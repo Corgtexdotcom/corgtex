@@ -10,6 +10,7 @@ import { invariant } from "./errors";
 import { closeRoleLifecycleForCircleTree } from "./role-onboarding";
 import { readableArtifactIds } from "./source-lineage";
 import { filterReadableRoleAssignments } from "./roles";
+import { DigestReadRelease } from "./digest-lineage";
 
 async function validateParentCircle(tx: Prisma.TransactionClient, params: {
   workspaceId: string;
@@ -81,14 +82,14 @@ export async function listCircles(actor: AppActor, workspaceId: string, opts?: {
       },
     },
   });
-  const visibleCircles = await readableArtifactIds(actor, workspaceId, "Circle", circles);
-  const admitted = circles.filter((circle) => visibleCircles.has(circle.id));
-  const visibleParents = await readableArtifactIds(actor, workspaceId, "Circle", admitted.flatMap((circle) => circle.parentCircle ? [circle.parentCircle] : []));
-  const visibleRoles = await readableArtifactIds(actor, workspaceId, "Role", admitted.flatMap((circle) => circle.roles));
-  return admitted.sort(compareCircleOrder).map(({ parentCircle: _parentCircle, ...circle }) => ({ ...circle,
+  const release = new DigestReadRelease(actor, workspaceId);
+  const admitted = (await release.capture("Circle", circles)).records;
+  const visibleParents = new Set((await release.capture("Circle", admitted.flatMap((circle) => circle.parentCircle ? [circle.parentCircle] : []))).records.map(row => row.id));
+  const visibleRoles = new Set((await release.capture("Role", admitted.flatMap((circle) => circle.roles))).records.map(row => row.id));
+  return release.finish(admitted.sort(compareCircleOrder).map(({ parentCircle: _parentCircle, ...circle }) => ({ ...circle,
     parentCircleId: circle.parentCircleId && visibleParents.has(circle.parentCircleId) ? circle.parentCircleId : null,
     roles: circle.roles.filter((role) => visibleRoles.has(role.id)).sort(compareCircleOrder),
-  }));
+  })));
 }
 
 function compareCircleOrder(left: { sortOrder: number; createdAt: Date }, right: { sortOrder: number; createdAt: Date }) {
@@ -342,12 +343,12 @@ export async function listCircleTree(actor: AppActor, workspaceId: string, opts?
       },
     },
   });
-  const visibleCircles = await readableArtifactIds(actor, workspaceId, "Circle", circles);
-  const admitted = circles.filter((circle) => visibleCircles.has(circle.id));
-  const visibleParents = await readableArtifactIds(actor, workspaceId, "Circle", admitted.flatMap((circle) => circle.parentCircle ? [circle.parentCircle] : []));
-  const visibleRoles = await readableArtifactIds(actor, workspaceId, "Role", admitted.flatMap((circle) => circle.roles));
+  const release = new DigestReadRelease(actor, workspaceId);
+  const admitted = (await release.capture("Circle", circles)).records;
+  const visibleParents = new Set((await release.capture("Circle", admitted.flatMap((circle) => circle.parentCircle ? [circle.parentCircle] : []))).records.map(row => row.id));
+  const visibleRoles = new Set((await release.capture("Role", admitted.flatMap((circle) => circle.roles))).records.map(row => row.id));
   const assignments = await filterReadableRoleAssignments(actor, workspaceId,
-    admitted.flatMap((circle) => circle.roles.filter((role) => visibleRoles.has(role.id)).flatMap((role) => role.assignments)));
+    admitted.flatMap((circle) => circle.roles.filter((role) => visibleRoles.has(role.id)).flatMap((role) => role.assignments)), release);
   const visibleAssignments = new Set(assignments.map((assignment) => assignment.id));
   const safeCircles = admitted.sort(compareCircleOrder).map((circle) => ({ ...circle,
     parentCircleId: circle.parentCircleId && visibleParents.has(circle.parentCircleId) ? circle.parentCircleId : null,
@@ -358,7 +359,7 @@ export async function listCircleTree(actor: AppActor, workspaceId: string, opts?
         .sort((left, right) => right.assignedAt.getTime() - left.assignedAt.getTime()),
     })),
   }));
-  return buildCircleTree(safeCircles);
+  return release.finish(buildCircleTree(safeCircles));
 }
 
 function buildCircleTree(flatList: any[]): CircleTreeItem[] {

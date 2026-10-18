@@ -393,3 +393,87 @@ describe("absorbSource", () => {
     expect(markSourceAbsorbedMock).toHaveBeenCalledWith(expect.objectContaining({ label: "brain-absorb" }), { sourceId: "source-1", tx: prismaMock });
   });
 });
+
+
+describe("absorption provider attempt controls", () => {
+  const phases = ["analysis", "synthesis", "new", "fallback"] as const;
+  type Phase = typeof phases[number];
+  function prepare(phase: Phase) {
+    prismaMock.brainArticle.findMany.mockResolvedValue(phase === "synthesis" ? [{ id: "article-1", slug: "existing", title: "Existing", type: "PROJECT", authority: "DRAFT", bodyMd: "Original body", sourceIds: [], isPrivate: false }] : []);
+    return { output: { articleType: "PROJECT", createNew: phase === "synthesis" ? { title: "Existing", slug: "existing" } : phase === "new" ? { title: "New", slug: "new" } : null, summary: "Summary" } };
+  }
+  beforeEach(() => {
+    vi.clearAllMocks();
+    recoveryIdentityMock.mockReturnValue("a".repeat(64));
+    prismaMock.$transaction.mockImplementation(async callback => callback(prismaMock));
+    prismaMock.brainSource.findUnique.mockResolvedValue({ id: "source-1", workspaceId: "workspace-1", sourceType: "DOC", tier: 1, title: "Source", content: "Private captured source", accessDomain: "WORKSPACE", absorbedAt: null, archivedAt: null });
+    prismaMock.brainArticle.findMany.mockResolvedValue([]);
+    prismaMock.brainBacklink.findMany.mockResolvedValue([]);
+    createArticleMock.mockResolvedValue({ id: "article-created", slug: "generated" });
+    markSourceAbsorbedMock.mockResolvedValue(undefined);
+    rebuildBacklinksMock.mockResolvedValue(undefined);
+  });
+  const cases = phases.flatMap(phase => (["credentials", "retry"] as const).flatMap(boundary => (["source", "worker"] as const).map(authority => ({ phase, boundary, authority }))));
+  it.each(cases)("reauthorizes $phase/$boundary/$authority before sending", async ({ phase, boundary, authority }) => {
+    const domain = await import("@corgtex/domain");
+    let revoked = false, sends = 0;
+    vi.mocked(domain.isArtifactInputProofReadable).mockImplementation(async () => authority !== "source" || !revoked);
+    vi.mocked(domain.assertBrainExportWorkerCurrent).mockImplementation(async () => { if (authority === "worker" && revoked) throw new Error("Export worker revoked"); });
+    const analysis = prepare(phase);
+    const attempt = async (request: { signal?: AbortSignal; authorizeAttempt?: (context: { signal: AbortSignal }) => Promise<void> }) => {
+      const context = { signal: new AbortController().signal };
+      if (boundary === "credentials") revoked = true;
+      await request.authorizeAttempt?.(context); sends++;
+      if (boundary === "retry") { revoked = true; await request.authorizeAttempt?.(context); sends++; }
+    };
+    modelGatewayMock.extract.mockImplementation(async request => { if (phase === "analysis") await attempt(request); else await request.authorizeAttempt?.({ signal: new AbortController().signal }); return analysis; });
+    modelGatewayMock.chat.mockImplementation(async request => { await attempt(request); return { content: "Generated" }; });
+    const { absorbSource } = await import("./brain-absorb");
+    try {
+      await expect(absorbSource({ workspaceId: "workspace-1", sourceId: "source-1", agentRunId: "run-attempt" })).rejects.toThrow();
+      expect(sends).toBe(boundary === "credentials" ? 0 : 1);
+      expect(createArticleMock).not.toHaveBeenCalled();
+      expect(markSourceAbsorbedMock).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(domain.isArtifactInputProofReadable).mockResolvedValue(true);
+      vi.mocked(domain.assertBrainExportWorkerCurrent).mockResolvedValue(undefined);
+    }
+  });
+  it.each(phases)("preserves authorized retries and original proofs at $0", async phase => {
+    const domain = await import("@corgtex/domain");
+    const analysis = prepare(phase);
+    if (phase === "analysis") prismaMock.brainSource.findUnique.mockResolvedValue({ id: "source-1", workspaceId: "workspace-1", sourceType: "RESEARCH", tier: 2, title: "Source", content: "Source", accessDomain: "WORKSPACE", absorbedAt: null, archivedAt: null });
+    let attempts = 0;
+    const caller = vi.fn(async () => {});
+    const attempt = async (request: { signal: AbortSignal; authorizeAttempt: (context: { signal: AbortSignal }) => Promise<void> }) => {
+      expect(request.signal).toBeInstanceOf(AbortSignal);
+      for (let i = 0; i < 2; i++) { await request.authorizeAttempt({ signal: new AbortController().signal }); attempts++; }
+    };
+    modelGatewayMock.extract.mockImplementation(async request => { if (phase === "analysis") await attempt(request); else await request.authorizeAttempt({ signal: new AbortController().signal }); return analysis; });
+    modelGatewayMock.chat.mockImplementation(async request => { await attempt(request); return { content: "Generated body" }; });
+    const { absorbSource } = await import("./brain-absorb");
+    await absorbSource({ workspaceId: "workspace-1", sourceId: "source-1", agentRunId: "authorized-attempt", authorizeAttempt: caller });
+    expect(attempts).toBe(2); expect(caller.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(domain.captureArtifactInputProof).toHaveBeenCalledOnce();
+    expect(domain.captureImmutableArtifactInputProof).toHaveBeenCalledOnce();
+  });
+  it.each(["prior", "proof"] as const)("honors cancellation during $0 authorization", async boundary => {
+    const domain = await import("@corgtex/domain");
+    const controller = new AbortController(); let armed = false, sends = 0;
+    const context = { signal: new AbortController().signal };
+    const caller = vi.fn(async actual => { expect(actual).toBe(context); if (boundary === "prior") controller.abort(new Error("Caller stopped")); });
+    vi.mocked(domain.isArtifactInputProofReadable).mockImplementation(async () => { if (armed && boundary === "proof") controller.abort(new Error("Caller stopped")); return true; });
+    modelGatewayMock.extract.mockImplementation(async request => { armed = true; await request.authorizeAttempt(context); sends++; return prepare("analysis"); });
+    const { absorbSource } = await import("./brain-absorb");
+    try { await expect(absorbSource({ workspaceId: "workspace-1", sourceId: "source-1", agentRunId: "cancelled", signal: controller.signal, authorizeAttempt: caller })).rejects.toThrow("Caller stopped"); expect(sends).toBe(0); }
+    finally { vi.mocked(domain.isArtifactInputProofReadable).mockResolvedValue(true); }
+  });
+  it("latches failed authority when an adapter swallows the guard error", async () => {
+    const domain = await import("@corgtex/domain"); let revoked = false;
+    vi.mocked(domain.isArtifactInputProofReadable).mockImplementation(async () => !revoked);
+    modelGatewayMock.extract.mockImplementation(async request => { revoked = true; try { await request.authorizeAttempt({ signal: new AbortController().signal }); } catch {} expect(request.signal.aborted).toBe(true); return prepare("analysis"); });
+    const { absorbSource } = await import("./brain-absorb");
+    try { await expect(absorbSource({ workspaceId: "workspace-1", sourceId: "source-1", agentRunId: "swallowed" })).rejects.toMatchObject({ code: "SOURCE_CHANGED" }); expect(createArticleMock).not.toHaveBeenCalled(); }
+    finally { vi.mocked(domain.isArtifactInputProofReadable).mockResolvedValue(true); }
+  });
+});

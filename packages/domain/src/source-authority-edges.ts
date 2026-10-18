@@ -26,6 +26,7 @@ const related = (table: string, relation: Record<string, unknown>, manifest: Des
 
 /** Closed SQL/model registry. A new lineage kind cannot silently acquire a default loader or lock policy. */
 export const SOURCE_AUTHORITY_REGISTRY = freezeDescriptor({
+  OAuthProviderFetchInput: row("OAuthProviderFetchInput", "optional", { native: true }),
   ExternalDataSource: row("ExternalDataSource", "optional"), SqlNativeRunInput: row("SqlNativeRunInput", "optional"),
   MeetingAudioAsset: row("MeetingAudioAsset"), NativeTranscriptInput: row("NativeTranscriptInput", "optional", { native: true }),
   CommunicationMessageNativeInput: row("CommunicationMessageNativeInput", "optional", { native: true }),
@@ -78,7 +79,7 @@ export const SOURCE_AUTHORITY_REGISTRY = freezeDescriptor({
 } satisfies Record<LineageKind, Descriptor>);
 
 // Physical governors which are not themselves model inputs still need explicit allowlisted SQL identifiers.
-export const SOURCE_AUTHORITY_GOVERNOR_TABLES = ["TranscriptTransportArchive", "NativeTranscriptPublication", "MeetingTranscriptSourceConnection", "MeetingTranscriptSourceRecord", "CommunicationInstallation", "CommunicationIngressInput", "WorkspaceIntegrationBinding", "ExternalMcpConnection",
+export const SOURCE_AUTHORITY_GOVERNOR_TABLES = ["OAuthConnection", "TranscriptTransportArchive", "NativeTranscriptPublication", "MeetingTranscriptSourceConnection", "MeetingTranscriptSourceRecord", "CommunicationInstallation", "CommunicationIngressInput", "WorkspaceIntegrationBinding", "ExternalMcpConnection",
   "SqlKnowledgePublication", "SqlKnowledgeStagedChunk", "InformationCategoryPolicy", "WorkspaceSupportGrant", "AgentCredential", "McpOAuthAccessToken", "McpOAuthClient", "WorkspaceFeatureFlag", "WorkspaceModuleGrant",
   "AdviceRequestRecipient", "WorkspaceArchiveRecord", "WorkspaceToolLinkCircleTag", "ArtifactInputLineage", "WorkflowJob", "RecorderTranscriptBinding", "RecorderTranscriptAttempt", "RecorderTranscriptClaim", "RecorderTranscriptPublication", "WorkspaceMeetingRecorderConfig", "MeetingRecording", "MeetingRecorderProviderEvent", "MeetingRecorderSmokeRun", "MeetingTranscriptProcessingProgress", "AuditLog", "Event"] as const;
 export const SOURCE_AUTHORITY_TABLES:readonly string[] = Object.freeze([...new Set([...Object.values(SOURCE_AUTHORITY_REGISTRY).flatMap(d => d.table ? [d.table] : []), ...SOURCE_AUTHORITY_GOVERNOR_TABLES])]);
@@ -154,7 +155,7 @@ async function authorityRows(context:AuthorityDiscoveryContext,table:string,wher
   for(const row of rows) if(typeof row.id==="string") context.rowCache?.set(JSON.stringify([table,row.id]),row);
   return rows;
 }
-const sourceKinds: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource" };
+const sourceKinds: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource", TENSION: "Tension", ACTION: "Action", CIRCLE: "Circle", ROLE: "Role", SLACK: "CommunicationMessage" };
 const discussionKinds: Record<string, LineageKind> = { ...sourceKinds, TENSION: "Tension", ACTION: "Action" };
 
 /** Enumerates every database edge used by evaluateRoot, including existence and collection predicates. */
@@ -399,6 +400,11 @@ export async function discoverSourceAuthorityEdges(context: AuthorityDiscoveryCo
       if (content.ingressInputId != null) await rows("CommunicationIngressInput", { id: content.ingressInputId, workspaceId }, `communication-ingress:${content.ingressInputId}`, undefined, true);
     }
   }
+  if (kind === "OAuthProviderFetchInput") {
+    await rows("OAuthConnection", {id: content.connectionId}, `oauth-connection:${content.connectionId}`, undefined, true);
+    await rows("Member", {workspaceId, userId: authorityIdentity(content.localUserId)}, `oauth-owner:${content.localUserId}`, "Member", true);
+    field("User", "localUserId");
+  }
   // Box safe scopes lock the selection FOR UPDATE even for consumed-only inputs.
   // Declare that strongest mode before the saved epoch union; no inner upgrade is safe.
   if(kind==="ExternalProviderFetchInput"||kind==="ExternalContentSource") {
@@ -424,7 +430,9 @@ export async function discoverSourceAuthorityEdges(context: AuthorityDiscoveryCo
       const recovery = decodeLegacyRecovery(content);
       invariant(recovery, 409, "SOURCE_LOCK_INCOMPLETE", "Recovery authority is malformed.");
       const where = recovery.targetKind === "ConversationTurn" ? {id: recovery.targetId, conversation: {workspaceId}}
-        : recovery.targetKind === "Role" ? {id: recovery.targetId, circle: {workspaceId}} : {id: recovery.targetId, workspaceId};
+        : recovery.targetKind === "Role" ? {id: recovery.targetId, circle: {workspaceId}}
+          : recovery.targetKind === "GoalUpdate" || recovery.targetKind === "KeyResult"
+            ? {id: recovery.targetId, goal: {workspaceId}} : {id: recovery.targetId, workspaceId};
       const targets = await rows(recovery.targetKind, where, `recovery-target:${input.id}`, undefined, true);
       await rows("ArtifactInputLineage",{id:recovery.targetManifestId,workspaceId,artifactType:recovery.targetKind,artifactId:recovery.targetId,
         contentHash:recovery.targetFingerprint,origin:"DERIVED"},`recovery-original:${input.id}`,undefined,true);

@@ -170,6 +170,8 @@ describe("advice requests", () => {
       ],
       skipDuplicates: true,
     });
+    expect(tx.adviceRequestRecipient.createMany.mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(finishProducerLineage).mock.invocationCallOrder[0]);
     expect(tx.workflowJob.upsert).toHaveBeenCalledWith({
       where: { dedupeKey: "advice.request.reminder:request-1:2026-06-25T12:00:00.000Z" },
       update: {},

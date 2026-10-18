@@ -1,3 +1,6 @@
+import type { ModelRequestControls } from "@corgtex/models";
+import type { LineageRoot } from "../../domain/src/source-lineage";
+import { AppError } from "../../domain/src/errors";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -14,6 +17,8 @@ const {
   currentRootsMock,
   sourceFingerprintMock,
   artifactFingerprintMock,
+  releaseProofMock,
+  membershipMock,
 } = vi.hoisted(() => ({
   prismaMock: {
     brainSource: { findMany: vi.fn(), count: vi.fn() },
@@ -37,6 +42,8 @@ const {
   currentRootsMock: vi.fn(),
   sourceFingerprintMock: vi.fn(),
   artifactFingerprintMock: vi.fn(),
+  releaseProofMock: vi.fn(),
+  membershipMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -47,7 +54,15 @@ vi.mock("@corgtex/models", () => ({
   defaultModelGateway: modelGatewayMock,
 }));
 
-vi.mock("@corgtex/domain", () => ({
+vi.mock("../../domain/src/auth", () => ({ requireWorkspaceMembership: membershipMock }));
+vi.mock("../../domain/src/source-lineage", () => ({
+  captureArtifactInputProof: captureProofMock,
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  mergeLineageInputRoot: (_previous: unknown, root: unknown) => root,
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _workspace: string, roots: unknown, _remote: unknown, finish: (tx: unknown) => Promise<unknown>) => { await releaseProofMock(roots); return finish({}); },
+}));
+vi.mock("@corgtex/domain", async () => ({
+  ...await import("../../domain/src/digest-lineage"),
   AGENT_REGISTRY: {
     "company-understanding": { defaultModelTier: "quality" },
   },
@@ -108,6 +123,9 @@ vi.mock("@corgtex/domain", () => ({
 describe("company understanding synthesis", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    releaseProofMock.mockReset().mockResolvedValue(undefined);
+    membershipMock.mockReset().mockResolvedValue({id: "member-1"});
+    modelGatewayMock.extract.mockReset();
     prismaMock.brainSource.findMany.mockResolvedValue([
       {
         id: "source-1",
@@ -149,11 +167,15 @@ describe("company understanding synthesis", () => {
     captureProofMock.mockImplementation(async (_actor, _workspaceId, inputs) => {
       const roots = [];
       for (const input of inputs) {
+        const permitted = input.kind === "BrainSource"
+          ? await readableSourcesMock(_actor, _workspaceId, [input.snapshot])
+          : await readableArtifactIdsMock(_actor, _workspaceId, input.kind, [input.snapshot]);
+        if (!permitted.has(input.id)) throw new AppError(409, "UNKNOWN_LINEAGE", "Not permitted.");
         roots.push({ kind: input.kind, id: input.id, fingerprint: input.kind === "BrainSource"
           ? sourceFingerprintMock(input.snapshot) : artifactFingerprintMock(input.kind, input.snapshot) });
         if (input.kind !== "BrainSource") {
           const inherited = await currentRootsMock(null, null, input, input.snapshot);
-          if (!inherited) throw { code: "UNKNOWN_LINEAGE" };
+          if (!inherited) throw new AppError(409, "UNKNOWN_LINEAGE", "No original manifest.");
           roots.push(...inherited);
         }
       }
@@ -646,7 +668,7 @@ describe("company understanding synthesis", () => {
   });
 
   it("does not send an artifact whose manifest disappeared during input capture to the model", async () => {
-    currentRootsMock.mockResolvedValue(null);
+    releaseProofMock.mockRejectedValueOnce(new AppError(409, "SOURCE_CHANGED", "Original manifest changed."));
     const { runCompanyUnderstandingSynthesis } = await import("./company-understanding");
     await expect(runCompanyUnderstandingSynthesis({ workspaceId: "workspace-1", agentRunId: "run-1", model: "synthetic" }))
       .resolves.toEqual({ skipped: true, reason: "input_changed" });
@@ -694,6 +716,159 @@ describe("company understanding synthesis", () => {
     const prompt = JSON.parse(modelGatewayMock.extract.mock.calls[0][0].input);
     expect(prompt.sources.map((row: { id: string }) => row.id)).toEqual(["source-1"]);
     expect(modelGatewayMock.extract.mock.calls[0][0].input).not.toContain("unproven copied");
+  });
+
+it.each([0, 110])("collects bounded synthesis samples or rejects an incomplete goal window (denied goals=%s)", async deniedGoals => {
+  const now = new Date("2026-01-01T00:00:00Z");
+  const fixtures = [
+    [prismaMock.brainSource.findMany, "source", 140, 20],
+    [prismaMock.brainArticle.findMany, "article", 160, 40],
+    [prismaMock.goal.findMany, "goal", 320, 200],
+  ] as const;
+  for (const [load, prefix, count] of fixtures) {
+    const rows = Array.from({length: count}, (_, index) => ({id: `${prefix}-${String(index).padStart(4,"0")}`,
+      createdAt: now, updatedAt: now, accessDomain: "WORKSPACE", archivedAt: null, content: "original", bodyMd: "original",
+      sourceIds: [], title: "Original", links: []}));
+    load.mockImplementation(async args => {
+      expect(args.take).toBeLessThanOrEqual(100);
+      expect(args.orderBy).toHaveLength(2);
+      const after = args.where.OR?.[1]?.id?.gt;
+      return rows.filter(row => !after || row.id > after).slice(0,args.take);
+    });
+  }
+  readableSourcesMock.mockImplementation(async (_a,_w,rows: Array<{id: string}>) => new Set(rows.filter(row=>Number(row.id.split("-")[1])>=110).map(row=>row.id)));
+  readableArtifactIdsMock.mockImplementation(async (_a,_w,kind,rows: Array<{id: string}>) => new Set(rows.filter(row=>Number(row.id.split("-")[1]) >= (kind === "Goal" ? deniedGoals : 110)).map(row=>row.id)));
+  modelGatewayMock.extract.mockResolvedValue({output:{}});
+  const {runCompanyUnderstandingSynthesis}=await import("./company-understanding");
+  const result = runCompanyUnderstandingSynthesis({workspaceId:"workspace-1",agentRunId:"run",model:"synthetic"});
+  if (deniedGoals) {
+    await expect(result).rejects.toMatchObject({code:"SOURCE_READ_SCAN_LIMIT"});
+    expect(prismaMock.goal.findMany).toHaveBeenCalledTimes(2);
+    expect(modelGatewayMock.extract).not.toHaveBeenCalled();
+    expect(createGoalMock).not.toHaveBeenCalled();
+    return;
+  }
+  await result;
+  const input=JSON.parse(modelGatewayMock.extract.mock.calls.at(-1)![0].input);
+  expect(input.sources).toHaveLength(20);expect(input.articles).toHaveLength(40);expect(input.existingGoals).toHaveLength(200);
+  expect(input.sources[0].id).toBe("source-0110");expect(input.articles[0].id).toBe("article-0110");
+  expect(input.existingGoals.map((row: {id:string})=>row.id)).toEqual(Array.from({length:200},(_,i)=>`goal-${String(i).padStart(4,"0")}`));
+  expect(prismaMock.goal.findMany).toHaveBeenCalledTimes(2);
+  expect(prismaMock.goal.findMany.mock.calls.at(-1)![0].include.links.take).toBe(1);
+});
+
+  it("checks selected original proofs after the last pre-model configuration await", async () => {
+    getApplyModeMock.mockImplementationOnce(async()=>{
+      releaseProofMock.mockRejectedValueOnce(new AppError(409,"SOURCE_CHANGED","Revoked while awaiting configuration"));
+      return "AUTO";
+    });
+    const {runCompanyUnderstandingSynthesis}=await import("./company-understanding");
+    await expect(runCompanyUnderstandingSynthesis({workspaceId:"workspace-1",agentRunId:"run",model:"synthetic"})).resolves.toEqual({skipped:true,reason:"input_changed"});
+    expect(modelGatewayMock.extract).not.toHaveBeenCalled();
+  });
+
+  describe("provider attempt authorization", () => {
+    const run = async () => {
+      const { runCompanyUnderstandingSynthesis } = await import("./company-understanding");
+      return runCompanyUnderstandingSynthesis({ workspaceId: "workspace-1", agentRunId: "run-attempt", model: "synthetic" });
+    };
+    const publishable = { output: { openQuestions: [{ questionText: "Who owns onboarding?", confidence: 0.9 }] } };
+
+    it.each(["BrainSource", "BrainArticle", "Goal", "caller"].flatMap(kind =>
+      ["credentials", "retry"].flatMap(boundary => [false, true].map(restore => ({ kind, boundary, restore })))))
+      ("blocks $kind loss at $boundary (restored=$restore) using original proof", async ({kind, boundary, restore}) => {
+        prismaMock.goal.findMany.mockResolvedValue([{id: "goal-1", title: "Original goal", links: []}]);
+        let epoch = "1", allowed = true, sends = 0;
+        const originalCapture = captureProofMock.getMockImplementation()!;
+        captureProofMock.mockImplementation(async (...args) => (await originalCapture(...args)).map((root: LineageRoot) => ({
+          ...root, permissionEpochs: {version: 1, policyVersion: "pun68-permissions-v3", entries: [{kind, id: "original-authority", epoch}]},
+        })));
+        let original: LineageRoot[] | undefined;
+        const revoked = new AppError(409, "SOURCE_CHANGED", "Original permission epoch changed.");
+        releaseProofMock.mockImplementation(async (roots: LineageRoot[]) => {
+          original ??= structuredClone(roots);
+          expect(roots).toEqual(original);
+          expect(roots.map(root => root.kind)).toEqual(expect.arrayContaining(["BrainSource", "BrainArticle", "Goal"]));
+          if (roots.some(root => root.permissionEpochs?.entries.some(entry => entry.epoch !== epoch))) throw revoked;
+        });
+        membershipMock.mockImplementation(async () => {
+          if (!allowed && kind === "caller") throw new AppError(403, "NOT_A_MEMBER", "Caller revoked.");
+          return {id: "member-1"};
+        });
+        modelGatewayMock.extract.mockImplementation(async (request: ModelRequestControls) => {
+          const context = {signal: new AbortController().signal};
+          if (boundary === "retry") { await request.authorizeAttempt?.(context); sends++; }
+          allowed = false; epoch = "2";
+          if (restore) { allowed = true; epoch = "3"; }
+          await request.authorizeAttempt?.(context); sends++;
+          return publishable;
+        });
+        const outcome = await run().catch(error => error);
+        expect(sends).toBe(boundary === "retry" ? 1 : 0);
+        expect(outcome).toBe(revoked);
+        expect(captureProofMock).toHaveBeenCalledTimes(3);
+        expect(createQuestionMock).not.toHaveBeenCalled();
+        expect(createGoalMock).not.toHaveBeenCalled();
+        expect(createDiffMock).not.toHaveBeenCalled();
+      });
+
+    it("checks current caller at each attempt independently of unchanged input proofs", async () => {
+      const revoked = new AppError(403, "NOT_A_MEMBER", "Caller revoked.");
+      let sends = 0;
+      modelGatewayMock.extract.mockImplementation(async (request: ModelRequestControls) => {
+        membershipMock.mockRejectedValue(revoked);
+        await request.authorizeAttempt?.({signal: new AbortController().signal}); sends++;
+        return publishable;
+      });
+      await expect(run()).rejects.toBe(revoked);
+      expect(sends).toBe(0);
+      expect(createQuestionMock).not.toHaveBeenCalled();
+    });
+
+    it("permits two authorized provider attempts and retains final publication validation", async () => {
+      let sends = 0;
+      modelGatewayMock.extract.mockImplementation(async (request: ModelRequestControls) => {
+        expect(request.signal).toBeInstanceOf(AbortSignal);
+        expect(request.authorizeAttempt).toBeTypeOf("function");
+        for (let index = 0; index < 2; index++) {
+          await request.authorizeAttempt!({signal: new AbortController().signal}); sends++;
+        }
+        return publishable;
+      });
+      await expect(run()).resolves.toMatchObject({synthesized: true, questions: 1});
+      expect(sends).toBe(2);
+      expect(releaseProofMock).toHaveBeenCalledTimes(4);
+      expect(membershipMock).toHaveBeenCalledTimes(4);
+      expect(createQuestionMock).toHaveBeenCalledTimes(1);
+      expect(captureProofMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("latches denied authority even if the gateway swallows failure and authority returns", async () => {
+      const revoked = new AppError(409, "SOURCE_CHANGED", "Revoked during credentials.");
+      modelGatewayMock.extract.mockImplementation(async (request: ModelRequestControls) => {
+        releaseProofMock.mockRejectedValueOnce(revoked);
+        await expect(request.authorizeAttempt!({signal: new AbortController().signal})).rejects.toBe(revoked);
+        expect(request.signal?.aborted).toBe(true);
+        await expect(request.authorizeAttempt!({signal: new AbortController().signal})).rejects.toBe(revoked);
+        return publishable;
+      });
+      await expect(run()).rejects.toBe(revoked);
+      expect(createQuestionMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["before", "during"])("latches attempt cancellation %s proof validation", async when => {
+      const cancellation = new Error("Synthetic provider cancellation");
+      const context = new AbortController();
+      modelGatewayMock.extract.mockImplementation(async (request: ModelRequestControls) => {
+        if (when === "before") context.abort(cancellation);
+        else releaseProofMock.mockImplementationOnce(async () => {context.abort(cancellation);});
+        await expect(request.authorizeAttempt!({signal: context.signal})).rejects.toBe(cancellation);
+        expect(request.signal?.aborted).toBe(true);
+        return publishable;
+      });
+      await expect(run()).rejects.toBe(cancellation);
+      expect(createQuestionMock).not.toHaveBeenCalled();
+    });
   });
 
 });

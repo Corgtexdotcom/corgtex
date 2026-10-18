@@ -630,6 +630,54 @@ describe("external MCP gateway", () => {
     expect(JSON.stringify(recordAuditMock.mock.calls)).not.toContain("box-token");
   });
 
+  it.each([-60_000, 240_000])("reuses single-use rotating Box tokens across identity and content at expiry %i", async expiryOffset => {
+    let stored = activeBoxConnection({ expiresAt: new Date(Date.now() + expiryOffset) });
+    externalMcpConnectionMock.findFirst.mockImplementation(async () => structuredClone(stored));
+    externalMcpConnectionMock.update.mockImplementation(async ({ data }) => {
+      stored = { ...stored, ...data };
+      return structuredClone(stored);
+    });
+    let refreshes = 0;
+    const tools: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, options: RequestInit) => {
+      if (url === "https://api.box.com/oauth2/token") {
+        refreshes++;
+        const body = options.body as URLSearchParams;
+        if (refreshes !== 1 || body.get("refresh_token") !== "box-refresh") {
+          return Response.json({ error: "invalid_grant" }, { status: 400 });
+        }
+        return Response.json({ access_token: "rotated-access", refresh_token: "rotated-refresh", expires_in: 3600 });
+      }
+      expect((options.headers as Record<string, string>).authorization).toBe("Bearer rotated-access");
+      const tool = JSON.parse(options.body as string).params.name as string;
+      tools.push(tool);
+      return Response.json({ result: { structuredContent: tool === "who_am_i" ? { id: "box-user-1" } : { text: "Selected file content" } } });
+    }));
+    const { callBoxExternalMcpReadToolForConnection } = await import("./external-mcp");
+    await expect(callBoxExternalMcpReadToolForConnection(actor, { workspaceId: "ws-1", connectionId: "box-connection-1",
+      toolName: "get_file_content", arguments: { file_id: "123" } })).resolves.toEqual({ text: "Selected file content" });
+    expect(refreshes).toBe(1);
+    expect(tools).toEqual(["who_am_i", "get_file_content"]);
+    expect(stored.status).toBe("ACTIVE");
+    expect(stored.lastError).toBeNull();
+    expect(externalMcpConnectionMock.update).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "ERROR" }) }));
+  });
+
+  it("does not recertify a Box account changed while its token refreshes", async () => {
+    let stored = activeBoxConnection({ expiresAt: new Date(Date.now() - 60_000) });
+    externalMcpConnectionMock.findFirst.mockImplementation(async () => structuredClone(stored));
+    externalMcpConnectionMock.update.mockImplementation(async ({ data }) => {
+      stored = { ...stored, ...data, providerAccountId: "replacement-account" };
+      return structuredClone(stored);
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ access_token: "rotated-access", refresh_token: "rotated-refresh", expires_in: 3600 })));
+    const { callBoxExternalMcpReadToolForConnection } = await import("./external-mcp");
+    await expect(callBoxExternalMcpReadToolForConnection(actor, { workspaceId: "ws-1", connectionId: "box-connection-1",
+      toolName: "get_file_content", arguments: { file_id: "123" } })).rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith("https://api.box.com/oauth2/token", expect.anything());
+  });
+
   it("withholds another user's selected connection before a provider call", async () => {
     externalMcpConnectionMock.findFirst.mockResolvedValue(activeBoxConnection({ userId: "other-user" }));
     vi.stubGlobal("fetch", vi.fn());

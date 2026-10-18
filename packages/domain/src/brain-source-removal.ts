@@ -1,3 +1,7 @@
+import { assertVariantGenerationClaim, variantGenerationClaimStamp, type VariantGenerationControls } from "./variant-model-attempt";
+import { startBrainSourceRemovalAttempt } from "./brain-source-removal-attempt";
+import { DigestReadRelease } from "./digest-lineage";
+import { isArtifactPermissionEpochProofCurrent, type PermissionEpochProof } from "./source-permission-epochs";
 import { createHash, randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { incrementCacheVersion, prisma, type AppActor } from "@corgtex/shared";
@@ -9,8 +13,8 @@ import { sourceIdsInDerivation } from "./brain-source-impact";
 import { lockActiveArticleSources, lockBrainSourceLink } from "./brain-source-links";
 import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
-import { advanceHumanArtifactInputLineage, assertArtifactInputWriteFence, captureArtifactInputProof, createBrainArticleHistoryVersion, currentArtifactInputRoots,
-  inspectStoredArtifactInputDependencies, isArtifactInputProofReadable, readableArtifactIds,
+import { advanceHumanArtifactInputLineage, assertArtifactInputWriteFence, captureArtifactInputProof, captureArtifactPermissionEpochs, lineageContentFingerprint, createBrainArticleHistoryVersion, currentArtifactInputRoots, currentArtifactInputRootsBatch,
+  inspectStoredArtifactInputDependencies, isArtifactInputProofReadable,
   readableBrainSourceIds, recordArtifactInputLineage, sealArtifactInputActor, type LineageRoot } from "./source-lineage";
 import { commitBrainSourceRemovalCompletion, consumeArchivedBrainSourceRetirement, findBrainSourceRemovalCompletion,
   prepareArchivedBrainSourceRetirement, prepareBrainSourceRemovalControl,
@@ -120,17 +124,39 @@ async function archiveStateHash(tx: Prisma.TransactionClient, workspaceId: strin
 }
 
 async function discoverRemovalArticles(tx: Prisma.TransactionClient, workspaceId: string, sourceId: string) {
-  const articles = await tx.brainArticle.findMany({ where: { workspaceId, archivedAt: null } });
   const discovered = [];
-  for (const article of articles) {
-    const roots = await currentArtifactInputRoots(tx, workspaceId, { kind: "BrainArticle", id: article.id }, article);
-    const dependencies = roots ? await inspectStoredArtifactInputDependencies(tx, workspaceId, roots) : null;
-    // An attested original is independent even when it has citation-only links.
-    const linked = article.sourceIds.includes(sourceId) || sourceIdsInDerivation(article.derivationJson).includes(sourceId)
-      || dependencies?.roots.some((root) => root.kind === "BrainSource" && root.id === sourceId);
-    if (linked) discovered.push({ article, roots, dependencies });
+  let cursor: string | undefined;
+  for (;;) {
+    // This metadata-only pass excludes independent/unproved unlinked rows
+    // without hydrating every article body or issuing one head query per row.
+    // Nonempty ancestry still uses the complete existing dependency inspector,
+    // including historical snapshots and encrypted consent/recovery capsules.
+    const page = await tx.$queryRaw<Array<{id: string; candidate: boolean}>>(Prisma.sql`
+      SELECT a.id, (${sourceId} = ANY(a."sourceIds")
+        OR coalesce(a."derivationJson" @> ${JSON.stringify({sources: [{sourceId}]})}::jsonb, false)
+        OR CASE WHEN jsonb_typeof(h."rootsJson") = 'array' THEN jsonb_array_length(h."rootsJson") > 0 ELSE false END) AS candidate
+      FROM "BrainArticle" a
+      LEFT JOIN LATERAL (SELECT "rootsJson" FROM "ArtifactInputLineage"
+        WHERE "workspaceId" = ${workspaceId} AND "artifactType" = 'BrainArticle' AND "artifactId" = a.id
+        ORDER BY revision DESC LIMIT 1) h ON true
+      WHERE a."workspaceId" = ${workspaceId} AND a."archivedAt" IS NULL
+        ${cursor ? Prisma.sql`AND a.id > ${cursor}` : Prisma.empty}
+      ORDER BY a.id LIMIT 100
+    `);
+    const ids = page.filter(row => row.candidate).map(row => row.id);
+    const articles = ids.length ? await tx.brainArticle.findMany({where: {workspaceId, archivedAt: null, id: {in: ids}}, orderBy: {id: "asc"}}) : [];
+    const currentRoots = await currentArtifactInputRootsBatch(tx, workspaceId, "BrainArticle", articles);
+    for (const article of articles) {
+      const roots = currentRoots.get(article.id) ?? null;
+      const dependencies = roots ? await inspectStoredArtifactInputDependencies(tx, workspaceId, roots) : null;
+      // An attested original is independent even when it has citation-only links.
+      const linked = article.sourceIds.includes(sourceId) || sourceIdsInDerivation(article.derivationJson).includes(sourceId)
+        || dependencies?.roots.some(root => root.kind === "BrainSource" && root.id === sourceId);
+      if (linked) discovered.push({article, roots, dependencies});
+    }
+    if (page.length < 100) return discovered;
+    cursor = page[page.length - 1].id;
   }
-  return discovered.sort((left, right) => left.article.id.localeCompare(right.article.id));
 }
 
 async function currentPlan(tx: Prisma.TransactionClient, workspaceId: string, sourceId: string, expected?: RemovalRequest) {
@@ -426,7 +452,7 @@ export async function generateBrainSourceRemovalCandidate(params: {
   jobId: string;
   expectedAttempt: number;
   expectedOwner: string | null;
-  generate: (article: { id: string; title: string }, sources: Array<{ id: string; title: string | null; content: string }>) => Promise<string>;
+  generate: (article: { id: string; title: string }, sources: Array<{ id: string; title: string | null; content: string }>, controls: VariantGenerationControls) => Promise<string>;
 }) {
   const claim = await prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "WorkflowJob" WHERE id = ${params.jobId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
@@ -437,6 +463,7 @@ export async function generateBrainSourceRemovalCandidate(params: {
       return { done: "SUPERSEDED" } as const;
     }
     if (payload.phase !== "REQUESTED" && payload.phase !== "GENERATING") return { done: payload.phase } as const;
+    assertVariantGenerationClaim(variantGenerationClaimStamp(job), job);
     const excluded = await tx.brainSource.findFirst({ where: { id: payload.sourceId, workspaceId: params.workspaceId } });
     if (!payload.sourceArchivedAt && excluded?.archivedAt
       && brainSourceContentFingerprint(excluded) === payload.sourceFingerprint) {
@@ -450,18 +477,21 @@ export async function generateBrainSourceRemovalCandidate(params: {
         sourceArchiveStateHash: await archiveStateHash(tx, params.workspaceId, payload.sourceId) };
     }
     const token = randomUUID();
-    await tx.workflowJob.update({ where: { id: job.id }, data: {
+    const generationJob = await tx.workflowJob.update({ where: { id: job.id }, data: {
       payload: { ...payload, phase: "GENERATING", generationToken: token } as Prisma.InputJsonObject,
     } });
-    return { payload, token, attempts: job.attempts } as const;
+    return { payload, token, attempts: job.attempts, generationJob } as const;
   });
   if ("done" in claim) return { phase: claim.done };
   const { payload, token, attempts } = claim;
 
   const generationActor: AppActor = { kind: "agent", authProvider: "bootstrap", label: "brain-source-regenerate",
     workspaceIds: [params.workspaceId] };
+  let attempt: ReturnType<typeof startBrainSourceRemovalAttempt> | undefined;
   const finish = async (candidates: Record<string, string> | null, candidateTitles: Record<string, string> = {},
-    candidateRoots: Record<string, LineageRoot[]> = {}) => prisma.$transaction(async (tx) => {
+    candidateRoots: Record<string, LineageRoot[]> = {}) => {
+    await attempt?.stop();
+    return prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "WorkflowJob" WHERE id = ${params.jobId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
     const current = await tx.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId, type: "agent.brain-source-regenerate" } });
     invariant(current, 404, "NOT_FOUND", "Regeneration job not found.");
@@ -470,6 +500,7 @@ export async function generateBrainSourceRemovalCandidate(params: {
       || livePayload.phase !== "GENERATING" || livePayload.generationToken !== token) {
       return { phase: "SUPERSEDED" as const };
     }
+    attempt?.assertCurrent(current);
     let stale = candidates === null;
     if (!stale) {
       try {
@@ -499,7 +530,8 @@ export async function generateBrainSourceRemovalCandidate(params: {
       payload: { ...payload, phase: "READY", candidates, candidateTitles, candidateRoots, regenerationRunId: run.id } as Prisma.InputJsonObject,
     } });
     return { phase: "READY" as const, candidateCount: Object.keys(candidates!).length };
-  });
+    });
+  };
 
   try {
     await prisma.$transaction((tx) => currentPlan(tx, params.workspaceId, payload.sourceId, payload));
@@ -510,6 +542,13 @@ export async function generateBrainSourceRemovalCandidate(params: {
   const candidates: Record<string, string> = {};
   const candidateTitles: Record<string, string> = {};
   const candidateRoots: Record<string, LineageRoot[]> = {};
+  attempt = startBrainSourceRemovalAttempt(claim.generationJob, async () => {
+    await prisma.$transaction((tx) => currentPlan(tx, params.workspaceId, payload.sourceId, payload));
+    for (const roots of Object.values(candidateRoots)) invariant(
+      await isArtifactInputProofReadable(generationActor, params.workspaceId, roots),
+      409, "SOURCE_CHANGED", "The original remaining sources are no longer readable.");
+  });
+  try {
   for (const article of payload.articles.filter((item) => item.action === "regenerate")) {
     const ids = article.remaining.map((item) => item.sourceId);
     const sources = await prisma.brainSource.findMany({
@@ -531,22 +570,35 @@ export async function generateBrainSourceRemovalCandidate(params: {
     // The removed article's old title may itself contain withdrawn information.
     // Give the model only a title from the independently retained sources.
     const safeTitle = sources[0]?.title?.trim() || "Remaining-source article";
-    const bodyMd = (await params.generate({ id: article.id, title: safeTitle }, sources)).trim();
+    await attempt.controls.authorizeAttempt({ signal: attempt.controls.signal });
+    const generated = await params.generate({ id: article.id, title: safeTitle }, sources, attempt.controls);
+    attempt.assertActive();
+    const bodyMd = generated.trim();
     invariant(bodyMd.length > 0 && bodyMd.length <= 100_000, 422, "INVALID_CANDIDATE", "Regeneration produced an invalid candidate.");
     candidates[article.id] = bodyMd;
     candidateTitles[article.id] = safeTitle;
   }
-  return finish(candidates, candidateTitles, candidateRoots);
+  return await finish(candidates, candidateTitles, candidateRoots);
+  } finally { await attempt.stop(); }
 }
 
 export async function listBrainSourceRemovalReviews(actor: AppActor, params: { workspaceId: string; sourceIds: string[] }) {
+  sealArtifactInputActor(actor);
+  params = structuredClone(params);
   await requireRemovalManager(actor, params.workspaceId);
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  const epochs: PermissionEpochProof[] = [await prisma.$transaction(tx => captureArtifactPermissionEpochs(actor, params.workspaceId, [], tx))];
+  const jobs: Array<{ id: string; stamp: string }> = [];
+  const envelopes = new Map<string, string>();
+  const envelopeStamp = (row: { id: string; isPrivate: boolean; ownerMemberId: string | null; archivedAt: Date | null }) =>
+    JSON.stringify([row.id, row.isPrivate, row.ownerMemberId, row.archivedAt]);
   const entries = await Promise.all(params.sourceIds.map(async (sourceId) => {
     const source = await prisma.brainSource.findFirst({ where: { id: sourceId, workspaceId: params.workspaceId } });
     if (!source) return null;
     const job = await latestRemovalJob(prisma, params.workspaceId, sourceId);
     if (!job) return null;
+    jobs.push({ id: job.id, stamp: variantGenerationClaimStamp(job) });
     const payload = readPayload(job.payload);
     const exclusionMatches = payload.sourceFingerprint === brainSourceContentFingerprint(source)
       && (payload.sourceArchivedAt ?? null) === (source.archivedAt?.toISOString() ?? null);
@@ -556,14 +608,17 @@ export async function listBrainSourceRemovalReviews(actor: AppActor, params: { w
       where: { workspaceId: params.workspaceId, id: { in: remainingIds }, archivedAt: null },
     });
     const remainingById = new Map(remainingSources.map((item) => [item.id, item]));
-    const readableRemaining = await readableBrainSourceIds(actor, params.workspaceId, remainingSources);
+    const readableRemaining = new Set((await release.capture("BrainSource", remainingSources)).records.map(row => row.id));
     const articles = await prisma.brainArticle.findMany({
       where: { workspaceId: params.workspaceId, id: { in: payload.articles.map((item) => item.id) } },
     });
-    const readableIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", articles);
+    epochs.push(await prisma.$transaction(tx => captureArtifactPermissionEpochs(actor, params.workspaceId,
+      articles.map(row => ({ kind: "BrainArticle", id: row.id, fingerprint: lineageContentFingerprint("BrainArticle", row) })), tx)));
+    for (const article of articles) envelopes.set(article.id, envelopeStamp(article));
+    const readableIds = new Set((await release.capture("BrainArticle", articles)).records.map(row => row.id));
     const candidatePermissions = new Map(await Promise.all(payload.articles.map(async (item) => [item.id,
       Boolean(payload.candidateRoots?.[item.id]?.length
-        && await isArtifactInputProofReadable(actor, params.workspaceId, payload.candidateRoots[item.id])),
+        && await release.observeRead(() => isArtifactInputProofReadable(actor, params.workspaceId, payload.candidateRoots![item.id]))),
     ] as const)));
     return { sourceId, jobId: job.id, status: job.status, phase: payload.phase,
       articles: payload.articles.flatMap((item) => {
@@ -580,8 +635,9 @@ export async function listBrainSourceRemovalReviews(actor: AppActor, params: { w
         if (item.action === "preserve" || !envelopePermits || (!readableIds.has(item.id) && !candidateReadable)) return [];
         // The manager may review an independent candidate for an authorized job
         // without receiving any metadata or body from its now-hidden predecessor.
+        if (candidateReadable) release.add(payload.candidateRoots![item.id]);
         return [{
-          id: item.id, title: readableIds.has(item.id) ? item.title : "Article unavailable", action: item.action,
+          id: item.id, title: readableIds.has(item.id) ? target.title : "Article unavailable", action: item.action,
           currentBodyMd: readableIds.has(item.id) ? articles.find((article) => article.id === item.id)?.bodyMd ?? null : null,
           candidateBodyMd: payload.phase === "READY" && candidateReadable ? payload.candidates?.[item.id] ?? null : null,
           candidateTitle: payload.phase === "READY" && candidateReadable ? payload.candidateTitles?.[item.id] ?? null : null,
@@ -589,7 +645,20 @@ export async function listBrainSourceRemovalReviews(actor: AppActor, params: { w
       }),
     };
   }));
-  return entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+  return release.finish(entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null), async tx => {
+    await requireRemovalManager(actor, params.workspaceId, tx);
+    for (const proof of epochs) invariant(await isArtifactPermissionEpochProofCurrent(params.workspaceId, proof, tx),
+      409, "SOURCE_CHANGED", "Removal review permissions changed.");
+    for (const job of jobs) {
+      const current = await tx.workflowJob.findFirst({ where: { id: job.id, workspaceId: params.workspaceId, type: "agent.brain-source-regenerate" } });
+      invariant(current && variantGenerationClaimStamp(current) === job.stamp, 409, "SOURCE_CHANGED", "Removal review job changed.");
+    }
+    for (const [id, stamp] of envelopes) {
+      const current = await tx.brainArticle.findFirst({ where: { id, workspaceId: params.workspaceId },
+        select: { id: true, isPrivate: true, ownerMemberId: true, archivedAt: true } });
+      invariant(current && envelopeStamp(current) === stamp, 409, "SOURCE_CHANGED", "Removal review target changed.");
+    }
+  });
 }
 
 export async function resolveBrainSourceRemoval(actor: AppActor, params: {

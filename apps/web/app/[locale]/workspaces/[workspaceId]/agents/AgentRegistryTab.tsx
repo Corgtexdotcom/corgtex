@@ -7,9 +7,9 @@ import {
   listAgentCredentials,
   listAgentIdentities,
   listAgentRuns,
+  getAgentRunOperationalCounts,
   type AgentAuthoritySummary,
 } from "@corgtex/domain";
-import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AgentRegistryToggle } from "./AgentRegistryToggle";
 import { updateAgentGovernancePolicyAction } from "./actions";
@@ -63,8 +63,14 @@ function AgentAuthorityRow({
   workspaceId,
   format,
   canReadFinancials,
+  usageComplete,
+  hasUsage,
+  windowLabel,
 }: {
   canReadFinancials: boolean;
+  usageComplete: boolean;
+  hasUsage: boolean;
+  windowLabel: string;
   agent: AgentAuthoritySummary;
   workspaceId: string;
   format: Awaited<ReturnType<typeof getFormatter>>;
@@ -122,7 +128,7 @@ function AgentAuthorityRow({
           <strong style={{ fontSize: "0.72rem", textTransform: "uppercase", color: "var(--muted)" }}>Approval & activity</strong>
           <span style={{ fontSize: "0.85rem" }}>{policyLabel(agent)}</span>
           <span className="nr-item-meta" style={{ fontSize: "0.76rem" }}>
-            {agent.approval.pendingApprovalCount} pending / {agent.recentActivity.runCount30d} runs{canReadFinancials && <> / {formatUsd(agent.recentActivity.spend30dUsd, 4)}</>}
+            {agent.approval.pendingApprovalCount} pending / {agent.recentActivity.runCount30d} runs{canReadFinancials && <> / {!usageComplete && !hasUsage ? "…" : formatUsd(agent.recentActivity.spend30dUsd, 4)}{!usageComplete && ` (${windowLabel})`}</>}
           </span>
         </div>
 
@@ -194,7 +200,6 @@ export async function AgentRegistryTab({
 }) {
   const membership = await requireWorkspaceMembership({actor, workspaceId});
   const canReadFinancials = actor.kind === "user" && membership?.role === "ADMIN";
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const [
     identities,
     usageSummary,
@@ -202,7 +207,6 @@ export async function AgentRegistryTab({
     credentials,
     budget,
     recentRuns,
-    pendingApprovalRuns,
     runCounts,
     t,
     format,
@@ -213,12 +217,7 @@ export async function AgentRegistryTab({
     listAgentCredentials(actor, workspaceId),
     canReadFinancials ? getModelUsageBudget(actor, workspaceId) : null,
     listAgentRuns(actor, workspaceId, { take: 100 }),
-    listAgentRuns(actor, workspaceId, { status: "WAITING_APPROVAL", take: null }),
-    prisma.agentRun.groupBy({
-      by: ["agentKey"],
-      where: { workspaceId, createdAt: { gte: thirtyDaysAgo } },
-      _count: { _all: true },
-    }),
+    getAgentRunOperationalCounts(actor, workspaceId),
     getTranslations("agents"),
     getFormatter(),
   ]);
@@ -228,10 +227,9 @@ export async function AgentRegistryTab({
     configs,
     credentials,
     recentRuns,
-    pendingApprovalRuns,
+    pendingApprovalCountsByAgent: runCounts.pendingApprovalCountsByAgent,
     usageByAgent: usageSummary?.byAgent ?? [],
-    runCountsByAgent: (runCounts as Array<{ agentKey: string; _count: { _all: number } }>)
-      .map((row) => ({ agentKey: row.agentKey, count: row._count._all })),
+    runCountsByAgent: runCounts.runCountsByAgent,
     workspaceBudget: budget
       ? {
         monthlyCostCapUsd: String(budget.monthlyCostCapUsd),
@@ -249,6 +247,7 @@ export async function AgentRegistryTab({
         </p>
       </div>
 
+      {canReadFinancials && usageSummary && !usageSummary.readWindow.complete && <p role="status" className="nr-item-meta">{t("usageWindowNotice")}</p>}
       <div className="stack" style={{ gap: 12 }}>
         {authoritySummaries.map((agent) => (
           <AgentAuthorityRow
@@ -257,6 +256,9 @@ export async function AgentRegistryTab({
             workspaceId={workspaceId}
             format={format}
             canReadFinancials={canReadFinancials}
+            usageComplete={usageSummary?.readWindow.complete ?? true}
+            hasUsage={usageSummary?.byAgent.some(row => row.agentKey === agent.agentKey) ?? false}
+            windowLabel={t("usageWindowLabel")}
           />
         ))}
         {authoritySummaries.length === 0 && (

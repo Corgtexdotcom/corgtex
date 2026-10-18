@@ -69,7 +69,7 @@ export default async function CircleDetailPage({
       where: { workspaceId, isActive: true, archivedAt: null },
       orderBy: { displayName: "asc" },
     }),
-    loadRoleDirectoryData(workspaceId),
+    loadRoleDirectoryData(actor, workspaceId),
   ]);
 
   const circle = findCircle(treeData, circleId);

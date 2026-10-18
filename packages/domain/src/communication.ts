@@ -1,3 +1,4 @@
+import { AbortError as SlackAttemptAbortError } from "p-retry";
 import { createHmac } from "node:crypto";
 import { WebClient } from "@slack/web-api";
 import { Prisma, type CommunicationInstallation, type CommunicationMessage, type CommunicationProvider } from "@prisma/client";
@@ -16,10 +17,10 @@ import { captureSlackNativeMessageFetch, communicationInstallationGrantHash, isC
   withSlackNativeCommitReceipt, slackNativeMessageProjection, type SlackNativeFetchReceipt } from "./communication-native-authority";
 import { artifactPermissionEpochIdentities, capturePermissionEpochs } from "./source-permission-epochs";
 import { requireWorkspaceMembership } from "./auth";
-import { loadReadableDigestQuery, captureReadableDigestInputs, isDigestInputProofShared } from "./digest-lineage";
+import { loadReadableDigestQuery, DigestReadRelease, isDigestInputProofShared } from "./digest-lineage";
 import { createAction, publishAction } from "./actions";
 import { ingestSource } from "./brain";
-import { mergeLineageInputRoot, withArtifactCountReleaseSnapshot, captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, recordArtifactInputLineage, preserveUnknownArtifactInputSnapshot, type LineageRoot } from "./source-lineage";
+import { captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, recordArtifactInputLineage, preserveUnknownArtifactInputSnapshot, type LineageRoot } from "./source-lineage";
 import { AppError, invariant } from "./errors";
 import {
   assertMeetingReviewPublicPublication,
@@ -313,26 +314,37 @@ export async function listCommunicationInstallations(actor: AppActor, workspaceI
       _count: { select: { channels: true, externalUsers: true } },
     },
   });
-  const counts = new Map<string, number>();
-  const roots = new Map<string, LineageRoot>();
-  let afterId: string | undefined;
-  for (;;) {
-    const batch = await prisma.communicationMessage.findMany({
-      where: { workspaceId, ...(afterId ? {id: {gt: afterId}} : {}) }, orderBy: {id: "asc"}, take: 100,
+  const unavailable = () => installations.map(installation => ({...installation,
+    _count: {...installation._count, messages: null as number | null},
+    messageCount: {count: null as number | null, complete: false, available: false},
+  }));
+  try {
+    const counts = new Map<string, number>();
+    const release = new DigestReadRelease(actor, workspaceId);
+    // Enumerate the bounded corpus once: live keyset pages can mix insert snapshots.
+    const candidates = await prisma.communicationMessage.findMany({
+      where: { workspaceId }, orderBy: {id: "asc"}, take: 200,
     });
-    const admitted = await captureReadableDigestInputs({ actor, workspaceId, kind: "CommunicationMessage", records: batch });
-    for (const root of admitted.roots) {
-      const key = `${root.kind}:${root.id}`;
-      roots.set(key, mergeLineageInputRoot(roots.get(key), root));
+    const complete = candidates.length < 200;
+    for (let offset = 0; offset < candidates.length; offset += 100) {
+      for (const message of (await release.capture("CommunicationMessage", candidates.slice(offset, offset + 100))).records) {
+        counts.set(message.installationId, (counts.get(message.installationId) ?? 0) + 1);
+      }
     }
-    for (const message of admitted.records) counts.set(message.installationId, (counts.get(message.installationId) ?? 0) + 1);
-    if (batch.length < 100) break;
-    afterId = batch[batch.length - 1].id;
+    return await release.finish(installations.map(installation => ({...installation,
+      _count: {...installation._count, messages: complete ? counts.get(installation.id) ?? 0 : null},
+      messageCount: {count: counts.get(installation.id) ?? 0, complete, available: true},
+    })), async tx => {
+      await requireWorkspaceMembership({actor, workspaceId, allowedRoles: ["ADMIN"], tx});
+    });
+  } catch (error) {
+    if (!(error instanceof AppError) || !["SOURCE_CHANGED", "SOURCE_RESTRICTED", "UNKNOWN_LINEAGE"].includes(error.code)) throw error;
+    // A withdrawn count is not evidence that the installation disappeared.
+    // Release no stale count, and independently recheck current administrator authority.
+    return new DigestReadRelease(actor, workspaceId).finish(unavailable(), async tx => {
+      await requireWorkspaceMembership({actor, workspaceId, allowedRoles: ["ADMIN"], tx});
+    });
   }
-  return withArtifactCountReleaseSnapshot(actor, workspaceId, [...roots.values()], async () => undefined, async tx => {
-    await requireWorkspaceMembership({actor, workspaceId, allowedRoles: ["ADMIN"], tx});
-    return installations.map(installation => ({...installation, _count: {...installation._count, messages: counts.get(installation.id) ?? 0}}));
-  });
 
 }
 
@@ -2042,14 +2054,15 @@ export async function handleSlackInteraction(payload: Record<string, unknown>, s
         privateMetadata: asString(view.private_metadata),
         values,
       });
-      await assertMeetingReviewPublicPublication(actor, {
+      const publication = await meetingReviewSlackAttempt(actor, {
         workspaceId: installation.workspaceId, installationId: installation.id,
         channelId: result.channelId, lineageRoots: result.lineageRoots,
       });
       await updateSlackMessage(installation.id, {
         channel: result.channelId,
         ts: result.messageTs,
-      }, result.blocks, result.text);
+      }, result.blocks, result.text, publication);
+      publication.assertActive();
       return {};
     }
 
@@ -2112,14 +2125,15 @@ export async function handleSlackInteraction(payload: Record<string, unknown>, s
             reviewId,
             insightId,
           });
-        await assertMeetingReviewPublicPublication(actor, {
+        const publication = await meetingReviewSlackAttempt(actor, {
           workspaceId: installation.workspaceId, installationId: installation.id,
           channelId: result.channelId, lineageRoots: result.lineageRoots,
         });
         await updateSlackMessage(installation.id, {
           channel: result.channelId,
           ts: result.messageTs,
-        }, result.blocks, result.text);
+        }, result.blocks, result.text, publication);
+        publication.assertActive();
         return { response_type: "ephemeral", text: result.responseText };
       } catch (error) {
         if (error instanceof AppError) {
@@ -2143,18 +2157,68 @@ export async function handleSlackInteraction(payload: Record<string, unknown>, s
   return {};
 }
 
+export type SlackAttemptControls = Readonly<{
+  signal: AbortSignal;
+  authorizeAttempt: (context: Readonly<{ signal: AbortSignal }>) => Promise<void>;
+}>;
+
+async function meetingReviewSlackAttempt(actor: AppActor, params: {
+  workspaceId: string; installationId: string; channelId: string; lineageRoots: LineageRoot[];
+}) {
+  const originalRoots = structuredClone(await assertMeetingReviewPublicPublication(actor, params));
+  const controller = new AbortController();
+  const assertOriginal = async () => {
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+    invariant(originalRoots.length > 0 && await isArtifactInputProofReadable(actor, params.workspaceId, originalRoots),
+      409, "SOURCE_CHANGED", "The original meeting review inputs changed before Slack delivery.");
+  };
+  const authorizeAttempt: SlackAttemptControls["authorizeAttempt"] = async ({ signal }) => {
+    try {
+      controller.signal.throwIfAborted(); signal.throwIfAborted();
+      await assertOriginal();
+      const installation = await prisma.communicationInstallation.findFirst({ where: {
+        id: params.installationId, workspaceId: params.workspaceId, provider: "SLACK", status: "ACTIVE", disconnectedAt: null,
+      } });
+      invariant(installation, 403, "SOURCE_RESTRICTED", "The Slack installation is no longer active.");
+      await assertMeetingReviewPublicPublication(actor, { ...params, lineageRoots: originalRoots });
+      // Destination-policy checks may await Slack. Never replace the originally
+      // admitted source/destination receipt with the newly checked channel proof.
+      await assertOriginal();
+      signal.throwIfAborted(); controller.signal.throwIfAborted();
+    } catch (error) { controller.abort(error); throw error; }
+  };
+  return { signal: controller.signal, authorizeAttempt, assertActive: () => controller.signal.throwIfAborted() };
+}
+
+function guardedSlackClient(token: string, controls?: SlackAttemptControls) {
+  if (!controls) return slackClient(token);
+  // The SDK interceptor runs after credential acquisition and for every actual
+  // HTTP retry. A denied authority aborts its retry engine, not just one request.
+  return new WebClient(token, { requestInterceptor: async config => {
+    try {
+      controls.signal.throwIfAborted();
+      await controls.authorizeAttempt({ signal: controls.signal });
+      controls.signal.throwIfAborted();
+      config.signal = controls.signal;
+      return config;
+    } catch (error) {
+      throw new SlackAttemptAbortError(error instanceof Error ? error : new Error("Slack attempt denied."));
+    }
+  } });
+}
+
 export async function sendSlackMessage(installationId: string, target: {
   channel: string;
   threadTs?: string;
   text?: string;
-}, blocks: unknown[], tokenOverride?: string) {
+}, blocks: unknown[], tokenOverride?: string, controls?: SlackAttemptControls) {
   const installation = await prisma.communicationInstallation.findUnique({
     where: { id: installationId },
   });
   invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
   const token = tokenOverride ?? encryptedBotToken(installation);
 
-  return slackClient(token).chat.postMessage({
+  return guardedSlackClient(token, controls).chat.postMessage({
     channel: target.channel,
     thread_ts: target.threadTs,
     text: target.text ?? "Corgtex update",
@@ -2185,13 +2249,13 @@ export async function slackSourceLink(installationId: string, channelId: string,
 export async function updateSlackMessage(installationId: string, target: {
   channel: string;
   ts: string;
-}, blocks: unknown[], text = "Corgtex update") {
+}, blocks: unknown[], text = "Corgtex update", controls?: SlackAttemptControls) {
   const installation = await prisma.communicationInstallation.findUnique({
     where: { id: installationId },
   });
   invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
 
-  return slackClient(encryptedBotToken(installation)).chat.update({
+  return guardedSlackClient(encryptedBotToken(installation), controls).chat.update({
     channel: target.channel,
     ts: target.ts,
     text,
@@ -2203,14 +2267,15 @@ export async function syncSlackMeetingActionReviewAfterWebApply(actor: AppActor,
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const refreshed = await refreshSlackMeetingActionReviewAfterWebApply(actor, params);
   if (!refreshed) return;
-  await assertMeetingReviewPublicPublication(actor, {
+  const publication = await meetingReviewSlackAttempt(actor, {
     workspaceId: params.workspaceId, installationId: refreshed.installationId,
     channelId: refreshed.update.channelId, lineageRoots: refreshed.update.lineageRoots,
   });
   await updateSlackMessage(refreshed.installationId, {
     channel: refreshed.update.channelId,
     ts: refreshed.update.messageTs,
-  }, refreshed.update.blocks, refreshed.update.text);
+  }, refreshed.update.blocks, refreshed.update.text, publication);
+  publication.assertActive();
 }
 
 async function openSlackModal(installationId: string, triggerId: string, view: unknown) {
@@ -2307,23 +2372,32 @@ export async function validateSlackPostTarget(installationId: string, rawChannel
 export async function sendSlackEphemeralMessage(installationId: string, target: {
   channel: string;
   user: string;
-}, blocks: unknown[], text = "Corgtex update") {
+}, blocks: unknown[], text = "Corgtex update", controls?: SlackAttemptControls) {
   const installation = await prisma.communicationInstallation.findUnique({
     where: { id: installationId },
   });
   invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
 
-  return slackClient(encryptedBotToken(installation)).chat.postEphemeral({
+  const result = await guardedSlackClient(encryptedBotToken(installation), controls).chat.postEphemeral({
     channel: target.channel,
     user: target.user,
     text,
     blocks: blocks as any,
   });
+  controls?.signal.throwIfAborted();
+  return result;
 }
 
-async function postSlackResponseUrl(responseUrlEnc: string, delivery: SlackAgentDelivery) {
-  const response = await fetch(decryptSecret(responseUrlEnc), {
+async function postSlackResponseUrl(responseUrlEnc: string, delivery: SlackAgentDelivery, controls?: SlackAttemptControls) {
+  const responseUrl = decryptSecret(responseUrlEnc);
+  if (controls) {
+    controls.signal.throwIfAborted();
+    await controls.authorizeAttempt({ signal: controls.signal });
+    controls.signal.throwIfAborted();
+  }
+  const response = await fetch(responseUrl, {
     method: "POST",
+    ...(controls ? { signal: controls.signal } : {}),
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       response_type: "ephemeral",
@@ -2332,12 +2406,13 @@ async function postSlackResponseUrl(responseUrlEnc: string, delivery: SlackAgent
       blocks: delivery.blocks,
     }),
   });
+  controls?.signal.throwIfAborted();
   invariant(response.ok, 502, "SLACK_RESPONSE_FAILED", "Slack response URL rejected the agent reply.");
 }
 
-export async function deliverSlackAgentResponse(payload: SlackAgentJobPayload, delivery: SlackAgentDelivery) {
+export async function deliverSlackAgentResponse(payload: SlackAgentJobPayload, delivery: SlackAgentDelivery, controls?: SlackAttemptControls) {
   if (payload.responseUrlEnc) {
-    await postSlackResponseUrl(payload.responseUrlEnc, delivery);
+    await postSlackResponseUrl(payload.responseUrlEnc, delivery, controls);
     return;
   }
 
@@ -2348,7 +2423,8 @@ export async function deliverSlackAgentResponse(payload: SlackAgentJobPayload, d
     }, delivery.blocks ?? [{
       type: "section",
       text: { type: "mrkdwn", text: delivery.text },
-    }]);
+    }], undefined, controls);
+    controls?.signal.throwIfAborted();
     return;
   }
 
@@ -2359,7 +2435,8 @@ export async function deliverSlackAgentResponse(payload: SlackAgentJobPayload, d
     }, delivery.blocks ?? [{
       type: "section",
       text: { type: "mrkdwn", text: delivery.text },
-    }], delivery.text);
+    }], delivery.text, controls);
+    controls?.signal.throwIfAborted();
   }
 }
 

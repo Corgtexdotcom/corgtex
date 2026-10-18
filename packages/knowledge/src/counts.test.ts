@@ -7,6 +7,7 @@ const fixture = vi.hoisted(() => {
   const chunks: Array<Record<string, any>> = [];
   const afterPage = vi.fn();
   const release = vi.fn();
+  const membership = vi.fn(async () => ({ id: "member-alice", isActive: true }));
   const domains = new Map<string, string[]>();
   const permitted = new Map<string, Set<string>>();
   const rows = (type: string, where: any) => sources.filter((source) => source.type === type
@@ -35,7 +36,7 @@ const fixture = vi.hoisted(() => {
     sqlNativeRunInput: { findMany: vi.fn(async () => []) },
   };
   const hash = (kind: string, row: any) => JSON.stringify([kind, row.title, row.bodyMd ?? row.textContent]);
-  return { sources, chunks, domains, permitted, prisma, hash, afterPage, release };
+  return { sources, chunks, domains, permitted, prisma, hash, afterPage, release, membership };
 });
 
 vi.mock("@corgtex/shared", async original => ({...await original<any>(), prisma: fixture.prisma}));
@@ -54,7 +55,22 @@ vi.mock("@corgtex/domain", () => ({
     new Set(rows.filter((row) => fixture.permitted.get(`${actor.kind === "user" ? actor.user.id : "agent"}:${workspaceId}`)?.has(row.id))
       .map((row) => row.id))),
 }));
-vi.mock("../../domain/src/source-lineage", () => ({withArtifactCountReleaseSnapshot: async (actor: AppActor, ws: string,
+vi.mock("../../domain/src/auth", () => ({ requireWorkspaceMembership: fixture.membership }));
+vi.mock("../../domain/src/sql-native-input", () => ({
+  loadSqlNativeRunInputs: vi.fn(async (workspaceId: string, ids: string[]) => fixture.sources.filter(row => row.type === "EXTERNAL_DATABASE" && row.workspaceId === workspaceId && ids.includes(row.id))),
+  isSqlNativeRunInputLocallyCurrent: vi.fn(async () => true),
+}));
+vi.mock("../../domain/src/sql-knowledge-read-proof", () => ({
+  captureSqlKnowledgeInputProof: vi.fn(async () => undefined),
+  isSqlKnowledgeInputProofReadable: vi.fn(async () => undefined),
+}));
+vi.mock("../../domain/src/source-lineage", () => ({
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({ value: await read(), heads: new Map() }),
+  mergeLineageInputRoot: (prior: LineageRoot | undefined, root: LineageRoot) => {
+    if (prior && prior.fingerprint !== root.fingerprint) throw Object.assign(new Error("Original changed"), { code: "SOURCE_CHANGED" });
+    return root;
+  },
+  withArtifactCountReleaseSnapshot: async (actor: AppActor, ws: string,
   roots: LineageRoot[], remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {
   fixture.release(roots);
   const {isArtifactInputProofReadable} = await import("@corgtex/domain");
@@ -65,7 +81,7 @@ vi.mock("../../domain/src/source-lineage", () => ({withArtifactCountReleaseSnaps
   await current(); await remote(); await current(); return finish(fixture.prisma);
 }}));
 
-import { countReadableKnowledgeChunkAggregate, countReadableKnowledgeChunks } from "./counts";
+import { countReadableKnowledgeChunkAggregate, countReadableKnowledgeChunks, getReadableKnowledgeChunkSummary } from "./counts";
 
 const alice: AppActor = { kind: "user", user: { id: "alice", email: "alice@example.test", displayName: "Alice" } };
 const bob: AppActor = { kind: "user", user: { id: "bob", email: "bob@example.test", displayName: "Bob" } };
@@ -206,4 +222,83 @@ describe("bounded dashboard knowledge aggregate", () => {
     expect(fixture.release.mock.calls.at(-1)![0]).toEqual(expect.arrayContaining([expect.objectContaining({id: "parent"})]));
   });
 
+});
+
+describe("bounded knowledge summary", () => {
+  beforeEach(() => {
+    vi.clearAllMocks(); fixture.afterPage.mockReset();
+    fixture.sources.length = 0; fixture.chunks.length = 0;
+    fixture.domains.clear(); fixture.permitted.clear();
+    fixture.domains.set("alice:ws-1", ["WORKSPACE"]);
+    fixture.permitted.set("alice:ws-1", new Set());
+    fixture.membership.mockReset().mockResolvedValue({ id: "member-alice", isActive: true });
+  });
+  const allow = (id: string) => { fixture.permitted.get("alice:ws-1")!.add(id); fixture.permitted.get("alice:ws-1")!.add(`chunk-${id}`); };
+
+  it("stops after 200 hidden rows and does not claim exact zero before the next readable row", async () => {
+    for (let i = 0; i < 201; i++) article(`source-${String(i).padStart(3, "0")}`, "ws-1");
+    allow("source-200");
+    expect(await getReadableKnowledgeChunkSummary(alice, "ws-1")).toEqual({ count: 0, complete: false });
+    expect(fixture.prisma.knowledgeChunk.findMany).toHaveBeenCalledTimes(2);
+    expect(fixture.prisma.brainArticle.findMany.mock.calls.flatMap(([query]) => query.where.id.in)).not.toContain("source-200");
+    expect(fixture.prisma.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it("reports a readable lower bound and preserves the exact aggregate contract", async () => {
+    for (let i = 0; i < 201; i++) { const id = `source-${String(i).padStart(3, "0")}`; article(id, "ws-1"); allow(id); }
+    expect(await getReadableKnowledgeChunkSummary(alice, "ws-1")).toEqual({ count: 200, complete: false });
+    expect(fixture.prisma.knowledgeChunk.findMany).toHaveBeenCalledTimes(2);
+    expect(await countReadableKnowledgeChunkAggregate(alice, "ws-1", ["BRAIN_ARTICLE"])).toBe(201);
+  });
+
+  it("shares one 200-row budget across generic and native SQL candidates", async () => {
+    for (let i = 0; i < 201; i++) {
+      const id = `source-${String(i).padStart(3, "0")}`;
+      const source = article(id, "ws-1"); allow(id);
+      if (i % 2) {
+        source.type = "EXTERNAL_DATABASE";
+        const chunk = fixture.chunks.at(-1)!;
+        chunk.sourceType = "EXTERNAL_DATABASE";
+        chunk.metadata = { nativeInputId: id, sourceContentHash: fixture.hash("SqlNativeRunInput", source) };
+      }
+    }
+    expect(await getReadableKnowledgeChunkSummary(alice, "ws-1")).toEqual({ count: 200, complete: false });
+    expect(fixture.prisma.knowledgeChunk.findMany).toHaveBeenCalledTimes(2);
+    const { loadSqlNativeRunInputs } = await import("../../domain/src/sql-native-input");
+    expect(vi.mocked(loadSqlNativeRunInputs).mock.calls.map(([, ids]) => ids.length)).toEqual([50, 50]);
+    expect(fixture.prisma.$queryRaw).not.toHaveBeenCalled();
+    expect(fixture.release.mock.calls.at(-1)![0]).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "SqlNativeRunInput", id: "source-001" })]));
+  });
+
+  it("returns exact short-window counts only in permitted workspace, source types and domains", async () => {
+    article("visible", "ws-1"); allow("visible"); article("hidden", "ws-1");
+    article("finance", "ws-1", "FINANCE"); allow("finance"); article("foreign", "ws-2"); allow("foreign");
+    expect(await getReadableKnowledgeChunkSummary(alice, "ws-1", { sourceTypes: ["BRAIN_ARTICLE"] })).toEqual({ count: 1, complete: true });
+    expect(fixture.prisma.knowledgeChunk.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ take: 100,
+      where: { workspaceId: "ws-1", accessDomain: { in: ["WORKSPACE"] }, sourceType: { in: ["BRAIN_ARTICLE"] } } }));
+    expect(await getReadableKnowledgeChunkSummary(alice, "ws-1", { sourceTypes: ["DOCUMENT", "MEETING"] })).toEqual({ count: 0, complete: true });
+  });
+
+  it("withholds original counted roots revoked during a later page", async () => {
+    for (let i = 0; i < 101; i++) { const id = `source-${String(i).padStart(3, "0")}`; article(id, "ws-1"); allow(id); }
+    fixture.afterPage.mockImplementation(async where => { if (where.id?.gt) fixture.permitted.get("alice:ws-1")!.delete("source-000"); });
+    await expect(getReadableKnowledgeChunkSummary(alice, "ws-1")).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+  });
+
+  it("retains original roots in the caller's shared release until its final response", async () => {
+    const { DigestReadRelease } = await import("../../domain/src/digest-lineage");
+    article("visible", "ws-1"); allow("visible");
+    const release = new DigestReadRelease(alice, "ws-1");
+    const result = await getReadableKnowledgeChunkSummary(alice, "ws-1", { release });
+    expect(result).toEqual({ count: 1, complete: true });
+    expect(fixture.release).not.toHaveBeenCalled();
+    fixture.permitted.get("alice:ws-1")!.delete("visible");
+    await expect(release.finish(result)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    await expect(getReadableKnowledgeChunkSummary(bob, "ws-1", { release })).rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
+  });
+
+  it("rechecks current caller even for an empty authorized window", async () => {
+    fixture.membership.mockRejectedValueOnce(Object.assign(new Error("Caller departed"), { code: "NOT_A_MEMBER" }));
+    await expect(getReadableKnowledgeChunkSummary(alice, "ws-1")).rejects.toMatchObject({ code: "NOT_A_MEMBER" });
+  });
 });

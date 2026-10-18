@@ -143,7 +143,8 @@ export async function startDatabase(database, { run = command, wait = pause } = 
   if (!/^corgtex_(test|ci)$/.test(database)) throw new Error("Invalid isolated CI database name");
   run("docker", ["run", "--detach", "--pull=never", "--name", CONTAINER,
     "--publish", "127.0.0.1:5432:5432", "--env", "POSTGRES_USER=postgres",
-    "--env", "POSTGRES_PASSWORD=postgres", "--env", `POSTGRES_DB=${database}`, LOCAL_IMAGE]);
+    "--env", "POSTGRES_PASSWORD=postgres", "--env", `POSTGRES_DB=${database}`, LOCAL_IMAGE,
+    "postgres", "-c", "shared_preload_libraries=pg_stat_statements"]);
   for (let attempt = 0; attempt < 30; attempt++) {
     try {
       run("docker", ["exec", CONTAINER, "pg_isready", "-U", "postgres", "-d", database]);

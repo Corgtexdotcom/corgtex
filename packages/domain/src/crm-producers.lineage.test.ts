@@ -1,5 +1,5 @@
 import { installSourcePermissionEpochFixture } from "./source-permission-epochs.test-fixture";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
 const fixture = vi.hoisted(() => {
@@ -65,9 +65,17 @@ const fixture = vi.hoisted(() => {
     const before = Object.fromEntries(names.map((name) => [name, tables[name].map((row) => ({ ...row }))]));
     try { return await run(prisma); } catch (error) { for (const name of names) tables[name] = before[name]; throw error; }
   });
-  return { prisma, tables, time, revoked: new Set<string>(), departed: new Set<string>() };
+  return { beforeEmail: null as (() => void) | null, prisma, tables, time, revoked: new Set<string>(), departed: new Set<string>() };
 });
 vi.mock("@corgtex/shared", () => ({ prisma: fixture.prisma, env: { APP_URL: "https://synthetic.test" }, toInputJson: (value: unknown) => value }));
+vi.mock("../../shared/src/env", () => ({ env: {
+  get RESEND_API_KEY() { fixture.beforeEmail?.(); return "synthetic-resend-key"; },
+  EMAIL_FROM: "Synthetic <sender@example.test>", EMAIL_REPLY_TO: "reply@example.test",
+} }));
+vi.mock("../../shared/src/db", () => ({ prisma: fixture.prisma }));
+import { sendEmail } from "../../shared/src/email";
+const wire = vi.fn<typeof fetch>();
+afterEach(() => { fixture.beforeEmail = null; vi.unstubAllGlobals(); });
 vi.mock("./auth", () => ({ requireWorkspaceMembership: vi.fn(async ({ actor, workspaceId }) => {
   if (!["ws-crm", "ws-other"].includes(workspaceId) || fixture.departed.has(actor.user?.id ?? "agent")) throw Object.assign(new Error("Membership revoked"), { status: 403 });
   return { id: `member-${actor.user?.id ?? "agent"}`, role: "MEMBER" };
@@ -108,7 +116,9 @@ async function dripRoots() {
 describe("CRM writers with real source receipts", () => {
   beforeEach(() => {
     for (const name of Object.keys(fixture.tables)) fixture.tables[name] = [];
-    fixture.revoked.clear(); fixture.departed.clear(); vi.clearAllMocks();
+    fixture.revoked.clear(); fixture.departed.clear(); fixture.beforeEmail = null; vi.clearAllMocks();
+    wire.mockResolvedValue(new Response(JSON.stringify({ id: "synthetic-message" }), {status: 200, headers: {"Content-Type": "application/json"}}));
+    vi.stubGlobal("fetch", wire);
     fixture.prisma.$queryRaw.mockReset().mockResolvedValue([]);
     fixture.prisma.$executeRaw.mockReset().mockResolvedValue(1);
     installSourcePermissionEpochFixture(fixture.prisma);
@@ -165,12 +175,55 @@ describe("CRM writers with real source receipts", () => {
     const roots = await dripRoots(); const send = vi.fn(async () => ({ status: "SENT" as const, providerMessageId: "message" }));
     const opts = { actor: agent, lineageRoots: roots, operationId: "job", expectedFollowUpNumber: 1, send };
     await recordDripFollowUp(ws, "lead", "Proven body", opts);
-    expect(send).toHaveBeenCalledWith("lead@synthetic.test", "job"); expect(fixture.tables.demoLead[0].followUpCount).toBe(1);
+    expect(send).toHaveBeenCalledWith("lead@synthetic.test", "job", expect.objectContaining({signal: expect.any(AbortSignal), authorizeAttempt: expect.any(Function)})); expect(fixture.tables.demoLead[0].followUpCount).toBe(1);
     expect(JSON.parse(fixture.tables.crmActivity[0].bodyMd)).toEqual({ operationId: "job", status: "SENT", providerMessageId: "message", emailContent: "Proven body" });
     expect(await readableArtifactIds(agent, ws, "DemoLead", fixture.tables.demoLead)).toEqual(new Set(["lead"]));
     expect(await readableArtifactIds(agent, ws, "CrmActivity", fixture.tables.crmActivity)).toEqual(new Set([fixture.tables.crmActivity[0].id]));
     await expect(recordDripFollowUp(ws, "lead", "Proven body", opts)).rejects.toMatchObject({ code: "DELIVERY_ALREADY_RESERVED" });
     expect(send).toHaveBeenCalledTimes(1);
+  });
+  it.each(["source", "member", "unchanged"])("replays original drip authority at the actual Resend HTTP boundary: %s", async change => {
+    const roots = await dripRoots();
+    fixture.beforeEmail = () => {
+      if (change === "source") fixture.tables.workflowJob[0].payload = {demoLeadId: "lead", followUpNumber: 1, changed: true};
+      if (change === "member") fixture.departed.add("agent");
+    };
+    const send = vi.fn((_recipient, _operationId, controls) => sendEmail({to: "lead@synthetic.test", subject: "Original", html: "<p>Original</p>"}, controls));
+    const work = recordDripFollowUp(ws, "lead", "Proven body", {actor: agent, lineageRoots: roots, operationId: "job", expectedFollowUpNumber: 1, send});
+    if (change === "unchanged") {
+      await expect(work).resolves.toMatchObject({delivery: {status: "SENT"}});
+      expect(wire).toHaveBeenCalledTimes(1);
+      expect(wire.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
+      expect(fixture.tables.demoLead[0].followUpCount).toBe(1);
+    } else {
+      await expect(work).rejects.toThrow(change === "member" ? "Membership revoked" : "Original follow-up inputs");
+      expect(wire).not.toHaveBeenCalled();
+      expect(fixture.tables.demoLead[0].followUpCount).toBe(0);
+      expect(JSON.parse(fixture.tables.crmActivity[0].bodyMd).status).toBe("RESERVED");
+    }
+  });
+  it("rechecks the original worker fence after email credential preparation", async () => {
+    const roots = await dripRoots();
+    let active = true;
+    fixture.beforeEmail = () => { active = false; };
+    const send = vi.fn((_recipient, _operationId, controls) => sendEmail({to: "lead@synthetic.test", subject: "Original", html: "Original"}, controls));
+    await expect(withArtifactInputWriteFence(async () => {
+      if (!active) throw new Error("Synthetic original lease lost");
+    }, () => recordDripFollowUp(ws, "lead", "Body", {actor: agent, lineageRoots: roots, operationId: "job", expectedFollowUpNumber: 1, send}))).rejects.toThrow("Synthetic original lease lost");
+    expect(wire).not.toHaveBeenCalled();
+    expect(fixture.tables.demoLead[0].followUpCount).toBe(0);
+    expect(JSON.parse(fixture.tables.crmActivity[0].bodyMd).status).toBe("RESERVED");
+  });
+  it("keeps a swallowed drip dispatch denial fatal without marking SENT", async () => {
+    const roots = await dripRoots();
+    const send = vi.fn(async (_recipient, _operationId, controls) => {
+      fixture.departed.add("agent");
+      try { await controls.authorizeAttempt({signal: controls.signal}); } catch { /* simulate provider wrapper */ }
+      return {status: "SENT" as const, providerMessageId: "fake-success"};
+    });
+    await expect(recordDripFollowUp(ws, "lead", "Body", {actor: agent, lineageRoots: roots, operationId: "job", expectedFollowUpNumber: 1, send})).rejects.toThrow("Membership revoked");
+    expect(fixture.tables.demoLead[0].followUpCount).toBe(0);
+    expect(JSON.parse(fixture.tables.crmActivity[0].bodyMd).status).toBe("RESERVED");
   });
   it("requires the authoritative job target even when a different operation has readable roots", async () => {
     const roots = await dripRoots();

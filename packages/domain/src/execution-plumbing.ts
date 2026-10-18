@@ -18,6 +18,7 @@ import {
   type Proposal,
   type Meeting,
   type BrainArticle,
+  type CrmCommunicationSuggestion,
   type ExecutionRequest,
   type ExecutionResult,
 } from "@prisma/client";
@@ -40,7 +41,7 @@ import { captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifac
   captureImmutableArtifactInputProof, isArtifactInputProofReadable, readableArtifactIds, assertArtifactInputWriteFence,
   sealArtifactInputActor, lineageContentFingerprint, inspectStoredArtifactInputDependencies, type LineageKind, type LineageRoot } from "./source-lineage";
 import { finishProducerLineage, prepareProducerLineage, type ProducerLineageParams } from "./producer-lineage";
-import { captureReadableDigestInputs } from "./digest-lineage";
+import { createArtifactSampleBudget, captureReadableDigestInputs } from "./digest-lineage";
 import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 import { lockArtifactReadAuthorityRows, prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./artifact-commit-preflight";
 import { prepareArtifactSourceCommit, withArtifactSourceCommit } from "./artifact-source-commit";
@@ -888,19 +889,23 @@ export async function listExecutionRequests(actor: AppActor, params: {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const status = params.status ? String(params.status).trim().toUpperCase() : null;
   invariant(!status || status in ExecutionRequestStatus, 400, "INVALID_INPUT", "Unsupported execution request status.");
+  invariant(params.take == null || Number.isSafeInteger(params.take), 400, "INVALID_INPUT", "Invalid execution sample size.");
   const take = Math.min(Math.max(params.take ?? 20, 1), 100);
   const release = new WorkItemReadRelease(actor, params.workspaceId);
   const visible: ExecutionRequestRecord[] = [];
+  const budget = createArtifactSampleBudget(take);
   let after: { id: string; createdAt: Date } | undefined;
   while (visible.length < take) {
+    const pageTake = budget.nextTake();
     const requests = await prisma.executionRequest.findMany({
       where: { ...executionRequestAccessWhere(actor, params.workspaceId),
         ...(status ? { status: status as ExecutionRequestStatus } : {}),
         ...(after ? { OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] } : {}),
-      }, include: executionRequestInclude, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: 100,
+      }, include: executionRequestInclude, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: pageTake,
     });
     invariant(requests.length <= 100 && (!requests.length || requests.at(-1)!.id !== after?.id),
       503, "SOURCE_READ_SCAN_CHANGED", "Execution page changed; retry.");
+    budget.consume(requests.length, pageTake);
     for (const candidate of requests) {
       let request: ExecutionRequestRecord;
       try { request = await release.observeRead(() => loadExecutionRequest(actor, params.workspaceId, candidate.id, release)); }
@@ -913,7 +918,7 @@ export async function listExecutionRequests(actor: AppActor, params: {
       visible.push(request);
       if (visible.length === take) break;
     }
-    if (requests.length < 100) break;
+    if (requests.length < pageTake) break;
     after = requests.at(-1);
   }
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
@@ -954,14 +959,6 @@ export async function getExecutionPacket(actor: AppActor, params: { workspaceId:
   return packet;
 }
 
-const SOURCE_SCAN_LIMIT = 5000;
-const SOURCE_SCAN = { orderBy: { id: "asc" as const }, take: SOURCE_SCAN_LIMIT + 1 };
-
-async function readableExecutionRows<T extends { id: string }>(actor: AppActor, workspaceId: string, kind: LineageKind, candidates: T[]) {
-  invariant(candidates.length <= SOURCE_SCAN_LIMIT, 503, "SOURCE_READ_SCAN_LIMIT", "Execution input permission scan exceeds its supported size.");
-  return captureReadableDigestInputs({ actor, workspaceId, kind, records: candidates });
-}
-
 function recentRows<T extends { id: string; updatedAt?: Date; recordedAt?: Date | null }>(records: T[], take: number) {
   return [...records].sort((a, b) => ((b.recordedAt ?? b.updatedAt)?.getTime() ?? 0) - ((a.recordedAt ?? a.updatedAt)?.getTime() ?? 0)
     || a.id.localeCompare(b.id)).slice(0, take);
@@ -984,31 +981,46 @@ async function readableExecutionMember(actor: AppActor, workspaceId: string, mem
   }
 }
 
-/** Keep only the permitted recent sample and its original receipts. Canonical
- * pages replenish denied rows; coalesced meeting dates require a bounded top-N
- * fold rather than Prisma's different nullable-column ordering. */
+/** Meeting.recordedAt is required in storage. Order by that same date used by
+ * the response ranking so a recent sample never needs a full-history fold. */
+function meetingSampleAfter(after?: { id: string; recordedAt?: Date | null }): Prisma.MeetingWhereInput {
+  if (!after) return {};
+  invariant(after.recordedAt instanceof Date, 409, "SOURCE_CHANGED", "Meeting ordering is unavailable.");
+  return { OR: [{ recordedAt: { lt: after.recordedAt } }, { recordedAt: after.recordedAt, id: { gt: after.id } }] };
+}
+
+/** Keep only the permitted recent sample and its original receipts. Database
+ * pages use the same deterministic ranking as the returned sample. */
 async function recentExecutionInputs<T extends { id: string; updatedAt: Date; recordedAt?: Date | null }>(params: {
   actor: AppActor; workspaceId: string; kind: LineageKind; take: number;
-  load: (after: NoInfer<T> | undefined) => Promise<T[]>; fold?: boolean;
+  load: (after: NoInfer<T> | undefined) => Promise<T[]>;
   release: WorkItemReadRelease;
+  matches?: (row: T) => boolean;
+  admit?: (row: T, proof: LineageRoot[]) => Promise<LineageRoot[] | null>;
 }) {
   let after: T | undefined;
   let selected: T[] = [];
+  const budget = createArtifactSampleBudget(params.take);
   const proofs = new Map<string, LineageRoot[]>();
   for (;;) {
+    budget.nextTake();
     const batch = await params.load(after);
     invariant(batch.length <= 100 && (!batch.length || batch.at(-1)!.id !== after?.id),
       503, "SOURCE_READ_SCAN_CHANGED", "Execution context page changed; retry.");
-    const read = await params.release.observeRead(() => captureReadableDigestInputs({ ...params, records: batch }));
+    budget.consume(batch.length, 100);
+    const next = batch.length ? structuredClone(batch.at(-1)!) : undefined;
+    const read = await params.release.observeRead(() => captureReadableDigestInputs({ ...params, records: batch.filter(row => !params.matches || params.matches(row)) }));
     for (const row of read.records) {
+      const proof = params.admit ? await params.release.observeRead(() => params.admit!(row, read.proofs.get(row.id)!)) : read.proofs.get(row.id)!;
+      if (!proof) continue;
       selected.push(row);
-      proofs.set(row.id, read.proofs.get(row.id)!);
+      proofs.set(row.id, proof);
     }
     selected = recentRows(selected, params.take);
     const ids = new Set(selected.map(row => row.id));
     for (const id of proofs.keys()) if (!ids.has(id)) proofs.delete(id);
-    if (batch.length < 100 || !params.fold && selected.length === params.take) break;
-    after = batch.at(-1);
+    if (batch.length < 100 || selected.length === params.take) break;
+    after = next;
   }
   return { records: selected, proofs };
 }
@@ -1031,8 +1043,9 @@ export async function getCompanyContext(actor: AppActor, workspaceId: string) {
     recentExecutionInputs<Action>({ ...read, kind: "Action", load: after => prisma.action.findMany(recentQuery(after)) }),
     recentExecutionInputs<Tension>({ ...read, kind: "Tension", load: after => prisma.tension.findMany(recentQuery(after)) }),
     recentExecutionInputs<Proposal>({ ...read, kind: "Proposal", load: after => prisma.proposal.findMany(recentQuery(after)) }),
-    recentExecutionInputs<Meeting>({ ...read, kind: "Meeting", take: 10, fold: true,
-      load: after => prisma.meeting.findMany({ where: { workspaceId, archivedAt: null, ...(after ? { id: { gt: after.id } } : {}) }, orderBy: { id: "asc" }, take: 100 }) }),
+    recentExecutionInputs<Meeting>({ ...read, kind: "Meeting", take: 10,
+      load: after => prisma.meeting.findMany({ where: { workspaceId, archivedAt: null, ...meetingSampleAfter(after) },
+        orderBy: [{ recordedAt: "desc" }, { id: "asc" }], take: 100 }) }),
     recentExecutionInputs<BrainArticle>({ ...read, kind: "BrainArticle", load: after => prisma.brainArticle.findMany(recentQuery(after)) }),
   ]);
   const select = <T extends { id: string; updatedAt?: Date; recordedAt?: Date | null }>(read: { records: T[]; proofs: Map<string, LineageRoot[]> }, take = MAX_CONTEXT_ITEMS) => {
@@ -1081,7 +1094,9 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
   const take = Math.min(Math.max(params.take ?? 10, 1), 50);
   const query = params.query?.trim().toLocaleLowerCase() ?? "";
   const items: WritebackTargetSummary[] = [];
-  const roots = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Workspace", id: params.workspaceId }]);
+  sealArtifactInputActor(actor);
+  const release = new WorkItemReadRelease(actor, params.workspaceId);
+  const roots = await release.observeRead(() => captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Workspace", id: params.workspaceId }]));
   const includeType = (type: ExecutionWritebackTargetType) => !selectedTypes || selectedTypes.has(type);
   const native = [
     ["ACTION", "Action", prisma.action, "/actions/"],
@@ -1097,32 +1112,42 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
     const where = type === "BUILD_ARTIFACT" ? { workspaceId: params.workspaceId, NOT: OPERATIONAL_ARTIFACT_FILTER }
       : type === "BRAIN_ARTICLE" ? { AND: [{ workspaceId: params.workspaceId, archivedAt: null }, { OR: brainArticlePrivacyFilter(actor, membership) }] }
       : { workspaceId: params.workspaceId, archivedAt: null, ...(["ACTION", "TENSION", "PROPOSAL"].includes(type) ? privacyFilter(actor, membership) : {}) };
-    // All delegates share a scalar query boundary. Gate complete rows before title matches and samples.
-    const candidates = await (delegate.findMany as (args: unknown) => Promise<Array<{ id: string; title: string | null; status?: string; authority?: string; slug?: string; updatedAt: Date; recordedAt?: Date | null }>>)({ where, ...SOURCE_SCAN });
-    const readable = await readableExecutionRows(actor, params.workspaceId, kind, candidates);
-    const records = recentRows(readable.records.filter((row) => !query || row.title?.toLocaleLowerCase().includes(query)), take);
+    type TargetRow = { id: string; title: string | null; status?: string; authority?: string; slug?: string; updatedAt: Date; recordedAt?: Date | null };
+    const readable = await recentExecutionInputs<TargetRow>({ actor, workspaceId: params.workspaceId, kind, take, release,
+      matches: row => !query || Boolean(row.title?.toLocaleLowerCase().includes(query)),
+      load: after => (delegate.findMany as (args: unknown) => Promise<TargetRow[]>)({
+        where: after ? { AND: [where, type === "MEETING" ? meetingSampleAfter(after)
+          : { OR: [{ updatedAt: { lt: after.updatedAt } }, { updatedAt: after.updatedAt, id: { gt: after.id } }] }] } : where,
+        orderBy: type === "MEETING" ? [{ recordedAt: "desc" }, { id: "asc" }] : [{ updatedAt: "desc" }, { id: "asc" }], take: 100,
+      }),
+    });
+    const records = readable.records;
     for (const row of records) roots.push(...(readable.proofs.get(row.id) ?? []));
     items.push(...records.map((row) => ({ type, id: row.id, title: row.title ?? "Untitled meeting", status: row.status ?? row.authority ?? null, webPath: `${path}${type === "BRAIN_ARTICLE" ? row.slug : row.id}` })));
   }
   if (includeType("CRM_COMMUNICATION")) {
     requireExecutionScope(actor, "relationships:read");
-    const candidates = await prisma.crmCommunicationSuggestion.findMany({ where: { workspaceId: params.workspaceId,
-      ...activeCrmParentWhere(["account", "contact", "deal", "activity"]) }, ...SOURCE_SCAN });
-    const readable = await readableExecutionRows(actor, params.workspaceId, "CrmCommunicationSuggestion", candidates);
-    const records: typeof candidates = [];
-    for (const row of readable.records) {
-      if (!await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, readable.proofs.get(row.id) ?? [])) continue;
-      // The affiliation path is an independent current input, even when the suggestion body is original.
-      if (row.accountId) {
-        try { roots.push(...await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "CrmAccount", id: row.accountId }])); }
-        catch (error) {
-          if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
-          continue;
+    const readable = await recentExecutionInputs<CrmCommunicationSuggestion>({ actor, workspaceId: params.workspaceId, kind: "CrmCommunicationSuggestion", take, release,
+      load: after => prisma.crmCommunicationSuggestion.findMany({
+        where: { workspaceId: params.workspaceId, ...activeCrmParentWhere(["account", "contact", "deal", "activity"]),
+          ...(after ? { OR: [{ updatedAt: { lt: after.updatedAt } }, { updatedAt: after.updatedAt, id: { gt: after.id } }] } : {}) },
+        orderBy: [{ updatedAt: "desc" }, { id: "asc" }], take: 100,
+      }),
+      matches: row => !query || [row.title, row.subject, row.recipientEmail, row.recipientName].some(value => value?.toLocaleLowerCase().includes(query)),
+      admit: async (row, proof) => {
+        if (!await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, proof)) return null;
+        // Only sampled suggestions retain their independently admitted affiliation.
+        if (row.accountId) {
+          try { return [...proof, ...await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "CrmAccount", id: row.accountId }])]; }
+          catch (error) {
+            if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+            return null;
+          }
         }
-      }
-      if (!query || [row.title, row.subject, row.recipientEmail, row.recipientName].some((v) => v?.toLocaleLowerCase().includes(query))) records.push(row);
-    }
-    const sampled = recentRows(records, take);
+        return proof;
+      },
+    });
+    const sampled = readable.records;
     for (const row of sampled) roots.push(...(readable.proofs.get(row.id) ?? []));
     items.push(...sampled.map((row) => ({ type: "CRM_COMMUNICATION" as const, id: row.id,
       title: row.subject ?? row.title, status: row.status, webPath: row.accountId ? `/leads/accounts/${row.accountId}?view=review` : "/leads?view=review" })));
@@ -1131,8 +1156,8 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
     roots.push(...await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Workspace", id: params.workspaceId }]));
     items.push({ type: "COMMENT", id: null, title: "Comment on execution request", status: null, webPath: "" });
   }
-  invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots), 409, "SOURCE_CHANGED", "Execution targets changed during collection.");
-  return { items: items.slice(0, take * 6) };
+  release.add(roots);
+  return release.finish({ items: items.slice(0, take * 6) });
 }
 
 async function validateCrmCommunicationResultOutput(actor: AppActor, workspaceId: string, targetId: string | null, output: JsonRecord,

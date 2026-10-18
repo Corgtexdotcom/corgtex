@@ -10,6 +10,18 @@ vi.mock("./brain-access", () => ({ resolveKnowledgeAccessDomains: async (actor: 
 
 beforeEach(async () => {
   await resetFixture();
+  const baseQuery = vi.mocked(fixture.prisma.$queryRaw).getMockImplementation()!;
+  vi.mocked(fixture.prisma.$queryRaw).mockImplementation(async (query: any, ...values: any[]) => {
+    if (query.sql?.includes('FROM "ArtifactInputLineage"') && query.sql.includes("DISTINCT ON")) {
+      const [ws, kind, ...ids] = query.values;
+      const rows = fixture.rows.artifactInputLineage.filter(row => row.workspaceId === ws
+        && row.artifactType === kind && ids.includes(row.artifactId)).sort((a, b) => b.revision - a.revision);
+      return [...new Set(rows.map(row => row.artifactId))].map(id => ({ ...rows.find(row => row.artifactId === id) }));
+    }
+    return baseQuery(query, ...values);
+  });
+  fixture.rows.adviceRequest = [];
+  fixture.prisma.adviceRequest = { findMany: vi.fn(async () => []) };
   fixture.rows.circle = [];
   fixture.prisma.circle = { findFirst: vi.fn(async ({ where }: any) => fixture.rows.circle.find((row: any) =>
     row.id === where.id && row.workspaceId === where.workspaceId) ?? null) };
@@ -127,14 +139,35 @@ describe("Proposal reader source admission", () => {
 
   it("rejects a parent whose content changes after its list row was read", async () => {
     const { visible } = await seed();
+    // Complete first-use epoch initialization before injecting drift into the
+    // serving snapshot; a discarded initialization attempt is not admission.
+    await listProposals(alpha, workspaceId, { take: 10 });
     const read = vi.mocked(fixture.prisma.proposal.findMany).getMockImplementation()!;
+    let changed = 0;
     vi.mocked(fixture.prisma.proposal.findMany).mockImplementationOnce(async (args: any) => {
       const rows = await read(args);
-      visible.bodyMd = "Changed after the candidate read";
+      expect(args.take).toBe(100);
+      fixture.rows.proposal.find((row: any) => row.id === visible.id)!.bodyMd = "Changed after the candidate read";
+      changed++;
       return rows;
     });
     const result = await listProposals(alpha, workspaceId, { take: 10 });
     expect(result.items.every((row) => row.id !== visible.id)).toBe(true);
     expect(result.total).toBe(1);
+    expect(changed).toBe(1);
   });
+});
+
+it("bounds all selected proposal relation candidates to one shared window per family", async () => {
+  await seed();
+  const rows = Array.from({length: 5001}, (_, index) => ({id: `unknown-${String(index).padStart(5, "0")}`, workspaceId,
+    proposalId: "c-visible", title: "UNPROVED RELATION", bodyMd: "Unknown", authorUserId: "beta", status: "OPEN", isPrivate: false}));
+  vi.mocked(fixture.prisma.action.findMany).mockImplementation(async (args: any) => rows
+    .filter(row => !args.where?.id?.gt || row.id > args.where.id.gt).slice(0, args.take));
+  const result = await listProposals(alpha, workspaceId, {take: 20});
+  const queries = vi.mocked(fixture.prisma.action.findMany).mock.calls.filter(([args]: any[]) => args.take);
+  expect(queries).toHaveLength(1);
+  expect(queries[0][0].take).toBe(200);
+  expect(result.items.every(row => row.relationWindow.actionsComplete === false)).toBe(true);
+  expect(result.items.every(row => row.actions.length === 0)).toBe(true);
 });

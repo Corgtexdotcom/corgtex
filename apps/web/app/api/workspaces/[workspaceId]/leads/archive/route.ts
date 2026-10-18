@@ -25,7 +25,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
-    const filters = query.parse(Object.fromEntries(request.nextUrl.searchParams));
+    const parsed = query.safeParse(Object.fromEntries(request.nextUrl.searchParams));
+    if (!parsed.success) throw new AppError(400, "VALIDATION_ERROR", "Invalid archive filters.");
+    const filters = parsed.data;
     await requireWorkspaceFeature(workspaceId, "RELATIONSHIPS");
     if (expectedOrigin !== originIdentity()) throw new AppError(403, "MCP_AUTHORIZATION_REVOKED", "Presentation authority changed.");
     const options = { archiveFilter: filters.archiveFilter, take: filters.take, skip: filters.skip };

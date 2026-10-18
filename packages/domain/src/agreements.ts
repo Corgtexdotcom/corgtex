@@ -2,6 +2,7 @@ import type { BrainArticleAuthority, BrainArticleType, Constitution, Constitutio
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
+import { invariant } from "./errors";
 import { privacyFilter } from "./privacy";
 import { DigestReadRelease, loadReadableDigestQuery } from "./digest-lineage";
 
@@ -22,12 +23,32 @@ export async function listWorkspaceAgreements(actor: AppActor, params: {
   workspaceId: string;
   brainArticleTake?: number;
   constitutionVersionTake?: number;
+  policyTake?: number;
+  policyCursor?: string;
+  policyScope?: string;
 }) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   const release = new DigestReadRelease(actor, params.workspaceId);
   const brainArticleTake = params.brainArticleTake ?? 20;
   const constitutionVersionTake = params.constitutionVersionTake ?? 8;
+
+  const policyTake = params.policyTake ?? 50;
+  const policyScope = params.policyScope ?? "all";
+  invariant(Number.isSafeInteger(policyTake) && policyTake > 0 && policyTake <= 100
+    && policyScope.length > 0 && policyScope.length <= 256, 400, "INVALID_INPUT", "Invalid policy window.");
+  let policyAfter: { id: string; acceptedAt: Date } | undefined;
+  if (params.policyCursor !== undefined) {
+    try {
+      invariant(params.policyCursor.length <= 2048 && /^[A-Za-z0-9_-]+$/.test(params.policyCursor), 400, "INVALID_INPUT", "Invalid policy cursor.");
+      const value = JSON.parse(Buffer.from(params.policyCursor, "base64url").toString("utf8"));
+      invariant(value?.purpose === "agreements-policy-v1" && value.workspaceId === params.workspaceId && value.scope === policyScope
+        && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 256
+        && typeof value.acceptedAt === "string" && Number.isFinite(Date.parse(value.acceptedAt)),
+      400, "INVALID_INPUT", "Invalid policy cursor.");
+      policyAfter = { id: value.id, acceptedAt: new Date(value.acceptedAt) };
+    } catch { invariant(false, 400, "INVALID_INPUT", "Invalid policy cursor."); }
+  }
 
   const constitutionRows = await loadReadableDigestQuery<Constitution & {sourceReferences?: ConstitutionSourceReference[]}>({
     actor, workspaceId: params.workspaceId, release, kind: "Constitution", keyset: true,
@@ -41,17 +62,45 @@ export async function listWorkspaceAgreements(actor: AppActor, params: {
   });
   const currentConstitution = constitutionRows[0] ?? null;
   const constitutionVersions = constitutionRows.slice(0, Math.max(0, constitutionVersionTake)).map(({sourceReferences: _references, ...row}) => row);
-  const [policyCorpus, brainArticles] = await Promise.all([
-    loadReadableDigestQuery<PolicyCorpus & { circle: { id: string; name: string; [key: string]: unknown } | null }>({
-      actor, workspaceId: params.workspaceId, release, kind: "PolicyCorpus", keyset: true, limit: 100, completeScan: true,
-      loadBatch: ({ take, after }) => prisma.policyCorpus.findMany({
-        where: { workspaceId: params.workspaceId, ...(after ? { OR: [
-          { acceptedAt: { lt: after.acceptedAt } }, { acceptedAt: after.acceptedAt, id: { lt: after.id } },
-        ] } : {}) },
-        include: { circle: true },
-        orderBy: [{ acceptedAt: "desc" }, { id: "desc" }], take,
-      }),
-    }),
+  const loadPolicyWindow = async () => {
+    type Policy = PolicyCorpus & { circle: { id: string; name: string; [key: string]: unknown } | null };
+    const records: Policy[] = [];
+    let after = policyAfter;
+    let examined = 0;
+    let complete = false;
+    while (records.length < policyTake && examined < 200) {
+      const rows = await prisma.policyCorpus.findMany({
+        where: { workspaceId: params.workspaceId,
+          ...(policyScope === "all" ? {} : {circleId: policyScope === "workspace" ? null : policyScope}),
+          ...(after ? { OR: [{acceptedAt: {lt: after.acceptedAt}}, {acceptedAt: after.acceptedAt, id: {lt: after.id}}] } : {}),
+        }, include: {circle: true}, orderBy: [{acceptedAt: "desc"}, {id: "desc"}], take: 100,
+      });
+      invariant(rows.length <= 100, 409, "SOURCE_CHANGED", "Policy page exceeded its bound.");
+      let previous = after;
+      for (const row of rows) {
+        invariant(!previous || row.acceptedAt < previous.acceptedAt
+          || (row.acceptedAt.getTime() === previous.acceptedAt.getTime() && row.id < previous.id),
+        409, "SOURCE_CHANGED", "Policy history changed during pagination.");
+        previous = row;
+      }
+      examined += rows.length;
+      if (!rows.length) { complete = true; break; }
+      const captured = await release.capture("PolicyCorpus", rows);
+      const selected = captured.records.slice(0, policyTake - records.length);
+      records.push(...selected);
+      const lastIndex = records.length === policyTake && selected.length
+        ? rows.findIndex(row => row.id === selected[selected.length - 1].id) : rows.length - 1;
+      after = {id: rows[lastIndex].id, acceptedAt: rows[lastIndex].acceptedAt};
+      complete = rows.length < 100 && lastIndex === rows.length - 1;
+      if (complete) break;
+    }
+    return { records, complete, nextCursor: complete || !after ? null : Buffer.from(JSON.stringify({
+      purpose: "agreements-policy-v1", workspaceId: params.workspaceId, scope: policyScope,
+      id: after.id, acceptedAt: after.acceptedAt.toISOString(),
+    })).toString("base64url") };
+  };
+  const [policyPage, brainArticles] = await Promise.all([
+    loadPolicyWindow(),
     loadReadableDigestQuery<BrainArticle & { ownerMember: { id: string; user: { id: string; displayName: string | null; email: string }; [key: string]: unknown } | null }>({
       actor, workspaceId: params.workspaceId, release, kind: "BrainArticle", keyset: true, limit: Math.max(0, brainArticleTake),
       loadBatch: ({ take, after }) => prisma.brainArticle.findMany({
@@ -69,6 +118,7 @@ export async function listWorkspaceAgreements(actor: AppActor, params: {
     }),
   ]);
 
+  const policyCorpus = policyPage.records;
   const circles = await release.capture("Circle", policyCorpus.flatMap(row => row.circle ? [row.circle] : []));
   const circleIdsReadable = new Set(circles.records.map(row => row.id));
   const owners = await release.capture("Member", brainArticles.flatMap(row => row.ownerMember ? [{id: row.ownerMember.id, userId: row.ownerMember.user.id,
@@ -141,6 +191,7 @@ export async function listWorkspaceAgreements(actor: AppActor, params: {
     currentConstitution: currentConstitution ? { ...currentConstitution, sourceReferences: visibleReferences } : null,
     constitutionVersions,
     policyCorpus: visiblePolicies,
+    policyWindow: {complete: policyPage.complete, nextCursor: policyPage.nextCursor, continued: Boolean(params.policyCursor)},
     brainArticles: visibleBrainArticles,
     counts: {
       constitutionVersions: constitutionVersions.length,

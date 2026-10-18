@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, captureManualTranscriptSourceArtifact, requireWorkspaceMembership, importMeetingTranscriptSourceArtifacts, normalizeMeetingTranscriptSourceProvider } from "@corgtex/domain";
+import { AppError, captureManualTranscriptSourceArtifact, requireWorkspaceMembership, requireMeetingTranscriptSourcesFeature, importMeetingTranscriptSourceArtifacts, normalizeMeetingTranscriptSourceProvider } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { checkApiDemoGuard } from "@/lib/demo-guard";
 import { handleRouteError } from "@/lib/http";
@@ -22,16 +22,25 @@ export async function POST(
     await requireWorkspaceMembership({ actor, workspaceId });
     await checkApiDemoGuard(workspaceId);
     const provider = normalizeMeetingTranscriptSourceProvider(providerParam);
+    await requireMeetingTranscriptSourcesFeature(workspaceId);
     const contentType = request.headers.get("content-type") ?? "";
     const formData = contentType.includes("multipart/form-data") ? await request.formData() : null;
     const redirectValue = formData?.get("redirectTo");
     const redirectTo = typeof redirectValue === "string" ? redirectValue : null;
     const rawRequestText = formData ? null : await request.text();
     if (rawRequestText && Buffer.byteLength(rawRequestText) > 5 * 1024 * 1024) throw new AppError(413, "TRANSCRIPT_TOO_LARGE", "Transcript request exceeds its byte limit.");
-    const artifacts = formData ? await meetingTranscriptArtifactsFromFormData(formData)
-      : (JSON.parse(rawRequestText || "{}") as { artifacts?: unknown }).artifacts;
-    if (!Array.isArray(artifacts)) {
-      throw new AppError(400, "INVALID_INPUT", "Upload transcript files or provide an artifacts array.");
+    let artifacts: unknown;
+    if (formData) artifacts = await meetingTranscriptArtifactsFromFormData(formData);
+    else {
+      let payload: unknown;
+      try { payload = JSON.parse(rawRequestText || "{}"); }
+      catch { throw new AppError(400, "INVALID_INPUT", "Transcript request must contain valid JSON."); }
+      artifacts = payload && typeof payload === "object" && !Array.isArray(payload)
+        ? (payload as { artifacts?: unknown }).artifacts : undefined;
+    }
+    if (!Array.isArray(artifacts) || artifacts.some(artifact =>
+      artifact === null || typeof artifact !== "object" || Array.isArray(artifact))) {
+      throw new AppError(400, "INVALID_INPUT", "Upload transcript files or provide an array of artifact objects.");
     }
     const originalRequestBytes = rawRequestText ? transcriptArtifactByteBudget(rawRequestText, 20 * 1024 * 1024) + 64 : 0;
     let admitted = 0;

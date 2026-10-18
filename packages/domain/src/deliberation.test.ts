@@ -295,6 +295,15 @@ vi.mock("./source-lineage", () => ({ readableArtifactIds: producerMocks.readable
   captureArtifactInputProof: vi.fn(async (_actor, _workspace, inputs) => inputs.map((input: { kind: string; id: string }) => ({ ...input, fingerprint: "a".repeat(64) }))),
 }));
 
+vi.mock("./digest-lineage", () => ({ DigestReadRelease: class {
+  constructor(private actor: unknown, private workspaceId: string) {}
+  async capture(kind: string, records: Array<{ id: string }>) {
+    const ids = await producerMocks.readable(this.actor, this.workspaceId, kind, records);
+    return { records: records.filter(row => ids.has(row.id)), roots: [] };
+  }
+  async finish<T>(value: T) { return value; }
+} }));
+
 describe("deliberation", () => {
   const workspaceId = "ws-1";
   const proposalId = "proposal-1";
@@ -364,7 +373,7 @@ describe("deliberation", () => {
     });
     expect(list).toHaveLength(1);
     expect(list[0].id).toBe(entry.id);
-    expect(list[0].author.displayName).toBe("Member");
+    expect(list[0].author!.displayName).toBe("Member");
     expect(list[0].parentVersion).toBe(1);
   });
 
@@ -798,7 +807,7 @@ describe("deliberation", () => {
     expect(entriesByParent.get(proposalId)?.map((entry) => entry.id)).toEqual([firstEntry.id, laterFirstEntry.id]);
     expect(entriesByParent.get("proposal-2")?.map((entry) => entry.id)).toEqual([secondEntry.id]);
     expect(entriesByParent.get("missing-parent")).toEqual([]);
-    expect(entriesByParent.get(proposalId)?.[0].author.displayName).toBe("Member");
+    expect(entriesByParent.get(proposalId)?.[0].author!.displayName).toBe("Member");
   });
 
   it("returns an empty parent map for empty parent ids", async () => {

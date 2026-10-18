@@ -1,19 +1,19 @@
 import type { BrainArticle, Meeting, Prisma } from "@prisma/client";
 import {
-  countUnreadNotifications,
+  getUnreadNotificationSummary,
+  DigestReadRelease,
   filterWorkspaceBriefingSources,
   normalizeNewspaperEditionDigest,
   normalizeWorkspaceBriefingPayload,
   personalizeWorkspaceBriefing,
   privacyFilter,
   rankPersonalNewspaperItems,
-  readableArtifactIds,
   requireWorkspaceMembership,
   scoreMemberBriefingItem,
 } from "@corgtex/domain";
 import type { MemberBriefingContext, PersonalNewspaperItem } from "@corgtex/domain";
 import { prisma, workspaceBranding } from "@corgtex/shared";
-import { countReadableKnowledgeChunkAggregate } from "@corgtex/knowledge";
+import { getReadableKnowledgeChunkSummary } from "@corgtex/knowledge";
 import { requirePageActor } from "@/lib/auth";
 import Link from "next/link";
 import { getFormatter, getTranslations } from "next-intl/server";
@@ -23,6 +23,7 @@ import {
   capDashboardUnreadNotificationCount,
   isDashboardUnreadNotificationCountCapped,
 } from "@/lib/dashboard-briefing";
+import { notificationUnreadCountLabel } from "@/lib/notification-count";
 import { findLatestReadableArtifact, scanReadableArtifactPages } from "@/lib/readable-artifact-pages";
 import { getDashboardWorkAttentionCountsFromMetrics } from "@/lib/dashboard-attention";
 
@@ -208,6 +209,7 @@ export default async function WorkspaceDashboard({
   const t = await getTranslations("dashboard");
   const format = await getFormatter();
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const release = new DigestReadRelease(actor, workspaceId);
   const currentMember = actor.kind === "user" && actor.user.globalRole !== "OPERATOR"
     ? membership
     : actor.kind === "user"
@@ -283,8 +285,9 @@ export default async function WorkspaceDashboard({
     PROPOSAL: new Map<string, Date | null>(),
     TENSION: new Map<string, Date | null>(),
   };
+  let adviceComplete = true;
   if (actor.kind === "user" && currentMember?.id) {
-    await scanReadableArtifactPages({ actor, workspaceId, kind: "AdviceRequest",
+    const adviceWindow = await scanReadableArtifactPages({ actor, workspaceId, release, kind: "AdviceRequest",
       loadPage: (cursor, take) => prisma.adviceRequest.findMany({
         ...pageArgs(cursor, take),
         where: { workspaceId, status: "ACTIVE", requestedByUserId: { not: actor.user.id },
@@ -306,14 +309,15 @@ export default async function WorkspaceDashboard({
         }
       },
     });
+    adviceComplete = adviceWindow.complete;
   }
   const latestPageArgs = (cursor: { id: string; generatedAt: Date } | undefined, take: number) => ({
     orderBy: [{ generatedAt: "desc" as const }, { id: "desc" as const }], take,
     ...(cursor ? { OR: [{ generatedAt: { lt: cursor.generatedAt } }, { generatedAt: cursor.generatedAt, id: { lt: cursor.id } }] } : {}),
   });
-  const [unreadNotificationsCount, latestWorkspaceBriefing, latestNewspaperEdition, workspaceData, membersCount] = await Promise.all([
-    countUnreadNotifications(actor, workspaceId),
-    findLatestReadableArtifact({ actor, workspaceId, kind: "WorkspaceBriefing",
+  const [unreadNotificationsSummary, briefingWindow, editionWindow, workspaceData, membersCount] = await Promise.all([
+    getUnreadNotificationSummary(actor, workspaceId),
+    findLatestReadableArtifact({ actor, workspaceId, release, kind: "WorkspaceBriefing",
       loadPage: (cursor, take) => {
         const { OR, ...paging } = latestPageArgs(cursor, take);
         return prisma.workspaceBriefing.findMany({ ...paging,
@@ -321,7 +325,7 @@ export default async function WorkspaceDashboard({
         });
       },
     }),
-    findLatestReadableArtifact({ actor, workspaceId, kind: "NewspaperEdition",
+    findLatestReadableArtifact({ actor, workspaceId, release, kind: "NewspaperEdition",
       loadPage: (cursor, take) => {
         const { OR, ...paging } = latestPageArgs(cursor, take);
         return prisma.newspaperEdition.findMany({ ...paging, where: { workspaceId, ...(OR ? { OR } : {}) } });
@@ -330,6 +334,8 @@ export default async function WorkspaceDashboard({
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } }),
     prisma.member.count({ where: { workspaceId, isActive: true } }),
   ]);
+  const latestWorkspaceBriefing = briefingWindow.item;
+  const latestNewspaperEdition = editionWindow.item;
   const articles: BrainArticle[] = [];
   const meetings: Meeting[] = [];
   let actionPersonalCount = 0, proposalPersonalCount = 0, tensionPersonalCount = 0;
@@ -340,8 +346,8 @@ export default async function WorkspaceDashboard({
     personalSources.push({ type: item.kind === "ADVICE" ? "ADVICE_REQUEST" : item.kind, id: item.id, title: item.title });
     personalItems = rankPersonalNewspaperItems([...personalItems, item], rankingTime).slice(0, 8);
   };
-  const [articleTotalCount, actionTotalCount, proposalTotalCount, tensionTotalCount, meetingTotalCount] = await Promise.all([
-    scanReadableArtifactPages({ actor, workspaceId, kind: "BrainArticle",
+  const [articleWindow, actionWindow, proposalWindow, tensionWindow, meetingWindow] = await Promise.all([
+    scanReadableArtifactPages({ actor, workspaceId, release, kind: "BrainArticle",
       loadPage: (cursor, take) => prisma.brainArticle.findMany({ where: { workspaceId, archivedAt: null }, ...pageArgs(cursor, take) }),
       visit: (article) => {
         if (article.isPrivate || article.type === "DIGEST" || article.type === "PERSON") return;
@@ -350,7 +356,7 @@ export default async function WorkspaceDashboard({
         articles.length = Math.min(articles.length, 50);
       },
     }),
-    scanReadableArtifactPages({ actor, workspaceId, kind: "Action",
+    scanReadableArtifactPages({ actor, workspaceId, release, kind: "Action",
       loadPage: (cursor, take) => prisma.action.findMany({ where: visibleOpenActionWhere, ...pageArgs(cursor, take) }),
       visit: (action) => {
         if (!currentMember || (action.assigneeMemberId !== currentMember.id && !adviceDeadlinesByKind.ACTION.has(action.id))) return;
@@ -363,7 +369,7 @@ export default async function WorkspaceDashboard({
           href: `/workspaces/${workspaceId}/actions/${action.id}` });
       },
     }),
-    scanReadableArtifactPages({ actor, workspaceId, kind: "Proposal",
+    scanReadableArtifactPages({ actor, workspaceId, release, kind: "Proposal",
       loadPage: (cursor, take) => prisma.proposal.findMany({ where: visibleOpenProposalWhere, ...pageArgs(cursor, take) }),
       visit: (proposal) => {
         if (!currentMember || (proposal.ownerMemberId !== currentMember.id && !adviceDeadlinesByKind.PROPOSAL.has(proposal.id))) return;
@@ -374,7 +380,7 @@ export default async function WorkspaceDashboard({
           href: `/workspaces/${workspaceId}/proposals/${proposal.id}` });
       },
     }),
-    scanReadableArtifactPages({ actor, workspaceId, kind: "Tension",
+    scanReadableArtifactPages({ actor, workspaceId, release, kind: "Tension",
       loadPage: (cursor, take) => prisma.tension.findMany({ where: visibleOpenTensionWhere, ...pageArgs(cursor, take) }),
       visit: (tension) => {
         if (!currentMember || (tension.assigneeMemberId !== currentMember.id && !adviceDeadlinesByKind.TENSION.has(tension.id))) return;
@@ -385,7 +391,7 @@ export default async function WorkspaceDashboard({
           href: `/workspaces/${workspaceId}/tensions/${tension.id}` });
       },
     }),
-    scanReadableArtifactPages({ actor, workspaceId, kind: "Meeting",
+    scanReadableArtifactPages({ actor, workspaceId, release, kind: "Meeting",
       loadPage: (cursor, take) => prisma.meeting.findMany({ where: { workspaceId, status: "COMPLETED", archivedAt: null }, ...pageArgs(cursor, take) }),
       visit: (meeting) => {
         meetings.push(meeting);
@@ -395,18 +401,21 @@ export default async function WorkspaceDashboard({
       },
     }),
   ]);
-  const chunksCount = await countReadableKnowledgeChunkAggregate(actor, workspaceId);
+  const chunksSummary = await getReadableKnowledgeChunkSummary(actor, workspaceId, { release });
+  const limitedSnapshot = !chunksSummary.complete || !adviceComplete || !briefingWindow.complete || !editionWindow.complete
+    || [articleWindow, actionWindow, proposalWindow, tensionWindow, meetingWindow].some(window => !window.complete);
+  const personalComplete = adviceComplete && actionWindow.complete && proposalWindow.complete && tensionWindow.complete;
   const branding = workspaceData
     ? workspaceBranding(workspaceData)
     : { primaryName: "Corgtex", secondaryLabel: "powered by Corgtex" };
   const workAttentionCounts = getDashboardWorkAttentionCountsFromMetrics({
     currentMemberId: currentMember?.id ?? null,
     actionPersonalCount,
-    actionTotalCount,
+    actionTotalCount: actionWindow.count,
     proposalPersonalCount,
-    proposalTotalCount,
+    proposalTotalCount: proposalWindow.count,
     tensionPersonalCount,
-    tensionTotalCount,
+    tensionTotalCount: tensionWindow.count,
   });
   const memberContext: MemberBriefingContext | null = currentMember ? {
     roleNames: memberCircleAssignments.map((assignment) => assignment.role.name),
@@ -443,8 +452,8 @@ export default async function WorkspaceDashboard({
         .then((items) => items.map((item) => `RECOGNITION:${item.id}`)),
       prisma.adviceRequest.findMany({ where: { workspaceId, id: { in: idsFor("ADVICE_REQUEST") }, audienceType: "WORKSPACE" } })
         .then(async (items) => {
-          const readable = await readableArtifactIds(actor, workspaceId, "AdviceRequest", items);
-          return items.filter((item) => readable.has(item.id)).map((item) => `ADVICE_REQUEST:${item.id}`);
+          const captured = await release.capture("AdviceRequest", items);
+          return captured.records.map((item) => `ADVICE_REQUEST:${item.id}`);
         }),
     ])
     : [];
@@ -465,7 +474,7 @@ export default async function WorkspaceDashboard({
     articles,
     meetings,
     labels: {
-      intro: storedGeneratedAt ? t("newspaperLiveUpdatedIntro") : t("newspaperLiveIntro"),
+      intro: limitedSnapshot ? t("limitedSnapshot") : storedGeneratedAt ? t("newspaperLiveUpdatedIntro") : t("newspaperLiveIntro"),
       closing: t("newspaperLiveClosing"),
     },
   });
@@ -484,8 +493,9 @@ export default async function WorkspaceDashboard({
     : displayedEditionPeriod === "DAILY"
       ? t("dailyEdition")
       : t("workspaceEdition");
+  const unreadNotificationsCount = unreadNotificationsSummary.count;
   const unreadNotificationsDisplayCount = capDashboardUnreadNotificationCount(unreadNotificationsCount);
-  const isUnreadNotificationsCountCapped = isDashboardUnreadNotificationCountCapped(unreadNotificationsCount);
+  const isUnreadNotificationsCountCapped = !unreadNotificationsSummary.complete || isDashboardUnreadNotificationCountCapped(unreadNotificationsCount);
   const notificationLabel = unreadNotificationsCount > 0
     ? t(isUnreadNotificationsCountCapped ? "unreadNotificationsSummaryCapped" : "unreadNotificationsSummary", {
       count: unreadNotificationsDisplayCount,
@@ -511,18 +521,24 @@ export default async function WorkspaceDashboard({
       href: `/workspaces/${workspaceId}/actions?status=OPEN&status=IN_PROGRESS`,
       label: t("attentionActions"),
       counts: workAttentionCounts.actions,
+      complete: actionWindow.complete,
     },
     {
       href: `/workspaces/${workspaceId}/proposals?status=OPEN`,
       label: t("attentionProposals"),
       counts: workAttentionCounts.proposals,
+      complete: proposalWindow.complete,
     },
     {
       href: `/workspaces/${workspaceId}/tensions?status=OPEN`,
       label: t("attentionTensions"),
       counts: workAttentionCounts.tensions,
+      complete: tensionWindow.complete,
     },
   ];
+
+  // Release all original page and family observations together after the final async join.
+  await release.finish(undefined);
 
   return (
     <>
@@ -553,9 +569,13 @@ export default async function WorkspaceDashboard({
         </Link>
       </div>
 
+      {limitedSnapshot && <p role="status">{t("limitedSnapshot")}</p>}
+
       <section className="nr-home-attention-strip" aria-label={t("attentionStripLabel")}>
         {attentionTiles.map((tile) => {
           const hasPersonalCount = tile.counts.personalCount !== null;
+          const personalLabel = notificationUnreadCountLabel({ count: tile.counts.personalCount ?? 0, complete: tile.complete && adviceComplete });
+          const totalLabel = notificationUnreadCountLabel({ count: tile.counts.totalCount, complete: tile.complete });
           return (
             <Link
               key={tile.href}
@@ -564,24 +584,24 @@ export default async function WorkspaceDashboard({
               aria-label={hasPersonalCount
                 ? t("attentionTileAria", {
                   label: tile.label,
-                  personal: tile.counts.personalCount ?? 0,
-                  total: tile.counts.totalCount,
+                  personal: personalLabel,
+                  total: totalLabel,
                 })
                 : t("attentionTileTotalAria", {
                   label: tile.label,
-                  total: tile.counts.totalCount,
+                  total: totalLabel,
                 })}
             >
               <span className="nr-home-attention-title">{tile.label}</span>
               <span className={`nr-home-attention-metrics ${hasPersonalCount ? "" : "nr-home-attention-metrics-single"}`}>
                 {hasPersonalCount && (
                   <span className="nr-home-attention-metric">
-                    <strong>{tile.counts.personalCount}</strong>
+                    <strong>{personalLabel}</strong>
                     <span>{t("attentionForYou")}</span>
                   </span>
                 )}
                 <span className="nr-home-attention-metric">
-                  <strong>{tile.counts.totalCount}</strong>
+                  <strong>{totalLabel}</strong>
                   <span>{t("attentionTotalOpen")}</span>
                 </span>
               </span>
@@ -620,7 +640,7 @@ export default async function WorkspaceDashboard({
                 </li>
               ))}
             </ol>
-          ) : <p className="nr-personal-newspaper-empty">{t("personalNewspaperEmpty")}</p>}
+          ) : <p className="nr-personal-newspaper-empty">{t(personalComplete ? "personalNewspaperEmpty" : "snapshotEmpty")}</p>}
         </section>
       )}
 
@@ -679,7 +699,7 @@ export default async function WorkspaceDashboard({
           </div>
         ) : (
           <div className="nr-newspaper-body">
-            <p>{t("newspaperEmptyBody")}</p>
+            <p>{t(limitedSnapshot ? "limitedSnapshot" : "newspaperEmptyBody")}</p>
           </div>
         )}
 
@@ -706,15 +726,15 @@ export default async function WorkspaceDashboard({
 
       {!hasArticle && (
         <p className="nr-newspaper-empty">
-          {t("newspaperWaiting")}
+          {t(limitedSnapshot ? "limitedSnapshot" : "newspaperWaiting")}
         </p>
       )}
 
       <div className="nr-footer">
         {t("footerStats", {
-          articles: articleTotalCount,
-          meetings: meetingTotalCount,
-          chunks: chunksCount,
+          articles: notificationUnreadCountLabel(articleWindow),
+          meetings: notificationUnreadCountLabel(meetingWindow),
+          chunks: notificationUnreadCountLabel(chunksSummary),
           members: membersCount,
         })}
       </div>

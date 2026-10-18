@@ -1,5 +1,6 @@
-import { readableArtifactIds } from "@corgtex/domain";
 import {
+  captureReadableDigestInputs,
+  WorkItemReadRelease,
   coerceWorkItemPriorityInput,
   getProposal,
   loadAdviceRequestCountSummaries,
@@ -94,7 +95,21 @@ export function serializeGoalWorkItem<T extends GoalLike>(goal: T) {
   return normalizeGoalWorkItem(goal);
 }
 
+// A member's presentation includes a separately governed user profile. Retain
+// both original proofs and lineage heads until the complete response is ready.
+async function readableResponseMembers<T extends { id: string; userId: string; user: UserLike }>(
+  actor: AppActor, workspaceId: string, release: WorkItemReadRelease, members: T[],
+) {
+  const captured = await release.observeRead(() => captureReadableDigestInputs({
+    actor, workspaceId, kind: "Member", records: members,
+    additionalInputs: member => [{ kind: "User", id: member.userId, snapshot: { ...member.user, id: member.userId } }],
+  }));
+  release.add(captured.roots);
+  return new Set(captured.records.map(member => member.id));
+}
+
 export async function loadActionWorkItemResponse(actor: AppActor, workspaceId: string, actionId: string) {
+  const release = new WorkItemReadRelease(actor, workspaceId);
   const action = await prisma.action.findFirst({
     where: { id: actionId, workspaceId },
     include: {
@@ -102,15 +117,20 @@ export async function loadActionWorkItemResponse(actor: AppActor, workspaceId: s
     },
   });
   if (!action) return null;
-  if (!(await readableArtifactIds(actor, workspaceId, "Action", [action])).has(action.id)) return { id: action.id, contentWithheld: true };
-  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", [action.id]);
-  return {
+  if (!(await release.admit("Action", [action])).length) return { id: action.id, contentWithheld: true };
+  const members = await readableResponseMembers(actor, workspaceId, release, action.assigneeMember ? [action.assigneeMember] : []);
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", [action.id],
+    requests => release.observe("AdviceRequest", requests));
+  return release.finish({
     ...action,
+    assigneeMemberId: action.assigneeMember && members.has(action.assigneeMember.id) ? action.assigneeMemberId : null,
+    assigneeMember: action.assigneeMember && members.has(action.assigneeMember.id) ? action.assigneeMember : null,
     ...requestCountSummaries.get(action.id),
-  };
+  });
 }
 
 export async function loadTensionWorkItemResponse(actor: AppActor, workspaceId: string, tensionId: string) {
+  const release = new WorkItemReadRelease(actor, workspaceId);
   const tension = await prisma.tension.findFirst({
     where: { id: tensionId, workspaceId },
     include: {
@@ -120,12 +140,25 @@ export async function loadTensionWorkItemResponse(actor: AppActor, workspaceId: 
     },
   });
   if (!tension) return null;
-  if (!(await readableArtifactIds(actor, workspaceId, "Tension", [tension])).has(tension.id)) return { id: tension.id, contentWithheld: true };
-  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", [tension.id]);
-  return {
+  if (!(await release.admit("Tension", [tension])).length) return { id: tension.id, contentWithheld: true };
+  const members = await readableResponseMembers(actor, workspaceId, release,
+    [tension.assigneeMember, tension.raisedByMember].filter(member => member !== null));
+  const votes = await release.observeRead(() => captureReadableDigestInputs({
+    actor, workspaceId, kind: "TensionUpvote", records: tension.upvotes,
+    additionalInputs: vote => [{ kind: "User", id: vote.userId }],
+  }));
+  release.add(votes.roots);
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", [tension.id],
+    requests => release.observe("AdviceRequest", requests));
+  return release.finish({
     ...tension,
+    assigneeMemberId: tension.assigneeMember && members.has(tension.assigneeMember.id) ? tension.assigneeMemberId : null,
+    assigneeMember: tension.assigneeMember && members.has(tension.assigneeMember.id) ? tension.assigneeMember : null,
+    raisedByMemberId: tension.raisedByMember && members.has(tension.raisedByMember.id) ? tension.raisedByMemberId : null,
+    raisedByMember: tension.raisedByMember && members.has(tension.raisedByMember.id) ? tension.raisedByMember : null,
+    upvotes: votes.records,
     ...requestCountSummaries.get(tension.id),
-  };
+  });
 }
 
 export async function loadProposalWorkItemResponse(actor: AppActor, workspaceId: string, proposalId: string) {

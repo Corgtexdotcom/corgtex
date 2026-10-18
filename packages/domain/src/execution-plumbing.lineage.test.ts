@@ -84,6 +84,12 @@ beforeEach(async () => {
       }
       return result;
     }
+    if (text.includes('FROM "ArtifactInputLineage"') && text.includes("DISTINCT ON")) {
+      const [ws, kind, ...ids] = bindings;
+      const rows = fixture.rows.artifactInputLineage.filter(row => row.workspaceId === ws
+        && row.artifactType === kind && ids.includes(row.artifactId)).sort((a, b) => b.revision - a.revision);
+      return [...new Set(rows.map(row => row.artifactId))].map(id => ({ ...rows.find(row => row.artifactId === id) }));
+    }
     const table = text.match(/FROM "([A-Za-z]+)"/)?.[1];
     if (table) {
       const name = table[0]!.toLowerCase() + table.slice(1);

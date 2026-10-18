@@ -1,3 +1,5 @@
+import { assertVariantGenerationClaim, createVariantModelControls, variantGenerationClaimStamp,
+  type VariantGenerationControls } from "./variant-model-attempt";
 import { createHash, randomUUID } from "node:crypto";
 import { Prisma, type GenericDerivedArtifactVariant } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
@@ -104,7 +106,7 @@ type Discovery = { params: PreparationParams; memberId: string; requestRoots: Li
 type PhasePreflight = { discovery: Discovery; admitted: DerivationIdentity[]; roots: LineageRoot[];
   targetEpochs: PermissionEpochProof; provider: ExternalProviderCommitPreflight };
 export type GraphSourceVariantGenerationResult = { phase: "APPLIED"; variantId: string } | { phase: "STALE" | "SUPERSEDED" };
-type GenerationClaim = GraphSourceVariantGenerationResult | { actor: UserActor; prepared: Prepared; token: string; leaseStamp: string };
+type GenerationClaim = GraphSourceVariantGenerationResult | { actor: UserActor; prepared: Prepared; token: string; leaseStamp: string; claimStamp: string };
 const TARGET_KINDS: GraphTargetKind[] = ["ContextGraphObject", "ContextGraphRelationship", "ContextGraphEvidenceRef", "ContextGraphProposedDiff"];
 const LIMIT = 5000;
 const TX_OPTIONS = { maxWait: 5_000, timeout: 120_000 };
@@ -183,26 +185,42 @@ async function discover(tx: Prisma.TransactionClient, actor: UserActor, workspac
   const cohortKey = dependencyKey(discovery.dependencies);
   // Cohorts use historical field-bearing source identities, never old graph semantic text.
   const targets: Target[] = [{ ...params.target, fingerprint, manifestId: current.id, recipeManifestId }];
-  const manifests = await tx.artifactInputLineage.findMany({ where: { workspaceId, artifactType: { in: TARGET_KINDS } },
-    orderBy: { revision: "desc" }, take: LIMIT + 1, select: { id: true, artifactType: true, artifactId: true, contentHash: true, origin: true } });
-  invariant(manifests.length <= LIMIT, 503, "INPUT_SCAN_LIMIT", "Graph cohort dependency collection is too large.");
-  const visited = new Set<string>([JSON.stringify([params.target.kind, params.target.id])]);
-  for (const manifest of manifests) {
-    if (!targetKind(manifest.artifactType)) continue;
-    const key = JSON.stringify([manifest.artifactType, manifest.artifactId]);
-    if (visited.has(key)) continue; visited.add(key);
-    let originalId = manifest.id;
-    if (manifest.origin === "UNKNOWN") {
-      const state = await tx.derivedArtifactRebuildState.findFirst({ where: { workspaceId, targetKind: manifest.artifactType,
-        targetId: manifest.artifactId, targetFingerprint: manifest.contentHash, state: { in: ["REBUILD_REQUIRED", "CANDIDATE_READY"] } }, orderBy: { updatedAt: "desc" } });
-      if (!state) continue; originalId = state.targetManifestId;
-    } else if (manifest.origin !== "DERIVED") continue;
-    const other = { kind: manifest.artifactType, id: manifest.artifactId };
-    const ancestry = await inspectStoredArtifactInputDependencyIdentities(tx, workspaceId, other, originalId);
-    if (!ancestry.complete || dependencyKey(ancestry.dependencies) !== cohortKey) continue;
-    const otherRow = await targetRow(tx, workspaceId, other);
-    if (!otherRow || lineageContentFingerprint(other.kind, otherRow) !== manifest.contentHash) continue;
-    targets.push({ ...other, fingerprint: manifest.contentHash, manifestId: manifest.id, recipeManifestId: originalId });
+  // Page artifact identities, not revisions: unrelated history must not consume
+  // the matching cohort's size budget. Each bounded page selects its latest head.
+  let after: { artifactType: string; artifactId: string } | undefined;
+  while (true) {
+    const identities = await tx.artifactInputLineage.groupBy({
+      by: ["artifactType", "artifactId"],
+      where: { workspaceId, artifactType: { in: TARGET_KINDS }, ...(after ? { OR: [
+        { artifactType: { gt: after.artifactType } },
+        { artifactType: after.artifactType, artifactId: { gt: after.artifactId } },
+      ] } : {}) },
+      _max: { revision: true }, orderBy: [{ artifactType: "asc" }, { artifactId: "asc" }], take: 100,
+    });
+    if (!identities.length) break;
+    const manifests = await tx.artifactInputLineage.findMany({ where: { workspaceId,
+      OR: identities.map(identity => ({ artifactType: identity.artifactType, artifactId: identity.artifactId,
+        revision: identity._max.revision! })) },
+      select: { id: true, artifactType: true, artifactId: true, contentHash: true, origin: true }, take: 100 });
+    invariant(manifests.length === identities.length, 409, "SOURCE_CHANGED", "Graph cohort heads changed during discovery.");
+    for (const manifest of manifests) {
+      if (!targetKind(manifest.artifactType) || (manifest.artifactType === params.target.kind && manifest.artifactId === params.target.id)) continue;
+      let originalId = manifest.id;
+      if (manifest.origin === "UNKNOWN") {
+        const state = await tx.derivedArtifactRebuildState.findFirst({ where: { workspaceId, targetKind: manifest.artifactType,
+          targetId: manifest.artifactId, targetFingerprint: manifest.contentHash, state: { in: ["REBUILD_REQUIRED", "CANDIDATE_READY"] } }, orderBy: { updatedAt: "desc" } });
+        if (!state) continue; originalId = state.targetManifestId;
+      } else if (manifest.origin !== "DERIVED") continue;
+      const other = { kind: manifest.artifactType, id: manifest.artifactId };
+      const ancestry = await inspectStoredArtifactInputDependencyIdentities(tx, workspaceId, other, originalId);
+      if (!ancestry.complete || dependencyKey(ancestry.dependencies) !== cohortKey) continue;
+      const otherRow = await targetRow(tx, workspaceId, other);
+      if (!otherRow || lineageContentFingerprint(other.kind, otherRow) !== manifest.contentHash) continue;
+      invariant(targets.length < LIMIT, 503, "INPUT_SCAN_LIMIT", "Graph cohort dependency collection is too large.");
+      targets.push({ ...other, fingerprint: manifest.contentHash, manifestId: manifest.id, recipeManifestId: originalId });
+    }
+    if (identities.length < 100) break;
+    after = identities.at(-1);
   }
   targets.sort((a, b) => JSON.stringify([a.kind, a.id]).localeCompare(JSON.stringify([b.kind, b.id])));
   const additional = [{ kind: "Workspace" as const, id: workspaceId }, { kind: "Member" as const, id: member.id }, { kind: "User" as const, id: actor.user.id },
@@ -522,7 +540,7 @@ export async function revalidateGraphSourceVariants(actor: AppActor, params: { w
 }
 
 export async function generateGraphSourceVariant(params: { workspaceId: string; jobId: string; expectedAttempt: number; expectedOwner: string;
-  generate: (sources: PermittedDerivationSource[], anchors: readonly never[], scope: GraphVariantScope) => Promise<GraphVariantCandidate> }): Promise<GraphSourceVariantGenerationResult> {
+  generate: (sources: PermittedDerivationSource[], anchors: readonly never[], scope: GraphVariantScope, controls: VariantGenerationControls) => Promise<GraphVariantCandidate> }): Promise<GraphSourceVariantGenerationResult> {
   invariant(Number.isInteger(params.expectedAttempt) && params.expectedAttempt > 0 && params.expectedOwner?.trim(), 400, "INVALID_INPUT", "An actual worker lease is required.");
   params = { ...params };
   const initialJob = await prisma.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId, type: GRAPH_SOURCE_VARIANT_JOB_TYPE } });
@@ -573,7 +591,8 @@ export async function generateGraphSourceVariant(params: { workspaceId: string; 
       if (recipe.phase === "APPLIED") return invalidate();
       const token = randomUUID();
       await tx.workflowJob.update({ where: { id: job.id }, data: { payload: json({ ...recipe, phase: "GENERATING", generationToken: token }) } });
-      return { actor, prepared, token, leaseStamp: leaseHash(job) };
+      return { actor, prepared, token, leaseStamp: leaseHash(job),
+        claimStamp: variantGenerationClaimStamp({ ...job, payload: json({ ...recipe, phase: "GENERATING", generationToken: token }) }) };
     } catch (error) { if (stale(error)) return invalidate(); throw error; }
   }), TX_OPTIONS); } catch (error) { if (stale(error)) return invalidateJob(); throw error; }
   if ("phase" in claim) {
@@ -588,7 +607,17 @@ export async function generateGraphSourceVariant(params: { workspaceId: string; 
   for (const source of modelSources) Object.freeze(source);
   Object.freeze(modelSources);
   const modelScope = Object.freeze(structuredClone(claim.prepared.recipe.scope));
-  const candidate = current ? await params.generate(modelSources, [], modelScope) : null;
+  const attempt = createVariantModelControls(async () => {
+    invariant(await isArtifactInputProofReadable(claim.actor, params.workspaceId, claim.prepared.inputs.roots)
+      && await isArtifactPermissionEpochProofCurrent(params.workspaceId, claim.prepared.recipe.sourceState.permissionEpochs)
+      && await isArtifactPermissionEpochProofCurrent(params.workspaceId, claim.prepared.recipe.sourceState.targetEpochs),
+    409, "SOURCE_CHANGED", "The original graph variant inputs are no longer readable.");
+    const job = await prisma.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId,
+      type: GRAPH_SOURCE_VARIANT_JOB_TYPE } });
+    assertVariantGenerationClaim(claim.claimStamp, job);
+  });
+  const candidate = current ? await params.generate(modelSources, [], modelScope, attempt.controls) : null;
+  attempt.assertActive();
   const bundle = candidate ? createGraphVariantBundle(candidate, modelSources) : null;
   const publicationJob = await prisma.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId, type: GRAPH_SOURCE_VARIANT_JOB_TYPE } });
   if (!publicationJob || leaseHash(publicationJob) !== claim.leaseStamp) return { phase: "SUPERSEDED" };

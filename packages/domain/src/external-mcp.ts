@@ -400,6 +400,11 @@ async function requireActiveConnection(actor: AppActor, params: {
 
 async function callExternalMcpTool(connection: ExternalMcpConnectionRecord, toolName: string, args: Record<string, unknown>, strictResponse = false) {
   const activeConnection = await refreshExternalMcpConnectionIfNeeded(connection);
+  return callExternalMcpToolWithActiveConnection(activeConnection, toolName, args, strictResponse);
+}
+
+async function callExternalMcpToolWithActiveConnection(activeConnection: ExternalMcpConnectionRecord, toolName: string,
+  args: Record<string, unknown>, strictResponse = false) {
   const token = activeConnection.accessTokenEnc ? decryptSecret(activeConnection.accessTokenEnc) : null;
   if (!token) {
     throw new AppError(404, "NOT_CONNECTED", "External MCP connection is missing an access token.");
@@ -1013,10 +1018,15 @@ export async function readBoxExternalMcpNativeResponse(params: { actor: AppActor
     && externalMcpConnectionGrantHash(current) === params.connectionGrantHash && BOX_NATIVE_CONTENT_TOOLS.has(params.toolName),
   403, "SOURCE_RESTRICTED", "External provider authority is unavailable.");
   try {
-    const identity = extractMcpPayload(await callExternalMcpTool(current, "who_am_i", {}));
+    // One refresh owns this identity/content pair: Box refresh tokens are single-use.
+    const active = await refreshExternalMcpConnectionIfNeeded(current);
+    invariant(active.status === "ACTIVE" && active.accessTokenEnc
+      && externalMcpConnectionGrantHash(active) === params.connectionGrantHash,
+    403, "SOURCE_RESTRICTED", "External provider authority changed during token refresh.");
+    const identity = extractMcpPayload(await callExternalMcpToolWithActiveConnection(active, "who_am_i", {}));
     invariant(asString(asRecord(identity).id) === current.providerAccountId,
       403, "SOURCE_RESTRICTED", "External provider principal changed.");
-    const response = await callExternalMcpTool(current, params.toolName, structuredClone(params.arguments));
+    const response = await callExternalMcpToolWithActiveConnection(active, params.toolName, structuredClone(params.arguments));
     invariant(asRecord(response).isError !== true, 403, "SOURCE_RESTRICTED", "External provider did not return readable content.");
     const payload = extractMcpPayload(response);
     const after = await prisma.externalMcpConnection.findFirst({ where: { id: current.id, workspaceId: params.workspaceId, status: "ACTIVE" } }) as ExternalMcpConnectionRecord | null;

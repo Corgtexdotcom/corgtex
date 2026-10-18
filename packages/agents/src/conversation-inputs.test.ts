@@ -16,10 +16,13 @@ const fixture = vi.hoisted(() => {
     if (where.AND && !where.AND.every((item: any) => matches(row, item))) return false;
     for (const [key, value] of Object.entries(where)) {
       if (key === "AND") continue;
+      if (key === "OR") { if (!(value as any[]).some(item => matches(row, item))) return false; continue; }
       if (key === "conversation") {
         if (!matches(tables.get("conversationSession")?.get(row.conversationId), value)) return false;
       } else if (typeof value === "object" && value !== null && "in" in value) {
         if (!(value.in as string[]).includes(row[key])) return false;
+      } else if (typeof value === "object" && value !== null && "lt" in value) {
+        if (!(row[key] < value.lt!)) return false;
       } else if (row[key] !== value) return false;
     }
     return true;
@@ -43,7 +46,9 @@ const fixture = vi.hoisted(() => {
       }),
       findMany: vi.fn(async ({ where, select, orderBy, take }) => {
         let rows = [...(tables.get(String(property))?.values() ?? [])].filter((row) => matches(row, where));
-        if (orderBy?.sequenceNumber === "desc") rows = rows.sort((left, right) => right.sequenceNumber - left.sequenceNumber);
+        if (orderBy?.sequenceNumber === "desc" || (Array.isArray(orderBy) && orderBy[0]?.sequenceNumber === "desc")) {
+          rows = rows.sort((left, right) => right.sequenceNumber - left.sequenceNumber || right.id.localeCompare(left.id));
+        }
         return rows.slice(0, take ?? rows.length).map((row) => project(row, select));
       }),
       create: vi.fn(async ({ data }) => {
@@ -110,6 +115,7 @@ function crmPage(): ConversationPageContext {
       contacts: [], deals: [], activities: [], suggestions: [] } };
 }
 
+let permissionEpochs: ReturnType<typeof installSourcePermissionEpochFixture>;
 beforeEach(() => {
   vi.clearAllMocks(); fixture.tables.clear(); fixture.memberships.clear(); fixture.manifests.length = 0;
   fixture.memberships.set(`${workspaceId}:synthetic-alice`, { id: "member-alice", role: "CONTRIBUTOR" });
@@ -127,7 +133,7 @@ beforeEach(() => {
   insert("conversationSession", { id: "session-bob", workspaceId, userId: "synthetic-bob", agentKey: "assistant", topic: null, status: "ACTIVE", systemPrompt: null });
   fixture.base.$executeRaw.mockReset().mockResolvedValue(1);
   fixture.base.$queryRaw.mockReset().mockResolvedValue([]);
-  installSourcePermissionEpochFixture(fixture.prisma);
+  permissionEpochs = installSourcePermissionEpochFixture(fixture.prisma);
 });
 
 describe("conversation server context admission with actual source proofs", () => {
@@ -246,7 +252,7 @@ describe("conversation server context admission with actual source proofs", () =
     const source = await original("BrainArticle", "brainArticle", { id: "source-public", workspaceId, title: "Permitted source", bodyMd: "Permitted body", isPrivate: false, ownerMemberId: null, archivedAt: null });
     const sourceRoot = { kind: "BrainArticle" as const, id: source.id, fingerprint: lineageContentFingerprint("BrainArticle", source) };
     await derived("ConversationTurn", "conversationTurn", { id: "turn-permitted", conversationId: base.sessionId, sequenceNumber: 1, userMessage: "Earlier human question", assistantMessage: "Permitted earlier reply", promptInputId: null, contextJson: null }, [sourceRoot]);
-    for (let number = 2; number <= 25; number += 1) insert("conversationTurn", { id: `turn-unknown-${number}`, conversationId: base.sessionId,
+    for (let number = 2; number <= 125; number += 1) insert("conversationTurn", { id: `turn-unknown-${number}`, conversationId: base.sessionId,
       sequenceNumber: number, userMessage: "Unknown copied question", assistantMessage: "Unknown legacy answer", promptInputId: null, contextJson: null });
     const prepared = await prepareConversationInputs(base);
     expect(await loadConversationHistory(alice, workspaceId, base.sessionId, 1, prepared.collector)).toMatchObject([{ id: "turn-permitted", sequenceNumber: 1 }]);
@@ -261,11 +267,20 @@ describe("conversation server context admission with actual source proofs", () =
     expect(await loadConversationHistory(alice, "synthetic-ws-b", base.sessionId, 5, prepared.collector)).toEqual([]);
   });
 
-  it("rejects oversized history without returning partial counts or context", async () => {
+  it("selects only the newest twenty proven turns from a history beyond5000", async () => {
     const prepared = await prepareConversationInputs(base);
-    for (let number = 1; number <= 5001; number += 1) insert("conversationTurn", { id: `turn-${number}`, conversationId: base.sessionId, sequenceNumber: number });
-    await expect(loadConversationHistory(alice, workspaceId, base.sessionId, 5, prepared.collector)).rejects.toMatchObject({ code: "INPUT_SCAN_LIMIT" });
-    expect((await prepared.collector.roots()).every((root) => root.kind !== "ConversationTurn")).toBe(true);
+    for (let number = 1; number <= 4981; number += 1) insert("conversationTurn", { id: `turn-${number}`, conversationId: base.sessionId, sequenceNumber: number });
+    const source = await original("BrainArticle", "brainArticle", { id: "history-source", workspaceId, title: "Permitted history source", bodyMd: "Original source", isPrivate: false, ownerMemberId: null, archivedAt: null });
+    const roots = [{ kind: "BrainArticle" as const, id: source.id, fingerprint: lineageContentFingerprint("BrainArticle", source) }];
+    for (let number = 4982; number <= 5001; number += 1) await derived("ConversationTurn", "conversationTurn", {
+      id: `turn-${number}`, conversationId: base.sessionId, sequenceNumber: number, userMessage: "Original question", assistantMessage: "Original reply", promptInputId: null, contextJson: null,
+    }, roots);
+    const history = await loadConversationHistory(alice, workspaceId, base.sessionId, 20, prepared.collector);
+    expect(history.map(row => row.sequenceNumber)).toEqual(Array.from({ length: 20 }, (_, i) => 4982 + i));
+    const queries = fixture.delegates.get("conversationTurn").findMany.mock.calls;
+    expect(queries).toHaveLength(1);
+    expect(queries[0][0].take).toBe(100);
+    expect((await prepared.collector.roots()).filter(root => root.kind === "ConversationTurn")).toHaveLength(20);
   });
 
   it("captures every onboarding input including an uncited private contributor and rechecks it at release", async () => {
@@ -279,4 +294,46 @@ describe("conversation server context admission with actual source proofs", () =
     article.isPrivate = true; article.ownerMemberId = "member-bob"; fixture.tables.get("brainArticle")!.set(article.id, article);
     await expect(prepared.collector.assertReadable()).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
   });
+});
+
+it("rejects an earlier admitted history page when its source changes during replenishment", async () => {
+  const prepared = await prepareConversationInputs(base);
+  const source = await original("BrainArticle", "brainArticle", { id: "paged-source", workspaceId, title: "Original", bodyMd: "Original", isPrivate: false, ownerMemberId: null, archivedAt: null });
+  await derived("ConversationTurn", "conversationTurn", { id: "newest-proven", conversationId: base.sessionId, sequenceNumber: 200,
+    userMessage: "Original", assistantMessage: "Derived", promptInputId: null, contextJson: null },
+    [{ kind: "BrainArticle", id: source.id, fingerprint: lineageContentFingerprint("BrainArticle", source) }]);
+  for (let i = 1; i <= 101; i++) insert("conversationTurn", { id: `denied-${i}`, conversationId: base.sessionId, sequenceNumber: i });
+  const delegate = fixture.delegates.get("conversationTurn");
+  const load = delegate.findMany.getMockImplementation();
+  delegate.findMany.mockImplementation(async (args: { where: { OR?: unknown } }) => {
+    if (args.where.OR) source.archivedAt = stamp;
+    return load(args);
+  });
+  await expect(loadConversationHistory(alice, workspaceId, base.sessionId, 2, prepared.collector)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+});
+
+ it("bounds denied conversation history independently of admitted turns", async () => {
+  const prepared = await prepareConversationInputs(base);
+  for (let number = 1; number <= 501; number++) insert("conversationTurn", {
+    id: `denied-window-${number}`, conversationId: base.sessionId, sequenceNumber: number,
+  });
+  await expect(loadConversationHistory(alice, workspaceId, base.sessionId, 20, prepared.collector))
+    .rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
+  expect(fixture.delegates.get("conversationTurn").findMany).toHaveBeenCalledTimes(2);
+ });
+
+it("rechecks caller epochs even when the bounded history has no admitted turns", async () => {
+  const prepared = await prepareConversationInputs(base);
+  for (let number = 1; number <= 201; number++) insert("conversationTurn", {
+    id: `denied-caller-${number}`, conversationId: base.sessionId, sequenceNumber: number,
+  });
+  const delegate = fixture.delegates.get("conversationTurn");
+  const load = delegate.findMany.getMockImplementation();
+  delegate.findMany.mockImplementation(async (args: { where: { OR?: unknown } }) => {
+    if (args.where.OR) permissionEpochs.bump(workspaceId, "MemberUserPolicy", base.userId);
+    return load(args);
+  });
+  await expect(loadConversationHistory(alice, workspaceId, base.sessionId, 20, prepared.collector))
+    .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+  expect(delegate.findMany).toHaveBeenCalledTimes(2);
 });

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
+import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
 import { buildObservationSummary, normalizeObservationTargets, runObservationGate } from "./post-deploy-observation-gate.mjs";
 
@@ -46,8 +47,8 @@ describe("automatic production CI boundary", () => {
   });
 
   it("runs sequence ACL regression on the existing isolated CI database", () => {
-    expect(job("check")).toContain("node --test scripts/selfserve-validation-schema.integration.test.mjs");
-    expect(job("check")).toContain("QA_SCHEMA_TEST_DATABASE_URL: ${{ env.DATABASE_URL }}");
+    expect(job("check-native")).toContain("node --test scripts/selfserve-validation-schema.integration.test.mjs");
+    expect(job("check-native")).toContain("QA_SCHEMA_TEST_DATABASE_URL: ${{ env.DATABASE_URL }}");
   });
 
   it.each(["corgtex_route_error", "corgtex_route_response"])("blocks accepted selfserve %s, not stale source failures", (event) => {
@@ -141,11 +142,45 @@ describe("automatic production CI boundary", () => {
     expect(job("smoke-selfserve")).toContain("uses: ./.github/workflows/production-validation.yml");
     expect(job("observe-prod")).toContain("post-deploy-observation-gate.mjs");
     expect(job("observe-prod")).toContain("SELFSERVE_VALIDATION_EXPECTED_SHA");
-    expect(job("check")).toContain("npx vitest run --project unit --project integration");
+    expect(job("test")).toContain("npx vitest run --project unit --project integration");
+  });
+
+
+  it("runs all original Vitest projects on three isolated runners without weakening failures", () => {
+    const jobs = parse(workflow).jobs;
+    const tests = jobs.test;
+    expect(tests.strategy).toEqual({"fail-fast": false, matrix: {shard: [1, 2, 3]}});
+    expect(tests["runs-on"]).toBe("ubuntu-latest");
+    expect(tests.if).toBeUndefined();
+    expect(tests["continue-on-error"]).toBeUndefined();
+    expect(tests.steps.some(step => step["continue-on-error"])).toBe(false);
+    expect(tests.env.DATABASE_URL).toBe(jobs["check-native"].env.DATABASE_URL);
+    expect(tests.steps.filter(step => step.run?.includes("vitest run")).map(step => step.run))
+      .toEqual(["npx vitest run --project unit --project integration --shard ${{ matrix.shard }}/3"]);
+    expect(jobs["check-native"].steps.some(step => step.run?.includes("vitest run"))).toBe(false);
+    expect(tests.steps.at(-1)).toMatchObject({if: "always()", run: "docker rm --force --volumes corgtex-ci-postgres || true"});
+  });
+
+  it("keeps the required check fail closed for unsuccessful, cancelled, skipped or missing dependencies", () => {
+    const gate = parse(workflow).jobs.check;
+    expect(gate.name).toBe("Lint, Typecheck & Test");
+    expect(gate.needs).toEqual(["check-native", "test"]);
+    expect(gate.if).toBe("${{ always() }}");
+    expect(gate["continue-on-error"]).toBeUndefined();
+    expect(gate.steps).toHaveLength(1);
+    const step = gate.steps[0];
+    expect(step.env).toEqual({NATIVE_RESULT: "${{ needs.check-native.result }}", TEST_RESULT: "${{ needs.test.result }}"});
+    for (const native of ["success", "failure", "cancelled", "skipped", ""]) {
+      for (const tests of ["success", "failure", "cancelled", "skipped", ""]) {
+        const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-c", step.run],
+          {env: {...process.env, NATIVE_RESULT: native, TEST_RESULT: tests}});
+        expect(result.status === 0).toBe(native === "success" && tests === "success");
+      }
+    }
   });
 
   it("retains isolated PostgreSQL migration, integration and seed-fixture checks", () => {
-    for (const name of ["check", "db-sync"]) {
+    for (const name of ["check-native", "test", "db-sync"]) {
       expect(job(name)).toContain("uses: ./.github/actions/ci-pgvector");
       expect(job(name)).not.toContain("services:");
       expect(job(name)).toContain("Remove isolated PostgreSQL fixture");
@@ -153,7 +188,7 @@ describe("automatic production CI boundary", () => {
       expect(job(name)).toContain("npx prisma migrate deploy");
       expect(job(name)).not.toContain("secrets.PRODUCTION_DATABASE_URL");
     }
-    expect(job("check")).toContain("npx vitest run --project unit --project integration");
+    expect(job("test")).toContain("npx vitest run --project unit --project integration");
     expect(job("db-sync")).toContain("npm run check:migration-fixtures");
     expect(job("db-sync")).toContain("npm run check:seed-fixtures");
   });

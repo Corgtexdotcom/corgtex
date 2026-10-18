@@ -6,7 +6,7 @@ import { getBrainExportWorkerPurpose, isBrainExportWorkerCurrent } from "./brain
 import { canReadInformationCategory, categoryGovernorIdentities, CATEGORY_BOUND_SOURCE_KINDS } from "./information-category-policy";
 import { financeFactValue, financeValueHash, isFinanceFactRevisionIntact } from "./finance-fact-value";
 import { getTranscriptSourceImportPurpose, getRecorderTranscriptWorkerPurpose, nativeTranscriptPrincipalUserId } from "./native-transcript-principal";
-import { artifactPermissionEpochIdentities, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof, withSourceCommitPermissionReadPass, withExternalProviderPermissionReadPass, withArtifactPermissionBatchRead, type PermissionEpochProof } from "./source-permission-epochs";
+import { collectWorkItemPermissionSnapshot, artifactPermissionEpochIdentities, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof, withSourceCommitPermissionReadPass, withExternalProviderPermissionReadPass, withArtifactPermissionBatchRead, type PermissionEpochProof } from "./source-permission-epochs";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { assertArtifactInputWriteFence } from "./artifact-input-write-fence";
@@ -17,12 +17,12 @@ import { prisma, mcpCredentialVersion, mcpScopesHash, type AppActor } from "@cor
 import { requireWorkspaceMembership } from "./auth";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
 import { brainSourceContentFingerprint } from "./brain-derivation";
-import { invariant } from "./errors";
+import { AppError, invariant } from "./errors";
 import { internalSourcePermission } from "./internal-source-principal";
 import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 import { isMcpToolInputEncryptedPayload } from "./mcp-tool-input-cipher";
 import { getExternalProviderPrincipalUserId } from "./external-provider-principal";
-import { artifactPermissionParents, loadArtifactPermissionMetadata } from "./source-permission-parents";
+import { artifactPermissionParents, loadArtifactPermissionMetadata, withArtifactPermissionMetadataRead } from "./source-permission-parents";
 import { loadExternalMcpConnectionSetInput } from "./external-mcp-connection-set";
 import { assertMcpOriginActive, getMcpOrigin } from "../../shared/src/mcp-context";
 import { assertSourceCommitRowCovered, assertSourceCommitTransactionCompatible,
@@ -32,6 +32,7 @@ import { sourceAuthorityPhysicalRow } from "./source-authority-edges";
 import { assertSourceCommitMcpOriginCovered } from "./source-commit-row-locks";
 import { allocateArtifactInputSnapshotId } from "./artifact-input-snapshot-allocations";
 import { reserveArtifactWriteHeads } from "./artifact-write-heads";
+import { sealArtifactInputActor } from "./artifact-input-actor";
 export { sealArtifactInputActor } from "./artifact-input-actor";
 
 type ArtifactReadCapture = { actor: AppActor; workspaceId: string; roots: Map<string, LineageRoot>; preserveConsumedRevisions: boolean };
@@ -76,7 +77,7 @@ async function assertPlannedArtifactPublication(tx: Prisma.TransactionClient, wo
 }
 
 export type LineageKind =
-  | "ExternalDataSource" | "SqlNativeRunInput" | "MeetingAudioAsset" | "NativeTranscriptInput" | "CommunicationMessageNativeInput" | "GenericDerivedArtifactVariant" | "ExternalProviderFetchInput" | "ExternalContentSource"
+  | "OAuthProviderFetchInput" | "ExternalDataSource" | "SqlNativeRunInput" | "MeetingAudioAsset" | "NativeTranscriptInput" | "CommunicationMessageNativeInput" | "GenericDerivedArtifactVariant" | "ExternalProviderFetchInput" | "ExternalContentSource"
   | "ExternalMcpResponseInput" | "ExternalMcpConnectionSet"
   | "WorkspaceToolLink" | "WorkspaceToolLinkCredential" | "ConversationOperationOutcome"
   | "FinanceReportUploadInput" | "CrmQualificationFormInput" | "ExecutionRequest" | "ExecutionResult"
@@ -122,6 +123,7 @@ const CONTENT_FIELDS: Record<LineageKind, string[]> = {
   NativeTranscriptInput: ["workspaceId", "mode", "ownerMemberId", "submittedByUserId", "meetingAudioAssetId", "sourceRecordId", "connectionId", "recordingId", "storageKey", "fileHash", "fileSizeBytes", "mimeType", "encryptedPayloadJson", "payloadHash", "grantHash"],
   CommunicationMessageNativeInput: ["workspaceId", "installationId", "communicationMessageId", "provider", "externalWorkspaceId", "appId", "providerPrincipalId", "externalChannelId", "externalMessageId", "externalUserId", "threadExternalId", "mode", "ingressInputId", "requestJson", "encryptedPayloadJson", "projectedContentJson", "projectionHash", "installationGrantHash", "channelGrantHash", "permissionEpochsJson", "epochProofVersion", "expiresRawAt", "fetchedAt"],
   GenericDerivedArtifactVariant: ["workspaceId", "targetKind", "targetId", "ownerMemberId", "recipeVersion", "generatorKey", "generatorVersion", "instructionHash", "targetFingerprint", "inputSetHash", "sourceStateJson", "targetsJson", "scopeJson", "payloadJson", "generationJobId"],
+  OAuthProviderFetchInput: ["workspaceId", "connectionId", "localUserId", "ownerMemberId", "provider", "providerAccountId", "sourceKind", "externalId", "sourceKey", "selection", "grantHash", "encryptedPayload", "payloadHash", "permissionEpochsJson", "createdAt"],
   ExternalProviderFetchInput: ["workspaceId", "externalContentSourceId", "connectionId", "localUserId", "providerKey", "serverUrl", "providerAccountId", "sourceKind", "externalId", "toolName", "requestJson", "encryptedResponseJson", "responseHash", "connectionGrantHash", "fetchedAt"],
   ExternalMcpResponseInput: ["workspaceId", "connectionId", "localUserId", "providerKey", "serverUrl", "providerAccountId", "mode", "toolName", "requestJson", "encryptedResponseJson", "responseHash", "connectionGrantHash", "originalLocalEpochsJson", "fetchedAt"],
   ExternalMcpConnectionSet: ["workspaceId", "localUserId", "epoch"],
@@ -248,7 +250,7 @@ function snapshotContentFields(kind: LineageKind, row?: Record<string, unknown>)
 
 function fingerprintFields(kind: LineageKind) {
   return [...new Set([...CONTENT_FIELDS[kind], "createdAt",
-    ...(["FinanceReportFactRevision", "NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationOperationOutcome", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "WorkflowJobInput", "McpToolInput", "ConversationIngressInput", "NewspaperTrackedLink", "Meeting", "ModelUsageBudget", "ConversationSession", "ConversationPendingOperation", "AgentRun", "AgentStep", "AgentToolCall"].includes(kind) ? [] : ["updatedAt"])])];
+    ...(["FinanceReportFactRevision", "NativeTranscriptInput", "CommunicationMessageNativeInput", "OAuthProviderFetchInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationOperationOutcome", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "WorkflowJobInput", "McpToolInput", "ConversationIngressInput", "NewspaperTrackedLink", "Meeting", "ModelUsageBudget", "ConversationSession", "ConversationPendingOperation", "AgentRun", "AgentStep", "AgentToolCall"].includes(kind) ? [] : ["updatedAt"])])];
 }
 
 export function lineageContentFingerprint(kind: LineageKind, row: unknown): string {
@@ -306,7 +308,7 @@ function parseRoots(value: Prisma.JsonValue): LineageRoot[] | null {
   return roots;
 }
 
-type BatchedWorkItemKind = "Action" | "Proposal" | "Tension";
+type BatchedWorkItemKind = "BrainArticle" | "Action" | "Proposal" | "Tension" | "CrmAccount" | "CrmContact" | "CrmActivity" | "CrmDeal";
 type WorkItemRows = {rows: Map<string, Record<string, unknown>>; heads: Map<string, import("@prisma/client").ArtifactInputLineage>};
 type WorkItemReadBatch = WorkItemRows & {db: LineageClient; workspaceId: string; kind: BatchedWorkItemKind; active: boolean};
 const workItemReadBatch = new AsyncLocalStorage<WorkItemReadBatch>();
@@ -318,12 +320,17 @@ function workItemBatch(db: LineageClient, workspaceId: string, input: LineageInp
   return batch;
 }
 function isBatchedWorkItemKind(kind: LineageKind | undefined): kind is BatchedWorkItemKind {
-  return kind === "Action" || kind === "Proposal" || kind === "Tension";
+  return kind === "BrainArticle" || kind === "Action" || kind === "Proposal" || kind === "Tension" || kind === "CrmAccount" || kind === "CrmContact" || kind === "CrmActivity" || kind === "CrmDeal";
 }
 async function loadWorkItemBatch(db: LineageClient, workspaceId: string, kind: BatchedWorkItemKind, ids: string[]): Promise<WorkItemRows> {
   const where = {workspaceId, id: {in: ids}};
-  const rows = kind === "Action" ? await db.action.findMany({where})
-    : kind === "Proposal" ? await db.proposal.findMany({where}) : await db.tension.findMany({where});
+  const rows = kind === "BrainArticle" ? await db.brainArticle.findMany({where})
+    : kind === "Action" ? await db.action.findMany({where})
+    : kind === "Proposal" ? await db.proposal.findMany({where})
+      : kind === "CrmAccount" ? await db.crmAccount.findMany({where})
+      : kind === "CrmContact" ? await db.crmContact.findMany({where})
+      : kind === "CrmActivity" ? await db.crmActivity.findMany({where})
+      : kind === "CrmDeal" ? await db.crmDeal.findMany({where}) : await db.tension.findMany({where});
   // Latest only, even when a selected source has an arbitrarily long history.
   const heads = await db.$queryRaw<import("@prisma/client").ArtifactInputLineage[]>(Prisma.sql`
     SELECT manifest.* FROM unnest(ARRAY[${Prisma.join(ids)}]::text[]) AS selected(id)
@@ -367,12 +374,16 @@ async function withWorkItemBatchRead(db: LineageClient, workspaceId: string, roo
  * The observed vector has the same current caller and per-target identities as
  * captureArtifactPermissionEpochs; saved ancestry is never refreshed. */
 export async function captureReadableWorkItemInputs(actor: AppActor, workspaceId: string, kind: BatchedWorkItemKind,
-  records: Array<{id: string; [key: string]: unknown}>) {
+  records: Array<{id: string; [key: string]: unknown}>, db: LineageClient = prisma) {
   invariant(records.length <= 100, 400, "INVALID_INPUT", "Capture one bounded work item page.");
   if (!records.length) return {ids: new Set<string>(), roots: [] as LineageRoot[], heads: new Map<string,string>()};
+  if (db === prisma && LOCAL_CRM_KINDS.has(kind)) {
+    const captured = await captureLocalCrmOriginalInputs(actor,workspaceId,kind,records);
+    if (captured) return captured;
+  }
   const ids = new Set<string>(), roots: LineageRoot[] = [], heads = new Map<string,string>();
   const fallback: typeof records = [];
-  await prisma.$transaction(async tx => {
+  const capturePage = async (tx: Prisma.TransactionClient) => {
     const membership = await requireWorkspaceMembership({actor,workspaceId,tx});
     const domains = await resolveKnowledgeAccessDomains(actor,workspaceId,tx);
     const loaded = await loadWorkItemBatch(tx,workspaceId,kind,records.map(row => row.id));
@@ -409,17 +420,321 @@ export async function captureReadableWorkItemInputs(actor: AppActor, workspaceId
       invariant(stamp,409,"SOURCE_CHANGED","Observed work item has no bound head.");
       heads.set(key,stamp);
     }
-  });
+  };
+  if (db === prisma) await prisma.$transaction(capturePage); else await capturePage(db);
   if (fallback.length) {
-    const readable = await readableArtifactIds(actor,workspaceId,kind,fallback);
-    const admitted = fallback.filter(row => readable.has(row.id));
-    if (admitted.length) {
-      roots.push(...await captureArtifactInputProof(actor,workspaceId,admitted.map(row => ({kind,id:row.id,snapshot:row}))));
-      for (const row of admitted) ids.add(row.id);
+    const observed = await captureArtifactReadHeadObservation(async () => {
+      const readable = await readableArtifactIds(actor,workspaceId,kind,fallback,db);
+      const admitted = fallback.filter(row => readable.has(row.id));
+      if (admitted.length) {
+        roots.push(...await captureArtifactInputProof(actor,workspaceId,admitted.map(row => ({kind,id:row.id,snapshot:row})),db));
+        for (const row of admitted) ids.add(row.id);
+      }
+    });
+    for (const [key,stamp] of observed.heads) {
+      invariant(!heads.has(key) || heads.get(key) === stamp,409,"SOURCE_CHANGED","A work item lineage head changed during admission.");
+      heads.set(key,stamp);
     }
   }
   observeArtifactRead(actor,workspaceId,roots);
   return {ids,roots,heads};
+}
+
+type LocalDeliveryRows = {rows: Map<string, Record<string, unknown>>;
+  heads: Map<string, import("@prisma/client").ArtifactInputLineage>};
+type LocalDeliveryBatch = LocalDeliveryRows & {db: LineageClient; workspaceId: string; active: boolean};
+const localDeliveryReadBatch = new AsyncLocalStorage<LocalDeliveryBatch>();
+const deliveryInputKey = (input: LineageInput) => JSON.stringify([input.kind, input.id]);
+const LOCAL_CRM_KINDS = new Set<LineageKind>(["CrmAccount", "CrmContact", "CrmActivity", "CrmDeal"]);
+const LOCAL_DIRECTORY_KINDS = new Set<LineageKind>(["Role", "RoleAssignment", "Circle", "Member", "User"]);
+const LOCAL_APPROVAL_KINDS = new Set<LineageKind>(["ApprovalFlow", "ApprovalDecision", "Objection", "Proposal", "Member"]);
+const CONVERSATION_READ_KINDS = new Set<LineageKind>(["ConversationTurn", "ConversationPromptInput", "ConversationSession"]);
+const LOCAL_CONVERSATION_KINDS = new Set<LineageKind>([...CONVERSATION_READ_KINDS, "BrainSource", "BrainArticle", "Document", "Action", "Proposal", "Tension"]);
+const APPROVAL_READ_KINDS = new Set<LineageKind>(["ApprovalFlow", "ApprovalDecision", "Objection"]);
+const LOCAL_DELIVERY_KINDS = new Set<LineageKind>(["NewspaperDelivery", "Workspace", "Member", "Action", "Proposal", "Tension"]);
+function localDeliveryBatch(db: LineageClient, workspaceId: string, input: LineageInput) {
+  const batch = localDeliveryReadBatch.getStore();
+  if (!batch?.rows.has(deliveryInputKey(input))) return undefined;
+  invariant(batch.active && batch.db === db && batch.workspaceId === workspaceId,
+    409, "SOURCE_CHANGED", "Delivery batch belongs to another or expired read.");
+  return batch;
+}
+async function loadLocalDeliveryRows(db: LineageClient, workspaceId: string, inputs: readonly LineageInput[]): Promise<LocalDeliveryRows> {
+  const rows: LocalDeliveryRows["rows"] = new Map(), heads: LocalDeliveryRows["heads"] = new Map();
+  for (const kind of new Set(inputs.map(input => input.kind))) {
+    const ids = [...new Set(inputs.filter(input => input.kind === kind).map(input => input.id))];
+    const where = {workspaceId, id: {in: ids}};
+    const found = kind === "NewspaperDelivery" ? await db.newspaperDelivery.findMany({where})
+      : kind === "Workspace" ? await db.workspace.findMany({where: {id: {in: ids.filter(id => id === workspaceId)}}})
+      : kind === "Member" ? await db.member.findMany({where, include: {user: {select: {id: true, email: true, displayName: true}}}})
+      : kind === "User" ? await db.user.findMany({where: {id: {in: ids}, memberships: {some: {workspaceId, isActive: true}}},
+        select: {id: true, email: true, displayName: true, bio: true, avatarUrl: true, linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true}})
+      : kind === "Role" ? await db.role.findMany({where: {id: {in: ids}, circle: {workspaceId}}})
+      : kind === "Circle" ? await db.circle.findMany({where})
+      : kind === "RoleAssignment" ? await db.roleAssignment.findMany({where: {id: {in: ids}, member: {workspaceId}, role: {circle: {workspaceId}}}})
+      : kind === "ConversationTurn" ? await db.conversationTurn.findMany({where: {id: {in: ids}, conversation: {workspaceId}}})
+      : kind === "ConversationPromptInput" ? await db.conversationPromptInput.findMany({where})
+      : kind === "ConversationSession" ? await db.conversationSession.findMany({where})
+      : kind === "BrainSource" ? await db.brainSource.findMany({where})
+      : kind === "BrainArticle" ? await db.brainArticle.findMany({where})
+      : kind === "Document" ? await db.document.findMany({where})
+      : kind === "ApprovalFlow" ? await db.approvalFlow.findMany({where})
+      : kind === "ApprovalDecision" ? await db.approvalDecision.findMany({where: {id: {in: ids}, flow: {workspaceId}}})
+      : kind === "Objection" ? await db.objection.findMany({where: {id: {in: ids}, flow: {workspaceId}}})
+      : kind === "Action" ? await db.action.findMany({where})
+      : kind === "Proposal" ? await db.proposal.findMany({where})
+      : kind === "CrmAccount" ? await db.crmAccount.findMany({where})
+      : kind === "CrmContact" ? await db.crmContact.findMany({where})
+      : kind === "CrmActivity" ? await db.crmActivity.findMany({where})
+      : kind === "CrmDeal" ? await db.crmDeal.findMany({where}) : await db.tension.findMany({where});
+    for (const row of found) rows.set(deliveryInputKey({kind,id:row.id}), row);
+    const manifests = await db.$queryRaw<import("@prisma/client").ArtifactInputLineage[]>(Prisma.sql`
+      SELECT manifest.* FROM unnest(ARRAY[${Prisma.join(ids)}]::text[]) AS selected(id)
+      CROSS JOIN LATERAL (SELECT * FROM "ArtifactInputLineage" WHERE "workspaceId"=${workspaceId}
+        AND "artifactType"=${kind} AND "artifactId"=selected.id ORDER BY revision DESC LIMIT 1) AS manifest`);
+    for (const head of manifests) heads.set(deliveryInputKey({kind,id:head.artifactId}), head);
+  }
+  return {rows,heads};
+}
+/** Eligibility follows the complete stored closure, including same-body heads.
+ * Unsupported kinds (especially snapshots/native inputs) keep the ordinary path. */
+async function prepareLocalDeliveryBatch(db: LineageClient, workspaceId: string, inputs: readonly LineageInput[], allowDirectory = false) {
+  const crm = inputs.every(input => LOCAL_CRM_KINDS.has(input.kind));
+  const directory = allowDirectory && inputs.every(input => LOCAL_DIRECTORY_KINDS.has(input.kind));
+  const approvals = inputs.some(input => APPROVAL_READ_KINDS.has(input.kind));
+  const conversations = inputs.some(input => CONVERSATION_READ_KINDS.has(input.kind));
+  if (!inputs.length || inputs.length > 100 || !crm && !directory && !approvals && !conversations && !inputs.some(input => input.kind === "NewspaperDelivery")
+    || hasActiveSourceCommitLockPlan(db) || localDeliveryReadBatch.getStore() || workItemReadBatch.getStore()) return null;
+  const loaded: LocalDeliveryRows = {rows:new Map(),heads:new Map()};
+  let pending = [...inputs];
+  const revisions = new Map<string,string>();
+  while (pending.length) {
+    for (const input of pending) if ("fingerprint" in input && typeof input.fingerprint === "string") {
+      const key = deliveryInputKey(input), previous = revisions.get(key), row = loaded.rows.get(key);
+      if (previous && previous !== input.fingerprint || row && lineageContentFingerprint(input.kind,row) !== input.fingerprint) return null;
+      revisions.set(key,input.fingerprint);
+    }
+    pending = [...new Map(pending.filter(input => !loaded.rows.has(deliveryInputKey(input)))
+      .map(input => [deliveryInputKey(input),input])).values()];
+    if (!pending.length) break;
+    if (loaded.rows.size + pending.length > 256 || pending.some(input => !(crm ? LOCAL_CRM_KINDS : directory ? LOCAL_DIRECTORY_KINDS : approvals ? LOCAL_APPROVAL_KINDS : conversations ? LOCAL_CONVERSATION_KINDS : LOCAL_DELIVERY_KINDS).has(input.kind))) return null;
+    const page = await loadLocalDeliveryRows(db,workspaceId,pending);
+    if (page.rows.size !== pending.length) return null;
+    const next: LineageInput[] = [];
+    for (const input of pending) {
+      const key = deliveryInputKey(input), row = page.rows.get(key)!, head = page.heads.get(key);
+      const fingerprint = lineageContentFingerprint(input.kind,row);
+      const parents = artifactPermissionParents(input.kind,row);
+      if (!crm && !directory && !approvals && !conversations && parents.length || revisions.has(key) && revisions.get(key) !== fingerprint
+        || head && head.contentHash !== fingerprint) return null;
+      if (directory) {
+        if ((needsManifest(input.kind,row) || head) && (!head || head.origin !== "HUMAN_ORIGINAL"
+          || !Array.isArray(head.inputsJson) || head.inputsJson.length
+          || !Array.isArray(head.rootsJson) || head.rootsJson.length)) return null;
+        next.push(...parents);
+      } else if (crm) {
+        if (!head || head.origin !== "HUMAN_ORIGINAL" || !Array.isArray(head.inputsJson) || head.inputsJson.length
+          || !Array.isArray(head.rootsJson) || head.rootsJson.length) return null;
+        next.push(...parents);
+      } else if (needsManifest(input.kind,row) || head) {
+        const roots = head && parseRoots(head.rootsJson);
+        if (!head || !roots || !["HUMAN_ORIGINAL","DERIVED"].includes(head.origin)
+          || roots.some(root => !root.permissionEpochs) && (!(approvals || conversations) || head.epochProofVersion !== 1
+            || !parsePermissionEpochProof(head.permissionEpochsJson))) return null;
+        next.push(...roots);
+      }
+      if (approvals || conversations) next.push(...parents);
+      loaded.rows.set(key,row);
+      if (head) loaded.heads.set(key,head);
+    }
+    pending = next;
+  }
+  return loaded;
+}
+function localDeliveryStamp(loaded: LocalDeliveryRows) {
+  return createHash("sha256").update(sourceCommitCanonical([
+    [...loaded.rows].sort(([a],[b]) => a.localeCompare(b)), [...loaded.heads].sort(([a],[b]) => a.localeCompare(b)),
+  ])).digest("hex");
+}
+async function readLocalDeliveryBatch(db: LineageClient, workspaceId: string, loaded: LocalDeliveryRows,
+  roots: readonly LineageRoot[], read: () => Promise<boolean>) {
+  const stamp = localDeliveryStamp(loaded);
+  const crm = [...loaded.rows.keys()].every(key => LOCAL_CRM_KINDS.has(JSON.parse(key)[0]));
+  const directory = [...loaded.rows.keys()].every(key => LOCAL_DIRECTORY_KINDS.has(JSON.parse(key)[0]));
+  const approvals = [...loaded.rows.keys()].some(key => APPROVAL_READ_KINDS.has(JSON.parse(key)[0]));
+  const conversations = [...loaded.rows.keys()].some(key => CONVERSATION_READ_KINDS.has(JSON.parse(key)[0]));
+  const proofs = [...roots.flatMap(root => root.permissionEpochs ? [root.permissionEpochs] : []),
+    ...(crm || directory ? [] : [...loaded.heads.values()].flatMap(head => [(approvals || conversations) && head.origin === "HUMAN_ORIGINAL"
+      ? undefined : parsePermissionEpochProof(head.permissionEpochsJson),
+      ...(parseRoots(head.rootsJson) ?? []).map(root => root.permissionEpochs)].filter((proof): proof is PermissionEpochProof => Boolean(proof))))];
+  // Original human content does not inherit its publisher's historical epochs.
+  // A page containing conflicting derived receipts needs ordinary per-row
+  // admission; a batch cache must not turn one denied sibling into a page error.
+  if (approvals || conversations) try { mergePermissionEpochProofs(...proofs); } catch (error) {
+    if (error instanceof AppError && ["SOURCE_CHANGED", "UNKNOWN_LINEAGE", "PERMISSION_PROOF_LIMIT"].includes(error.code)) return false;
+    throw error;
+  }
+  const batch: LocalDeliveryBatch = {...loaded,db,workspaceId,active:true};
+  const valid = await localDeliveryReadBatch.run(batch, () => withArtifactPermissionMetadataRead(db,workspaceId,loaded.rows,async () => {
+    try { return await withArtifactPermissionBatchRead(db,workspaceId,proofs,read); }
+    finally { batch.active = false; }
+  }));
+  const inputs = [...loaded.rows.keys()].map(key => { const [kind,id] = JSON.parse(key); return {kind,id} as LineageInput; });
+  return valid && stamp === localDeliveryStamp(await loadLocalDeliveryRows(db,workspaceId,inputs));
+}
+
+/** Local CRM and directory originals retain the ordinary parent-envelope evaluator. The
+ * complete current parent closure is loaded and compared before/after the read;
+ * any derived/native/historical input uses the ordinary uncached path. */
+async function captureLocalCrmOriginalInputs(actor: AppActor, workspaceId: string, kind: BatchedWorkItemKind | "Circle" | "Role" | "RoleAssignment" | "Member" | "User",
+  records: Array<{id: string; [key: string]: unknown}>) {
+  const directory = LOCAL_DIRECTORY_KINDS.has(kind);
+  return prisma.$transaction(async tx => {
+    const loaded = await prepareLocalDeliveryBatch(tx,workspaceId,records.map(record => ({kind,id:record.id})),directory);
+    if (!loaded || records.some(record => {
+      const row = loaded.rows.get(deliveryInputKey({kind,id:record.id}))!;
+      return directory ? snapshotContentFields(kind,row).some(field => field in record && !snapshotMatches(record[field],row[field]))
+        : lineageContentFingerprint(kind,record) !== lineageContentFingerprint(kind,row);
+    })) return null;
+    const membership = await requireWorkspaceMembership({actor,workspaceId,tx});
+    const domains = await resolveKnowledgeAccessDomains(actor,workspaceId,tx);
+    const ambient = await captureArtifactPermissionEpochs(actor,workspaceId,[],tx);
+    const identities = new Map(records.map(record => {
+      const pending: LineageInput[] = [{kind,id:record.id}], seen = new Set<string>();
+      const own: Array<{kind: string; id: string}> = [];
+      for (const input of pending) {
+        const key = deliveryInputKey(input);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const row = loaded.rows.get(key)!;
+        own.push(...artifactPermissionEpochIdentities(input.kind,row));
+        pending.push(...artifactPermissionParents(input.kind,row));
+      }
+      return [record.id,own] as const;
+    }));
+    const target = await capturePermissionEpochs(tx,workspaceId,[...identities.values()].flat());
+    const candidates: LineageRoot[] = records.map(record => {
+      const keys = new Set(identities.get(record.id)!.map(identity => JSON.stringify([identity.kind,identity.id])));
+      const own = {...target,entries:target.entries.filter(entry => keys.has(JSON.stringify([entry.kind,entry.id])))};
+      return {kind,id:record.id,fingerprint:lineageContentFingerprint(kind,directory ? loaded.rows.get(deliveryInputKey({kind,id:record.id}))! : record),permissionEpochs:mergePermissionEpochProofs(ambient,own)!};
+    });
+    const binding: ReadHeadBinding = directory && expectedReadHeads.getStore() || {heads:new Map(),sealed:false};
+    const memo = new Map<string,boolean>(); readHeadMemos.set(memo,binding);
+    const roots: LineageRoot[] = [];
+    const valid = await expectedReadHeads.run(binding,()=>readLocalDeliveryBatch(tx,workspaceId,loaded,candidates,async()=>{
+      for (const root of candidates) if (await rootIsReadable(tx,actor,workspaceId,membership,domains,root,new Set(),memo)) roots.push(root);
+      return true;
+    }));
+    invariant(valid,409,"SOURCE_CHANGED","Local original inputs changed during admission.");
+    observeArtifactRead(actor,workspaceId,roots);
+    return {ids:new Set(roots.map(root=>root.id)),roots,heads:binding.heads};
+  });
+}
+
+/** Directory originals share bounded canonical rows, live parents and epochs.
+ * Only current local originals qualify; unsupported ancestry keeps the ordinary
+ * per-record path. The caller's exact projections and final release remain bound. */
+export async function captureReadableDirectoryInputs<T extends {id: string}>(actor: AppActor,
+  workspaceId: string, kind: LineageKind, records: T[]) {
+  if (!LOCAL_DIRECTORY_KINDS.has(kind) || !records.length || records.length > 75) return null;
+  const captured = await captureLocalCrmOriginalInputs(actor,workspaceId,
+    kind as "Circle" | "Role" | "RoleAssignment" | "Member" | "User", records);
+  if (!captured) return null;
+  const admitted = records.filter(record => captured.ids.has(record.id));
+  const proofs = new Map(captured.roots.map(root => [root.id,[root]]));
+  return {records: admitted, proofs, roots: captured.roots};
+}
+
+/** Bounded delivery capture with ordinary per-root admission and original
+ * ancestry. Null requests the per-record fallback, including denied inputs. */
+export async function captureReadableNewspaperDeliveryInputs<T extends {id: string}>(actor: AppActor,
+  workspaceId: string, records: T[]) {
+  const inputs = records.map(record => ({kind:"NewspaperDelivery" as const,id:record.id}));
+  const loaded = await prepareLocalDeliveryBatch(prisma,workspaceId,inputs);
+  if (!loaded) return null;
+  for (const record of records) {
+    const row = loaded.rows.get(deliveryInputKey({kind:"NewspaperDelivery",id:record.id}))!;
+    if (snapshotContentFields("NewspaperDelivery",row).some(field => field in record
+      && !snapshotMatches((record as Record<string,unknown>)[field],row[field]))) return null;
+  }
+  const epochs = await prisma.$transaction(async tx => {
+    await requireWorkspaceMembership({actor,workspaceId,tx});
+    const ambient = await captureArtifactPermissionEpochs(actor,workspaceId,[],tx);
+    const own = await capturePermissionEpochs(tx,workspaceId,records.flatMap(record =>
+      artifactPermissionEpochIdentities("NewspaperDelivery",loaded.rows.get(deliveryInputKey({kind:"NewspaperDelivery",id:record.id}))!)));
+    return {ambient,own};
+  });
+  const proofs = new Map<string,LineageRoot[]>();
+  for (const record of records) {
+    const key = deliveryInputKey({kind:"NewspaperDelivery",id:record.id}), row = loaded.rows.get(key)!;
+    const identities = new Set(artifactPermissionEpochIdentities("NewspaperDelivery",row).map(identity => JSON.stringify([identity.kind,identity.id])));
+    const own = {...epochs.own,entries:epochs.own.entries.filter(entry => identities.has(JSON.stringify([entry.kind,entry.id])))};
+    proofs.set(record.id,[{kind:"NewspaperDelivery",id:record.id,fingerprint:lineageContentFingerprint("NewspaperDelivery",row),
+      permissionEpochs:mergePermissionEpochProofs(epochs.ambient,own)!}, ...parseRoots(loaded.heads.get(key)!.rootsJson)!]);
+  }
+  const roots = new Map<string,LineageRoot>();
+  for (const proof of proofs.values()) for (const root of proof) roots.set(deliveryInputKey(root),mergeLineageInputRoot(roots.get(deliveryInputKey(root)),root));
+  const all = [...roots.values()];
+  const valid = await readLocalDeliveryBatch(prisma,workspaceId,loaded,all,
+    () => isArtifactInputProofReadable(actor,workspaceId,all));
+  if (!valid) return null;
+  observeArtifactRead(actor,workspaceId,all);
+  return {records,proofs,roots:all};
+}
+
+/** Small conversation pages cache only supported current local rows/heads.
+ * Original ancestor epochs remain unchanged; unsupported or denied pages ask
+ * the caller to subdivide and eventually use ordinary individual admission. */
+export async function captureReadableConversationInputs<T extends {id: string}>(actor: AppActor,
+  workspaceId: string, kind: "ConversationTurn" | "ConversationPromptInput", records: T[]) {
+  const loaded = await prepareLocalDeliveryBatch(prisma,workspaceId,records.map(record => ({kind,id:record.id})));
+  if (!loaded) return null;
+  const ownIdentities = new Map<string, Array<{kind: string; id: string}>>();
+  for (const record of records) {
+    const key = deliveryInputKey({kind,id:record.id}), row = loaded.rows.get(key)!;
+    if (snapshotContentFields(kind,row).some(field => field in record
+      && !snapshotMatches((record as Record<string,unknown>)[field],row[field]))) return null;
+    const upstream = loaded.heads.has(key) ? parseRoots(loaded.heads.get(key)!.rootsJson) : [];
+    if (!upstream || upstream.some(root => !root.permissionEpochs)) return null;
+    const pending: LineageInput[] = [{kind,id:record.id}], visited = new Set<string>();
+    const identities: Array<{kind: string; id: string}> = [];
+    for (const input of pending) {
+      const parentKey = deliveryInputKey(input);
+      if (visited.has(parentKey)) continue;
+      visited.add(parentKey);
+      // This newly bound root has only native conversation ownership parents.
+      // Source/category/native ancestors keep their original saved proofs.
+      if (!CONVERSATION_READ_KINDS.has(input.kind)) return null;
+      const parent = loaded.rows.get(parentKey)!;
+      identities.push(...artifactPermissionEpochIdentities(input.kind,{...parent,id:input.id,workspaceId}));
+      pending.push(...artifactPermissionParents(input.kind,parent));
+    }
+    ownIdentities.set(record.id,identities);
+  }
+  const epochs = await prisma.$transaction(async tx => {
+    await requireWorkspaceMembership({actor,workspaceId,tx});
+    return {ambient:await captureArtifactPermissionEpochs(actor,workspaceId,[],tx),
+      own:await capturePermissionEpochs(tx,workspaceId,[...ownIdentities.values()].flat())};
+  });
+  const proofs = new Map<string,LineageRoot[]>(), all = new Map<string,LineageRoot>();
+  for (const record of records) {
+    const key = deliveryInputKey({kind,id:record.id}), row = loaded.rows.get(key)!;
+    const identities = new Set(ownIdentities.get(record.id)!.map(identity => JSON.stringify([identity.kind,identity.id])));
+    const own = {...epochs.own,entries:epochs.own.entries.filter(entry => identities.has(JSON.stringify([entry.kind,entry.id])))};
+    const roots: LineageRoot[] = [{kind,id:record.id,fingerprint:lineageContentFingerprint(kind,row),
+      permissionEpochs:mergePermissionEpochProofs(epochs.ambient,own)!},
+      ...parseRoots(loaded.heads.get(key)?.rootsJson ?? [])!];
+    proofs.set(record.id,roots);
+    try { for (const root of roots) all.set(deliveryInputKey(root),mergeLineageInputRoot(all.get(deliveryInputKey(root)),root)); }
+    catch (error) {
+      if (error instanceof AppError && ["SOURCE_CHANGED","UNKNOWN_LINEAGE","PERMISSION_PROOF_LIMIT"].includes(error.code)) return null;
+      throw error;
+    }
+  }
+  const roots = [...all.values()];
+  if (!await readLocalDeliveryBatch(prisma,workspaceId,loaded,roots,() => isArtifactInputProofReadable(actor,workspaceId,roots))) return null;
+  observeArtifactRead(actor,workspaceId,roots);
+  return {records,proofs,roots};
 }
 
 async function loadArtifact(db: LineageClient, workspaceId: string, input: LineageInput): Promise<Record<string, unknown> | null> {
@@ -428,6 +743,8 @@ async function loadArtifact(db: LineageClient, workspaceId: string, input: Linea
     const physical = sourceAuthorityPhysicalRow(input);
     if (physical) assertSourceCommitRowCovered(db, physical.table, physical.id);
   }
+  const deliveryBatch = localDeliveryBatch(db,workspaceId,input);
+  if (deliveryBatch) return structuredClone(deliveryBatch.rows.get(deliveryInputKey(input))!);
   const batch = workItemBatch(db, workspaceId, input);
   if (batch) return structuredClone(batch.rows.get(input.id)!);
   const where = { id: input.id, workspaceId };
@@ -441,6 +758,7 @@ async function loadArtifact(db: LineageClient, workspaceId: string, input: Linea
     case "NativeTranscriptInput": return db.nativeTranscriptInput.findFirst({ where });
     case "CommunicationMessageNativeInput": return db.communicationMessageNativeInput.findFirst({ where });
     case "GenericDerivedArtifactVariant": return db.genericDerivedArtifactVariant.findFirst({ where });
+    case "OAuthProviderFetchInput": return db.oAuthProviderFetchInput.findFirst({ where });
     case "ExternalProviderFetchInput": return db.externalProviderFetchInput.findFirst({ where });
     case "ExternalMcpResponseInput": return db.externalMcpResponseInput.findFirst({ where });
     case "ExternalMcpConnectionSet": return loadExternalMcpConnectionSetInput(workspaceId, input.id, db);
@@ -567,7 +885,7 @@ export function isLineageKind(value: unknown): value is LineageKind {
 function knownSnapshotOrigin(row: Record<string, unknown>) {
   if (["MeetingAudioAsset", "KnowledgeChunk", "CommunicationMessage", "GenericDerivedArtifactVariant", "FinanceReportFactRevision"].includes(String(row.sourceKind)) && row.origin !== "DERIVED") return false;
   return row.origin === "HUMAN_ORIGINAL" || row.origin === "DERIVED"
-    || (row.origin === "NATIVE_ORIGINAL" && (["SqlNativeRunInput", "NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationIngressInput", "McpToolInput"].includes(String(row.sourceKind))
+    || (row.origin === "NATIVE_ORIGINAL" && (["SqlNativeRunInput", "NativeTranscriptInput", "CommunicationMessageNativeInput", "OAuthProviderFetchInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationIngressInput", "McpToolInput"].includes(String(row.sourceKind))
       || (row.sourceKind === "ConversationOperationOutcome" && isRecord(row.contentJson) && isNativeControlOutcome(row.contentJson))));
 }
 
@@ -644,7 +962,8 @@ function actorCanReadRecord(actor: AppActor, workspaceId: string, membership: { 
     : row.actorKind === "agent" && row.userId == null && actor.kind === "agent" && actor.authProvider === "credential" && row.credentialId === actor.credentialId
       && row.credentialVersion === actor.credentialVersion && row.scopeHash === mcpScopesHash(actor.scopes ?? []);
   if (kind === "Member") return row.isActive === true;
-  if (kind === "AgentIdentity") return row.isActive === true || (row.agentKey === "__workspace__" && row.archivedAt == null);
+  if (kind === "AgentIdentity") return row.isActive === true || (row.agentKey === "__workspace__" && row.archivedAt == null)
+    || (actor.kind === "user" && membership?.role === "ADMIN" && row.archivedAt == null);
   if (kind === "NewspaperDelivery") return membership?.role === "ADMIN"
     || (row.kind === "MEMBER_NEWSPAPER" && row.memberId === membership?.id);
   if (kind === "Notification") return actor.kind === "user" && row.userId === actor.user.id;
@@ -661,7 +980,7 @@ function actorCanReadRecord(actor: AppActor, workspaceId: string, membership: { 
 function needsManifest(kind: LineageKind, row: Record<string, unknown>) {
   if (kind === "BrainSource") return brainSourceNeedsLineage(row);
   return !["ExternalDataSource", "SqlNativeRunInput", "Workspace", "Member", "User", "RoleAssignment", "CircleAgentAssignment", "CommunicationExternalUser", "CommunicationEntityLink", "CommunicationChannel",
-    "WorkspaceToolLinkCredential", "NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "McpToolInput", "ConversationIngressInput", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "AgentRequestInput", "AgentFeedbackInput", "ConversationPromptInput", "ModelUsageBudget", "ModelUsageCost", "ApprovalPolicy", "CrmDealStageTransition", "TensionUpvote", "ArtifactInputSnapshot"].includes(kind);
+    "WorkspaceToolLinkCredential", "NativeTranscriptInput", "CommunicationMessageNativeInput", "OAuthProviderFetchInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "McpToolInput", "ConversationIngressInput", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "AgentRequestInput", "AgentFeedbackInput", "ConversationPromptInput", "ModelUsageBudget", "ModelUsageCost", "ApprovalPolicy", "CrmDealStageTransition", "TensionUpvote", "ArtifactInputSnapshot"].includes(kind);
 }
 
 function credentialReadScopes(kind: LineageKind): readonly string[] {
@@ -957,6 +1276,12 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
     if (!await current(actor, workspaceId,
       row as unknown as import("./communication-native-authority").CommunicationMessageNativeInputRecord, db)) return false;
   }
+  if (root.kind === "OAuthProviderFetchInput") {
+    if (db === prisma && !localCommitAdmission.getStore()) observeNativeReplay(memo);
+    const authority = await import("./oauth-provider-native");
+    const current = localCommitAdmission.getStore() ? authority.isOAuthProviderFetchInputLocallyCurrent : authority.isOAuthProviderFetchInputCurrent;
+    if (!await current(actor, workspaceId, row as unknown as import("@prisma/client").OAuthProviderFetchInput, db)) return false;
+  }
   if (root.kind === "ExternalProviderFetchInput") {
     if (db === prisma && !localCommitAdmission.getStore()) observeNativeReplay(memo);
     const authority = await import("./external-provider-authority");
@@ -1225,7 +1550,7 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
   }
   if (root.kind === "KnowledgeChunk") {
     if (!domains.includes(String(row.accessDomain))) return false;
-    const sourceKinds: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource", EXTERNAL_DATABASE: "SqlNativeRunInput" };
+    const sourceKinds: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource", EXTERNAL_DATABASE: "SqlNativeRunInput", TENSION: "Tension", ACTION: "Action", CIRCLE: "Circle", ROLE: "Role", SLACK: "CommunicationMessage" };
     const kind = sourceKinds[String(row.sourceType)];
     if (!kind || !isRecord(row.metadata)) return false;
     const sourceId = row.sourceType === "EXTERNAL_DATABASE" ? row.metadata.nativeInputId : row.sourceId;
@@ -1284,12 +1609,12 @@ async function evaluateRoot(db: LineageClient, actor: AppActor, workspaceId: str
     if (!session || session.userId !== row.userId || (actor.kind === "user" && session.userId !== actor.user.id)) return false;
   }
   if (root.kind === "ConversationPromptInput") {
-    const session = await db.conversationSession.findFirst({ where: { id: String(row.sessionId), workspaceId } });
+    const session = await loadArtifact(db, workspaceId, { kind: "ConversationSession", id: String(row.sessionId) });
     if (!session || session.userId !== row.userId || (actor.kind === "user" && session.userId !== actor.user.id
       && !consentAllows(purpose, root.kind, root.id, root.fingerprint))) return false;
   }
   if (root.kind === "ConversationTurn") {
-    const session = await db.conversationSession.findFirst({ where: { id: String(row.conversationId), workspaceId } });
+    const session = await loadArtifact(db, workspaceId, { kind: "ConversationSession", id: String(row.conversationId) });
     if (!session || (!consentAllows(purpose, root.kind, root.id, root.fingerprint)
       && (actor.kind !== "user" || session.userId !== actor.user.id))) return false;
   }
@@ -1484,13 +1809,13 @@ async function snapshotInput(actor: AppActor, tx: Prisma.TransactionClient, work
       fingerprint: lineageContentFingerprint("ArtifactInputSnapshot", snapshot) }, roots: [] as LineageRoot[] };
   }
   const recordedManifest = recordedBefore?.manifest ?? await latestManifest(tx, workspaceId, root);
-  const nativeOriginal = ["NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "Workspace", "Member", "User", "RoleAssignment", "CircleAgentAssignment", "CommunicationExternalUser", "CommunicationEntityLink", "CommunicationChannel", "FinanceReportUploadInput", "CrmQualificationFormInput", "McpToolInput", "ConversationIngressInput", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "ConversationPromptInput", "AgentRequestInput", "AgentFeedbackInput", "ModelUsageBudget", "ModelUsageCost", "ApprovalPolicy", "CrmDealStageTransition", "TensionUpvote"].includes(root.kind);
-  const manifest = recordedManifest ?? (nativeOriginal ? { contentHash: root.fingerprint, origin: ["SqlNativeRunInput", "NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationIngressInput", "McpToolInput"].includes(root.kind) ? "NATIVE_ORIGINAL" : "HUMAN_ORIGINAL", rootsJson: [], inputsJson: [] } : null);
+  const nativeOriginal = ["NativeTranscriptInput", "CommunicationMessageNativeInput", "OAuthProviderFetchInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "Workspace", "Member", "User", "RoleAssignment", "CircleAgentAssignment", "CommunicationExternalUser", "CommunicationEntityLink", "CommunicationChannel", "FinanceReportUploadInput", "CrmQualificationFormInput", "McpToolInput", "ConversationIngressInput", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "ConversationPromptInput", "AgentRequestInput", "AgentFeedbackInput", "ModelUsageBudget", "ModelUsageCost", "ApprovalPolicy", "CrmDealStageTransition", "TensionUpvote"].includes(root.kind);
+  const manifest = recordedManifest ?? (nativeOriginal ? { contentHash: root.fingerprint, origin: ["SqlNativeRunInput", "NativeTranscriptInput", "CommunicationMessageNativeInput", "OAuthProviderFetchInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationIngressInput", "McpToolInput"].includes(root.kind) ? "NATIVE_ORIGINAL" : "HUMAN_ORIGINAL", rootsJson: [], inputsJson: [] } : null);
   const inputs = manifest ? parseRoots(manifest.rootsJson) : null;
   invariant(manifest && manifest.contentHash === root.fingerprint && inputs
     && (manifest.origin === "DERIVED" || (manifest.origin === "HUMAN_ORIGINAL"
       && Array.isArray(manifest.inputsJson) && manifest.inputsJson.length === 0)
-      || (manifest.origin === "NATIVE_ORIGINAL" && (["SqlNativeRunInput", "NativeTranscriptInput", "CommunicationMessageNativeInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationIngressInput", "McpToolInput"].includes(root.kind)
+      || (manifest.origin === "NATIVE_ORIGINAL" && (["SqlNativeRunInput", "NativeTranscriptInput", "CommunicationMessageNativeInput", "OAuthProviderFetchInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationIngressInput", "McpToolInput"].includes(root.kind)
         || (root.kind === "ConversationOperationOutcome" && isNativeControlOutcome(content))))),
   409, "UNKNOWN_LINEAGE", "A mutable input has incomplete lineage.");
   const snapshotRoots = convertInputs ? await convertInputs(inputs) : inputs;
@@ -1753,19 +2078,54 @@ export async function assertArtifactInputClosureLocallyAdmissible(actor: AppActo
   });
 }
 
+/** Internal work-item collection only: local admission in one repeatable-read
+ * inventory. It grants no provider/serving authority; the caller must release
+ * the original roots and heads through withArtifactCountReleaseSnapshot after
+ * this transaction closes. Never use it for model inputs or publication. */
+export async function collectWorkItemReadSnapshot<T>(workspaceId: string, read: (tx: Prisma.TransactionClient) => Promise<T>) {
+  const ambient = artifactReadCapture.getStore();
+  const ambientHeads = expectedReadHeads.getStore();
+  const captured = await collectWorkItemPermissionSnapshot(workspaceId, tx => {
+    const heads: ReadHeadBinding = {heads:new Map(),sealed:false};
+    const scope = ambient ? {...ambient,roots:new Map<string,LineageRoot>()} : undefined;
+    const collect = async () => ({value:await localCommitAdmission.run(true, () => read(tx)),heads:heads.heads,roots:scope?.roots});
+    return expectedReadHeads.run(heads, () => scope ? artifactReadCapture.run(scope,collect) : collect());
+  });
+  // Failed initialization attempts publish no ambient observations.
+  if (ambient && captured.roots) observeArtifactRead(ambient.actor,workspaceId,[...captured.roots.values()]);
+  if (ambientHeads) for (const [key,stamp] of captured.heads) {
+    invariant(!ambientHeads.heads.has(key) || ambientHeads.heads.get(key) === stamp,409,"SOURCE_CHANGED","Original read lineage changed during collection.");
+    invariant(!ambientHeads.sealed || ambientHeads.heads.has(key),409,"SOURCE_CHANGED","Collection escaped the original read lineage.");
+    ambientHeads.heads.set(key,stamp);
+  }
+  return captured.value;
+}
+
 /** Fixed count release boundary: ordinary authorization observes all generic
  * heads before remote work; a fresh shared database snapshot then checks those
  * exact heads/bodies and caller permissions together with the SQL count ledger.
  * This creates no reusable read, native, model or publication capability. */
 export async function withArtifactCountReleaseSnapshot<T>(actor: AppActor, workspaceId: string,
   roots: readonly LineageRoot[], remote: () => Promise<void>, finish: (tx: Prisma.TransactionClient) => Promise<T>,
-  observedHeads?: ReadonlyMap<string,string>): Promise<T> {
+  observedHeads?: ReadonlyMap<string,string>, options?: {directory?: boolean}): Promise<T> {
   // Keep only compact original receipts across the aggregate. Bound each proof
   // traversal's hydration/memos, not the workspace's total number of inputs.
   const assertPages = async (db: LineageClient, message: string) => {
-    for (let offset = 0; offset < roots.length; offset += 100) {
-      const page = roots.slice(offset, offset + 100);
-      invariant(await withWorkItemBatchRead(db, workspaceId, page, () => isArtifactInputProofReadable(actor, workspaceId, page, db)),
+    const approvals = roots.some(root => APPROVAL_READ_KINDS.has(root.kind));
+    const directory = options?.directory === true && roots.some(root => LOCAL_DIRECTORY_KINDS.has(root.kind));
+    for (let offset = 0; offset < roots.length;) {
+      // A child page also loads its flow and proposal. Keep that complete
+      // closure within the existing 256-row local observation budget.
+      const kind = roots[offset].kind;
+      const limit = approvals && ["ApprovalDecision", "Objection"].includes(kind) || directory && LOCAL_DIRECTORY_KINDS.has(kind) ? 75 : 100;
+      let end = Math.min(offset + limit, roots.length);
+      if (approvals || directory) for (let index = offset + 1; index < end; index++) if (roots[index].kind !== kind) { end = index; break; }
+      const page = roots.slice(offset, end);
+      offset = end;
+      const loaded = await prepareLocalDeliveryBatch(db,workspaceId,page,directory);
+      const read = () => isArtifactInputProofReadable(actor,workspaceId,page,db);
+      invariant(await (loaded ? readLocalDeliveryBatch(db,workspaceId,loaded,page,read)
+        : withWorkItemBatchRead(db,workspaceId,page,read)),
         409, "SOURCE_CHANGED", message);
     }
   };
@@ -1859,7 +2219,7 @@ async function artifactInputProofAudience(actor: AppActor, workspaceId: string,
   const seen = new Set<string>();
   const publicAuthorities = new Set<string>();
   const privateEnvelope = (kind: LineageKind, row: Record<string, unknown>) => row.isPrivate === true || row.isRestricted === true
-    || row.accessDomain === "FINANCE" || ["ExternalDataSource", "SqlNativeRunInput", "MeetingAudioAsset", "NativeTranscriptInput", "CommunicationMessageNativeInput", "GenericDerivedArtifactVariant", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "ExternalContentSource", "FinanceReport", "FinanceReportFact", "FinanceReportFactRevision", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate", "FinanceReportUploadInput", "ExecutionRequest", "ExecutionResult", "ConversationOperationOutcome", "WorkspaceToolLinkCredential", "McpToolInput", "ConversationIngressInput", "AgentRequestInput", "AgentFeedbackInput", "ConversationPendingOperation", "ConversationPromptInput", "ConversationSession", "ConversationTurn", "RoleOnboardingSession", "CheckIn", "Notification", "NewspaperDelivery"].includes(kind)
+    || row.accessDomain === "FINANCE" || ["ExternalDataSource", "SqlNativeRunInput", "MeetingAudioAsset", "NativeTranscriptInput", "CommunicationMessageNativeInput", "GenericDerivedArtifactVariant", "OAuthProviderFetchInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "ExternalContentSource", "FinanceReport", "FinanceReportFact", "FinanceReportFactRevision", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportCandidate", "FinanceReportUploadInput", "ExecutionRequest", "ExecutionResult", "ConversationOperationOutcome", "WorkspaceToolLinkCredential", "McpToolInput", "ConversationIngressInput", "AgentRequestInput", "AgentFeedbackInput", "ConversationPendingOperation", "ConversationPromptInput", "ConversationSession", "ConversationTurn", "RoleOnboardingSession", "CheckIn", "Notification", "NewspaperDelivery"].includes(kind)
     || (kind === "Recognition" && row.visibility !== "WORKSPACE")
     || (kind === "AdviceRequest" && row.audienceType !== "WORKSPACE")
     || (kind === "ContextMapView" && row.createdByUserId != null)
@@ -1936,6 +2296,8 @@ async function artifactInputProofAudience(actor: AppActor, workspaceId: string,
 
 async function latestManifest(db: LineageClient, workspaceId: string, input: LineageInput) {
   assertSourceCommitTransactionCompatible(db);
+  const deliveryBatch = localDeliveryBatch(db,workspaceId,input);
+  if (deliveryBatch) return structuredClone(deliveryBatch.heads.get(deliveryInputKey(input)) ?? null);
   const batch = workItemBatch(db, workspaceId, input);
   if (batch) return structuredClone(batch.heads.get(input.id) ?? null);
   return db.artifactInputLineage.findFirst({ where: {
@@ -2000,8 +2362,14 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
     } else {
       // Follow the revision that was actually consumed, including preserved
       // historical manifests. A newer revision cannot redefine old ancestry.
-      const manifest = await db.artifactInputLineage.findFirst({ where: { workspaceId,
-        artifactType: root.kind, artifactId: root.id, contentHash: root.fingerprint }, orderBy: { revision: "desc" } });
+      const batch = localDeliveryBatch(db,workspaceId,root);
+      const head = batch?.heads.get(deliveryInputKey(root));
+      // The exact latest matching revision is also the latest historical match.
+      // Absence is reusable only for non-manifest local rows in this batch.
+      const manifest = head?.contentHash === root.fingerprint ? structuredClone(head)
+        : batch && !head && !needsManifest(root.kind,row) ? null
+          : await db.artifactInputLineage.findFirst({ where: { workspaceId,
+            artifactType: root.kind, artifactId: root.id, contentHash: root.fingerprint }, orderBy: { revision: "desc" } });
       if (manifest) {
         upstream = parseRoots(manifest.rootsJson);
         if (!upstream || (manifest.origin === "HUMAN_ORIGINAL"
@@ -2030,7 +2398,7 @@ export async function inspectStoredArtifactInputDependencies(db: LineageClient, 
         if (dependency) upstream = [...(upstream ?? []), dependency];
       }
       if (root.kind === "KnowledgeChunk") {
-        const kinds: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource", EXTERNAL_DATABASE: "SqlNativeRunInput" };
+        const kinds: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource", EXTERNAL_DATABASE: "SqlNativeRunInput", TENSION: "Tension", ACTION: "Action", CIRCLE: "Circle", ROLE: "Role", SLACK: "CommunicationMessage" };
         if (!kinds[String(row.sourceType)] || !isRecord(row.metadata) || typeof row.metadata.sourceContentHash !== "string") return false;
         const parentId = row.sourceType === "EXTERNAL_DATABASE" ? row.metadata.nativeInputId : row.sourceId;
         if (typeof parentId !== "string" || !parentId) return false;
@@ -2349,6 +2717,56 @@ export async function copyArtifactInputLineage(params: {
   return true;
 }
 
+type HumanAdvanceAdmission = {
+  tx: Prisma.TransactionClient; actor: AppActor; workspaceId: string; artifact: LineageInput;
+  fingerprint: string; manifestStamp: string; epochs: PermissionEpochProof;
+};
+const humanAdvanceAdmissions = new WeakMap<object, HumanAdvanceAdmission>();
+const manifestAdvanceStamp = (manifest: NonNullable<Awaited<ReturnType<typeof latestManifest>>>) =>
+  createHash("sha256").update(sourceCommitCanonical(manifest)).digest("hex");
+const artifactOwnEpochKind = (kind: LineageKind) => ["MeetingTranscript", "MeetingAgenda"].includes(kind) ? "Meeting" : kind;
+
+/** Admit the original derived body BEFORE its governed edit. The opaque, single-use
+ * receipt never refreshes upstream permissions or accepts an already stale body. */
+export async function captureHumanArtifactInputAdvance(params: {
+  tx: Prisma.TransactionClient; actor: AppActor; workspaceId: string; artifact: LineageInput;
+  before: unknown; allowSystemTransition?: boolean;
+}): Promise<object | undefined> {
+  const { tx, actor, workspaceId, artifact, before } = params;
+  await assertArtifactInputWriteFence(tx);
+  await assertPlannedArtifactPublication(tx, workspaceId, artifact);
+  if (actor.kind !== "user" && !params.allowSystemTransition) return undefined;
+  const initial = await latestManifest(tx, workspaceId, artifact);
+  const saved = initial?.epochProofVersion === 1 ? parsePermissionEpochProof(initial.permissionEpochsJson) : null;
+  if (initial?.origin !== "DERIVED" || !saved || !parseRoots(initial.rootsJson)?.length) return undefined;
+  const physical = sourceAuthorityPhysicalRow(artifact);
+  if (!physical) return undefined;
+  if (hasActiveSourceCommitLockPlan(tx)) assertSourceCommitRowCovered(tx, physical.table, physical.id, "UPDATE");
+  else await tx.$queryRaw(Prisma.sql`SELECT id FROM ${Prisma.raw(`"${physical.table}"`)} WHERE id = ${physical.id} FOR UPDATE`);
+  const actual = await loadArtifact(tx, workspaceId, artifact);
+  const fingerprint = lineageContentFingerprint(artifact.kind, before);
+  invariant(actual && actual.id === artifact.id && lineageContentFingerprint(artifact.kind, actual) === fingerprint,
+    409, "SOURCE_CHANGED", "Artifact changed before the governed edit.");
+  const previous = await latestManifest(tx, workspaceId, artifact);
+  invariant(previous && manifestAdvanceStamp(previous) === manifestAdvanceStamp(initial)
+    && previous.contentHash === fingerprint, 409, "SOURCE_CHANGED", "Artifact lineage changed before the governed edit.");
+  if (!(await readableArtifactIds(actor, workspaceId, artifact.kind, [actual as { id: string; [key: string]: unknown }], tx)).has(artifact.id)) return undefined;
+  invariant(await isArtifactPermissionEpochProofCurrent(workspaceId, saved, tx),
+    409, "SOURCE_CHANGED", "Artifact permissions changed before the governed edit.");
+  const own = saved.entries.find(entry => entry.kind === artifactOwnEpochKind(artifact.kind) && entry.id === artifact.id);
+  if (!own) return undefined;
+  const currentOwn = await capturePermissionEpochs(tx, workspaceId, [{ kind: own.kind, id: own.id }]);
+  invariant(currentOwn.entries[0].epoch === own.epoch, 409, "SOURCE_CHANGED", "Artifact permission episode changed.");
+  const checkedHead = await latestManifest(tx, workspaceId, artifact);
+  invariant(checkedHead && manifestAdvanceStamp(checkedHead) === manifestAdvanceStamp(previous),
+    409, "SOURCE_CHANGED", "Artifact lineage changed during admission.");
+  const receipt = Object.freeze({});
+  humanAdvanceAdmissions.set(receipt, { tx, actor: sealArtifactInputActor(actor), workspaceId,
+    artifact: { kind: artifact.kind, id: artifact.id }, fingerprint,
+    manifestStamp: manifestAdvanceStamp(previous), epochs: structuredClone(saved) });
+  return receipt;
+}
+
 /** Carry verified input permissions across a direct human edit of the same artifact. */
 export async function advanceHumanArtifactInputLineage(params: {
   tx: Prisma.TransactionClient;
@@ -2357,6 +2775,8 @@ export async function advanceHumanArtifactInputLineage(params: {
   artifact: LineageInput;
   before: unknown;
   after: unknown;
+  /** Original pre-edit admission; cannot be forged, reused or moved across transactions. */
+  admission?: object;
   /** Only for a deterministic workflow transition with no new permission-bearing input. */
   allowSystemTransition?: boolean;
 }) {
@@ -2366,6 +2786,15 @@ export async function advanceHumanArtifactInputLineage(params: {
   if (hasActiveSourceCommitLockPlan(tx)) assertSourceCommitSemanticRootCovered(tx, workspaceId,
     { ...artifact, fingerprint: lineageContentFingerprint(artifact.kind, before) });
   const previous = await latestManifest(tx, workspaceId, artifact);
+  const admission = params.admission ? humanAdvanceAdmissions.get(params.admission) : undefined;
+  if (params.admission) {
+    humanAdvanceAdmissions.delete(params.admission);
+    invariant(admission && admission.tx === tx && admission.actor === actor && admission.workspaceId === workspaceId
+      && admission.artifact.kind === artifact.kind && admission.artifact.id === artifact.id
+      && admission.fingerprint === lineageContentFingerprint(artifact.kind, before)
+      && previous && admission.manifestStamp === manifestAdvanceStamp(previous),
+    409, "SOURCE_CHANGED", "Governed edit admission belongs to another artifact, head or transaction.");
+  }
   const roots = await currentArtifactInputRoots(tx, workspaceId, artifact, before);
   if ((actor.kind !== "user" && !params.allowSystemTransition) || !previous || !roots) {
     invariant(!getMcpToolInputRoots(actor, workspaceId).length, 409, "UNKNOWN_LINEAGE", "A partial MCP edit cannot prove the prior body safe.");
@@ -2394,10 +2823,37 @@ export async function advanceHumanArtifactInputLineage(params: {
       inheritedRoots: [receipt.root, ...receipt.roots, ...submissionRoots] });
     return true;
   }
+  let permissionEpochs = previous.permissionEpochsJson;
+  const saved = previous.epochProofVersion === 1 ? parsePermissionEpochProof(previous.permissionEpochsJson) : null;
+  if (previous.origin === "DERIVED" && saved) {
+    const ownKind = artifactOwnEpochKind(artifact.kind);
+    const own = saved.entries.find(entry => entry.kind === ownKind && entry.id === artifact.id);
+    if (own) {
+      const current = await capturePermissionEpochs(tx, workspaceId, [{ kind: own.kind, id: own.id }]);
+      if (current.entries[0].epoch !== own.epoch) {
+        invariant(admission, 409, "SOURCE_CHANGED", "A changed artifact permission episode requires pre-edit admission.");
+        const nonOwn = { ...saved, entries: saved.entries.filter(entry => entry.kind !== own.kind || entry.id !== own.id) };
+        invariant(nonOwn.entries.length > 0 && await isArtifactPermissionEpochProofCurrent(workspaceId, nonOwn, tx),
+          409, "SOURCE_RESTRICTED", "An original upstream permission episode changed.");
+        const actual = await loadArtifact(tx, workspaceId, artifact);
+        invariant(actual && lineageContentFingerprint(artifact.kind, actual) === lineageContentFingerprint(artifact.kind, after),
+          409, "SOURCE_CHANGED", "Artifact changed during its governed edit.");
+        await requireWorkspaceMembership({ actor, workspaceId, tx });
+        const next = mergePermissionEpochProofs(nonOwn, current);
+        const { isArtifactInputPermissionEpochCoverageComplete } = await import("./source-permission-coverage");
+        invariant(await isArtifactInputPermissionEpochCoverageComplete({ workspaceId, artifact, content: actual,
+          roots, permissionEpochs: next, db: tx }),
+        409, "SOURCE_RESTRICTED", "The governed edit introduces an uncaptured permission governor.");
+        permissionEpochs = next as unknown as Prisma.JsonValue;
+      }
+    }
+  }
+  // Exact optimistic head CAS: a concurrent manifest-only writer conflicts on
+  // this original revision+1. Never reread/retry against its replacement head.
   await tx.artifactInputLineage.create({ data: {
     workspaceId, artifactType: artifact.kind, artifactId: artifact.id,
     revision: previous.revision + 1, origin: previous.origin,
-    epochProofVersion: previous.epochProofVersion, permissionEpochsJson: previous.permissionEpochsJson ?? Prisma.JsonNull,
+    epochProofVersion: previous.epochProofVersion, permissionEpochsJson: permissionEpochs ?? Prisma.JsonNull,
     contentHash: lineageContentFingerprint(artifact.kind, after),
     inputsJson: previous.inputsJson as Prisma.InputJsonValue,
     rootsJson: previous.rootsJson as Prisma.InputJsonValue,
@@ -2479,16 +2935,42 @@ export async function currentArtifactInputRoots(db: LineageClient, workspaceId: 
   return parseRoots(manifest.rootsJson);
 }
 
+/** Discovery-only batch equivalent of currentArtifactInputRoots. Canonical rows
+ * still have to match the actual latest manifest; this does not grant reads. */
+export async function currentArtifactInputRootsBatch(db: LineageClient, workspaceId: string,
+  kind: LineageKind, records: readonly {id: string}[]) {
+  assertSourceCommitTransactionCompatible(db);
+  invariant(records.length <= 100, 409, "LINEAGE_DISCOVERY_PAGE_LIMIT", "Lineage discovery requires canonical pages.");
+  if (!records.length) return new Map<string, LineageRoot[] | null>();
+  const heads = await db.$queryRaw<Array<{artifactId: string; contentHash: string; rootsJson: Prisma.JsonValue}>>(Prisma.sql`
+    SELECT DISTINCT ON ("artifactId") "artifactId", "contentHash", "rootsJson"
+    FROM "ArtifactInputLineage"
+    WHERE "workspaceId" = ${workspaceId} AND "artifactType" = ${kind} AND "artifactId" IN (${Prisma.join(records.map(row => row.id))})
+    ORDER BY "artifactId", revision DESC
+  `);
+  const byId = new Map(heads.map(head => [head.artifactId, head]));
+  return new Map(records.map(row => {
+    const head = byId.get(row.id);
+    return [row.id, head?.contentHash === lineageContentFingerprint(kind, row) ? parseRoots(head.rootsJson) : null] as const;
+  }));
+}
+
 /** Archive existence and paths are source-derived metadata too. This exception
  * returns no body and never admits an archived input to a model or copy writer. */
 export async function isArtifactArchiveMetadataReadable(actor: AppActor, workspaceId: string,
   artifact: LineageInput, db: LineageClient = prisma) {
+  return evaluateArchiveMetadataRoot(actor, workspaceId, artifact, db);
+}
+
+async function evaluateArchiveMetadataRoot(actor: AppActor, workspaceId: string,
+  artifact: LineageInput, db: LineageClient, expected?: LineageRoot) {
   assertSourceCommitTransactionCompatible(db);
   const membership = await requireWorkspaceMembership({ actor, workspaceId, tx: db });
   const domains = await resolveKnowledgeAccessDomains(actor, workspaceId, db);
   const row = await loadArtifact(db, workspaceId, artifact);
   if (!isRecord(row)) return false;
   const fingerprint = lineageContentFingerprint(artifact.kind, row);
+  if (expected && fingerprint !== expected.fingerprint) return false;
   if (isArchived(row)) {
     const manifest = await latestManifest(db, workspaceId, artifact);
     if (!manifest || manifest.origin !== "HUMAN_ORIGINAL" || manifest.contentHash !== fingerprint
@@ -2500,15 +2982,109 @@ export async function isArtifactArchiveMetadataReadable(actor: AppActor, workspa
     { ...artifact, fingerprint }, new Set(), new Map(), false, true);
 }
 
+/** Current policy only for archive-owned purge audit receipts. This does not
+ * authenticate a receipt or admit content: archive.ts binds the stored receipt,
+ * original human head, post-delete epochs and final current-reader snapshot. */
+export async function isPurgedArchiveMetadataPolicyReadable(actor: AppActor, workspaceId: string,
+  kind: string, envelope: Record<string, unknown>, db: LineageClient = prisma): Promise<boolean> {
+  // These kinds have no live permission parents or native/provider validators.
+  // Never broaden this list merely because another kind has a similar DTO.
+  if (!["Action", "Goal", "Proposal", "Tension", "BrainArticle", "Meeting", "Document"].includes(kind)
+    || envelope.workspaceId !== workspaceId || typeof envelope.id !== "string"
+    || envelope.variantOfArticleId != null) return false;
+  const sourceKind = kind as LineageKind;
+  if (artifactPermissionParents(sourceKind, envelope).length) return false;
+  if (["Action", "Goal", "Proposal", "Tension", "BrainArticle"].includes(kind)
+    && typeof envelope.isPrivate !== "boolean") return false;
+  if (["Action", "Goal", "Proposal", "Tension"].includes(kind) && typeof envelope.status !== "string") return false;
+  const membership = await requireWorkspaceMembership({ actor, workspaceId, tx: db });
+  if (!await currentCredentialCanRead(db, actor, workspaceId, sourceKind, new Map())
+    || !actorCanReadRecord(actor, workspaceId, membership, sourceKind, envelope)) return false;
+  if (["Meeting", "Document"].includes(kind) && (typeof envelope.informationCategory !== "string"
+    || !await canReadInformationCategory(actor, workspaceId, envelope.informationCategory, db))) return false;
+  if (kind === "Document" && !(await resolveKnowledgeAccessDomains(actor, workspaceId, db)).some(domain => domain === String(envelope.accessDomain))) return false;
+  return true;
+}
+
+/** A metadata-only receipt. It must never be passed to a content/model reader. */
+export type ArchiveMetadataProof = { root: LineageRoot; heads: ReadonlyMap<string, string> };
+
+export async function captureArtifactArchiveMetadataProof(actor: AppActor, workspaceId: string,
+  artifact: LineageInput): Promise<ArchiveMetadataProof | null> {
+  // Cheap rejection before opening a proof transaction. This observation can
+  // only withhold a candidate; admission still rereads everything below.
+  const candidate = await loadArtifact(prisma, workspaceId, artifact);
+  if (!isRecord(candidate)) return null;
+  if (isArchived(candidate)) {
+    const manifest = await latestManifest(prisma, workspaceId, artifact);
+    if (!manifest || manifest.origin !== "HUMAN_ORIGINAL") return null;
+  }
+  const binding: ReadHeadBinding = { heads: new Map(), sealed: false };
+  const root = await expectedReadHeads.run(binding, () => prisma.$transaction(async tx => {
+    const membership = await requireWorkspaceMembership({ actor, workspaceId, tx });
+    const row = await loadArtifact(tx, workspaceId, artifact);
+    if (!isRecord(row)) return null;
+    const original: LineageRoot = { ...artifact, fingerprint: lineageContentFingerprint(artifact.kind, row) };
+    if (!await localCommitAdmission.run(true, () => isArtifactArchiveMetadataReadable(actor, workspaceId, artifact, tx))) return null;
+    // Capture the admitted closure and caller before provider replay. Archive
+    // transitions intentionally preserve older manifests; use the current epoch
+    // vector here solely to fence this metadata read's own lifetime.
+    const closure = [...binding.heads.keys()].map(key => {
+      const [kind, id] = JSON.parse(key) as [LineageKind, string];
+      return { kind, id, fingerprint: "metadata-permission-parent" };
+    });
+    const epochs = await captureArtifactPermissionEpochs(actor, workspaceId, closure, tx);
+    const role = membership?.id ? await capturePermissionEpochs(tx, workspaceId,
+      [{ kind: "MemberRolePolicy", id: membership.id }]) : undefined;
+    original.permissionEpochs = mergePermissionEpochProofs(epochs, role)!;
+    return original;
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 30_000 }));
+  if (!root) return null;
+  const proof = { root, heads: new Map(binding.heads) };
+  return await isArtifactArchiveMetadataProofReadable(actor, workspaceId, proof) ? proof : null;
+}
+
+/** Replay the ORIGINAL fingerprint, permission vector and heads, retaining the
+ * archive-only exception. A caller transaction is the final local release fence. */
+export async function isArtifactArchiveMetadataProofReadable(actor: AppActor, workspaceId: string,
+  proof: ArchiveMetadataProof, db: LineageClient = prisma): Promise<boolean> {
+  const read = async () => {
+    if (!proof.root.permissionEpochs
+      || !await isArtifactPermissionEpochProofCurrent(workspaceId, proof.root.permissionEpochs, db)) return false;
+    return evaluateArchiveMetadataRoot(actor, workspaceId, proof.root, db, proof.root);
+  };
+  return expectedReadHeads.run({ heads: new Map(proof.heads), sealed: true },
+    () => db === prisma ? read() : localCommitAdmission.run(true, read));
+}
+
 /** Returns only ids whose current content and every permission-bearing input are provably safe. */
 export async function readableArtifactIds(actor: AppActor, workspaceId: string,
-  kind: LineageKind, records: Array<{ id: string; [key: string]: unknown }>, db: LineageClient = prisma) {
+  kind: LineageKind, records: Array<{ id: string; [key: string]: unknown }>, db: LineageClient = prisma): Promise<Set<string>> {
   assertSourceCommitTransactionCompatible(db);
+  if (APPROVAL_READ_KINDS.has(kind) && !artifactReadCapture.getStore() && !localDeliveryReadBatch.getStore()) {
+    const roots = records.map(record => ({kind, id: record.id, fingerprint: lineageContentFingerprint(kind, record)}));
+    const loaded = await prepareLocalDeliveryBatch(db, workspaceId, roots);
+    if (loaded) {
+      let ids = new Set<string>();
+      const valid = await readLocalDeliveryBatch(db, workspaceId, loaded, roots, async () => {
+        ids = await readableArtifactIds(actor, workspaceId, kind, records, db);
+        return true;
+      });
+      if (valid) return ids;
+      // A denied saved vector can share a page with readable siblings. The
+      // ordinary path decides those independently using the original records.
+    }
+  }
   const membership = await requireWorkspaceMembership({ actor, workspaceId, tx: db });
   const domains = await resolveKnowledgeAccessDomains(actor, workspaceId, db);
-  const manifests = await db.artifactInputLineage.findMany({ where: {
-    workspaceId, artifactType: kind, artifactId: { in: records.map((record) => record.id) },
-  }, orderBy: { revision: "desc" } });
+  // Select the actual latest row in PostgreSQL; histories grow independently of
+  // the canonical candidate page. Never fall back to an older matching proof.
+  const manifests = records.length ? await db.$queryRaw<Prisma.ArtifactInputLineageGetPayload<Record<string, never>>[]>(Prisma.sql`
+    SELECT DISTINCT ON ("artifactId") * FROM "ArtifactInputLineage"
+    WHERE "workspaceId" = ${workspaceId} AND "artifactType" = ${kind}
+      AND "artifactId" IN (${Prisma.join(records.map(record => record.id))})
+    ORDER BY "artifactId", revision DESC
+  `) : [];
   const latest = new Map<string, typeof manifests[number]>();
   for (const manifest of manifests) if (!latest.has(manifest.artifactId)) latest.set(manifest.artifactId, manifest);
   const rootCache = new Map<string, boolean>();

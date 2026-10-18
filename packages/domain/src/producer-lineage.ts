@@ -6,6 +6,7 @@ import { assertSourceCommitTransactionCompatible, hasActiveSourceCommitLockPlan 
 import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 import {
   advanceHumanArtifactInputLineage,
+  captureHumanArtifactInputAdvance,
   captureArtifactInputProof,
   captureArtifactInputSnapshotProof,
   currentArtifactInputRoots,
@@ -24,7 +25,7 @@ export type ProducerLineageParams = {
 
 type ProducerReceipt =
   | { mode: "UNKNOWN" }
-  | { mode: "ADVANCE"; before: unknown; allowSystemTransition: boolean }
+  | { mode: "ADVANCE"; before: unknown; allowSystemTransition: boolean; admission?: object }
   | { mode: "HUMAN_ORIGINAL" | "DERIVED"; inputs: LineageInput[]; roots: LineageRoot[] };
 
 /** Prepare receipts before mutation, so a partial edit cannot certify an unproven old body. */
@@ -53,7 +54,9 @@ export async function prepareProducerLineage(params: {
   const explicit = Boolean(capture.lineageInputs?.length || capture.lineageRoots?.length);
   if (before !== undefined && !explicit && !params.completeCopy && !params.dependencies?.length) {
     if (params.copied) return { mode: "UNKNOWN" };
-    return { mode: "ADVANCE", before, allowSystemTransition: params.allowSystemTransition ?? false };
+    return { mode: "ADVANCE", before, allowSystemTransition: params.allowSystemTransition ?? false,
+      admission: artifact ? await captureHumanArtifactInputAdvance({ tx, actor, workspaceId, artifact, before,
+        allowSystemTransition: params.allowSystemTransition }) : undefined };
   }
   // An agent's ids alone do not prove what its earlier model prompt contained.
   if ((actor.kind !== "user" || params.copied) && !capture.lineageRoots?.length && !params.completeCopy) return { mode: "UNKNOWN" };
@@ -117,7 +120,7 @@ export async function finishProducerLineage(params: {
     try {
       return await advanceHumanArtifactInputLineage({
         tx: base.tx, actor: base.actor, workspaceId: base.workspaceId, artifact: base.artifact,
-        before: receipt.before, after: base.content, allowSystemTransition: receipt.allowSystemTransition,
+        before: receipt.before, after: base.content, allowSystemTransition: receipt.allowSystemTransition, admission: receipt.admission,
       });
     } catch (error) {
       if (!receipt.allowSystemTransition || typeof error !== "object" || error === null

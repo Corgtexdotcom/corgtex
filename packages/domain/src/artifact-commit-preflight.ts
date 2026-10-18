@@ -1,3 +1,4 @@
+import { prepareOAuthProviderReadCommitPreflight, withOAuthProviderReadCommitPreflight, type OAuthProviderReadCommitPreflight } from "./oauth-provider-read-preflight";
 import { isDeepStrictEqual } from "node:util";
 import type { Prisma } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
@@ -23,7 +24,7 @@ export type ArtifactCommitPreflight = { readonly [commitBrand]: true };
 type Backend = { kind: "local" } | { kind: "box"; token: ExternalProviderCommitPreflight }
   | { kind: "mcp"; token: ExternalMcpResponseCommitPreflight } | { kind: "slack"; token: SlackNativeCommitPreflight }
   | { kind: "mixed"; token: ExternalMixedCommitPreflight };
-type State = { actor: AppActor; workspaceId: string; roots: LineageRoot[]; backend: Backend; sql?: SqlNativeReadCommitPreflight };
+type State = { actor: AppActor; workspaceId: string; roots: LineageRoot[]; backend: Backend; sql?: SqlNativeReadCommitPreflight; oauth?: OAuthProviderReadCommitPreflight };
 const preflights = new WeakMap<object, State>();
 const MAX_NODES = 10000;
 
@@ -89,6 +90,7 @@ export async function prepareArtifactCommitPreflight(actor: AppActor, workspaceI
   const slack = dependencies.roots.some(root => root.kind === "CommunicationMessageNativeInput");
   const sql = await prepareSqlNativeReadCommitPreflight(actor, workspaceId, roots,
     dependencies.roots.filter(root => root.kind === "SqlNativeRunInput"));
+  const oauth = await prepareOAuthProviderReadCommitPreflight(actor, workspaceId, roots, dependencies.roots.filter(root => root.kind === "OAuthProviderFetchInput"));
   const backend: Backend = Number(box) + Number(mcp) + Number(slack) >= 2
     ? { kind: "mixed", token: await prepareExternalMixedCommitPreflight(actor, workspaceId, roots) }
     : box ? { kind: "box", token: await prepareExternalProviderRootCommitPreflight(actor, workspaceId, roots) }
@@ -97,7 +99,7 @@ export async function prepareArtifactCommitPreflight(actor: AppActor, workspaceI
     : { kind: "local" };
   invariant(await isArtifactInputProofReadable(actor, workspaceId, roots), 409, "SOURCE_CHANGED", "Commit source permissions changed.");
   const token = Object.freeze({}) as ArtifactCommitPreflight;
-  preflights.set(token, { actor, workspaceId, roots, backend, sql });
+  preflights.set(token, { actor, workspaceId, roots, backend, sql, oauth });
   return token;
 }
 
@@ -119,11 +121,11 @@ export async function withArtifactCommitPreflight<T>(actor: AppActor, workspaceI
     return result;
   };
   const backend = state.backend;
-  return withSqlNativeReadCommitPreflight(actor, workspaceId, tx, originalRoots, state.sql, () => withArtifactNativeCommitPhase(() => {
+  return withOAuthProviderReadCommitPreflight(actor, workspaceId, tx, originalRoots, state.oauth, () => withSqlNativeReadCommitPreflight(actor, workspaceId, tx, originalRoots, state.sql, () => withArtifactNativeCommitPhase(() => {
     if (backend.kind === "box") return withExternalProviderCommitPreflight(actor, workspaceId, tx, backend.token, verified, beforeSourceEpochs);
     if (backend.kind === "mcp") return withExternalMcpResponseCommitPreflight(actor, workspaceId, tx, backend.token, verified, beforeSourceEpochs);
     if (backend.kind === "slack") return withSlackNativeCommitPreflight(actor, workspaceId, tx, state.roots, backend.token, verified, beforeSourceEpochs);
     if (backend.kind === "mixed") return withExternalMixedCommitPreflight(actor, workspaceId, tx, state.roots, backend.token, verified, beforeSourceEpochs);
     return (async () => { await beforeSourceEpochs?.(); return verified(); })();
-  }));
+  })));
 }

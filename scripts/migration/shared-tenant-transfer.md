@@ -67,7 +67,7 @@ records what the bytes mean; it never grants permission.
   `RecorderTranscriptPublication`.
 - `SqlIngestionSourceClaim`, `SqlIngestionAttempt`, `SqlNativeRunInput`,
   `SqlNativeCapturePart`, `SqlKnowledgePublication`, `SqlKnowledgeStagedChunk`.
-- `ExternalProviderFetchInput`, `ExternalMcpResponseInput`, `ConversationIngressInput`,
+- `ExternalProviderFetchInput`, `OAuthProviderFetchInput`, `ExternalMcpResponseInput`, `ConversationIngressInput`,
   `McpToolInput`, `ConversationOperationOutcome`, `CrmQualificationFormInput`,
   `FinanceReportUploadInput`.
 

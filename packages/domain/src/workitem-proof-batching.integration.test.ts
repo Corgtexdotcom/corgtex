@@ -28,7 +28,11 @@ describe("bounded work item proof batches", () => {
     await db.$transaction(tx=>recordArtifactInputLineage({tx,actor:f.actor,workspaceId:f.workspaceId,artifact:{kind:"Action",id:derived.id},content:derived,origin:"DERIVED",inputs:[{kind:"Action",id:first.id}]}));
     const result=await captureReadableWorkItemInputs(f.actor,f.workspaceId,"Action",[first,privateRow,unknown,derived]);
     expect([...result.ids].sort()).toEqual([first.id,derived.id].sort());
-    expect(result.heads.size).toBe(1);
+    expect([...result.heads.keys()].sort()).toEqual([first, derived, unknown]
+      .map(row => JSON.stringify(["Action", row.id])).sort());
+    for (const row of [first, derived]) expect(result.heads.get(JSON.stringify(["Action", row.id]))).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.heads.get(JSON.stringify(["Action", unknown.id]))).toBe("ABSENT");
+    expect(result.heads.has(JSON.stringify(["Action", privateRow.id]))).toBe(false);
     expect(await listActions(f.actor,f.workspaceId,{take:0})).toMatchObject({total:2,items:[]});
     expect(await countActionsByStatus(f.actor,f.workspaceId)).toMatchObject({OPEN:2,ALL:2});
   });

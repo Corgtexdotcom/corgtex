@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { defaultModelGateway, type ModelGateway } from "@corgtex/models";
+import { defaultModelGateway, type ModelRequestControls, type ModelGateway } from "@corgtex/models";
 import { AppError, prepareFinanceReportImportProposalInput, bindFinanceReportProposalBehavior,
   assertFinanceReportProposalInputCurrent, claimFinanceReportImportProposal, failFinanceReportImportProposal, normalizeFinanceImportCurrency,
   persistFinanceReportImportProposal, resolveFinanceImportCurrency } from "@corgtex/domain";
@@ -54,7 +54,7 @@ export type FinanceReportImportProposalV1 = Omit<ModelProposal, "currency" | "ma
 export type FinanceReportImportProposalResultV1 =
   | { version: 1; kind: "SUCCESS"; attempts: 1 | 2; proposal: FinanceReportImportProposalV1 }
   | { version: 1; kind: "FAILURE"; attempts: 0 | 1 | 2; code: "INVALID_INPUT" | "INVALID_MODEL_OUTPUT" | "PROVIDER_ERROR" };
-export type FinanceReportImportProposalInputV1 = { workspaceId: string; format: FinanceReportEvidenceFormat; extractedEvidence: string; workspaceCurrencyCodes: string[]; model?: string; workflowJobId?: string; agentRunId?: string; gateway?: ModelGateway; behaviorContext?: string | null; beforeModel?: () => Promise<void> };
+export type FinanceReportImportProposalInputV1 = ModelRequestControls & { workspaceId: string; format: FinanceReportEvidenceFormat; extractedEvidence: string; workspaceCurrencyCodes: string[]; model?: string; workflowJobId?: string; agentRunId?: string; gateway?: ModelGateway; behaviorContext?: string | null; beforeModel?: () => Promise<void> };
 
 const ISO_CODES = new Set(FINANCE_REPORT_ISO_4217_CODES);
 const SCHEMA_HINT = JSON.stringify(z.toJSONSchema(financeReportModelProposalSchemaV1));
@@ -128,7 +128,7 @@ export async function proposeFinanceReportImportV1(input: FinanceReportImportPro
   for (const attempts of [1, 2] as const) {
     await input.beforeModel?.();
     try {
-      const response = await gateway.extract({ workspaceId: input.workspaceId, model: input.model, workflowJobId: input.workflowJobId, agentRunId: input.agentRunId, instruction: `${input.behaviorContext ?? ""}\n\n${attempts === 1 ? INSTRUCTION : `${INSTRUCTION} Repair the previous object using this validation feedback: ${feedback}.`}`, schemaHint: SCHEMA_HINT, input: JSON.stringify({ format: input.format, extractedEvidence: input.extractedEvidence, ...(attempts === 2 ? { previous } : {}) }) });
+      const response = await gateway.extract({ signal: input.signal, authorizeAttempt: input.authorizeAttempt, workspaceId: input.workspaceId, model: input.model, workflowJobId: input.workflowJobId, agentRunId: input.agentRunId, instruction: `${input.behaviorContext ?? ""}\n\n${attempts === 1 ? INSTRUCTION : `${INSTRUCTION} Repair the previous object using this validation feedback: ${feedback}.`}`, schemaHint: SCHEMA_HINT, input: JSON.stringify({ format: input.format, extractedEvidence: input.extractedEvidence, ...(attempts === 2 ? { previous } : {}) }) });
       previous = response.output;
     } catch { return { version: 1, kind: "FAILURE", attempts, code: "PROVIDER_ERROR" }; }
     await input.beforeModel?.();
@@ -193,10 +193,11 @@ export async function runFinanceReportImportAgentV1(params: { workspaceId: strin
         const modelRoots = await bindFinanceReportProposalBehavior(claim.receipt, helpers.behaviorLineageRoots);
         const modelReceipt = await helpers.captureInputs(modelRoots);
         const activeClaim = claim;
-        const result = await helpers.tool("model.finance-interpret", {}, () => proposeFinanceReportImportV1({ workspaceId: params.workspaceId, format: activeClaim.format,
+        const result = await helpers.tool("model.finance-interpret", {}, operation => proposeFinanceReportImportV1(operation.modelRequest({ workspaceId: params.workspaceId, format: activeClaim.format,
           extractedEvidence: activeClaim.extractedEvidence, workspaceCurrencyCodes: activeClaim.workspaceCurrencyCodes, model,
           workflowJobId: params.workflowJobId, agentRunId: currentRunId, behaviorContext: helpers.behaviorContext,
-          beforeModel: () => assertFinanceReportProposalInputCurrent(activeClaim.receipt) }), { receipt: modelReceipt });
+          beforeModel: () => assertFinanceReportProposalInputCurrent(activeClaim.receipt),
+          authorizeAttempt: () => assertFinanceReportProposalInputCurrent(activeClaim.receipt) })), { receipt: modelReceipt });
         if (result.kind === "FAILURE") {
           if (result.code === "PROVIDER_ERROR") { providerFailure = true; throw new Error("Finance report interpretation provider failed."); }
           const failed = await failFinanceReportImportProposal({ ...params, receipt: claim.receipt, agentRunId: currentRunId, expectedVersion: claim.version, failureCode: result.code });

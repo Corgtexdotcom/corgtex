@@ -1,6 +1,6 @@
 import { env, logger, prisma, sendEmail } from "@corgtex/shared";
-import type { AppActor } from "@corgtex/shared";
-import { defaultModelGateway, resolveModel } from "@corgtex/models";
+import type { AppActor, EmailAttemptControls } from "@corgtex/shared";
+import { defaultModelGateway, resolveModel, type ModelAttemptGuard, type ModelRequestControls } from "@corgtex/models";
 import {
   AGENT_REGISTRY,
   getAgentModelOverride,
@@ -35,7 +35,6 @@ import {
 } from "@corgtex/domain";
 import type { LineageKind, LineageRoot, PersonalNewspaperItem } from "@corgtex/domain";
 import { 
-  batchIngestDailyConversations, 
   createArticle, 
   listSlackMessagesForDigest,
   updateArticle, 
@@ -1305,7 +1304,7 @@ export async function runDailyDigest(params: {
   /** Rebuild shared artifacts without ingestion, person-profile writes, or delivery. */
   regenerationOnly?: boolean;
   rebuildRef?: string;
-}) {
+} & ModelRequestControls) {
   const agentActor: AppActor = {
     kind: "agent",
     authProvider: "bootstrap",
@@ -1393,11 +1392,8 @@ export async function runDailyDigest(params: {
     await getAgentModelOverride(params.workspaceId, "daily-digest"),
   );
 
-  // 1. Batch ingest all raw conversations as tier-3 sources
-  if (!params.regenerationOnly) await batchIngestDailyConversations({
-    workspaceId: params.workspaceId,
-    since,
-  });
+  // Private conversations enter Brain only through authenticated Save to Brain
+  // consent. Daily generation must not run the retired automatic batch exporter.
 
   // 2. Load all conversations from past 24h to extract insights and build the digest
   const loadedSessions = await prisma.conversationSession.findMany({
@@ -1416,13 +1412,52 @@ export async function runDailyDigest(params: {
     }
   });
   const audience: AppActor[] = recipientMembers.map((member) => ({ kind: "user", user: member.user }));
-  const sessionReceipts = await Promise.all(loadedSessions.map(async (session) => {
+  // Every model stage shares a fatal latch while retaining its own original
+  // input receipts. Credential waits and retries cannot refresh those receipts.
+  const modelController = new AbortController();
+  const modelSignal = params.signal ? AbortSignal.any([params.signal, modelController.signal]) : modelController.signal;
+  async function withModelProof<T>(roots: readonly LineageRoot[], work: (controls: ModelRequestControls) => Promise<T>, shared = false): Promise<T> {
+    const originalRoots = structuredClone(roots);
+    const assertCurrent = async () => {
+      await requireWorkspaceMembership({actor: agentActor, workspaceId: params.workspaceId});
+      if (!await isArtifactInputProofReadable(agentActor, params.workspaceId, originalRoots)
+        || (shared && !await isDigestInputProofShared(audience, params.workspaceId, originalRoots))) {
+        throw new AppError(409, "SOURCE_CHANGED", "Newspaper model inputs changed before use.");
+      }
+    };
+    const authorizeAttempt: ModelAttemptGuard = async context => {
+      try {
+        modelSignal.throwIfAborted(); context.signal.throwIfAborted();
+        await params.authorizeAttempt?.(context);
+        modelSignal.throwIfAborted(); context.signal.throwIfAborted();
+        await assertCurrent();
+        modelSignal.throwIfAborted(); context.signal.throwIfAborted();
+      } catch (error) {
+        modelController.abort(error);
+        throw error;
+      }
+    };
+    modelSignal.throwIfAborted();
+    const result = await work({signal: modelSignal, authorizeAttempt});
+    modelSignal.throwIfAborted();
+    await assertCurrent();
+    modelSignal.throwIfAborted();
+    return result;
+  }
+  const captureSessionReceipt = async (session: (typeof loadedSessions)[number]) => {
     const turns = await captureReadableDigestInputs({ actor: agentActor, workspaceId: params.workspaceId,
       kind: "ConversationTurn", records: session.turns, additionalInputs: () => [
         { kind: "User", id: session.userId, snapshot: session.user },
       ] });
     return { session, roots: turns.roots, complete: session.turns.length > 0 && turns.records.length === session.turns.length };
-  }));
+  };
+  const sessionReceipts: Awaited<ReturnType<typeof captureSessionReceipt>>[] = [];
+  // Each session performs DB-backed turn proof checks. Keep pool pressure
+  // bounded while preserving session order and every original receipt.
+  for (let offset = 0; offset < loadedSessions.length; offset += 5) {
+    modelSignal.throwIfAborted();
+    sessionReceipts.push(...await Promise.all(loadedSessions.slice(offset, offset + 5).map(captureSessionReceipt)));
+  }
   const sessions = sessionReceipts.filter((receipt) => receipt.complete).map((receipt) => receipt.session);
   const sharedSessionReceipts = [] as typeof sessionReceipts;
   for (const receipt of sessionReceipts.filter((item) => item.complete)) {
@@ -1613,7 +1648,8 @@ export async function runDailyDigest(params: {
   for (const [userId, data] of members.entries()) {
     const fullTranscript = data.transcripts.join("\n\n---\n\n").slice(0, 8000); // Take up to 8K chars
 
-    const extraction = await defaultModelGateway.extract({
+    const extraction = await withModelProof(data.lineageRoots, controls => defaultModelGateway.extract({
+      ...controls,
       model,
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId,
@@ -1630,7 +1666,7 @@ export async function runDailyDigest(params: {
         peopleSignals: string[]
       }`,
       input: fullTranscript
-    });
+    }));
 
     const insights = extraction.output as any;
 
@@ -1668,7 +1704,11 @@ export async function runDailyDigest(params: {
     const insightRoots = await captureArtifactInputProof(agentActor, params.workspaceId,
       [{ kind: "BrainSource", id: source.id, snapshot: source }]);
 
-    const profileMergeResult = await defaultModelGateway.chat({
+    const profileRoots = existingArticle ? await captureArtifactInputProof(agentActor, params.workspaceId,
+      [{kind: "BrainArticle", id: existingArticle.id, snapshot: existingArticle}]) : [];
+    const profileInputRoots = mergeArtifactInputProofs(data.lineageRoots, insightRoots, profileRoots);
+    const profileMergeResult = await withModelProof(profileInputRoots, controls => defaultModelGateway.chat({
+      ...controls,
       model,
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId,
@@ -1692,7 +1732,7 @@ Rules:
 - Maintain structured section headers exactly (e.g. Identity, Communication Preferences, Current Sentiment, Key Concerns & Tensions, Working Style, Relationship Dynamics, Recent Context)`
         }
       ]
-    });
+    }));
 
     const newBodyMd = profileMergeResult.content;
 
@@ -1753,7 +1793,8 @@ Rules:
     ...briefingCandidates.map((candidate) => candidate.lineageRoots ?? []));
 
   const digest = hasSourceInputs
-    ? normalizeNewspaperDigestPayload((await defaultModelGateway.extract({
+    ? normalizeNewspaperDigestPayload((await withModelProof(sharedInputRoots, controls => defaultModelGateway.extract({
+        ...controls,
         model,
         workspaceId: params.workspaceId,
         workflowJobId: params.workflowJobId,
@@ -1775,7 +1816,7 @@ Rules:
           otherUpdates: string[]
         }`,
         input: allTranscripts,
-      })).output)
+      }), true)).output)
     : normalizeNewspaperDigestPayload({});
 
   const workspaceBriefing = digest.sections.length > 0
@@ -1916,6 +1957,8 @@ Rules:
 
   for (const member of recipientMembers) {
     const recipientActor: AppActor = { kind: "user", user: member.user };
+    const emailController = new AbortController();
+    const emailSignal = params.signal ? AbortSignal.any([params.signal, emailController.signal]) : emailController.signal;
     try {
       await requireWorkspaceMembership({ actor: recipientActor, workspaceId: params.workspaceId });
       const safeOutcomeRoots = mergeArtifactInputProofs(workspaceRoots, await captureArtifactInputProof(agentActor, params.workspaceId,
@@ -1966,6 +2009,25 @@ Rules:
         [{ kind: "Member", id: member.id, snapshot: { user: member.user } }]);
       const recipientRoots = mergeArtifactInputProofs(briefingRoots, memberRoots, safeRoles.roots,
         safeOwnedProposals.roots, safeAssignedTensions.roots, ...personalItems.map((item) => item.lineageRoots!));
+      const originalRecipientRoots = structuredClone(recipientRoots);
+      const emailControls: EmailAttemptControls = {
+        signal: emailSignal,
+        authorizeAttempt: async context => {
+          try {
+            emailSignal.throwIfAborted(); context.signal.throwIfAborted();
+            await params.authorizeAttempt?.(context);
+            emailSignal.throwIfAborted(); context.signal.throwIfAborted();
+            await requireWorkspaceMembership({ actor: recipientActor, workspaceId: params.workspaceId });
+            if (!await isArtifactInputProofReadable(recipientActor, params.workspaceId, originalRecipientRoots)) {
+              throw new AppError(409, "SOURCE_CHANGED", "Newspaper recipient inputs changed before delivery.");
+            }
+            emailSignal.throwIfAborted(); context.signal.throwIfAborted();
+          } catch (error) {
+            emailController.abort(error);
+            throw error;
+          }
+        },
+      };
       const recipientBriefing = personalizeWorkspaceBriefing(sharedBriefing, {
         roleNames: activeRoles.flatMap((assignment) => assignment.role?.name ? [assignment.role.name] : []),
         circleNames: activeRoles.flatMap((assignment) => assignment.role?.circle?.name ? [assignment.role.circle.name] : []),
@@ -2049,7 +2111,8 @@ Rules:
               kind: "MEMBER_NEWSPAPER",
             },
           },
-        });
+        }, emailControls);
+        emailSignal.throwIfAborted();
         if (emailResult.status === "SENT") {
           sentEmails++;
           await recordNewspaperDelivery({
@@ -2084,6 +2147,7 @@ Rules:
           });
         }
       } catch (error) {
+        emailSignal.throwIfAborted();
         if (error instanceof AppError && error.code === "NOT_A_MEMBER") { skippedEmails++; continue; }
         failedEmails++;
         const message = error instanceof Error ? error.message : "Unknown email error";
@@ -2110,6 +2174,7 @@ Rules:
         });
       }
     } catch (error) {
+      emailSignal.throwIfAborted();
       if (error instanceof AppError && error.code === "NOT_A_MEMBER") { skippedEmails++; continue; }
       // A recipient can disappear between the membership and identity receipt.
       try { await requireWorkspaceMembership({ actor: recipientActor, workspaceId: params.workspaceId }); }

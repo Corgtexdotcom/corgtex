@@ -110,6 +110,19 @@ function transport(name: string) {
 }
 beforeEach(async () => {
   await resetFixture(); sequence = 0;
+  fixture.prisma.artifactInputLineage.groupBy = vi.fn(async ({where, take}: any) => {
+    const latest = new Map<string, any>();
+    for (const row of fixture.rows.artifactInputLineage) {
+      if (row.workspaceId !== where.workspaceId || !where.artifactType.in.includes(row.artifactType)) continue;
+      if (where.OR && !(row.artifactType > where.OR[0].artifactType.gt
+        || (row.artifactType === where.OR[1].artifactType && row.artifactId > where.OR[1].artifactId.gt))) continue;
+      const key = JSON.stringify([row.artifactType, row.artifactId]);
+      if (!latest.has(key) || row.revision > latest.get(key).revision) latest.set(key, row);
+    }
+    return [...latest.values()].sort((a, b) => a.artifactType.localeCompare(b.artifactType)
+      || a.artifactId.localeCompare(b.artifactId)).slice(0, take)
+      .map(row => ({artifactType: row.artifactType, artifactId: row.artifactId, _max: {revision: row.revision}}));
+  });
   remote.transactionDepth = 0; remote.callsInTransaction = 0; remote.body = { text: "The product team owns onboarding." };
   remote.transport.mockImplementation(async () => {
     if (remote.transactionDepth) { remote.callsInTransaction++; throw new Error("Provider called while interactive transaction is open"); }
@@ -310,6 +323,18 @@ describe("graph bundle generation with actual lineage and worker lease", () => {
     expect(await getReadableGraphSourceVariants(alpha, { workspaceId, scope: { kind: "default", mapKey: "org-structure" } })).toEqual([]);
     expect((await requestGraphSourceVariant(alpha, { ...f.request, target: { kind: "ContextGraphObject", id: "cohort-sibling" } })).status).toBe("READY");
   });
+  it("never revives an older derived sibling behind its latest unknown head", async () => {
+    const f = await setup();
+    const old = fixture.manifest("ContextGraphObject", "cohort-sibling");
+    fixture.rows.artifactInputLineage.push({...old, id: "latest-unknown-sibling", revision: old.revision + 1, origin: "UNKNOWN"});
+    const lease = await claimRequest(f.request);
+    expect((await generateGraphSourceVariant({...lease, generate: async (sources: any[]) => generated(sources)})).phase).toBe("APPLIED");
+    const views = await getReadableGraphSourceVariants(alpha, {workspaceId, scope: f.request.scope});
+    expect(views).toHaveLength(1);
+    expect(views[0].targets.map(target => target.id)).toEqual(["canonical"]);
+    expect(fixture.prisma.artifactInputLineage.groupBy.mock.calls.every(([query]: any[]) => query.take === 100)).toBe(true);
+  });
+
   it("does not model UNKNOWN targets or proven human originals", async () => {
     const f = await setup(); fixture.rows.artifactInputLineage = fixture.rows.artifactInputLineage.filter(row => row.artifactId !== "canonical");
     expect((await requestGraphSourceVariant(alpha, f.request)).status).toBe("UNAVAILABLE");
@@ -396,4 +421,54 @@ describe("graph bundle generation with actual lineage and worker lease", () => {
     expect(await getReadableGraphSourceVariants(alpha, { workspaceId, scope: f.request.scope })).toEqual([]);
   });
 
+});
+
+
+describe("graph variant provider attempt authority", () => {
+  it.each(["source epoch", "caller epoch", "target epoch", "owner", "payload", "lease expiry"].flatMap(change => [0, 1].map(sendsBeforeChange => ({ change, sendsBeforeChange }))))(
+    "denies $change after $sendsBeforeChange sends without recapturing authority", async ({ change, sendsBeforeChange }) => {
+        const f = await setup(); const lease = await claimRequest(f.request);
+        const job = fixture.rows.workflowJob.find(row => row.id === lease.jobId)!;
+        Object.assign(job, { lockedAt: new Date(), startedAt: new Date() });
+        let sends = 0;
+        const result = generateGraphSourceVariant({ ...lease, generate: async (sources, _anchors, _scope, controls) => {
+          if (sendsBeforeChange) { await controls?.authorizeAttempt({ signal: controls.signal }); sends++; }
+          if (change === "source epoch") epochFixture.bump(workspaceId, "Document", f.doc.id);
+          if (change === "caller epoch") epochFixture.bump(workspaceId, "MemberUserPolicy", "alpha");
+          if (change === "target epoch") epochFixture.bump(workspaceId, "ContextGraphObject", f.targets[0].id);
+          if (change === "owner") job.lockedBy = "replacement-worker";
+          if (change === "payload") job.payload = { ...job.payload, unreviewed: true };
+          if (change === "lease expiry") { vi.spyOn(Date, "now").mockReturnValue(job.lockedAt.getTime() + 300_001); }
+          try { await controls?.authorizeAttempt({ signal: controls.signal }); sends++; }
+          finally { vi.spyOn(Date, "now").mockRestore(); }
+          return generated(sources);
+        } });
+        const outcome = await result.catch(error => error);
+        expect(sends).toBe(sendsBeforeChange);
+        expect(outcome).toBeInstanceOf(Error);
+        expect(fixture.rows.genericDerivedArtifactVariant).toHaveLength(0);
+    });
+
+  it.each([1, 2])("allows %i provider sends with the unchanged original proof and claim", async attempts => {
+    const f = await setup(); const lease = await claimRequest(f.request);
+    Object.assign(fixture.rows.workflowJob.find(row => row.id === lease.jobId)!, { lockedAt: new Date(), startedAt: new Date() });
+    let sends = 0;
+    const result = await generateGraphSourceVariant({ ...lease, generate: async (sources, _anchors, _scope, controls) => {
+      for (let index = 0; index < attempts; index++) { await controls.authorizeAttempt({ signal: controls.signal }); sends++; }
+      return generated(sources);
+    } });
+    expect(result.phase).toBe("APPLIED"); expect(sends).toBe(attempts);
+  });
+
+  it("latches a swallowed guard failure and rejects publication", async () => {
+    const f = await setup(); const lease = await claimRequest(f.request);
+    Object.assign(fixture.rows.workflowJob.find(row => row.id === lease.jobId)!, { lockedAt: new Date(), startedAt: new Date() });
+    await expect(generateGraphSourceVariant({ ...lease, generate: async (sources, _anchors, _scope, controls) => {
+      epochFixture.bump(workspaceId, "Document", f.doc.id);
+      await controls.authorizeAttempt({ signal: controls.signal }).catch(() => {});
+      expect(controls.signal.aborted).toBe(true);
+      return generated(sources);
+    } })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(fixture.rows.genericDerivedArtifactVariant).toHaveLength(0);
+  });
 });

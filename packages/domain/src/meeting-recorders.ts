@@ -4064,13 +4064,41 @@ async function terminalizeStaleRecordingWithLock(
 
 async function recoverRecallTranscripts(workspaceId: string) {
   const now = new Date();
+  // A processed timestamp alone is not a publication receipt. Repair recent
+  // legacy markers, but do not hydrate successful or expired history each tick.
+  const repairs = await prisma.$queryRaw<Array<{id: string}>>(Prisma.sql`
+    SELECT r."id" FROM "MeetingRecording" r JOIN "Meeting" m ON m."id"=r."meetingId" AND m."workspaceId"=r."workspaceId"
+    WHERE r."workspaceId"=${workspaceId} AND r."provider" IN ('RECALL_AI', 'MEETING_BAAS')
+      AND r."externalBotId" IS NOT NULL AND r."transcriptProcessedAt" IS NOT NULL
+      AND r."status" IN ('PENDING', 'SCHEDULED', 'JOINING', 'RECORDING', 'COMPLETED')
+      AND COALESCE(r."joinAt", m."recordedAt") + CASE WHEN m."scheduledEndAt">m."recordedAt"
+        THEN m."scheduledEndAt"-m."recordedAt" ELSE ${FALLBACK_MEETING_DURATION_MS} * interval '1 millisecond' END > ${new Date(now.getTime() - 24 * 60 * 60 * 1000)}
+      AND NOT EXISTS (
+        SELECT 1 FROM "RecorderTranscriptPublication" p
+        JOIN "RecorderTranscriptAttempt" a ON a."id"=p."attemptId" AND a."workspaceId"=p."workspaceId"
+          AND a."recordingId"=r."id" AND a."meetingId"=r."meetingId" AND a."provider"=r."provider"::text
+          AND a."externalBotId"=r."externalBotId" AND a."nativeInputId"=p."nativeInputId" AND a."failureCode" IS NULL
+        JOIN "NativeTranscriptInput" n ON n."id"=p."nativeInputId" AND n."workspaceId"=p."workspaceId" AND n."mode"='RECORDER'
+          AND n."recorderAttemptId"=a."id" AND n."recordingId"=r."id" AND n."recorderMeetingId"=r."meetingId"
+          AND n."recorderBindingId"=a."bindingId" AND n."recorderProvider"=a."provider"
+        WHERE p."recordingId"=r."id" AND p."workspaceId"=r."workspaceId" AND p."meetingId"=r."meetingId" AND r."failureCode" IS NULL
+      ) AND NOT EXISTS (
+        SELECT 1 FROM "RecorderTranscriptAttempt" a JOIN "NativeTranscriptInput" n ON n."id"=a."nativeInputId"
+        WHERE r."failureCode"='RECORDER_TRANSCRIPT_EMPTY' AND a."workspaceId"=r."workspaceId" AND a."recordingId"=r."id" AND a."meetingId"=r."meetingId"
+          AND a."provider"=r."provider"::text AND a."externalBotId"=r."externalBotId" AND a."failureCode"='RECORDER_EMPTY'
+          AND n."workspaceId"=a."workspaceId" AND n."mode"='RECORDER' AND n."recorderAttemptId"=a."id"
+          AND n."recordingId"=a."recordingId" AND n."recorderMeetingId"=a."meetingId" AND n."recorderBindingId"=a."bindingId"
+          AND n."recorderProvider"=a."provider"
+      )`);
+
   const recordings = await prisma.meetingRecording.findMany({
     where: {
       workspaceId,
       provider: { in: ["RECALL_AI", "MEETING_BAAS"] },
       externalBotId: { not: null },
       OR: [
-        { status: { in: RECOVERABLE_RECALL_RECORDING_STATUSES } },
+        { status: { in: RECOVERABLE_RECALL_RECORDING_STATUSES }, transcriptProcessedAt: null },
+        { id: { in: repairs.map(recording => recording.id) } },
         { status: "FAILED", failureCode: "STALE_RECORDER" },
       ],
     },

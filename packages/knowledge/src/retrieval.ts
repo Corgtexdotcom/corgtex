@@ -1,6 +1,8 @@
+import { canonicalKnowledgeKinds, loadCanonicalKnowledgeSources, type CanonicalKnowledgeSource } from "./canonical-sources";
 import { createHash } from "node:crypto";
 import { Prisma, type KnowledgeAccessDomain, type KnowledgeSourceType } from "@prisma/client";
 import { getCacheJson, getCacheVersion, incrementCacheVersion, prisma, cosineSimilarity, logger, setCacheJson } from "@corgtex/shared";
+import type { ModelRequestControls } from "@corgtex/models";
 import { CatalogBudgetError, defaultModelGateway, ModelProviderHttpError, WorkspaceModelBudgetError } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
 import { mergeLineageInputRoot, captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, readableArtifactIds, resolveKnowledgeAccessDomains, type LineageKind, type LineageRoot } from "@corgtex/domain";
@@ -8,7 +10,7 @@ import type { SensitivityLabel } from "./sensitivity";
 import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, normalizeKnowledgeAccessDomains, searchAzureKnowledge } from "./azure-search";
 import { captureSqlCountCollection, captureSqlCountPageProof, captureSqlCountStamps, isSqlCountLedgerCurrent, retainSqlCountEpochs,
   type SqlCountEpoch, type SqlCountStamp } from "./sql-count-proof";
-import { withArtifactCountReleaseSnapshot } from "../../domain/src/source-lineage";
+import { captureArtifactReadHeadObservation, isArtifactInputProofReadableAtObservedHeads, withArtifactCountReleaseSnapshot } from "../../domain/src/source-lineage";
 import { isSqlNativeRunInputLocallyCurrent, loadSqlNativeRunInputs } from "../../domain/src/sql-native-input";
 
 const sensitivityOrder: SensitivityLabel[] = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII"];
@@ -149,6 +151,7 @@ async function knowledgeCacheVersion(workspaceId: string) {
 }
 
 const knowledgeLineageKinds: Partial<Record<KnowledgeSourceType, LineageKind>> = {
+  ...canonicalKnowledgeKinds,
   BRAIN_ARTICLE: "BrainArticle",
   DOCUMENT: "Document",
   MEETING: "Meeting",
@@ -157,7 +160,7 @@ const knowledgeLineageKinds: Partial<Record<KnowledgeSourceType, LineageKind>> =
   EXTERNAL_DATABASE: "SqlNativeRunInput",
 };
 
-type RetrievalAccess = {
+type RetrievalAccess = ModelRequestControls & {
   actor: AppActor;
   workspaceId: string;
   accessDomains: KnowledgeAccessDomain[];
@@ -168,11 +171,25 @@ type RetrievalAccess = {
 const knowledgeSourceKey = (chunk: {sourceType: KnowledgeSourceType; sourceId: string; metadata?: unknown}) =>
   `${chunk.sourceType}:${chunk.sourceType === "EXTERNAL_DATABASE" ? (chunk.metadata as Record<string, unknown> | null)?.nativeInputId : chunk.sourceId}`;
 
-type ReadableSource = { contentHash: string; kind: LineageKind; record: { id: string; [key: string]: unknown } };
+type ReadableSource = { inputs?: CanonicalKnowledgeSource["inputs"]; contentHash: string; kind: LineageKind; record: { id: string; [key: string]: unknown } };
 type SearchRun = { results: KnowledgeSearchResult[]; roots: LineageRoot[] };
-type ProvenSearchCache = { schema: 2; results: KnowledgeSearchResult[]; inputRoots: LineageRoot[] };
+type ProvenSearchCache = { schema: 2; results: KnowledgeSearchResult[]; inputRoots: LineageRoot[]; inputHeads: [string, string][] };
 type SearchProofState = { actorHash: string; workspaceId: string; payloadHash: string; roots: LineageRoot[] };
 const searchProofs = new WeakMap<KnowledgeSearchResult[], SearchProofState>();
+// Compact selected-input observations survive page boundaries and every later
+// ranking/cache/answer check. Denied rows never enter this retained head ledger.
+const searchInputHeads = new WeakMap<LineageRoot[], Map<string, string>>();
+
+function restoreSearchInputHeads(roots: LineageRoot[], value: unknown) {
+  if (!Array.isArray(value) || !value.every(entry => Array.isArray(entry) && entry.length === 2
+    && entry.every(part => typeof part === "string"))) return false;
+  searchInputHeads.set(roots, new Map(value as [string, string][]));
+  return true;
+}
+
+function serializedSearchInputHeads(roots: LineageRoot[]) {
+  return [...(searchInputHeads.get(roots) ?? new Map<string, string>())];
+}
 
 function fingerprintPayload(value: unknown) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -184,8 +201,11 @@ function unavailableInput(error: unknown) {
 }
 
 async function currentInputProof(params: RetrievalAccess, roots: LineageRoot[]) {
+  params.signal?.throwIfAborted();
   if (roots.length === 0) return false;
   try {
+    const heads = searchInputHeads.get(roots);
+    if (heads?.size) return await isArtifactInputProofReadableAtObservedHeads(params.actor, params.workspaceId, roots, heads);
     const {isSqlKnowledgeInputProofReadable} = await import("../../domain/src/sql-knowledge-read-proof");
     const sql = await isSqlKnowledgeInputProofReadable(params.actor, params.workspaceId, roots);
     return sql ?? await isArtifactInputProofReadable(params.actor, params.workspaceId, roots);
@@ -194,6 +214,22 @@ async function currentInputProof(params: RetrievalAccess, roots: LineageRoot[]) 
     if (unavailableInput(error)) return false;
     throw error;
   }
+}
+
+function knowledgeAttemptControls(params: RetrievalAccess, roots: LineageRoot[]): ModelRequestControls {
+  const authorizeAttempt = params.authorizeAttempt;
+  return { signal: params.signal, authorizeAttempt: async context => {
+    params.signal?.throwIfAborted();
+    context.signal.throwIfAborted();
+    await authorizeAttempt?.(context);
+    params.signal?.throwIfAborted();
+    context.signal.throwIfAborted();
+    if (!await currentInputProof(params, roots)) {
+      throw Object.assign(new Error("Knowledge source authority changed before provider send."), { code: "SOURCE_CHANGED", status: 409 });
+    }
+    params.signal?.throwIfAborted();
+    context.signal.throwIfAborted();
+  } };
 }
 
 function rememberSearchProof(params: RetrievalAccess, run: SearchRun) {
@@ -215,7 +251,10 @@ export async function getKnowledgeSearchInputRoots(actor: AppActor, workspaceId:
   if (proof.payloadHash !== fingerprintPayload(results) || proof.actorHash !== fingerprintPayload(actor)) {
     throw new Error("Knowledge search input changed during receipt validation.");
   }
-  return proof.roots.map((root) => ({ ...root }));
+  const roots = proof.roots.map((root) => ({ ...root }));
+  const heads = searchInputHeads.get(proof.roots);
+  if (heads) searchInputHeads.set(roots, heads);
+  return roots;
 }
 
 function provenRoots(value: unknown): value is LineageRoot[] {
@@ -234,7 +273,12 @@ async function captureKnowledgeInputs(params: RetrievalAccess,
   for (const chunk of chunks) {
     const source = sources.get(knowledgeSourceKey(chunk));
     if (!source) return null;
-    parentInputs.set(`${source.kind}:${source.record.id}`, { kind: source.kind, id: source.record.id, snapshot: source.record });
+    for (const input of source.inputs ?? [{ kind: source.kind, id: source.record.id, snapshot: source.record }]) {
+      const key = `${input.kind}:${input.id}`;
+      const previous = parentInputs.get(key);
+      if (previous && lineageContentFingerprint(input.kind, previous.snapshot) !== lineageContentFingerprint(input.kind, input.snapshot)) return null;
+      if (!previous) parentInputs.set(key, input);
+    }
   }
   try {
     return await captureArtifactInputProof(params.actor, params.workspaceId, [
@@ -287,6 +331,14 @@ async function readableKnowledgeSources(params: RetrievalAccess, sourceIds?: Map
     }
     const where = { workspaceId: params.workspaceId, ...(ids ? { id: { in: ids } } : {}), archivedAt: null };
     const scan = { take: ids ? Math.min(ids.length, KNOWLEDGE_SCAN_LIMIT - scanned + 1) : KNOWLEDGE_SCAN_LIMIT - scanned + 1 };
+    if (sourceType in canonicalKnowledgeKinds) {
+      const canonical = await loadCanonicalKnowledgeSources({ workspaceId: params.workspaceId, sourceType, sourceIds: ids, take: scan.take });
+      scanned += canonical.length;
+      if (scanned > KNOWLEDGE_SCAN_LIMIT) scanLimitExceeded();
+      const readable = await readableArtifactIds(params.actor, params.workspaceId, kind, canonical.map(source => source.record));
+      for (const source of canonical) if (readable.has(source.record.id)) sources.set(`${sourceType}:${source.record.id}`, source);
+      continue;
+    }
     const records = sourceType === "BRAIN_ARTICLE"
       ? await prisma.brainArticle.findMany({ ...scan, where: { ...where, OR: [{ isPrivate: false }, { variantOfArticleId: { not: null }, isPrivate: true }] } })
       : sourceType === "DOCUMENT"
@@ -378,9 +430,62 @@ export async function countReadableNonSqlKnowledgeChunks(params: RetrievalAccess
   }
 }
 
-/** Shared count/search admission. Raw rows never set a candidate cap or visible count. */
+/** A single bounded display window across every source type, including SQL.
+ * The caller owns final release; no successful admission escapes its originals. */
+export async function summarizeReadableKnowledgeChunks(params: RetrievalAccess,
+  release: import("../../domain/src/digest-lineage").DigestReadRelease) {
+  let cursor: string | undefined;
+  let examined = 0;
+  let count = 0;
+  while (examined < 200) {
+    const take = Math.min(100, 200 - examined);
+    const page = await release.observeRead(async () => {
+      const chunks = await prisma.knowledgeChunk.findMany({
+        where: { workspaceId: params.workspaceId, accessDomain: { in: params.accessDomains },
+          sourceType: { in: params.sourceTypes }, ...(cursor ? { id: { gt: cursor } } : {}) },
+        orderBy: { id: "asc" }, take, select: chunkProjection,
+      });
+      const sourceIds = new Map<KnowledgeSourceType, string[]>();
+      for (const chunk of chunks) {
+        if (chunk.sourceType === "EXTERNAL_DATABASE") continue;
+        const ids = sourceIds.get(chunk.sourceType) ?? [];
+        if (!ids.includes(chunk.sourceId)) ids.push(chunk.sourceId);
+        sourceIds.set(chunk.sourceType, ids);
+      }
+      const sources = await readableKnowledgeSources({ ...params,
+        sourceTypes: (params.sourceTypes ?? []).filter(type => type !== "EXTERNAL_DATABASE") }, sourceIds);
+      const sqlChunks = chunks.filter(chunk => chunk.sourceType === "EXTERNAL_DATABASE");
+      const nativeIds = [...new Set(sqlChunks.flatMap(chunk => {
+        const id = (chunk.metadata as Record<string, unknown> | null)?.nativeInputId;
+        return typeof id === "string" && id ? [id] : [];
+      }))];
+      if (nativeIds.length) {
+        const records = await loadSqlNativeRunInputs(params.workspaceId, nativeIds);
+        const readable = await readableArtifactIds(params.actor, params.workspaceId, "SqlNativeRunInput", records);
+        for (const record of records) if (readable.has(record.id)) sources.set(`EXTERNAL_DATABASE:${record.id}`, {
+          kind: "SqlNativeRunInput", record, contentHash: lineageContentFingerprint("SqlNativeRunInput", record),
+        });
+      }
+      // Keep native SQL's existing bounded proof path eligible for SQL children.
+      const otherChunks = chunks.filter(chunk => chunk.sourceType !== "EXTERNAL_DATABASE");
+      const proof: LineageRoot[] = [];
+      const other = await admitKnowledgeChunks(params, otherChunks, sources, roots => proof.push(...roots));
+      const sql = await admitKnowledgeChunks(params, sqlChunks, sources, roots => proof.push(...roots));
+      return { chunks, count: other.length + sql.length, proof };
+    });
+    release.add(page.proof);
+    examined += page.chunks.length;
+    count += page.count;
+    if (page.chunks.length < take) return { count, complete: true };
+    cursor = page.chunks[page.chunks.length - 1].id;
+  }
+  return { count, complete: false };
+}
+
+/** Count/search admission has an independent raw scan budget; denied rows never count as readable results. */
 export async function scanReadableKnowledgeChunks(params: RetrievalAccess, perTypeLimit?: number) {
-  const sources = await readableKnowledgeSources(params);
+  const retainedHeads = new Map<string, string>();
+  const retainedRoots = new Map<string, LineageRoot>();
   const sourceTypeWindows = params.sourceTypes?.length ? [...new Set(params.sourceTypes)] : [undefined];
   const chunks: PermissionChunk[] = [];
   let scanned = 0;
@@ -388,18 +493,12 @@ export async function scanReadableKnowledgeChunks(params: RetrievalAccess, perTy
     let cursor: PermissionChunk | undefined;
     let admitted = 0;
     while (perTypeLimit === undefined || admitted < perTypeLimit) {
+      // All source types share one raw budget. A nonadmitted sentinel distinguishes
+      // genuine exhaustion from an incomplete candidate window before hydration.
       const take = Math.min(POSTGRES_SEARCH_WINDOW, KNOWLEDGE_SCAN_LIMIT - scanned + 1);
       const page: PermissionChunk[] = await prisma.knowledgeChunk.findMany({
         where: {
           workspaceId: params.workspaceId, accessDomain: { in: params.accessDomains }, sourceType,
-          OR: [...sources].filter(([key]) => !sourceType || key.startsWith(`${sourceType}:`)).map(([key, source]) => {
-            const separator = key.indexOf(":");
-            const type = key.slice(0, separator) as KnowledgeSourceType;
-            return type === "EXTERNAL_DATABASE" ? {sourceType: type, AND: [
-              {metadata: {path: ["nativeInputId"], equals: source.record.id}},
-              {metadata: {path: ["sourceContentHash"], equals: source.contentHash}}]} :
-              {sourceType: type, sourceId: key.slice(separator + 1), metadata: { path: ["sourceContentHash"], equals: source.contentHash }};
-          }),
           sensitivity: params.maxSensitivity ? { in: levelsUpTo(params.maxSensitivity) } : undefined,
           ...(cursor ? { AND: [{ OR: [
             { createdAt: { lt: cursor.createdAt } },
@@ -411,8 +510,31 @@ export async function scanReadableKnowledgeChunks(params: RetrievalAccess, perTy
       });
       scanned += page.length;
       if (scanned > KNOWLEDGE_SCAN_LIMIT) scanLimitExceeded();
+      const sourceIds = new Map<KnowledgeSourceType, string[]>();
+      for (const chunk of page) {
+        const ids = sourceIds.get(chunk.sourceType) ?? [];
+        if (!ids.includes(chunk.sourceId)) ids.push(chunk.sourceId);
+        sourceIds.set(chunk.sourceType, ids);
+      }
+      // Parent hydration follows this bounded candidate page. Unindexed source
+      // records cannot exhaust a search before any chunk is considered.
+      const sources = await readableKnowledgeSources(params, sourceIds);
       const permitted = await admitKnowledgeChunks(params, page, sources);
       const selected = perTypeLimit === undefined ? permitted : permitted.slice(0, perTypeLimit - admitted);
+      const observed = perTypeLimit === undefined ? {value: await captureKnowledgeInputs(params, selected, sources), heads: new Map<string, string>()}
+        : await captureArtifactReadHeadObservation(() => captureKnowledgeInputs(params, selected, sources));
+      const proof = observed.value;
+      for (const [key, stamp] of observed.heads) {
+        if (retainedHeads.has(key) && retainedHeads.get(key) !== stamp) {
+          throw Object.assign(new Error("Knowledge lineage changed during admission."), {code: "SOURCE_CHANGED", status: 409});
+        }
+        retainedHeads.set(key, stamp);
+      }
+      if (!proof) throw Object.assign(new Error("Knowledge inputs changed during admission."), {code: "SOURCE_CHANGED", status: 409});
+      for (const root of proof) {
+        const key = `${root.kind}:${root.id}`;
+        retainedRoots.set(key, mergeLineageInputRoot(retainedRoots.get(key), root));
+      }
       chunks.push(...selected);
       admitted += selected.length;
       if (page.length < take) break;
@@ -422,8 +544,8 @@ export async function scanReadableKnowledgeChunks(params: RetrievalAccess, perTy
   chunks.sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()
     || left.chunkIndex - right.chunkIndex || left.id.localeCompare(right.id));
   // Every admitted candidate contributes to ranking, including uncited candidates.
-  const roots = await captureKnowledgeInputs(params, chunks, sources);
-  if (!roots) throw Object.assign(new Error("Knowledge inputs changed during admission."), { code: "SOURCE_CHANGED", status: 409 });
+  const roots = [...retainedRoots.values()];
+  if (perTypeLimit !== undefined) searchInputHeads.set(roots, retainedHeads);
   return { chunks, roots };
 }
 
@@ -587,7 +709,8 @@ export async function searchIndexedKnowledge(params: {
   agentRunId?: string;
   catalogItemId?: string;
   agentCredentialId?: string;
-}) {
+} & ModelRequestControls) {
+  params.signal?.throwIfAborted();
   const query = params.query.trim();
   if (!query) {
     return rememberSearchProof({ ...params, accessDomains: [] }, { results: [], roots: [] });
@@ -618,6 +741,7 @@ export async function searchIndexedKnowledge(params: {
   const access = { ...params, query, accessDomains };
   const cached = await getCacheJson<ProvenSearchCache>(cacheKey);
   if (cached?.schema === 2 && Array.isArray(cached.results) && provenRoots(cached.inputRoots)
+    && restoreSearchInputHeads(cached.inputRoots, cached.inputHeads)
     && await currentInputProof(access, cached.inputRoots)) {
     const current = await currentKnowledgeCitations(access, cached.results);
     if (current.length === cached.results.length && await currentInputProof(access, cached.inputRoots)) {
@@ -631,7 +755,7 @@ export async function searchIndexedKnowledge(params: {
     : await executeKnowledgeSearch({ ...access, provider: effectiveProvider, configuredProvider });
   const current = await currentSearchResults(access, run);
   if (!current.roots.length || !await currentInputProof(access, current.roots)) return rememberSearchProof(access, { results: [], roots: [] });
-  await setCacheJson(cacheKey, { schema: 2, results: current.results, inputRoots: current.roots } satisfies ProvenSearchCache, SEARCH_CACHE_TTL_MS);
+  await setCacheJson(cacheKey, { schema: 2, results: current.results, inputRoots: current.roots, inputHeads: serializedSearchInputHeads(current.roots) } satisfies ProvenSearchCache, SEARCH_CACHE_TTL_MS);
   if (!await currentInputProof(access, current.roots)) return rememberSearchProof(access, { results: [], roots: [] });
   const released = await currentKnowledgeCitations(access, current.results);
   return rememberSearchProof(access, released.length === current.results.length && await currentInputProof(access, current.roots)
@@ -652,11 +776,14 @@ async function executeKnowledgeSearch(params: {
   agentCredentialId?: string;
   provider: "postgres" | "azure" | "dual_compare";
   configuredProvider: "postgres" | "azure" | "dual_compare";
-}) {
+} & ModelRequestControls) {
   if (params.provider === "postgres") {
     return searchIndexedKnowledgePostgres(params);
   }
 
+  const cohort = await scanReadableKnowledgeChunks(params, POSTGRES_SEARCH_WINDOW);
+  if (!cohort.chunks.length || !await currentInputProof(params, cohort.roots)) return { results: [], roots: cohort.roots };
+  const controls = knowledgeAttemptControls(params, cohort.roots);
   let queryVector: number[];
   try {
     const queryEmbedding = await defaultModelGateway.embed({
@@ -666,8 +793,10 @@ async function executeKnowledgeSearch(params: {
       catalogItemId: params.catalogItemId,
       agentCredentialId: params.agentCredentialId,
       input: params.query,
+      ...controls,
     });
     queryVector = queryEmbedding.embeddings[0] ?? [];
+    await controls.authorizeAttempt!({ signal: params.signal ?? new AbortController().signal });
     await searchAzureKnowledge({
       workspaceId: params.workspaceId,
       query: params.query,
@@ -678,7 +807,9 @@ async function executeKnowledgeSearch(params: {
       accessDomains: params.accessDomains,
     });
   } catch (error) {
-    if (error instanceof CatalogBudgetError || error instanceof WorkspaceModelBudgetError) throw error;
+    params.signal?.throwIfAborted();
+    if (unavailableInput(error) || (error instanceof Error && "code" in error && error.code === "MODEL_ATTEMPT_DENIED")
+      || error instanceof CatalogBudgetError || error instanceof WorkspaceModelBudgetError) throw error;
     logger.warn("Azure Search retrieval failed; falling back to Postgres knowledge retrieval", {
       workspaceId: params.workspaceId,
       configuredProvider: params.configuredProvider,
@@ -686,14 +817,15 @@ async function executeKnowledgeSearch(params: {
       accessDomains: params.accessDomains,
       error: error instanceof Error ? error.message : String(error),
     });
-    return searchIndexedKnowledgePostgres(params);
+    return searchIndexedKnowledgePostgres(params, undefined, cohort);
   }
 
   // Azure hit membership, order and scores can depend on unseen private inputs.
   // Its suggestions cannot determine the candidate cap or any displayed rank.
   // Recompute from the canonical permitted SQL pool, reusing the charged query
   // embedding; all local candidates are captured before scoring and reranking.
-  return searchIndexedKnowledgePostgres(params, queryVector);
+  params.signal?.throwIfAborted();
+  return searchIndexedKnowledgePostgres(params, queryVector, cohort);
 }
 
 async function searchIndexedKnowledgePostgres(params: {
@@ -708,10 +840,12 @@ async function searchIndexedKnowledgePostgres(params: {
   agentRunId?: string;
   catalogItemId?: string;
   agentCredentialId?: string;
-}, queryEmbeddingOverride?: number[]): Promise<SearchRun> {
+} & ModelRequestControls, queryEmbeddingOverride?: number[],
+  captured?: Awaited<ReturnType<typeof scanReadableKnowledgeChunks>>): Promise<SearchRun> {
   const query = params.query;
 
-  const { chunks, roots } = await scanReadableKnowledgeChunks(params, POSTGRES_SEARCH_WINDOW);
+  const { chunks, roots } = captured ?? await scanReadableKnowledgeChunks(params, POSTGRES_SEARCH_WINDOW);
+  params.signal?.throwIfAborted();
   if (chunks.length === 0) return { results: [], roots: [] };
   if (!await currentInputProof(params, roots)) return { results: [], roots };
 
@@ -752,6 +886,7 @@ async function searchIndexedKnowledgePostgres(params: {
         catalogItemId: params.catalogItemId,
         agentCredentialId: params.agentCredentialId,
         input: query,
+        ...knowledgeAttemptControls(params, roots),
         failFastOnRateLimit: true,
       });
   } catch (error) {
@@ -794,6 +929,7 @@ async function searchIndexedKnowledgePostgres(params: {
       catalogItemId: params.catalogItemId,
       agentCredentialId: params.agentCredentialId,
       query,
+      ...knowledgeAttemptControls(params, roots),
       documents: scored.map((entry) => `${entry.chunk.sourceTitle ?? ""}\n${entry.chunk.content}`.trim()),
       topK: resultLimit,
       failFastOnRateLimit: true,
@@ -819,7 +955,8 @@ export async function answerKnowledgeQuestion(params: {
   accessDomains?: KnowledgeAccessDomain[];
   workflowJobId?: string;
   agentRunId?: string;
-}) {
+} & ModelRequestControls) {
+  params.signal?.throwIfAborted();
   const accessDomains = await currentAccessDomains(params.actor, params.workspaceId, params.accessDomains);
   if (accessDomains.length === 0) {
     return {
@@ -842,8 +979,10 @@ export async function answerKnowledgeQuestion(params: {
     citations: KnowledgeCitation[];
     schema: 2;
     inputRoots: LineageRoot[];
+    inputHeads: [string, string][];
   }>(cacheKey);
   if (cached?.schema === 2 && Array.isArray(cached.citations) && provenRoots(cached.inputRoots)
+    && restoreSearchInputHeads(cached.inputRoots, cached.inputHeads)
     && await currentInputProof({ ...params, accessDomains }, cached.inputRoots)) {
     const currentCitations = await currentKnowledgeCitations({ ...params, accessDomains }, cached.citations);
     if (currentCitations.length === cached.citations.length && await currentInputProof({ ...params, accessDomains }, cached.inputRoots)) {
@@ -855,6 +994,8 @@ export async function answerKnowledgeQuestion(params: {
     actor: params.actor,
     workspaceId: params.workspaceId,
     query: params.question,
+    signal: params.signal,
+    authorizeAttempt: params.authorizeAttempt,
     limit: params.limit ?? DEFAULT_ANSWER_LIMIT,
     sourceTypes: params.sourceTypes,
     accessDomains,
@@ -885,6 +1026,7 @@ export async function answerKnowledgeQuestion(params: {
   }
   const response = await defaultModelGateway.chat({
     model: resolveModel("quality"),
+    ...knowledgeAttemptControls({ ...params, accessDomains }, inputRoots),
     workspaceId: params.workspaceId,
     workflowJobId: params.workflowJobId,
     agentRunId: params.agentRunId,
@@ -909,7 +1051,7 @@ export async function answerKnowledgeQuestion(params: {
   if (currentCitations.length !== answer.citations.length || !await currentInputProof({ ...params, accessDomains }, inputRoots)) {
     return { answer: "I could not find relevant indexed knowledge for that question.", citations: [] as KnowledgeCitation[] };
   }
-  await setCacheJson(cacheKey, { ...answer, schema: 2, inputRoots }, SEARCH_CACHE_TTL_MS);
+  await setCacheJson(cacheKey, { ...answer, schema: 2, inputRoots, inputHeads: serializedSearchInputHeads(inputRoots) }, SEARCH_CACHE_TTL_MS);
   if ((await currentKnowledgeCitations({ ...params, accessDomains }, answer.citations)).length !== answer.citations.length
     || !await currentInputProof({ ...params, accessDomains }, inputRoots)) {
     return { answer: "I could not find relevant indexed knowledge for that question.", citations: [] as KnowledgeCitation[] };

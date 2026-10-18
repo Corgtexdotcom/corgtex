@@ -1,13 +1,15 @@
+import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
-import { captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, isArtifactInputProofReadable, type LineageInput, type LineageKind, type LineageRoot } from "./source-lineage";
+import { readableArtifactIds, captureReadableDirectoryInputs, captureReadableWorkItemInputs, captureReadableNewspaperDeliveryInputs, captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, isArtifactInputProofReadable, type LineageInput, type LineageKind, type LineageRoot } from "./source-lineage";
 import { mergePermissionEpochProofs } from "./source-permission-epochs";
 
 /** One request's original compact observations, released together in a fresh snapshot. */
 export class DigestReadRelease {
   private readonly roots = new Map<string, LineageRoot>();
   private readonly heads = new Map<string, string>();
+  private directoryCaptured = false;
   constructor(readonly actor: AppActor, readonly workspaceId: string) {}
   add(proof: readonly LineageRoot[]) {
     for (const root of proof) {
@@ -28,11 +30,46 @@ export class DigestReadRelease {
     this.add(captured.roots);
     return captured;
   }
-  finish<T>(value: T) {
+  /** Source scans share admission work within one bounded page. Capture only
+   * admitted original snapshots and retain every observed head through release. */
+  async captureSourcePage<T extends {id: string}>(kind: LineageKind, records: T[]) {
+    invariant(records.length <= 100, 400, "INVALID_INPUT", "Capture one bounded source page.");
+    const captured = await this.observeRead(async () => {
+      const ids = await readableArtifactIds(this.actor, this.workspaceId, kind, records);
+      const admitted = records.filter(record => ids.has(record.id));
+      const roots = admitted.length ? await captureArtifactInputProof(this.actor, this.workspaceId,
+        admitted.map(record => ({kind, id: record.id, snapshot: record}))) : [];
+      return {records: admitted, roots};
+    });
+    this.add(captured.roots);
+    return captured;
+  }
+  /** Directory projections retain their original heads; unsupported ancestry
+   * uses the ordinary capture path without changing other Digest consumers. */
+  async captureDirectory<T extends {id: string}>(kind: LineageKind, records: T[]) {
+    this.directoryCaptured = true;
+    const captured = await this.observeRead(() => captureReadableDirectoryInputs(this.actor, this.workspaceId, kind, records));
+    if (!captured) return this.capture(kind, records);
+    this.add(captured.roots);
+    return captured;
+  }
+  /** Bounded canonical admission for full-corpus Brain counts. Complex and derived
+   * articles retain the ordinary evaluator; original rows share page reads. */
+  async captureBrainArticlePage<T extends {id: string; [key: string]: unknown}>(records: T[]) {
+    const captured = await captureReadableWorkItemInputs(this.actor, this.workspaceId, "BrainArticle", records);
+    this.add(captured.roots);
+    for (const [key, stamp] of captured.heads) {
+      invariant(!this.heads.has(key) || this.heads.get(key) === stamp, 409, "SOURCE_CHANGED", "Brain article lineage changed during collection.");
+      this.heads.set(key, stamp);
+    }
+    return records.filter(record => captured.ids.has(record.id));
+  }
+  finish<T>(value: T, validate?: (tx: Prisma.TransactionClient) => Promise<void>) {
     return withArtifactCountReleaseSnapshot(this.actor, this.workspaceId, [...this.roots.values()], async () => {}, async tx => {
       await requireWorkspaceMembership({actor: this.actor, workspaceId: this.workspaceId, tx});
+      await validate?.(tx);
       return value;
-    }, this.heads);
+    }, this.heads, {directory: this.directoryCaptured});
   }
 }
 
@@ -64,12 +101,21 @@ export async function isDigestInputProofShared(audience: readonly AppActor[], wo
 /** Unknown legacy entries are omitted individually before formatting, ranking or counting. */
 export async function captureReadableDigestInputs<T extends { id: string }>(params: {
   actor: AppActor;
+  db?: Prisma.TransactionClient;
   workspaceId: string;
   kind: LineageKind;
   records: T[];
   audience?: AppActor[];
   additionalInputs?: (record: T) => Array<LineageInput & { snapshot?: Record<string, unknown> }>;
 }) {
+  if (!params.db && params.kind === "NewspaperDelivery" && !params.audience && !params.additionalInputs && params.records.length <= 100) {
+    try {
+      const batched = await captureReadableNewspaperDeliveryInputs(params.actor,params.workspaceId,params.records);
+      if (batched) return batched;
+    } catch (error) {
+      if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+    }
+  }
   const records: T[] = [];
   const proofs = new Map<string, LineageRoot[]>();
   for (const record of params.records) {
@@ -77,13 +123,64 @@ export async function captureReadableDigestInputs<T extends { id: string }>(para
       const roots = await captureArtifactInputProof(params.actor, params.workspaceId, [
         { kind: params.kind, id: record.id, snapshot: record },
         ...(params.additionalInputs?.(record) ?? []),
-      ]);
+      ], params.db);
       if (params.audience && !await isDigestInputProofShared(params.audience, params.workspaceId, roots)) continue;
       records.push(record);
       proofs.set(record.id, roots);
     } catch (error) {
       if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
     }
+  }
+  return { records, proofs, roots: mergeArtifactInputProofs(...proofs.values()) };
+}
+
+/** Small samples never certify an incomplete candidate window as an empty/full result. */
+export function createArtifactSampleBudget(limit: number) {
+  invariant(Number.isSafeInteger(limit) && limit > 0, 400, "INVALID_INPUT", "Invalid source sample size.");
+  const maximum = Math.max(200, limit);
+  let examined = 0;
+  return {
+    nextTake(pageSize = 100) {
+      invariant(examined < maximum, 409, "SOURCE_READ_SCAN_LIMIT", "Source sample is not available within the candidate window.");
+      return Math.min(pageSize, maximum - examined);
+    },
+    consume(count: number, requested: number) {
+      invariant(count <= requested, 409, "SOURCE_CHANGED", "Source sample exceeded its candidate page.");
+      examined += count;
+    },
+  };
+}
+
+/** Ordered keyset pages replenish denied candidates without retaining a corpus.
+ * The caller releases all selected original proofs together after its joins. */
+export async function loadReadableArtifactSample<T extends { id: string }>(params: {
+  actor: AppActor;
+  workspaceId: string;
+  kind: LineageKind;
+  limit: number;
+  release: DigestReadRelease;
+  loadBatch: (after: NoInfer<T> | undefined, take: number) => Promise<T[]>;
+}) {
+  const budget = createArtifactSampleBudget(params.limit);
+  const records: T[] = [];
+  const proofs = new Map<string, LineageRoot[]>();
+  let after: T | undefined;
+  while (records.length < params.limit) {
+    const take = budget.nextTake();
+    const batch = await params.loadBatch(after, take);
+    budget.consume(batch.length, take);
+    invariant(batch.length <= 100 && (!batch.length || batch.at(-1)!.id !== after?.id),
+      409, "SOURCE_CHANGED", "Source sample changed during pagination.");
+    const next = batch.length ? structuredClone(batch.at(-1)!) : undefined;
+    const captured = await params.release.observeRead(() => captureReadableDigestInputs({ ...params, records: batch }));
+    for (const row of captured.records.slice(0, params.limit - records.length)) {
+      records.push(row);
+      const proof = captured.proofs.get(row.id)!;
+      proofs.set(row.id, proof);
+      params.release.add(proof);
+    }
+    if (batch.length < take) break;
+    after = next;
   }
   return { records, proofs, roots: mergeArtifactInputProofs(...proofs.values()) };
 }
@@ -100,23 +197,19 @@ export async function loadReadableDigestQuery<T extends { id: string }>(params: 
   keyset?: boolean;
   release?: DigestReadRelease;
 }) {
+  const budget = createArtifactSampleBudget(params.limit);
   const records: T[] = [];
   const release = params.release ?? (params.completeScan ? new DigestReadRelease(params.actor, params.workspaceId) : undefined);
   const take = Math.min(100, Math.max(50, params.limit));
-  const scanLimit = 5_000;
   let skip = 0;
   let after: T | undefined;
   const seen = new Set<string>();
   const candidates = new Set<string>();
   while (params.completeScan || records.length < params.limit) {
     const page = params.keyset ? { skip: 0, after } : { skip };
-    if (!params.completeScan && skip >= scanLimit) {
-      // An exact-budget history still needs an empty terminator query.
-      const more = await params.loadBatch({ take: 1, ...page });
-      invariant(more.length === 0, 503, "INPUT_SCAN_LIMIT", "Input collection needs a lineage rebuild before it can complete.");
-      break;
-    }
-    const batch = await params.loadBatch({ take, ...page });
+    const pageTake = params.completeScan ? take : budget.nextTake(take);
+    const batch = await params.loadBatch({ take: pageTake, ...page });
+    if (!params.completeScan) budget.consume(batch.length, pageTake);
     for (const row of batch) {
       invariant(!candidates.has(row.id), 409, "SOURCE_CHANGED", "Input collection changed during pagination.");
       candidates.add(row.id);
@@ -132,7 +225,7 @@ export async function loadReadableDigestQuery<T extends { id: string }>(params: 
     const selected = params.completeScan ? fresh : fresh.slice(0, params.limit - records.length);
     for (const row of selected) release?.add(captured.proofs.get(row.id) ?? []);
     records.push(...selected);
-    if (batch.length < take) break;
+    if (batch.length < pageTake) break;
     skip += batch.length;
     after = batch.at(-1);
   }

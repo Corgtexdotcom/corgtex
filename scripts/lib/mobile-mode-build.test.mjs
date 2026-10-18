@@ -15,7 +15,8 @@ import {
 } from "./mobile-mode-build.mjs";
 
 const LEGACY_SHA = "eb423aca0618638cf7cd742dcb84397c492ba09b";
-const SCOPED_BLOB = "f1e7c033043897dc1d140bb84d0d3fba4641293c";
+const SCOPED_BLOB = "9515874eae16ff76a035dcdbfeb577b5c767431f";
+const PREVIOUS_SCOPED_BLOB = "f1e7c033043897dc1d140bb84d0d3fba4641293c";
 const LEGACY_BLOB = "bd5d6d6a52443da19938aca6a999dd0da69b332f";
 
 function healthyBuild(gitSha) {
@@ -43,10 +44,10 @@ describe("client readiness mobile mode build binding", () => {
     expect(mobileModeStorageKey(build, "/workspaces/workspace-1")).toBe("corgtex.mobileMode");
   });
 
-  it("recognizes a newer commit only when it has the same inspected scoped source blob", async () => {
+  it.each([PREVIOUS_SCOPED_BLOB, SCOPED_BLOB])("recognizes a newer commit with inspected scoped source blob %s", async (sourceBlob) => {
     const newerSha = "a".repeat(40);
     const build = await resolveMobileModeBuild(healthyBuild(newerSha), {
-      readSourceBlob: vi.fn().mockResolvedValue(SCOPED_BLOB),
+      readSourceBlob: vi.fn().mockResolvedValue(sourceBlob),
     });
     expect(build.inspectedGitSha).not.toBe(newerSha);
     expect(mobileModeStorageKey(build, "/es/workspaces/workspace-1/settings"))
@@ -58,6 +59,9 @@ describe("client readiness mobile mode build binding", () => {
   it("resolves the real checked-out source object for the scoped contract", async () => {
     const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     expect(await readMobileShellSourceBlob(head)).toBe(SCOPED_BLOB);
+    const build = await resolveMobileModeBuild(healthyBuild(head));
+    expect(build).toMatchObject({ sourceBlobSha: SCOPED_BLOB, contract: "workspace-scoped-v1" });
+    expect(mobileModeStorageKey(build, "/workspaces/workspace-1")).toBe("corgtex.mobileMode.workspace-1");
     await expect(readMobileShellSourceBlob("x".repeat(40))).rejects.toThrow("full serving Git SHA");
   });
 

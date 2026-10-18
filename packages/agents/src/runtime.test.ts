@@ -601,6 +601,27 @@ describe("agent runtime", () => {
     expect(lineage.record.mock.calls.some(([call]) => call.origin === "HUMAN_ORIGINAL")).toBe(false);
   });
 
+  it("retains original live job roots alongside immutable receipt roots for each model attempt", async () => {
+    const {executeAgentRun} = await import("./runtime");
+    const jobRoot = {kind: "WorkflowJobInput" as const, id: "job-input", fingerprint: "c".repeat(64)};
+    const initial = provenRunParams();
+    await executeAgentRun({...initial, lineageRoots: [...initial.lineageRoots, jobRoot], execute: async (_context, helpers) => {
+      const receipt = await helpers.captureInputs([jobRoot]);
+      jobRoot.fingerprint = "d".repeat(64);
+      await helpers.tool("model.test", {}, async operation => {
+        const request = operation.modelRequest({});
+        for (let i = 0; i < 2; i++) {
+          await request.authorizeAttempt!({signal: new AbortController().signal});
+          expect(lineage.readable.mock.lastCall?.[2]).toEqual(expect.arrayContaining([
+            expect.objectContaining({kind: "WorkflowJobInput", id: "job-input", fingerprint: "c".repeat(64)}),
+            expect.objectContaining({kind: "ArtifactInputSnapshot"}),
+          ]));
+        }
+      }, {receipt});
+      return {resultJson: {done: true}, lineageReceipt: receipt};
+    }});
+  });
+
   it("rejects forged operation receipts before any work", async () => {
     const { executeAgentRun } = await import("./runtime");
     const work = vi.fn();

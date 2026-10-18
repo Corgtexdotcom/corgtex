@@ -3,6 +3,7 @@ import { mcpScopesHash } from "../../shared/src/mcp-context";
 import { getNextPollIntervalMs, getWorkerPollOutcome } from "../../../apps/worker/src/polling";
 
 const {
+  oauthSyncMock,
   prismaMock,
   txMock,
   loggerMock,
@@ -37,6 +38,7 @@ const {
   runFinanceReportImportExtractionJobMock,
   runFinanceReportImportProposalJobMock,
 } = vi.hoisted(() => ({
+  oauthSyncMock: vi.fn(),
   prismaMock: {
     mcpOAuthAccessToken: { findUnique: vi.fn() },
     workspaceSupportGrant: { findUnique: vi.fn() },
@@ -75,6 +77,7 @@ const {
     $queryRaw: vi.fn(),
     mcpOAuthAccessToken: { findUnique: vi.fn() },
     workflowJob: {
+      updateMany: vi.fn(),
       upsert: vi.fn(),
       createMany: vi.fn(),
     },
@@ -122,6 +125,13 @@ vi.mock("@corgtex/shared", async () => ({
   logger: loggerMock,
   prisma: prismaMock,
   toInputJson: (value: unknown) => value,
+}));
+
+vi.mock("./handlers/knowledge-sync", async importOriginal => ({
+  ...await importOriginal<typeof import("./handlers/knowledge-sync")>(),
+  handleOAuthDocumentsSync: oauthSyncMock,
+  handleOAuthEmailSync: oauthSyncMock,
+  handleEventKnowledgeSync: oauthSyncMock,
 }));
 
 vi.mock("./handlers/agent-dispatch", () => ({
@@ -240,6 +250,61 @@ afterEach(() => {
 });
 
 describe("runPendingJobs", () => {
+  describe.each(["oauth.documents.sync", "oauth.email.sync", "knowledge.sync.event"])("%s original claim settlement", type => {
+    it.each(["current", "takeover-success", "takeover-error", "renewed-success", "renewed-error"])("retains the original recipe and fences %s", async mode => {
+      if (mode.startsWith("renewed")) vi.useFakeTimers();
+      txMock.workflowJob.updateMany.mockClear();
+      const row = {id: "oauth-job", workspaceId: "ws-1", type, payload: {connectionId: "conn-1"}, attempts: 1,
+        status: "RUNNING", lockedBy: "worker-1", lockedAt: new Date(), startedAt: new Date()};
+      const original = structuredClone(row);
+      let acknowledged = original.lockedAt;
+      txMock.$queryRaw.mockImplementation(async () => [structuredClone(row)]);
+      txMock.$queryRaw.mockResolvedValueOnce([structuredClone(row)]);
+      const apply = ({where, data}: any) => {
+        const matches = Object.entries(where).every(([key, value]: [string, any]) => {
+          const actual = row[key as keyof typeof row];
+          if (value && typeof value === "object" && !(value instanceof Date)) {
+            return (!Object.hasOwn(value, "equals") || JSON.stringify(actual) === JSON.stringify(value.equals))
+              && (!Object.hasOwn(value, "gt") || Number(actual) > Number(value.gt));
+          }
+          return JSON.stringify(actual) === JSON.stringify(value);
+        });
+        if (matches) Object.assign(row, data);
+        return {count: Number(matches)};
+      };
+      prismaMock.workflowJob.update.mockImplementation(async args => {apply(args); return row;});
+      prismaMock.workflowJob.updateMany.mockImplementation(async args => apply(args));
+      txMock.workflowJob.updateMany.mockImplementation(async args => apply(args));
+      oauthSyncMock.mockImplementationOnce(async () => {
+        if (mode.startsWith("renewed")) {
+          await vi.advanceTimersByTimeAsync(7 * 60_000);
+          acknowledged = row.lockedAt;
+          expect(acknowledged.getTime()).toBeGreaterThan(original.lockedAt.getTime());
+          if (mode === "renewed-error") throw new Error("Provider failed after renewal");
+          return;
+        }
+        if (mode !== "current") {row.attempts = 2; row.lockedAt = new Date(Date.now()+1);}
+        if (mode === "takeover-error") throw new Error("Old worker failed");
+      });
+      await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+      expect(oauthSyncMock).toHaveBeenCalledWith("oauth-job", original.payload, "ws-1", expect.objectContaining(original));
+      expect(prismaMock.workflowJob.update).not.toHaveBeenCalled();
+      if (mode.startsWith("takeover")) {
+        expect(txMock.workflowJob.updateMany).not.toHaveBeenCalled();
+        expect(loggerMock.warn).toHaveBeenCalledWith("workflow_job_processed", expect.objectContaining({outcome: "failed"}));
+      } else {
+      expect(txMock.workflowJob.updateMany).toHaveBeenCalledWith({where: expect.objectContaining({
+        id: original.id, workspaceId: original.workspaceId, type, attempts: 1, lockedBy: "worker-1", startedAt: original.startedAt,
+        payload: {equals: original.payload}, lockedAt: {equals: acknowledged, gt: expect.any(Date)},
+      }), data: expect.any(Object)});
+      }
+      expect(row).toMatchObject(mode === "current" || mode === "renewed-success" ? {status: "COMPLETED", lockedBy: null}
+        : mode === "renewed-error" ? {status: "PENDING", lockedBy: null}
+        : {status: "RUNNING", attempts: 2, lockedBy: "worker-1"});
+      if (mode.startsWith("renewed")) expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
   it("does not complete feedback jobs that never reach a new review checkpoint", async () => {
     txMock.$queryRaw.mockResolvedValueOnce([{
       id: "feedback-job", workspaceId: "ws-1", type: "agent.proposal-drafting",
@@ -254,9 +319,9 @@ describe("runPendingJobs", () => {
     });
   });
 
-  it("does not complete a source regeneration claim superseded before generation", async () => {
+  it.each(["agent.brain-source-regenerate", "agent.brain-article-variant", "agent.graph-source-variant"])("does not complete a %s claim superseded before generation", async type => {
     txMock.$queryRaw.mockResolvedValueOnce([{
-      id: "job-old", workspaceId: "ws-1", type: "agent.brain-source-regenerate", payload: {}, attempts: 1,
+      id: "job-old", workspaceId: "ws-1", type, payload: {}, attempts: 1,
     }]);
     runAgentWorkflowJobMock.mockResolvedValue({ phase: "SUPERSEDED" });
     prismaMock.workflowJob.updateMany.mockClear();
@@ -266,6 +331,60 @@ describe("runPendingJobs", () => {
     expect(runAgentWorkflowJobMock).toHaveBeenCalledWith(expect.objectContaining({ id: "job-old", attempts: 1 }), "worker-old");
     expect(prismaMock.workflowJob.updateMany).not.toHaveBeenCalled();
     expect(prismaMock.workflowJob.update).not.toHaveBeenCalled();
+  });
+
+  describe.each(["agent.brain-article-variant", "agent.graph-source-variant"])("%s claim finalization", type => {
+    function claimedRow() {
+      const row = { id: "variant-job", workspaceId: "ws-1", type, payload: { phase: "PENDING" },
+        attempts: 1, status: "RUNNING", lockedBy: "worker-1", lockedAt: new Date(), startedAt: new Date(), error: null };
+      txMock.$queryRaw.mockResolvedValueOnce([structuredClone(row)]);
+      // Apply the actual outbox update predicate to a separate persisted row.
+      // An unconditional update therefore reproduces replacement clobbering.
+      const apply = ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        const matches = Object.entries(where).every(([key, value]) => row[key as keyof typeof row] === value);
+        if (matches) Object.assign(row, data);
+        return { count: Number(matches) };
+      };
+      prismaMock.workflowJob.update.mockImplementation(async args => { apply(args); return row; });
+      prismaMock.workflowJob.updateMany.mockImplementation(async args => apply(args));
+      return row;
+    }
+
+    it.each(["SUPERSEDED", "APPLIED", "ERROR"])("preserves a replacement attempt after stale %s returns", async phase => {
+      const row = claimedRow(); let replacement: typeof row;
+      runAgentWorkflowJobMock.mockImplementationOnce(async () => {
+        // Reclaim under the same worker identity: owner alone is insufficient.
+        row.attempts = 2; row.lockedAt = new Date(Date.now() + 1);
+        row.payload = { phase: "GENERATING" }; replacement = structuredClone(row);
+        if (phase === "ERROR") throw new Error("Old model call failed");
+        return { phase };
+      });
+      await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+      expect(row).toEqual(replacement!);
+      expect(prismaMock.workflowJob.update).not.toHaveBeenCalled();
+      if (phase === "SUPERSEDED") expect(prismaMock.workflowJob.updateMany).not.toHaveBeenCalled();
+      else expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+        where: { id: "variant-job", workspaceId: "ws-1", type, status: "RUNNING", lockedBy: "worker-1", attempts: 1 },
+        data: expect.objectContaining({ status: phase === "ERROR" ? "PENDING" : "COMPLETED" }),
+      });
+    });
+
+    it.each(["APPLIED", "STALE", "ERROR"])("finalizes the current attempt after %s with its updated recipe", async phase => {
+      const row = claimedRow();
+      runAgentWorkflowJobMock.mockImplementationOnce(async () => {
+        row.payload = { phase: "GENERATING" };
+        if (phase === "ERROR") throw new Error("Current model call failed");
+        return { phase };
+      });
+      await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+      expect(row).toMatchObject({ attempts: 1, status: phase === "ERROR" ? "PENDING" : "COMPLETED",
+        lockedBy: null, lockedAt: null, payload: { phase: "GENERATING" } });
+      expect(prismaMock.workflowJob.update).not.toHaveBeenCalled();
+      expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+        where: { id: "variant-job", workspaceId: "ws-1", type, status: "RUNNING", lockedBy: "worker-1", attempts: 1 },
+        data: expect.objectContaining({ status: phase === "ERROR" ? "PENDING" : "COMPLETED" }),
+      });
+    });
   });
 
   it.each([null, { workspaceId: "ws-1", revokedAt: new Date(), client: { isActive: true } },
@@ -535,11 +654,20 @@ describe("runPendingJobs", () => {
         workspaceId: "ws-1",
         type: "meeting-audio.transcribe",
         payload: { audioAssetId: "audio-1" },
-        attempts: 1, lockedBy: "worker-1", lockedAt,
+        attempts: 1, lockedBy: "worker-1", lockedAt, startedAt: lockedAt,
       },
     ]);
 
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    // Every eligibility/reclaim predicate in the exclusive SQL turn must keep
+    // audio in the UTC-clock lane, including the final UPDATE recheck.
+    const [strings, ...values] = txMock.$queryRaw.mock.calls[0] as [TemplateStringsArray, ...Array<{sql?: string}>];
+    const claimSql = strings.map((part, index) => part + (values[index]?.sql ?? "")).join("");
+    const clockFamilies = [...claimSql.matchAll(/job\.type (?:NOT )?IN \(([^)]+)\)/g)]
+      .filter(match => match[1].includes("agent.action-extraction"));
+    expect(clockFamilies.length).toBeGreaterThan(4);
+    expect(clockFamilies.every(match => match[1].includes("meeting-audio.transcribe"))).toBe(true);
 
     expect(runMeetingAudioAssetTranscriptionMock).toHaveBeenCalledWith({
       workspaceId: "ws-1",
@@ -547,8 +675,10 @@ describe("runPendingJobs", () => {
       workflowJobId: "job-1",
       expectedLease: { attempts: 1, lockedBy: "worker-1", lockedAt },
     });
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1", workspaceId: "ws-1", type: "meeting-audio.transcribe",
+        status: "RUNNING", attempts: 1, lockedBy: "worker-1", startedAt: lockedAt,
+        payload: { equals: { audioAssetId: "audio-1" } }, lockedAt: { gt: expect.any(Date) } }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),

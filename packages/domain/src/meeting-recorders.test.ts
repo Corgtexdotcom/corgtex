@@ -3490,7 +3490,7 @@ describe("meeting recorder domain", () => {
     await expect(reconcileMeetingRecorders("workspace-1")).resolves.toMatchObject({ staleFailed: 0, recoveredTranscripts: 1 });
 
     expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(1);
-    expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+    expect(prismaMock.$queryRaw.mock.calls.every(([query]: any[]) => query.strings.join("?").includes('SELECT r."id" FROM "MeetingRecording"'))).toBe(true);
     expect(prismaMock.meetingRecording.findMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
       where: expect.objectContaining({
         OR: expect.arrayContaining([
@@ -4331,6 +4331,18 @@ describe("meeting recorder domain", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled();
     expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
+  });
+
+  it("excludes processed normal history while preserving stale recorder recovery discovery", async () => {
+    const {reconcileMeetingRecorders} = await import("./meeting-recorders");
+    prismaMock.meetingRecording.findMany.mockResolvedValue([]);
+    await reconcileMeetingRecorders("workspace-1");
+    const query = prismaMock.meetingRecording.findMany.mock.calls.find(([query]: any[]) => query.where?.provider?.in)?.[0];
+    expect(query.where.OR).toEqual([
+      {status: {in: expect.arrayContaining(["COMPLETED", "RECORDING"])}, transcriptProcessedAt: null},
+      {id: {in: []}},
+      {status: "FAILED", failureCode: "STALE_RECORDER"},
+    ]);
   });
 
   it("stale-vs-webhook race: terminalization lock skips if transcriptProcessedAt is set during lock wait", async () => {

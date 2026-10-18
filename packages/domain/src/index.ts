@@ -40,7 +40,7 @@ export {
   captureArtifactPermissionEpochs, recordArtifactInputLineage, copyArtifactInputLineage,
   advanceHumanArtifactInputLineage, advanceArchivedArtifactEnvelopeLineage, invalidateArtifactInputLineage,
   hasCurrentArtifactInputLineage, currentArtifactInputRoots, isArtifactArchiveMetadataReadable,
-  readableArtifactIds, readableBrainSourceIds,
+  readableArtifactIds, readableBrainSourceIds, captureArtifactReadHeadObservation, withArtifactCountReleaseSnapshot,
 } from "./source-lineage";
 export type { ArtifactInputWriteFence, LineageKind, LineageInput, LineageRoot } from "./source-lineage";
 export { prepareArtifactSourceCommit, withArtifactSourceCommit } from "./artifact-source-commit";
@@ -222,3 +222,6 @@ export { captureManualTranscriptSourceArtifact } from "./manual-transcript-sourc
 export { inspectLegacyRecovery, recoverLegacyArtifact, legacyRecoveryFileBinding, LEGACY_RECOVERY_KINDS, type LegacyRecoveryKind } from "./legacy-recovery";
 
 export { isLegacyRecoveryProofWorkspaceShareable } from "./source-lineage";
+
+export { WorkItemReadRelease } from "./work-item-readable-page";
+export { captureReadableDigestInputs } from "./digest-lineage";

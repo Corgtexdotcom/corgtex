@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AppActor } from "@corgtex/shared";
+import type { LineageKind } from "./source-lineage";
 
 const { prismaMock, txMock, requireWorkspaceMembershipMock } = vi.hoisted(() => {
   const constitution = { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() };
@@ -35,6 +37,17 @@ vi.mock("./source-lineage", () => ({
 }));
 vi.mock("./producer-lineage", () => ({ prepareProducerLineage: vi.fn().mockResolvedValue({ mode: "DERIVED", inputs: [], roots: [] }),
   finishProducerLineage: vi.fn().mockResolvedValue({}) }));
+vi.mock("./digest-lineage", async importOriginal => ({
+  createArtifactSampleBudget: (await importOriginal<typeof import("./digest-lineage")>()).createArtifactSampleBudget,
+  DigestReadRelease: class {
+    constructor(readonly actor: AppActor, readonly workspaceId: string) {}
+    async capture<T extends { id: string }>(kind: LineageKind, rows: T[]) {
+      const readable = await readableArtifactIds(this.actor, this.workspaceId, kind, rows);
+      return { records: rows.filter(row => readable.has(row.id)) };
+    }
+    async finish<T>(value: T) { return value; }
+  },
+}));
 
 import {
   createConstitutionVersion,
@@ -347,13 +360,42 @@ describe("Constitution input proof and readers", () => {
   it("filters unknown and restricted version bodies before current selection, pagination, and totals", async () => {
     txMock.constitution.findMany.mockResolvedValue([
       { id: "private", version: 5, bodyMd: "Hidden" }, { id: "legacy", version: 4, bodyMd: "Unknown" },
-      { id: "public-old", version: 1, bodyMd: "Old known" }, { id: "public-current", version: 3, bodyMd: "Current known" },
+      { id: "public-current", version: 3, bodyMd: "Current known" }, { id: "public-old", version: 1, bodyMd: "Old known" },
     ]);
     vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows
       .filter((row) => row.id.startsWith("public")).map((row) => row.id)));
     expect(await listConstitutionVersions(actor, "ws-1", { take: 1, skip: 1 })).toMatchObject({ items: [{ id: "public-old" }], total: 2 });
+    // The database supplies the canonical page order for current selection.
+    txMock.constitution.findMany.mockResolvedValue([
+      { id: "private", version: 5, bodyMd: "Hidden" }, { id: "legacy", version: 4, bodyMd: "Unknown" },
+      { id: "public-current", version: 3, bodyMd: "Current known" }, { id: "public-old", version: 1, bodyMd: "Old known" },
+    ]);
     expect(await getCurrentConstitution(actor, "ws-1")).toMatchObject({ id: "public-current", bodyMd: "Current known" });
-    expect(txMock.constitution.findMany).toHaveBeenCalledWith({ where: { workspaceId: "ws-1" } });
+    expect(txMock.constitution.findMany).toHaveBeenCalledWith({ where: { workspaceId: "ws-1" }, orderBy: [{ version: "desc" }, { id: "desc" }], take: 100 });
+  });
+
+  it("replenishes denied pages with a stable keyset and stops checking at the first readable version", async () => {
+    const denied = Array.from({ length: 100 }, (_, index) => ({ id: `denied-${index}`, version: 200 - index }));
+    txMock.constitution.findMany.mockResolvedValueOnce(denied).mockResolvedValueOnce([
+      { id: "selected", version: 100 }, { id: "unneeded", version: 99 },
+    ]);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows.filter(row => row.id === "selected").map(row => row.id)));
+    expect(await getCurrentConstitution(actor, "ws-1")).toMatchObject({ id: "selected" });
+    expect(txMock.constitution.findMany).toHaveBeenNthCalledWith(2, {
+      where: { workspaceId: "ws-1", OR: [{ version: { lt: 101 } }, { version: 101, id: { lt: "denied-99" } }] },
+      orderBy: [{ version: "desc" }, { id: "desc" }], take: 100,
+    });
+    expect(readableArtifactIds).toHaveBeenCalledTimes(101);
+    expect(readableArtifactIds).not.toHaveBeenCalledWith(actor, "ws-1", "Constitution", [{ id: "unneeded", version: 99 }]);
+  });
+
+  it("does not report no current constitution after 200 denied candidates", async () => {
+    const rows = Array.from({length: 501}, (_, i) => ({id: `hidden-${i}`, version: 501-i}));
+    txMock.constitution.findMany.mockImplementation(async ({where, take}: any) => rows.filter(row => !where.OR || row.version < where.OR[0].version.lt).slice(0, take));
+    vi.mocked(readableArtifactIds).mockResolvedValue(new Set());
+    await expect(getCurrentConstitution(actor, "ws-1")).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+    expect(txMock.constitution.findMany).toHaveBeenCalledTimes(2);
+    expect(readableArtifactIds).toHaveBeenCalledTimes(200);
   });
 
   it("loads only provably readable policy rows before sort and fingerprint", async () => {

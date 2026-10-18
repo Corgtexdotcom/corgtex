@@ -1,11 +1,11 @@
 import { env, prisma, sha256, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import type { NewspaperCadence, NewspaperDelivery, NewspaperDeliveryKind, NewspaperDeliveryStatus, NewspaperEdition, NewspaperTrackedLink, Prisma } from "@prisma/client";
+import type { NewspaperCadence, NewspaperDelivery, NewspaperDeliveryKind, NewspaperDeliveryStatus, NewspaperEdition, Prisma } from "@prisma/client";
 import { createHmac } from "node:crypto";
 import { AppError, invariant } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
-import { invalidateArtifactInputLineage, readableArtifactIds, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
-import { loadReadableDigestQuery } from "./digest-lineage";
+import { invalidateArtifactInputLineage, sealArtifactInputActor, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
+import { DigestReadRelease, loadReadableDigestQuery } from "./digest-lineage";
 import {
   getNextNewspaperRunISO,
   isHumanNewspaperRecipientIdentity,
@@ -278,49 +278,40 @@ export async function recordNewspaperDelivery(params: {
 }
 
 export async function recordNewspaperLinkClick(actor: AppActor, token: string) {
+  sealArtifactInputActor(actor);
   const tokenHash = sha256(token.trim());
-  const link = await prisma.newspaperTrackedLink.findUnique({
-    where: { tokenHash },
-  });
-
-  if (!link) {
-    throw new AppError(404, "NOT_FOUND", "Newspaper link not found.");
-  }
-
+  const loadedLink = await prisma.newspaperTrackedLink.findUnique({ where: { tokenHash } });
+  const link = loadedLink ? structuredClone(loadedLink) : null;
+  const missing = () => new AppError(404, "NOT_FOUND", "Newspaper link not found.");
+  if (!link) throw missing();
   try {
     await requireWorkspaceMembership({ actor, workspaceId: link.workspaceId });
-    const readableRuns = await readableNewspaperRunKeys(actor, link.workspaceId, [link.runKey]);
-    if (!readableRuns.has(link.runKey)) throw new Error("Unreadable edition");
-    if (!(await readableArtifactIds(actor, link.workspaceId, "NewspaperTrackedLink", [link])).has(link.id)) throw new Error("Unreadable link");
-  } catch {
-    throw new AppError(404, "NOT_FOUND", "Newspaper link not found.");
-  }
-
-  const target = normalizeTrackableTarget(link.targetUrl);
-  if (!target) {
-    throw new AppError(404, "NOT_FOUND", "Newspaper link not found.");
-  }
-
-  const now = new Date();
-  await prisma.newspaperTrackedLink.update({
-    where: { id: link.id },
-    data: {
-      clickCount: { increment: 1 },
-      firstClickedAt: link.firstClickedAt ?? now,
-      lastClickedAt: now,
-    },
-  });
-
-  return { targetUrl: target };
-}
-
-async function readableNewspaperRunKeys(actor: AppActor, workspaceId: string, runKeys: string[]) {
-  if (runKeys.length === 0) return new Set<string>();
-  const editions = await prisma.newspaperEdition.findMany({
-    where: { workspaceId, runKey: { in: [...new Set(runKeys)] } },
-  });
-  const readable = await readableArtifactIds(actor, workspaceId, "NewspaperEdition", editions);
-  return new Set(editions.filter((edition) => readable.has(edition.id)).map((edition) => edition.runKey));
+    const release = new DigestReadRelease(actor, link.workspaceId);
+    const editions = await prisma.newspaperEdition.findMany({ where: { workspaceId: link.workspaceId, runKey: link.runKey } });
+    const admittedEditions = await release.capture("NewspaperEdition", editions);
+    const editionId = admittedEditions.records[0]?.id;
+    if (!editionId) throw missing();
+    const admittedLink = await release.capture("NewspaperTrackedLink", [link]);
+    if (admittedLink.records.length !== 1) throw missing();
+    const target = normalizeTrackableTarget(link.targetUrl);
+    if (!target) throw missing();
+    const validateBinding = async (tx: Prisma.TransactionClient) => {
+      const currentLink = await tx.newspaperTrackedLink.findUnique({ where: { id: link.id },
+        select: { id: true, workspaceId: true, runKey: true } });
+      const currentEdition = await tx.newspaperEdition.findFirst({ where: { id: editionId, workspaceId: link.workspaceId, runKey: link.runKey }, select: { id: true } });
+      if (!currentLink || currentLink.workspaceId !== link.workspaceId || currentLink.runKey !== link.runKey || !currentEdition) throw missing();
+    };
+    await release.finish(undefined, async tx => {
+      await validateBinding(tx);
+      const now = new Date();
+      await tx.newspaperTrackedLink.update({ where: { id: link.id }, data: {
+        clickCount: { increment: 1 }, firstClickedAt: link.firstClickedAt ?? now, lastClickedAt: now,
+      } });
+    });
+    // The mutation can yield after its write. Reuse the original proof in a fresh
+    // release snapshot; a denied redirect may still have aggregate click telemetry.
+    return await release.finish({ targetUrl: target }, validateBinding);
+  } catch { throw missing(); }
 }
 
 export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceId: string, opts?: { take?: number }) {
@@ -328,45 +319,9 @@ export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceI
 
   const limit = opts?.take ?? 20;
   invariant(Number.isInteger(limit) && limit >= 0 && limit <= 5_000, 400, "INVALID_INPUT", "Delivery summary limit is invalid.");
-  if (limit === 0) return [];
-  // Group identities are discovery only. Every count below still comes from
-  // complete, permission-admitted rows, never from raw database aggregates.
-  const deliveries: NewspaperDelivery[] = [];
-  const latestReadable = new Map<string, number>();
-  let scannedGroups = 0, scannedDeliveries = 0, complete = false;
-  while (!complete) {
-    const candidates = await prisma.newspaperDelivery.groupBy({by: ["runKey"], where: {workspaceId},
-      _max: {createdAt: true}, orderBy: [{_max: {createdAt: "desc"}}, {runKey: "desc"}],
-      take: Math.min(50, 5_001 - scannedGroups), skip: scannedGroups});
-    for (const candidate of candidates) {
-      const threshold = [...latestReadable.values()].sort((a, b) => b - a)[limit - 1];
-      // A group's raw latest timestamp is an upper bound on any permitted row.
-      // Once it falls below the requested visible groups, older runs cannot win.
-      if (threshold !== undefined && candidate._max.createdAt && candidate._max.createdAt.getTime() < threshold) {
-        complete = true; break;
-      }
-      invariant(++scannedGroups <= 5_000, 503, "INPUT_SCAN_LIMIT", "Narrow the requested delivery history to complete its permission scan.");
-      const rows = await loadReadableDigestQuery<NewspaperDelivery>({actor, workspaceId, kind: "NewspaperDelivery",
-        limit: 100, completeScan: true, keyset: true,
-        loadBatch: async ({take, after}) => {
-          const batch = await prisma.newspaperDelivery.findMany({where: {workspaceId, runKey: candidate.runKey,
-            ...(after ? {OR: [{createdAt: {lt: after.createdAt}}, {createdAt: after.createdAt, id: {lt: after.id}}]} : {})},
-            orderBy: [{createdAt: "desc"}, {id: "desc"}], take: Math.min(take, 5_001 - scannedDeliveries)});
-          scannedDeliveries += batch.length;
-          invariant(scannedDeliveries <= 5_000, 503, "INPUT_SCAN_LIMIT", "The requested delivery groups exceed the complete permission scan limit.");
-          return batch;
-        },
-      });
-      if (rows.length) {
-        deliveries.push(...rows);
-        latestReadable.set(candidate.runKey, Math.max(...rows.map(row => row.createdAt.getTime())));
-      }
-    }
-    if (candidates.length < 50) complete = true;
-  }
-  const selectedKeys = new Set([...latestReadable].sort(([a, left], [b, right]) => right - left || b.localeCompare(a))
-    .slice(0, limit).map(([key]) => key));
-
+  if (limit === 0) return { items: [], complete: false, deliveriesComplete: false, linksComplete: false, scope: "WINDOW" as const };
+  // Enumerate each bounded candidate window once. Admission batches below use
+  // this fixed set, so concurrent inserts cannot create a falsely exact total.
   const groups = new Map<string, {
     runKey: string;
     kind: NewspaperDeliveryKind;
@@ -385,8 +340,7 @@ export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceI
     totalClickCount: number;
   }>();
 
-  for (const delivery of deliveries) {
-    if (!selectedKeys.has(delivery.runKey)) continue;
+  const addDelivery = (delivery: NewspaperDelivery) => {
     const group = groups.get(delivery.runKey) ?? {
       runKey: delivery.runKey,
       kind: delivery.kind,
@@ -420,29 +374,38 @@ export async function listNewspaperDeliverySummaries(actor: AppActor, workspaceI
       group.lastSentAt = !group.lastSentAt || delivery.sentAt > group.lastSentAt ? delivery.sentAt : group.lastSentAt;
     }
     groups.set(delivery.runKey, group);
-  }
+  };
 
-  const runKeys = Array.from(groups.keys());
-  if (runKeys.length > 0) {
-    const links = await loadReadableDigestQuery<NewspaperTrackedLink>({ actor, workspaceId, kind: "NewspaperTrackedLink",
-      limit: 100, completeScan: true, keyset: true,
-      loadBatch: ({ take, after }) => prisma.newspaperTrackedLink.findMany({
-        where: { workspaceId, runKey: { in: runKeys }, ...(after ? { id: { gt: after.id } } : {}) }, orderBy: { id: "asc" }, take }),
-    });
-    for (const link of links) {
+  const release = new DigestReadRelease(actor, workspaceId);
+  const deliveries = await prisma.newspaperDelivery.findMany({
+    where: { workspaceId }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 200,
+  });
+  for (let offset = 0; offset < deliveries.length; offset += 100) {
+    const captured = await release.capture("NewspaperDelivery", deliveries.slice(offset, offset + 100));
+    for (const row of captured.records) addDelivery(row);
+  }
+  const orderedGroups = [...groups.values()].sort((a, b) =>
+    b.createdAt.getTime() - a.createdAt.getTime() || b.runKey.localeCompare(a.runKey));
+  const items = orderedGroups.slice(0, limit);
+  const runKeys = items.map(group => group.runKey);
+  const links = runKeys.length ? await prisma.newspaperTrackedLink.findMany({
+    where: { workspaceId, runKey: { in: runKeys } }, orderBy: { id: "asc" }, take: 200,
+  }) : [];
+  for (let offset = 0; offset < links.length; offset += 100) {
+    const captured = await release.capture("NewspaperTrackedLink", links.slice(offset, offset + 100));
+    for (const link of captured.records) {
       const group = groups.get(link.runKey);
       if (!group) continue;
       group.trackedLinkCount += 1;
       group.totalClickCount += link.clickCount;
-      if (link.clickCount > 0) {
-        group.clickedLinkCount += 1;
-      }
+      if (link.clickCount > 0) group.clickedLinkCount += 1;
     }
   }
-
-  return Array.from(groups.values())
-    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.runKey.localeCompare(a.runKey))
-    .slice(0, limit);
+  const deliveriesComplete = deliveries.length < 200;
+  const linksComplete = links.length < 200;
+  return release.finish({ items, deliveriesComplete, linksComplete,
+    complete: deliveriesComplete && linksComplete && orderedGroups.length <= limit,
+    scope: "WINDOW" as const });
 }
 
 export async function listNewspaperDeliveryDetails(actor: AppActor, workspaceId: string, opts?: { take?: number }) {

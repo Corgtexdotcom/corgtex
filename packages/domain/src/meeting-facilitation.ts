@@ -1,4 +1,4 @@
-import { defaultModelGateway } from "@corgtex/models";
+import { defaultModelGateway, type ModelAttemptGuard } from "@corgtex/models";
 import { prisma, toInputJson, type AppActor } from "@corgtex/shared";
 import type { MeetingInsightType } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
@@ -39,6 +39,39 @@ async function requireAgendaProof(actor: AppActor, workspaceId: string, roots: L
     409, "UNKNOWN_LINEAGE", "The complete agenda input receipt is unavailable or changed.");
 }
 
+function agendaModelAttempt(actor: AppActor, workspaceId: string, roots: LineageRoot[], policy?: () => Promise<void>) {
+  const originalRoots = structuredClone(roots);
+  const controller = new AbortController();
+  const authorizeAttempt: ModelAttemptGuard = async ({ signal }) => {
+    try {
+      controller.signal.throwIfAborted();
+      signal.throwIfAborted();
+      await requireWorkspaceMembership({ actor, workspaceId });
+      await requireAgendaProof(actor, workspaceId, originalRoots);
+      if (policy) {
+        await policy();
+        // Slack policy validation may await remote authority. Replay the original
+        // prompt receipt afterward rather than capturing replacement inputs.
+        await requireAgendaProof(actor, workspaceId, originalRoots);
+      }
+      signal.throwIfAborted();
+      controller.signal.throwIfAborted();
+    } catch (error) {
+      controller.abort(error);
+      throw error;
+    }
+  };
+  return { authorizeAttempt, signal: controller.signal, assertActive: () => controller.signal.throwIfAborted() };
+}
+
+function agendaSlackAttempt(actor: AppActor, workspaceId: string, installationId: string, channelId: string, roots: LineageRoot[]) {
+  return agendaModelAttempt(actor, workspaceId, roots, async () => {
+    const installation = await activeSlackInstallation(workspaceId);
+    invariant(installation?.id === installationId, 403, "SOURCE_RESTRICTED", "The Slack installation is no longer active.");
+    await requirePublicSlackPublication(workspaceId, installationId, channelId, roots);
+  });
+}
+
 async function saveAgendaWithProof(actor: AppActor, workspaceId: string, meetingId: string,
   agenda: MeetingAgenda, roots: LineageRoot[], expectedMeetingHash?: string) {
   return prisma.$transaction(async (tx) => {
@@ -76,6 +109,7 @@ async function requirePublicSlackPublication(workspaceId: string, installationId
   invariant(validation.ok, 403, "SOURCE_RESTRICTED", "The Slack destination is unavailable.");
   invariant(await isArtifactInputProofPubliclyShareable(actor, workspaceId, [...roots, ...destinationRoots]),
     403, "SOURCE_RESTRICTED", "The content is not available to this public channel.");
+  return [...roots, ...destinationRoots];
 }
 
 type AgendaEditOutput = {
@@ -317,8 +351,11 @@ export async function prepareAgendaForMeeting(params: {
   const fallbackAgenda = buildLegacyAgendaFallback(context);
   let agenda: LegacyMeetingAgenda = fallbackAgenda;
   let fallbackReason: string | null = "model_not_used";
+  const attempt = agendaModelAttempt(actor, params.workspaceId, lineageRoots);
   try {
     const extraction = await defaultModelGateway.extract({
+      authorizeAttempt: attempt.authorizeAttempt,
+      signal: attempt.signal,
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId,
       instruction: [
@@ -341,12 +378,15 @@ export async function prepareAgendaForMeeting(params: {
         ]
       }`,
     });
+    attempt.assertActive();
     agenda = normalizeLegacyAgenda(extraction.output, context.meeting.title || "Meeting agenda", fallbackAgenda.sections);
     fallbackReason = null;
   } catch {
     agenda = fallbackAgenda;
     fallbackReason = "model_generation_failed";
   }
+  // Ordinary model errors can use the proven fallback; failed authority cannot.
+  attempt.assertActive();
   await saveAgendaWithProof(actor, params.workspaceId, context.meeting.id, agenda, lineageRoots, sourceStateHash);
 
   return { meeting: context.meeting, agenda, context, fallbackReason };
@@ -512,16 +552,17 @@ async function postAgendaForMeeting(params: {
   await requireAgendaProof(actor, params.workspaceId, lineageRoots.filter((root) => root.id !== params.meeting.id
     || (root.kind !== "Meeting" && root.kind !== "MeetingAgenda")));
   const attendeeMentions = await attendeeMentionsForContext(params.installationId, params.workspaceId, context.attendees);
-  await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, [
-    ...agendaRoots, ...lineageRoots.filter((root) => root.id !== params.meeting.id
-      || (root.kind !== "Meeting" && root.kind !== "MeetingAgenda")),
-  ]);
+  const publicationRoots = [...agendaRoots, ...lineageRoots.filter((root) => root.id !== params.meeting.id
+    || (root.kind !== "Meeting" && root.kind !== "MeetingAgenda"))];
+  await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, publicationRoots);
+  const publication = agendaSlackAttempt(actor, params.workspaceId, params.installationId, params.channelId, publicationRoots);
   const response = await sendSlackMessage(params.installationId, { channel: params.channelId }, renderAgendaSlackBlocks({
     meeting: params.meeting,
     agenda,
     attendeeMentions,
     timezone: params.settings.agendaTimezone || "UTC",
-  }));
+  }), undefined, publication);
+  publication.assertActive();
   const messageTs = typeof response.ts === "string" ? response.ts.trim() : "";
   if (!messageTs) {
     throw new AppError(502, "SLACK_AGENDA_POST_MISSING_TS", "Slack accepted the agenda post without returning a message timestamp.");
@@ -787,7 +828,14 @@ export async function runMeetingAgendaThreadEdit(params: {
 
   await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, promptRoots);
 
+  const attempt = agendaModelAttempt(actor, params.workspaceId, promptRoots, async () => {
+    const currentInstallation = await activeSlackInstallation(params.workspaceId);
+    invariant(currentInstallation?.id === params.installationId, 403, "SOURCE_RESTRICTED", "The Slack installation is no longer active.");
+    await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, promptRoots);
+  });
   const extraction = await defaultModelGateway.extract({
+    authorizeAttempt: attempt.authorizeAttempt,
+    signal: attempt.signal,
     workspaceId: params.workspaceId,
     workflowJobId: params.workflowJobId,
     instruction: [
@@ -828,15 +876,18 @@ export async function runMeetingAgendaThreadEdit(params: {
     }`,
   });
 
+  attempt.assertActive();
   await requireAgendaProof(actor, params.workspaceId, promptRoots);
   await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, promptRoots);
   const edit = parseAgendaEditOutput(extraction.output, meeting.title || currentAgenda.title);
   if (edit.action !== "update" || !edit.agenda) {
     const clarification = edit.clarification || "I could not identify a concrete agenda edit. Please tell me what to add, remove, reword, or reorder.";
+    const publication = agendaSlackAttempt(actor, params.workspaceId, params.installationId, params.channelId, promptRoots);
     await sendSlackMessage(params.installationId, {
       channel: params.channelId,
       threadTs: params.threadTs,
-    }, [slackSection("Agenda edit", [clarification])]);
+    }, [slackSection("Agenda edit", [clarification])], undefined, publication);
+    publication.assertActive();
     return { edited: false, reason: "clarification_requested" };
   }
 
@@ -861,12 +912,12 @@ export async function runMeetingAgendaThreadEdit(params: {
     } });
   });
 
-  await requireReadableAgenda(actor, params.workspaceId, meeting.id);
+  const publishedAgendaRoots = await requireReadableAgenda(actor, params.workspaceId, meeting.id);
   await requireAgendaProof(actor, params.workspaceId, promptRoots);
-  await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, [
-    ...promptRoots, ...(context.lineageRoots ?? []).filter((root) => root.id !== meeting.id
-      || (root.kind !== "Meeting" && root.kind !== "MeetingAgenda")),
-  ]);
+  const publicationRoots = [...publishedAgendaRoots, ...promptRoots, ...(context.lineageRoots ?? []).filter((root) => root.id !== meeting.id
+    || (root.kind !== "Meeting" && root.kind !== "MeetingAgenda"))];
+  await requirePublicSlackPublication(params.workspaceId, params.installationId, params.channelId, publicationRoots);
+  const publication = agendaSlackAttempt(actor, params.workspaceId, params.installationId, params.channelId, publicationRoots);
   await updateSlackMessage(params.installationId, {
     channel: params.channelId,
     ts: params.threadTs,
@@ -875,11 +926,13 @@ export async function runMeetingAgendaThreadEdit(params: {
     agenda: edit.agenda,
     attendeeMentions,
     timezone: settings.agendaTimezone || "UTC",
-  }));
+  }), undefined, publication);
+  publication.assertActive();
   await sendSlackMessage(params.installationId, {
     channel: params.channelId,
     threadTs: params.threadTs,
-  }, [slackSection("Agenda updated", [changeSummary])]);
+  }, [slackSection("Agenda updated", [changeSummary])], undefined, publication);
+  publication.assertActive();
 
 
   return { edited: true, changeSummary };
@@ -929,11 +982,14 @@ export async function postMeetingSummaryToAgendaThread(params: {
       return { skipped: true, reason: validation.code };
     }
 
-    await assertMeetingReviewPublicPublication(agendaActor(params.workspaceId), reviewPreparation);
+    const publicationRoots = await assertMeetingReviewPublicPublication(agendaActor(params.workspaceId), reviewPreparation);
+    const publication = agendaSlackAttempt(agendaActor(params.workspaceId), params.workspaceId,
+      reviewPreparation.installationId, reviewPreparation.channelId, publicationRoots);
     const response = await sendSlackMessage(reviewPreparation.installationId, {
       channel: reviewPreparation.channelId,
       threadTs: reviewPreparation.threadTs ?? undefined,
-    }, reviewPreparation.message.mainBlocks);
+    }, reviewPreparation.message.mainBlocks, undefined, publication);
+    publication.assertActive();
     const messageTs = typeof response.ts === "string" ? response.ts : "";
     invariant(messageTs, 502, "SLACK_POST_FAILED", "Slack did not return a message timestamp for the meeting follow-up review.");
     const threadTs = reviewPreparation.threadTs ?? messageTs;
@@ -957,7 +1013,8 @@ export async function postMeetingSummaryToAgendaThread(params: {
       await sendSlackMessage(reviewPreparation.installationId, {
         channel: reviewPreparation.channelId,
         threadTs,
-      }, blocks);
+      }, blocks, undefined, publication);
+      publication.assertActive();
     }
 
     await prisma.meeting.update({
@@ -994,7 +1051,7 @@ export async function postMeetingSummaryToAgendaThread(params: {
       { kind: "Meeting", id: meeting.id, snapshot: meeting },
       ...insights.map((insight) => ({ kind: "MeetingInsight" as const, id: insight.id, snapshot: insight })),
     ]);
-    await requirePublicSlackPublication(params.workspaceId, installation.id, meeting.agendaChannelId, roots);
+    roots = await requirePublicSlackPublication(params.workspaceId, installation.id, meeting.agendaChannelId, roots);
   } catch (error) {
     if (!(error instanceof Error) || !("code" in error)
       || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED", "NOT_FOUND"].includes(String(error.code))) throw error;
@@ -1007,10 +1064,12 @@ export async function postMeetingSummaryToAgendaThread(params: {
     groupedInsights.set(insight.type, items);
   }
 
+  const publication = agendaSlackAttempt(actor, params.workspaceId, installation.id, meeting.agendaChannelId, roots);
   await sendSlackMessage(installation.id, {
     channel: meeting.agendaChannelId,
     threadTs: meeting.agendaMessageTs,
-  }, renderSummaryBlocks({ meeting, groupedInsights }));
+  }, renderSummaryBlocks({ meeting, groupedInsights }), undefined, publication);
+  publication.assertActive();
 
   await prisma.meeting.update({
     where: { id: meeting.id },

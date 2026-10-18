@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import type { Prisma } from "@prisma/client";
+import type { Constitution, Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
+import { createArtifactSampleBudget, DigestReadRelease } from "./digest-lineage";
 import { captureArtifactInputProof, invalidateArtifactInputLineage, readableArtifactIds, recordArtifactInputLineage } from "./source-lineage";
 import { finishProducerLineage, prepareProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 
@@ -172,23 +173,81 @@ function isConstitutionVersionConflict(error: unknown) {
   return typeof target !== "string" || target.includes("workspaceId") || target.includes("version");
 }
 
-export async function listConstitutionVersions(actor: AppActor, workspaceId: string, opts?: {
-  take?: number;
-  skip?: number;
-}) {
-  await requireWorkspaceMembership({ actor, workspaceId });
-  const take = opts?.take ?? 20;
-  const skip = opts?.skip ?? 0;
+type ConstitutionPosition = {version: number; id: string};
+function constitutionCursor(cursor: string | undefined, workspaceId: string): ConstitutionPosition | undefined {
+  if (!cursor) return;
+  let value;
+  try { if (cursor.length <= 2048) value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")); } catch { /* validated below */ }
+  invariant(value?.v === 1 && value.workspaceId === workspaceId && Number.isSafeInteger(value.version) && value.version >= 0
+    && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 256,
+  400, "INVALID_INPUT", "Invalid constitution continuation.");
+  return {version: value.version, id: value.id};
+}
 
-  const rows = await prisma.constitution.findMany({ where: { workspaceId } });
-  const readable = await readableArtifactIds(actor, workspaceId, "Constitution", rows);
-  const visible = rows.filter((row) => readable.has(row.id)).sort((left, right) => right.version - left.version);
-  return { items: visible.slice(skip, skip + take), total: visible.length, take, skip };
+/** History is a bounded window, not a fabricated exact corpus total. */
+export async function listConstitutionVersionPage(actor: AppActor, workspaceId: string, opts?: {take?: number; cursor?: string}, readRelease?: DigestReadRelease) {
+  const take = opts?.take ?? 20;
+  invariant(Number.isSafeInteger(take) && take >= 1 && take <= 100, 400, "INVALID_INPUT", "Constitution window is out of range.");
+  let after = constitutionCursor(opts?.cursor, workspaceId);
+  await requireWorkspaceMembership({actor, workspaceId});
+  invariant(!readRelease || readRelease.actor === actor && readRelease.workspaceId === workspaceId,
+    400, "INVALID_INPUT", "Constitution read scope does not match this request.");
+  const release = readRelease ?? new DigestReadRelease(actor, workspaceId);
+  const rows = await prisma.constitution.findMany({
+    where: {workspaceId, ...(after ? {OR: [{version: {lt: after.version}}, {version: after.version, id: {lt: after.id}}]} : {})},
+    orderBy: [{version: "desc"}, {id: "desc"}], take: 200,
+  });
+  const items: Constitution[] = [];
+  let consumed = 0;
+  for (let offset = 0; offset < rows.length && items.length < take; offset += 100) {
+    const page = rows.slice(offset, offset + 100);
+    const captured = await release.capture("Constitution", page);
+    const admitted = new Set(captured.records.map(row => row.id));
+    for (const row of page) {
+      after = {version: row.version, id: row.id}; consumed++;
+      if (admitted.has(row.id)) items.push(row);
+      if (items.length === take) break;
+    }
+  }
+  const complete = consumed === rows.length && rows.length < 200;
+  const nextCursor = !complete && after ? Buffer.from(JSON.stringify({v: 1, workspaceId, ...after})).toString("base64url") : null;
+  return release.finish({items, complete, nextCursor, hasMore: Boolean(nextCursor)});
+}
+
+/** Compatibility exact-total API fails explicitly when the finite window is incomplete. */
+export async function listConstitutionVersions(actor: AppActor, workspaceId: string, opts?: {take?: number; skip?: number}) {
+  const take = opts?.take ?? 20, skip = opts?.skip ?? 0;
+  invariant(Number.isSafeInteger(take) && take >= 0 && take <= 100 && Number.isSafeInteger(skip) && skip >= 0 && skip <= 200,
+    400, "INVALID_INPUT", "Constitution window is out of range.");
+  const page = await listConstitutionVersionPage(actor, workspaceId, {take: 100});
+  invariant(page.complete, 503, "SOURCE_READ_SCAN_LIMIT", "Use constitution continuation to read more history.");
+  return {items: page.items.slice(skip, skip + take), total: page.items.length, take, skip};
 }
 
 export async function getCurrentConstitution(actor: AppActor, workspaceId: string) {
-  const versions = await listConstitutionVersions(actor, workspaceId, { take: 1 });
-  return versions.items[0] ?? null;
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const release = new DigestReadRelease(actor, workspaceId);
+  let after: { version: number; id: string } | undefined;
+  // Current reads do not need the history endpoint's exact readable total.
+  // A bounded current sample must not report absence after an incomplete scan.
+  const budget = createArtifactSampleBudget(1);
+  while (true) {
+    const take = budget.nextTake();
+    const rows = await prisma.constitution.findMany({
+      where: { workspaceId, ...(after ? { OR: [
+        { version: { lt: after.version } }, { version: after.version, id: { lt: after.id } },
+      ] } : {}) },
+      orderBy: [{ version: "desc" }, { id: "desc" }], take,
+    });
+    budget.consume(rows.length, take);
+    for (const row of rows) {
+      const captured = await release.capture("Constitution", [row]);
+      if (captured.records.length) return release.finish(captured.records[0]);
+    }
+    if (rows.length < take) return release.finish(null);
+    const last = rows[rows.length - 1]!;
+    after = { version: last.version, id: last.id };
+  }
 }
 
 export async function createConstitutionVersion(params: ProducerLineageParams & {
@@ -286,17 +345,19 @@ export async function createConstitutionVersion(params: ProducerLineageParams & 
 export async function listPolicyCorpus(actor: AppActor, workspaceId: string) {
   await requireWorkspaceMembership({ actor, workspaceId });
 
+  const release = new DigestReadRelease(actor, workspaceId);
   const policies = await prisma.policyCorpus.findMany({ where: { workspaceId }, include: { proposal: true, circle: true } });
-  const readable = await readableArtifactIds(actor, workspaceId, "PolicyCorpus", policies);
-  const visible = policies.filter((policy) => readable.has(policy.id));
-  const readableProposals = await readableArtifactIds(actor, workspaceId, "Proposal", visible.map((policy) => policy.proposal));
-  const readableCircles = await readableArtifactIds(actor, workspaceId, "Circle", visible.flatMap((policy) => policy.circle ? [policy.circle] : []));
-  return visible.sort((left, right) => right.acceptedAt.getTime() - left.acceptedAt.getTime()).map((policy) => ({ ...policy,
+  // Bind policy bodies before admitting their joined labels. Every displayed
+  // contribution retains its original proof and head until the final release.
+  const visible = (await release.capture("PolicyCorpus", policies)).records;
+  const readableProposals = new Set((await release.capture("Proposal", visible.map(policy => policy.proposal))).records.map(proposal => proposal.id));
+  const readableCircles = new Set((await release.capture("Circle", visible.flatMap(policy => policy.circle ? [policy.circle] : []))).records.map(circle => circle.id));
+  return release.finish(visible.sort((left, right) => right.acceptedAt.getTime() - left.acceptedAt.getTime()).map((policy) => ({ ...policy,
     proposalId: readableProposals.has(policy.proposalId) ? policy.proposalId : null,
     proposal: readableProposals.has(policy.proposalId) ? { id: policy.proposal.id, title: policy.proposal.title, status: policy.proposal.status } : null,
     circleId: policy.circleId && readableCircles.has(policy.circleId) ? policy.circleId : null,
     circle: policy.circle && readableCircles.has(policy.circle.id) ? { id: policy.circle.id, name: policy.circle.name } : null,
-  }));
+  })));
 }
 
 export async function getApprovalPolicies(actor: AppActor, workspaceId: string) {

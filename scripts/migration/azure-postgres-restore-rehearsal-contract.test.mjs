@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
 
 const read = (path) => readFileSync(path, "utf8");
 const expectedFoundationDatabases = ["azure_maintenance", "azure_sys", "corgtex", "postgres"];
@@ -53,14 +54,43 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
   });
 
   it("uses an immutable official PostgreSQL 18.6 client and rejects local older clients", () => {
-    const image = "public.ecr.aws/docker/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
+    const image = "docker.io/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
     expect(ciWorkflow).toContain(`docker pull ${image}`);
     expect(workflow).toContain(image);
     expect(runner).toContain(image);
+    // Keep the original audited index (including both runner architectures),
+    // changing only its public registry transport. Every consumer must agree.
+    for (const source of [ciWorkflow, workflow, runner,
+      read("scripts/migration/ops-core-source-controller.integration.node-test.mjs"),
+      read("scripts/migration/ops-core-postgres-fence.integration.node-test.mjs")]) {
+      const references = source.match(/(?:public\.ecr\.aws\/docker|docker\.io)\/library\/postgres@sha256:[a-f0-9]{64}/gu);
+      expect(references?.length).toBeGreaterThan(0);
+      expect(new Set(references)).toEqual(new Set([image]));
+    }
     expect(workflow).toContain('client_version="$(docker run --rm "$POSTGRES_CLIENT_IMAGE" pg_dump --version)"');
     expect(workflow).toContain('[[ "$client_version" == "pg_dump (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)" ]]');
     expect(runner).toContain("POSTGRES_18_REQUIRED");
     expect(packageJson.devDependencies.pg).toBeTruthy();
+  });
+
+  it("prepares custody images on each consuming runner before its long tests", () => {
+    const jobs = parse(ciWorkflow).jobs;
+    const steps = jobs["check-native"].steps;
+    const prepare = steps.findIndex(step => step.name === "Prepare custody fixture images on this runner");
+    const custody = steps.findIndex(step => step.run === "npm run test:migration:ops-core");
+    expect(prepare).toBeGreaterThan(-1);
+    expect(custody).toBeGreaterThan(prepare);
+    expect(steps[prepare].run).toContain("docker pull docker.io/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280");
+    expect(steps[prepare].run).toContain("docker pull mcr.microsoft.com/azure-storage/azurite:3.35.0");
+    expect(steps[prepare].if).toBeUndefined();
+    expect(steps[prepare]["continue-on-error"]).toBeUndefined();
+    expect(steps[prepare]["timeout-minutes"]).toBe(5);
+    expect(JSON.stringify(steps.slice(prepare, custody))).not.toMatch(/docker (?:system prune|image prune|image rm|rmi)/u);
+    const synthetic = jobs["synthetic-preparation"].steps;
+    const localPrepare = synthetic.findIndex(step => step.name === "Cache pinned official PostgreSQL client");
+    expect(localPrepare).toBeGreaterThan(-1);
+    expect(synthetic[localPrepare].run).toBe(steps[prepare].run.split("\n").find(line => line.startsWith("docker pull docker.io/")));
+    expect(synthetic.findIndex(step => step.name === "Exercise native local source and actual client transport")).toBeGreaterThan(localPrepare);
   });
 
   it("pins only the documented Azure PostgreSQL roots for explicit target verification", () => {

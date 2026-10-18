@@ -19,6 +19,13 @@ export function installSourcePermissionEpochFixture(db: any) {
     return bound.length / 4;
   });
   db.$queryRaw.mockImplementation(async (...args: any[]) => {
+    if (sql(args).includes('SELECT DISTINCT ON ("artifactId") * FROM "ArtifactInputLineage"')) {
+      const [workspaceId, artifactType, ...ids] = values(args);
+      const rows = await db.artifactInputLineage.findMany({where: {workspaceId, artifactType, artifactId: {in: ids}}, orderBy: {revision: "desc"}});
+      const latest = new Map<string, any>();
+      for (const row of rows) if (!latest.has(row.artifactId) || latest.get(row.artifactId).revision < row.revision) latest.set(row.artifactId, row);
+      return [...latest.values()];
+    }
     if (!sql(args).includes('FROM "SourcePermissionEpoch"')) return previousQuery?.(...args) ?? [];
     const [workspaceId, ...bound] = values(args);
     const rows = [];

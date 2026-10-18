@@ -1,15 +1,24 @@
-import type { AppActor } from "@corgtex/shared";
-import { visitSourceReadableRecords } from "./source-scoped-read";
+import { prisma, type AppActor } from "@corgtex/shared";
+import type { Prisma } from "@prisma/client";
+import { captureReadableDigestInputs } from "./digest-lineage";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
-import { captureArtifactInputProof, captureArtifactReadHeadObservation, captureReadableWorkItemInputs, mergeLineageInputRoot, readableArtifactIds, withArtifactCountReleaseSnapshot,
+import { collectWorkItemReadSnapshot, captureArtifactInputProof, captureArtifactReadHeadObservation, captureReadableWorkItemInputs, mergeLineageInputRoot, readableArtifactIds, withArtifactCountReleaseSnapshot,
   type LineageKind, type LineageRoot } from "./source-lineage";
 
 /** Compact original observations only. Bodies stay in their canonical page. */
 export class WorkItemReadRelease {
   private readonly roots = new Map<string, LineageRoot>();
   private readonly heads = new Map<string,string>();
-  constructor(private readonly actor: AppActor, private readonly workspaceId: string) {}
+  constructor(private readonly actor: AppActor, private readonly workspaceId: string, readonly db: Prisma.TransactionClient | typeof prisma = prisma) {}
+  async capture<T extends {id: string}>(kind: LineageKind, records: T[], additionalInputs?: (record: T) => Parameters<typeof captureArtifactInputProof>[2]) {
+    const captured = await this.observeRead(() => captureReadableDigestInputs({actor: this.actor, workspaceId: this.workspaceId, kind, records, additionalInputs, db: this.db}));
+    this.add(captured.roots);
+    return captured;
+  }
+  readable<T extends {id: string}>(kind: LineageKind, records: T[]) {
+    return this.observeRead(() => readableArtifactIds(this.actor, this.workspaceId, kind, records, this.db));
+  }
   async observeRead<T>(read: () => Promise<T>): Promise<T> {
     const observed = await captureArtifactReadHeadObservation(read);
     for (const [key, stamp] of observed.heads) {
@@ -19,7 +28,7 @@ export class WorkItemReadRelease {
     return observed.value;
   }
   async admit<T extends {id: string}>(kind: "Action" | "Proposal" | "Tension", rows: T[]) {
-    const proof = await captureReadableWorkItemInputs(this.actor, this.workspaceId, kind, rows);
+    const proof = await captureReadableWorkItemInputs(this.actor, this.workspaceId, kind, rows, this.db);
     this.add(proof.roots);
     for (const [key,stamp] of proof.heads) {
       invariant(!this.heads.has(key) || this.heads.get(key) === stamp,409,"SOURCE_CHANGED","Work item lineage changed during collection.");
@@ -37,7 +46,7 @@ export class WorkItemReadRelease {
         continue;
       }
       const proof = await this.observeRead(() => captureArtifactInputProof(this.actor, this.workspaceId,
-        rows.slice(offset,offset+100).map(row => ({kind, id: row.id, snapshot: row}))));
+        rows.slice(offset,offset+100).map(row => ({kind, id: row.id, snapshot: row})), this.db));
       this.add(proof);
     }
   }
@@ -48,11 +57,21 @@ export class WorkItemReadRelease {
     }
   }
   async has<T extends {id: string}>(kind: LineageKind, load: (afterId: string | undefined, take: number) => Promise<T[]>) {
-    let found=false;
-    await visitSourceReadableRecords({actor:this.actor,workspaceId:this.workspaceId,kind,load,
-      visit:async rows=>{ if(!rows.length) return; await this.observe(kind,[rows[0]]);found=true;return false; }});
-    return found;
+    let afterId: string | undefined;
+    let examined = 0;
+    for (;;) {
+      const rows = await load(afterId,100);
+      invariant(rows.length <= 100 && rows.every(row => !afterId || row.id > afterId),503,"SOURCE_READ_SCAN_CHANGED","Source page changed; retry.");
+      examined += rows.length;
+      invariant(examined <= 10_000, 409, "SOURCE_READ_SCAN_LIMIT", "Related work item lookup exceeds its candidate window; narrow the filters.");
+      const visible = await this.readable(kind,rows);
+      const first = rows.find(row => visible.has(row.id));
+      if (first) { await this.observe(kind,[first]); return true; }
+      if (rows.length < 100) return false;
+      afterId = rows.at(-1)!.id;
+    }
   }
+
   finish<T>(value: T) {
     return withArtifactCountReleaseSnapshot(this.actor, this.workspaceId, [...this.roots.values()],
       async () => {}, async tx => {
@@ -60,6 +79,18 @@ export class WorkItemReadRelease {
         return value;
       }, this.heads);
   }
+}
+
+/** Keep inventory, rank, relationships and selected hydration in one local DB
+ * snapshot, then replay provider authority and release the original union. */
+export async function readWorkItemListSnapshot<T>(actor: AppActor, workspaceId: string,
+  collect: (release: WorkItemReadRelease) => Promise<T>) {
+  let release!: WorkItemReadRelease;
+  const value = await collectWorkItemReadSnapshot(workspaceId, async tx => {
+    release = new WorkItemReadRelease(actor, workspaceId, tx);
+    return collect(release);
+  });
+  return release.finish(value);
 }
 
 export type WorkItemPosition = { id: string; title: string; priority: number; createdAt: Date };
@@ -71,7 +102,12 @@ export function workItemAfter(row: WorkItemPosition, sort?: string) {
   return { OR: [{ priority: { lt: row.priority } }, ...date.map(after => ({ priority: row.priority, ...after }))] };
 }
 
-/** Canonical, sorted keyset pages; the corpus is never retained for a total. */
+/** Canonical, sorted keyset pages with the existing exact readable-total contract.
+ * `take` bounds returned bodies, not permission evaluation: even take: 0 must
+ * admit the complete matching window to compute its total. At most 10,000 raw
+ * candidates are admitted; an extra SQL page proves exhaustion or fails explicitly.
+ * Each page holds at most 100 bodies; original proofs bind off-page contributors.
+ */
 export async function readableWorkItemPage<T extends WorkItemPosition>(params: {
   actor: AppActor; workspaceId: string; kind: "Action" | "Proposal" | "Tension";
   take: number; skip: number; release: WorkItemReadRelease;
@@ -81,14 +117,16 @@ export async function readableWorkItemPage<T extends WorkItemPosition>(params: {
   invariant(Number.isSafeInteger(params.take) && params.take >= 0 && params.take <= 5000
     && Number.isSafeInteger(params.skip) && params.skip >= 0,400,"INVALID_INPUT","Work item pagination is invalid.");
   let after: T | undefined;
-  let total=0;
+  let total=0, examined=0;
   const items:T[]=[];
   for (;;) {
     const rows=await params.load(after);
     invariant(rows.length <= 100 && (!rows.length || rows.at(-1)!.id !== after?.id),503,"SOURCE_READ_SCAN_CHANGED","Source page changed; retry.");
+    examined += rows.length;
+    invariant(examined <= 10_000, 409, "SOURCE_READ_SCAN_LIMIT", "Work item listing exceeds its candidate window; narrow the filters.");
     const next=rows.at(-1);
     const readable = params.admit
-      ? await readableArtifactIds(params.actor,params.workspaceId,params.kind,rows)
+      ? await params.release.readable(params.kind,rows)
       : new Set((await params.release.admit(params.kind,rows)).map(row => row.id));
     const admitted:T[]=[];
     for(const row of rows) {
@@ -101,8 +139,7 @@ export async function readableWorkItemPage<T extends WorkItemPosition>(params: {
     if(rows.length<100) break;
     after=next;
   }
-  const current=await readableArtifactIds(params.actor,params.workspaceId,params.kind,items);
-  return {items:items.filter(row=>current.has(row.id)),total:total-items.filter(row=>!current.has(row.id)).length};
+  return {items,total};
 }
 
 /** Permission-filtered rank cannot use a raw SQL relation count. Keep at most
@@ -111,7 +148,7 @@ export async function readableWorkItemPage<T extends WorkItemPosition>(params: {
 export async function rankedReadableTensionPage<T extends WorkItemPosition>(params: {
   actor:AppActor; workspaceId:string; take:number; skip:number; release: WorkItemReadRelease;
   load:(afterId:string|undefined)=>Promise<T[]>;
-  votes:(row:T)=>Promise<number>;
+  votes:(rows:T[])=>Promise<Map<string, number>>;
 }) {
   invariant(Number.isSafeInteger(params.take) && params.take>=0 && params.take<=5000
     && Number.isSafeInteger(params.skip) && params.skip>=0,400,"INVALID_INPUT","Work item pagination is invalid.");
@@ -120,19 +157,27 @@ export async function rankedReadableTensionPage<T extends WorkItemPosition>(para
     || (b.row.createdAt?.getTime()??0)-(a.row.createdAt?.getTime()??0) || b.row.id.localeCompare(a.row.id);
   const items:T[]=[];
   let boundary:Ranked|undefined,total=0,remainingSkip=params.skip,first=true;
+  // Exact totals and global ranking cannot be certified from a truncated scan.
+  // Bound work across repeated rank windows, and fail instead of returning a
+  // plausible but incomplete page. The next page probes exact-limit exhaustion.
+  let examined = 0;
   for(;;) {
     const window:Ranked[]=[];
     let afterId:string|undefined;
     for(;;) {
       const rows=await params.load(afterId);
       invariant(rows.length<=100,503,"SOURCE_READ_SCAN_CHANGED","Source page changed; retry.");
-      const readable=new Set((await params.release.admit("Tension",rows)).map(row => row.id));
+      examined += rows.length;
+      invariant(examined <= 10_000, 409, "SOURCE_READ_SCAN_LIMIT", "Tension ranking exceeds its candidate window; narrow the filters.");
+      const admitted = await params.release.admit("Tension", rows);
+      const readable = new Set(admitted.map(row => row.id));
+      const votes = params.take === 0 ? new Map<string, number>() : await params.votes(admitted);
       for(const row of rows) {
         invariant(!afterId || row.id>afterId,503,"SOURCE_READ_SCAN_CHANGED","Source page changed; retry.");
         if(!readable.has(row.id)) continue;
         if(first) total++;
         if(params.take===0) continue;
-        const ranked={row,votes:await params.votes(row)};
+        const ranked={row,votes:votes.get(row.id) ?? 0};
         if(boundary && compare(ranked,boundary)<=0) continue;
         window.push(ranked);window.sort(compare);
         if(window.length>100) window.pop();
@@ -147,6 +192,5 @@ export async function rankedReadableTensionPage<T extends WorkItemPosition>(para
     if(items.length===params.take || window.length<100) break;
     boundary=window.at(-1);
   }
-  const current=await readableArtifactIds(params.actor,params.workspaceId,"Tension",items);
-  return {items:items.filter(row=>current.has(row.id)),total:total-items.filter(row=>!current.has(row.id)).length};
+  return {items,total};
 }

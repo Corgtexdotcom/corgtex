@@ -225,6 +225,21 @@ describe("member readers with current source receipts", () => {
     expect(fixture.prisma.action.findMany.mock.calls[0][0]).toMatchObject({take: 100, orderBy: [{createdAt: "desc"}, {id: "desc"}]});
   });
 
+  it("rejects a recent profile sample after 200 unproven actions", async () => {
+    const {publicAction} = await seed();
+    for (let index = 0; index < 501; index++) add("action", {...publicAction, id: `hidden-${index}`, createdAt: new Date("2027-01-01")});
+    await expect(getMemberProfile(alpha, workspaceId, "member-alpha")).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+    expect(fixture.prisma.action.findMany).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects incomplete activity after 200 unknown audit candidates", async () => {
+    await seed();
+    for (let index = 0; index < 501; index++) add("auditLog", {id: `hidden-audit-${index}`, workspaceId,
+      actorUserId: alpha.kind === "user" ? alpha.user.id : "", createdAt: new Date("2027-01-01"), entityType: "Unknown", entityId: "unknown"});
+    await expect(getMemberProfile(alpha, workspaceId, "member-alpha")).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+    expect(fixture.prisma.auditLog.findMany).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects other workspace profiles and reacts immediately to membership loss", async () => {
     await seed();
     await expect(getMemberProfile(alpha, "ws-b", "member-beta-b")).rejects.toMatchObject({ code: "FORBIDDEN" });

@@ -293,6 +293,10 @@ vi.mock("./source-lineage", async () => ({
   assertDirectArtifactReadOutsideCapture: vi.fn(),
   assertArtifactInputWriteFence: vi.fn(async () => {}),
   captureArtifactInputProof: vi.fn(async () => []),
+  captureReadableWorkItemInputs: vi.fn(async (_actor, _workspaceId, _kind, rows: Array<{id:string}>) => ({ids:new Set(rows.map(row=>row.id)),roots:[],heads:new Map()})),
+  captureArtifactReadHeadObservation: async (read:()=>Promise<unknown>) => ({value:await read(),heads:new Map()}),
+  mergeLineageInputRoot: (_prior:unknown,root:unknown)=>root,
+  withArtifactCountReleaseSnapshot: async (_actor:unknown,_workspaceId:string,_roots:unknown,_remote:unknown,finish:(tx:unknown)=>Promise<unknown>)=>finish({}),
   captureImmutableArtifactInputProof: vi.fn(async (_actor, _ws, roots) => roots),
   recordArtifactInputLineage: vi.fn(),
   currentArtifactInputRoots: vi.fn(async () => []),
@@ -304,6 +308,7 @@ vi.mock("./crm-direct-original-read", () => ({
   admitCrmDirectOriginalRows: vi.fn(async () => []),
   trackCrmDirectOrdinaryRows: vi.fn(async () => {}),
   assertCrmDirectReadCurrent: vi.fn(async () => {}),
+  discardCrmDirectReadProjections: vi.fn(),
   isCrmDirectOriginalRow: vi.fn(() => false),
   finalizeCrmDirectReadResult: vi.fn(async (_session, result) => result),
   captureCrmDirectReadContributors: vi.fn(async (_actor, _ws, _session, read) => read()),
@@ -888,7 +893,7 @@ describe("CRM domain", () => {
           relationshipType: { in: ["CLIENT", "PARTNER"] },
           lifecycleStage: { in: ["ACTIVE", "PILOT"] },
         }),
-        take: 100,
+        take: 10001,
       }));
       expect(result.total).toBe(1);
     });
@@ -1297,7 +1302,7 @@ describe("CRM domain", () => {
       expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
       expect(prisma.crmActivity.findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: expect.objectContaining({ workspaceId: "ws-1", accountId: "account-1" }),
-        take: 100,
+        take: 10001,
       }));
       expect(result.total).toBe(1);
     });
@@ -1346,7 +1351,7 @@ describe("CRM domain", () => {
         vi.mocked(delegate.count).mockResolvedValue(0);
         await list(dummyActor, "ws-1");
         expect(delegate.count).not.toHaveBeenCalled();
-        expect(delegate.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 100 }));
+        expect(delegate.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 10001 }));
       }
       await crm.listContacts(dummyActor, "ws-1", { archiveFilter: "archived" });
       expect(vi.mocked(prisma.crmContact.findMany).mock.calls[1]![0]!.where).toEqual(expect.objectContaining({ archivedAt: { not: null } }));
@@ -1681,7 +1686,7 @@ describe("CRM domain", () => {
       expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
       expect(prisma.crmProspectWorkspace.findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: expect.objectContaining({ crmWorkspaceId: "ws-1", accountId: "account-1", status: "ACTIVE" }),
-        take: 100,
+        take: 10001,
       }));
       expect(result.total).toBe(1);
     });
@@ -1740,7 +1745,7 @@ describe("CRM domain", () => {
           accountId: "account-1",
           OR: expect.any(Array),
         }),
-        take: 100,
+        take: 10001,
       }));
       expect(prisma.crmDeal.findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: expect.objectContaining({
@@ -1749,7 +1754,7 @@ describe("CRM domain", () => {
           contactId: "contact-1",
           stage: { in: ["QUALIFIED", "PROPOSAL"] },
         }),
-        take: 100,
+        take: 10001,
       }));
       expect(contacts.total).toBe(1);
       expect(deals.total).toBe(1);
@@ -1776,7 +1781,7 @@ describe("CRM domain", () => {
       expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
       expect(prisma.crmCommunicationSuggestion.findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: expect.objectContaining({ workspaceId: "ws-1", ownerUserId: "u-1", status: { in: ["REQUESTED", "SENT"] } }),
-        take: 100,
+        take: 10001,
       }));
       expect(result.total).toBe(1);
     });

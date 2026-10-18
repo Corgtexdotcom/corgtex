@@ -1,3 +1,5 @@
+import { assertVariantGenerationClaim, createVariantModelControls, variantGenerationClaimStamp,
+  type VariantGenerationControls } from "./variant-model-attempt";
 import { createHash, randomUUID } from "node:crypto";
 import { Prisma, type BrainArticle } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
@@ -634,7 +636,7 @@ async function markGeneratingVariantStale(params: { workspaceId: string; jobId: 
 /** Claim and acceptance both validate the actual worker lease and the requesting member's current proof. */
 export async function generateBrainArticleVariant(params: {
   workspaceId: string; jobId: string; expectedAttempt: number; expectedOwner: string;
-  generate: (sources: PermittedVariantSource[]) => Promise<{ title: string; bodyMd: string }>;
+  generate: (sources: PermittedVariantSource[], controls: VariantGenerationControls) => Promise<{ title: string; bodyMd: string }>;
 }) {
   invariant(Number.isInteger(params.expectedAttempt) && params.expectedAttempt > 0
     && typeof params.expectedOwner === "string" && params.expectedOwner.trim().length > 0,
@@ -677,7 +679,8 @@ export async function generateBrainArticleVariant(params: {
       const token = randomUUID();
       await tx.workflowJob.update({ where: { id: job.id }, data: {
         payload: { ...payload, phase: "GENERATING", generationToken: token } as Prisma.InputJsonObject } });
-      return { actor, prepared, token };
+      return { actor, prepared, token, claimStamp: variantGenerationClaimStamp({ ...job,
+        payload: { ...payload, phase: "GENERATING", generationToken: token } as Prisma.InputJsonObject }) };
       });
     } catch (error) { if (isStaleError(error)) return stale(); throw error; }
   }, { maxWait: 5_000, timeout: 120_000 });
@@ -689,7 +692,17 @@ export async function generateBrainArticleVariant(params: {
   try { inputsReadable = await isArtifactInputProofReadable(claim.actor, params.workspaceId, claim.prepared.roots); }
   catch (error) { if (!isStaleError(error)) throw error; }
   if (!inputsReadable) return markGeneratingVariantStale(params, claim.token);
-  const candidate = await params.generate(claim.prepared.sources);
+  const attempt = createVariantModelControls(async () => {
+    invariant(await isArtifactInputProofReadable(claim.actor, params.workspaceId, claim.prepared.roots),
+      409, "SOURCE_CHANGED", "The original article variant inputs are no longer readable.");
+    const currentOwner = await ownerActor(prisma, params.workspaceId, claim.prepared.recipe);
+    invariant(hash(currentOwner) === hash(claim.actor), 409, "SOURCE_CHANGED", "The requesting member changed.");
+    const job = await prisma.workflowJob.findFirst({ where: { id: params.jobId, workspaceId: params.workspaceId,
+      type: BRAIN_ARTICLE_VARIANT_JOB_TYPE } });
+    assertVariantGenerationClaim(claim.claimStamp, job);
+  });
+  const candidate = await params.generate(claim.prepared.sources, attempt.controls);
+  attempt.assertActive();
   const title = typeof candidate?.title === "string" ? candidate.title.trim() : "";
   const bodyMd = typeof candidate?.bodyMd === "string" ? candidate.bodyMd.trim() : "";
   invariant(title.length > 0 && title.length <= 300 && bodyMd.length > 0 && bodyMd.length <= 100_000,

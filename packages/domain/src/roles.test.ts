@@ -6,6 +6,9 @@ import { AppError } from "./errors";
 vi.mock("./source-lineage", () => ({
   captureArtifactInputProof: vi.fn().mockResolvedValue([]),
   readableArtifactIds: vi.fn().mockResolvedValue(new Set()),
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({ value: await read(), heads: new Map() }),
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _workspaceId: string, _roots: unknown,
+    before: () => Promise<void>, release: (tx: typeof prismaMock) => Promise<unknown>) => { await before(); return release(prismaMock); },
 }));
 
 vi.mock("./producer-lineage", () => ({
@@ -119,11 +122,23 @@ const actor: AppActor = {
   },
 };
 
+// Keep the fixture's per-kind denials while exercising the real release
+// orchestration. PostgreSQL regressions exercise the actual proof backend.
+async function captureFixtureProof(...[actor, workspaceId, inputs]: Parameters<typeof captureArtifactInputProof>) {
+  for (const input of inputs) {
+    if (input.kind === "User") continue;
+    const visible = await readableArtifactIds(actor, workspaceId, input.kind,
+      [input.snapshot as { id: string }]);
+    if (!visible.has(input.id)) throw new AppError(409, "SOURCE_RESTRICTED", "Fixture source denied.");
+  }
+  return [];
+}
+
 describe("roles domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row) => row.id)));
-    vi.mocked(captureArtifactInputProof).mockResolvedValue([]);
+    vi.mocked(captureArtifactInputProof).mockImplementation(captureFixtureProof);
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
@@ -1041,7 +1056,7 @@ describe("roles domain", () => {
 
     vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor, _workspaceId, inputs) => {
       if (inputs.some((input) => input.id === "user-revoked")) throw new AppError(409, "SOURCE_RESTRICTED", "Profile unavailable.");
-      return [];
+      return captureFixtureProof(_actor, _workspaceId, inputs);
     });
     const { getRole } = await import("./roles");
     const result = await getRole(actor, { workspaceId: "workspace-1", roleId: role.id });
@@ -1115,7 +1130,7 @@ describe("roles domain", () => {
     expect(await filterReadableRoleAssignments(actor, "workspace-1", [row])).toEqual([row]);
     expect(captureArtifactInputProof).toHaveBeenCalledWith(actor, "workspace-1", [
       { kind: "User", id: partialUser.id, snapshot: partialUser },
-    ]);
+    ], undefined);
     expect(vi.mocked(captureArtifactInputProof).mock.calls.at(-1)?.[2][0]?.snapshot).not.toHaveProperty("bio");
     expect(vi.mocked(readableArtifactIds).mock.calls.some((call) => call[2] === "User")).toBe(false);
   });
@@ -1125,7 +1140,7 @@ describe("roles domain", () => {
     const changed = readerAssignment("changed");
     vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor, _workspaceId, inputs) => {
       if (inputs[0]?.id === changed.member.user.id) throw new AppError(409, "SOURCE_CHANGED", "User changed.");
-      return [];
+      return captureFixtureProof(_actor, _workspaceId, inputs);
     });
     const { filterReadableRoleAssignments } = await import("./roles");
     expect(await filterReadableRoleAssignments(actor, "workspace-1", [changed, readable])).toEqual([readable]);

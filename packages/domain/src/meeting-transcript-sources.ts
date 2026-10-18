@@ -136,7 +136,7 @@ export async function getMeetingTranscriptSourcesFeatureState(actor: AppActor, w
   return { featureEnabled: await meetingTranscriptSourcesFeatureEnabled(workspaceId) };
 }
 
-async function requireMeetingTranscriptSourcesFeature(workspaceId: string) {
+export async function requireMeetingTranscriptSourcesFeature(workspaceId: string) {
   invariant(
     await meetingTranscriptSourcesFeatureEnabled(workspaceId),
     403,

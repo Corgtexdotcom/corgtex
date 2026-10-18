@@ -97,6 +97,26 @@ describe("mixed-source private graph bundles with real SQL receipts", () => {
     expect((await requestGraphSourceVariant(f.readerActor, { ...f.request, target: { kind: "ContextGraphObject", id: f.targets[1].id } })).status).toBe("READY");
     expect(await prisma.genericDerivedArtifactVariant.count()).toBe(1);
   });
+  it("discovers the latest matching cohort beyond 5,001 unrelated historical revisions", async () => {
+    const f = await fixture();
+    const old = await prisma.artifactInputLineage.findFirstOrThrow({where: {workspaceId: f.workspace.id,
+      artifactType: "ContextGraphObject", artifactId: f.targets[0].id}});
+    await prisma.artifactInputLineage.createMany({data: [
+      ...Array.from({length: 5_001}, (_, index) => ({workspaceId: f.workspace.id, artifactType: "ContextGraphObject",
+        artifactId: "000-historical", revision: index + 1, origin: index === 5_000 ? "UNKNOWN" : "DERIVED",
+        contentHash: old.contentHash, rootsJson: old.rootsJson!})),
+      ...Array.from({length: 120}, (_, index) => ({workspaceId: f.workspace.id, artifactType: "ContextGraphObject",
+        artifactId: `000-unrelated-${String(index).padStart(3, "0")}`, revision: 1, origin: "UNKNOWN", contentHash: "unrelated"})),
+      {workspaceId: f.foreign.id, artifactType: "ContextGraphObject", artifactId: "foreign", revision: 9_999,
+        origin: "DERIVED", contentHash: old.contentHash, rootsJson: old.rootsJson!},
+    ]});
+    const {variant} = await generate(f);
+    const visible = await getReadableGraphSourceVariants(f.readerActor, {workspaceId: f.workspace.id, scope: f.request.scope});
+    expect(visible).toHaveLength(1);
+    expect(visible[0].targets.map(target => target.id).sort()).toEqual(f.targets.map(target => target.id).sort());
+    expect(variant.ownerMemberId).toBe(f.readerMember.id);
+  });
+
   it("does not grant owner-specific variants to another admin/user/workspace or a different map scope", async () => {
     const f = await fixture(); const { variant } = await generate(f);
     expect(await getReadableGraphSourceVariants(f.ownerActor, { workspaceId: f.workspace.id, scope: f.request.scope })).toEqual([]);

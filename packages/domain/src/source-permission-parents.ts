@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { invariant } from "./errors";
 import { Prisma } from "@prisma/client";
 import type { LineageInput, LineageKind } from "./source-lineage";
 import { loadExternalMcpConnectionSetInput } from "./external-mcp-connection-set";
@@ -56,13 +58,14 @@ export function artifactPermissionParents(kind: LineageKind, row: Record<string,
     const parent = subjects[String(row.subjectType)];
     if (parent) field(parent, "subjectId");
   }
+  if (kind === "OAuthProviderFetchInput") { field("Member", "ownerMemberId"); field("User", "localUserId"); }
   if (kind === "SqlNativeRunInput") field("ExternalDataSource", "sourceId");
   if (kind === "KnowledgeChunk" && row.sourceType === "EXTERNAL_DATABASE") {
     const metadata = row.metadata;
     if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) add("SqlNativeRunInput", (metadata as Record<string, unknown>).nativeInputId);
   }
   if (kind === "KnowledgeChunk") {
-    const sources: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource" };
+    const sources: Record<string, LineageKind> = { BRAIN_ARTICLE: "BrainArticle", DOCUMENT: "Document", MEETING: "Meeting", PROPOSAL: "Proposal", EXTERNAL_CONTENT: "ExternalContentSource", TENSION: "Tension", ACTION: "Action", CIRCLE: "Circle", ROLE: "Role", SLACK: "CommunicationMessage" };
     const parent = sources[String(row.sourceType)];
     if (parent) field(parent, "sourceId");
   }
@@ -126,6 +129,22 @@ function scopeRelations(value: object, workspaceId: string): Record<string, unkn
     Object.keys(child).length ? scopeRelations(child, workspaceId) : { workspaceId }]));
 }
 
+type MetadataReadBatch = { db: Prisma.TransactionClient; workspaceId: string; active: boolean;
+  rows: ReadonlyMap<string, Record<string, unknown>> };
+const metadataReadBatch = new AsyncLocalStorage<MetadataReadBatch>();
+
+/** Raw observations supplied by the bounded local lineage reader. Its owner
+ * compares every full row and head again before releasing a successful read. */
+export async function withArtifactPermissionMetadataRead<T>(db: Prisma.TransactionClient, workspaceId: string,
+  rows: ReadonlyMap<string, Record<string, unknown>>, read: () => Promise<T>): Promise<T> {
+  invariant(!metadataReadBatch.getStore() && !hasActiveSourceCommitLockPlan(db),
+    409, "SOURCE_CHANGED", "Permission metadata batch cannot nest or cover a writer.");
+  const batch = {db, workspaceId, rows, active: true};
+  return metadataReadBatch.run(batch, async () => {
+    try { return await read(); } finally { batch.active = false; }
+  });
+}
+
 /** Select only identities and governing bindings; this neither reads parent body
  * lineage nor demands a read scope from the principal writing a new output. */
 export async function loadArtifactPermissionMetadata(tx: Prisma.TransactionClient, workspaceId: string,
@@ -134,6 +153,13 @@ export async function loadArtifactPermissionMetadata(tx: Prisma.TransactionClien
   if (hasActiveSourceCommitLockPlan(tx)) {
     const physical = sourceAuthorityPhysicalRow(input);
     if (physical) assertSourceCommitRowCovered(tx, physical.table, physical.id);
+  }
+  const batch = metadataReadBatch.getStore();
+  const observed = batch?.rows.get(JSON.stringify([input.kind, input.id]));
+  if (batch && observed) {
+    invariant(batch.active && batch.db === tx && batch.workspaceId === workspaceId,
+      409, "SOURCE_CHANGED", "Permission metadata batch belongs to another or expired read.");
+    return structuredClone(Object.fromEntries(Object.entries(observed).filter(([field]) => METADATA_FIELDS.has(field) || (input.kind === "OAuthProviderFetchInput" && field === "sourceKind"))));
   }
   if (input.kind === "ExternalMcpConnectionSet") return loadExternalMcpConnectionSetInput(workspaceId, input.id, tx);
   const modelName = MODEL_ALIASES[input.kind] ?? input.kind;
@@ -144,6 +170,7 @@ export async function loadArtifactPermissionMetadata(tx: Prisma.TransactionClien
   // The documentId in BrainSource's policy metadata is its actual live parent
   // binding; no metadata is forwarded to a model or persisted as semantic input.
   if (["BrainSource", "KnowledgeChunk"].includes(input.kind)) select.metadata = true;
+  if (input.kind === "OAuthProviderFetchInput") select.sourceKind = true;
   if (input.kind === "ConversationOperationOutcome") { select.controlJson = true; select.operation = true; }
   const where = input.kind === "Workspace" ? { id: input.id === workspaceId ? input.id : "" }
     : input.kind === "User" ? { id: input.id, memberships: { some: { workspaceId, isActive: true } } }

@@ -366,6 +366,28 @@ describe("authenticated recorder native custody and atomic publication", () => {
     } finally { vi.unstubAllGlobals(); }
   });
 
+  it("does not select old processed history or a recent verified publication for reconciliation", async () => {
+    const f = await fixture();
+    await ingest(f);
+    const oldMeeting = await prisma.meeting.create({data: {workspaceId: f.workspace.id, title: "Old synthetic meeting",
+      source: "manual", recordedAt: new Date(Date.now() - 72 * 3600_000), status: "COMPLETED"}});
+    await prisma.meetingRecording.createMany({data: Array.from({length: 5010}, (_, index) => ({
+      workspaceId: f.workspace.id, meetingId: oldMeeting.id, provider: "RECALL_AI" as const,
+      externalBotId: `old-synthetic-${index}`, meetingUrl: f.recording.meetingUrl, status: "COMPLETED" as const,
+      transcriptProcessedAt: new Date(),
+    }))});
+    const findMany = vi.spyOn(prisma.meetingRecording, "findMany");
+    const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
+    try {
+      expect(await reconcileMeetingRecorders(f.workspace.id)).toMatchObject({recoveredTranscripts: 0});
+      const recoveryCall = findMany.mock.calls.findIndex(([query]) => (query?.where?.provider as any)?.in?.includes("RECALL_AI"));
+      expect(recoveryCall).toBeGreaterThanOrEqual(0);
+      expect(await findMany.mock.results[recoveryCall].value).toEqual([]);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(await prisma.recorderTranscriptPublication.count()).toBe(1);
+    } finally {findMany.mockRestore();}
+  });
+
   it("skips a duplicate recorder occurrence before provider work and without competing publication", async () => {
     const f = await fixture(); await ingest(f);
     const duplicate = await prisma.meetingRecording.create({ data: { workspaceId: f.workspace.id, meetingId: f.meeting.id, provider: "RECALL_AI", externalBotId: `duplicate-${randomUUID()}`, meetingUrl: f.recording.meetingUrl, status: "COMPLETED" } });
@@ -541,6 +563,21 @@ describe("Meeting BaaS authenticated native continuity", () => {
     expect(await prisma.recorderTranscriptPublication.count()).toBe(1);
     expect(calls).toHaveBeenCalledTimes(2);
   });
+  it.each(["RECORDER_TRANSCRIPT_RECOVERY_EXPIRED", "RECORDER_TRANSCRIPT_FETCH_FAILED", "STALE_RECORDER"])(
+    "preserves late signed webhook recovery after %s", async failureCode => {
+      const f = await fixture(true, "MEETING_BAAS");
+      await prisma.meetingRecording.update({where: {id: f.recording.id}, data: {
+        status: "FAILED", failureCode, transcriptProcessedAt: new Date(),
+      }});
+      const calls = native(f);
+      expect(await processMeetingRecorderWebhook("MEETING_BAAS", signed(f))).toMatchObject({processed: true});
+      expect(await prisma.recorderTranscriptPublication.count()).toBe(1);
+      calls.mockClear();
+      expect(await reconcileMeetingRecorders(f.workspace.id)).toMatchObject({recoveredTranscripts: 0});
+      expect(calls).not.toHaveBeenCalled();
+      expect(await prisma.recorderTranscriptPublication.count()).toBe(1);
+    });
+
   it("retains authenticated empty custody and a terminal event without publishing transcript knowledge", async () => {
     const f = await fixture(true, "MEETING_BAAS"); native(f, { text: '{"result":{"utterances":[]}}' });
     await processMeetingRecorderWebhook("MEETING_BAAS", { ...signed(f), headers: { "x-mb-secret": "synthetic-baas-secret" } });

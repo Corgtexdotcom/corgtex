@@ -7,6 +7,7 @@ const {
   txMock,
   createActionMock,
   slackWebClientMock,
+  attemptFixture,
   meetingReviewConfirmMock,
   meetingReviewDismissMock,
   meetingReviewEditViewMock,
@@ -131,6 +132,7 @@ const {
     },
     createActionMock: vi.fn(),
     slackWebClientMock: webClient,
+    attemptFixture: { enabled: false, http: vi.fn() },
     meetingReviewConfirmMock: vi.fn(),
     meetingReviewDismissMock: vi.fn(),
     meetingReviewEditViewMock: vi.fn(),
@@ -184,6 +186,7 @@ vi.mock("./source-permission-epochs", async (original) => ({ ...await original<t
   capturePermissionEpochs:vi.fn(async()=>({version:1})),isArtifactPermissionEpochProofCurrent:vi.fn(async()=>true) }));
 vi.mock("./source-lineage", () => ({ recordArtifactInputLineage:vi.fn(), preserveUnknownArtifactInputSnapshot:vi.fn(),
   captureArtifactInputProof: captureDigestProofMock,
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value:await read(),heads:new Map()}),
   mergeLineageInputRoot: (prior: {fingerprint: string} | undefined, root: {fingerprint: string}) => {
     if (prior && prior.fingerprint !== root.fingerprint) throw new AppError(409, "SOURCE_CHANGED", "Changed original");
     return root;
@@ -219,11 +222,15 @@ vi.mock("./meeting-action-review", () => ({
   updateSlackMeetingActionReviewProposalFromModal: meetingReviewModalUpdateMock,
 }));
 
-vi.mock("@slack/web-api", () => ({
-  WebClient: vi.fn(function WebClient() {
-    return slackWebClientMock;
-  }),
-}));
+vi.mock("@slack/web-api", async importOriginal => {
+  const actual = await importOriginal<typeof import("@slack/web-api")>();
+  return { ...actual, WebClient: vi.fn(function WebClient(token?: string, options?: import("@slack/web-api").WebClientOptions) {
+    return attemptFixture.enabled ? { ...slackWebClientMock, chat: new actual.WebClient(token, { ...options,
+      adapter: attemptFixture.http, retryConfig: { retries: 1, minTimeout: 0, maxTimeout: 0 },
+      logger: { debug() {}, info() {}, warn() {}, error() {}, setLevel() {}, getLevel: () => "error" } as never,
+    }).chat } : slackWebClientMock;
+  }) };
+});
 
 function signedHeaders(body: string, timestamp = Math.floor(Date.now() / 1000)) {
   const signature = `v0=${createHmac("sha256", "slack-secret").update(`v0:${timestamp}:${body}`).digest("hex")}`;
@@ -335,6 +342,7 @@ function stubAuthoredSlackScope() {
 describe("communication Slack integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    attemptFixture.enabled = false; attemptFixture.http.mockReset();
     prismaMock.communicationInboundEvent.findUnique.mockReset();
     prismaMock.communicationInstallation.findUnique.mockReset();
     prismaMock.communicationIngressInput.findFirst.mockReset();
@@ -350,6 +358,7 @@ describe("communication Slack integration", () => {
     reviewPublicationMock.mockReset().mockImplementation(async (actor, params) => {
       await requireMembershipMock({ actor, workspaceId: params.workspaceId });
       if (!params.lineageRoots?.length) throw new AppError(403, "UNKNOWN_LINEAGE", "Synthetic review input proof is unavailable.");
+      return params.lineageRoots;
     });
     reviewRefreshMock.mockReset().mockResolvedValue(null);
     captureDigestProofMock.mockReset().mockImplementation(async (_actor, _workspaceId, inputs) =>
@@ -453,7 +462,7 @@ describe("communication Slack integration", () => {
     expect(verifySlackRequest(body, signedHeaders(body))).toBe(true);
   });
 
-  it("counts only current complete Message inputs across unknown crowding before returning installation totals", async () => {
+  it("bounds installation message counts through unknown crowding and keeps the installation visible", async () => {
     const {listCommunicationInstallations} = await import("./communication");
     prismaMock.communicationInstallation.findMany.mockResolvedValue([{id:"install-1",_count:{channels:1,externalUsers:1}}]);
     const rows=Array.from({length:5005},(_,index)=>({id:`row-${String(index).padStart(4,"0")}`,workspaceId:"workspace-1",installationId:"install-1"}));
@@ -463,22 +472,61 @@ describe("communication Slack integration", () => {
       return inputs.map(input=>({kind:input.kind,id:input.id,fingerprint:"a".repeat(64)}));
     });
     const result=await listCommunicationInstallations({kind:"user",user:{id:"admin",email:"admin@example.test",displayName:"Admin"}},"workspace-1");
-    expect(result[0]._count.messages).toBe(3);
-    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledTimes(51);
-    expect(prismaMock.communicationMessage.findMany.mock.calls.every(([query]: any[]) => query.take === 100)).toBe(true);
+    expect(result[0]._count.messages).toBeNull();
+    expect(result[0].messageCount).toEqual({count:0,complete:false,available:true});
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledOnce();
+    expect(prismaMock.communicationMessage.findMany.mock.calls.every(([query]: any[]) => query.take === 200)).toBe(true);
     expect(prismaMock.communicationInstallation.findMany.mock.calls[0][0].select._count.select).toEqual({channels:true,externalUsers:true});
   });
 
-  it("does not release an installation total after an earlier source is revoked during a later page", async () => {
+  it("does not release an installation total after an earlier source is revoked during a later admission batch", async () => {
     const {listCommunicationInstallations} = await import("./communication");
     prismaMock.communicationInstallation.findMany.mockResolvedValue([{id: "install-1", _count: {channels: 1, externalUsers: 0}}]);
     const rows = Array.from({length: 101}, (_, i) => ({id: `row-${String(i).padStart(3, "0")}`, workspaceId: "workspace-1", installationId: "install-1"}));
-    prismaMock.communicationMessage.findMany.mockImplementation(async ({where, take}: any) => {
-      if (where.id?.gt) digestProofReadableMock.mockResolvedValue(false);
-      return rows.filter(row => !where.id?.gt || row.id > where.id.gt).slice(0, take);
+    prismaMock.communicationMessage.findMany.mockResolvedValue(rows);
+    captureDigestProofMock.mockImplementation(async(_actor,_ws,inputs:any[])=>{
+      if(inputs.some(input=>input.id==="row-100"))digestProofReadableMock.mockResolvedValue(false);
+      return inputs.map(input=>({kind:input.kind,id:input.id,fingerprint:"a".repeat(64)}));
     });
-    await expect(listCommunicationInstallations({kind: "user", user: {id: "admin", email: "admin@example.test", displayName: "Admin"}}, "workspace-1"))
-      .rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    const result = await listCommunicationInstallations({kind: "user", user: {id: "admin", email: "admin@example.test", displayName: "Admin"}}, "workspace-1");
+    expect(result).toMatchObject([{id:"install-1",_count:{messages:null},messageCount:{count:null,complete:false,available:false}}]);
+  });
+
+  it.each([3, 205])("reports honest installation counts for %i permitted messages", async size => {
+    const {listCommunicationInstallations} = await import("./communication");
+    prismaMock.communicationInstallation.findMany.mockResolvedValue([{id:"install-1",_count:{channels:1,externalUsers:0}}]);
+    const rows=Array.from({length:size},(_,i)=>({id:`row-${String(i).padStart(3,"0")}`,workspaceId:"workspace-1",installationId:"install-1"}));
+    prismaMock.communicationMessage.findMany.mockImplementation(async({where,take}:any)=>rows.filter(row=>!where.id?.gt||row.id>where.id.gt).slice(0,take));
+    const [installation]=await listCommunicationInstallations({kind:"user",user:{id:"admin",email:"admin@example.test",displayName:"Admin"}},"workspace-1");
+    expect(installation.messageCount).toEqual({count:Math.min(size,200),complete:size<200,available:true});
+    expect(installation._count.messages).toBe(size<200?size:null);
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledOnce();
+  });
+
+  it("withholds installation metadata when administrator authority is lost during the count", async()=>{
+    const {listCommunicationInstallations}=await import("./communication");
+    prismaMock.communicationInstallation.findMany.mockResolvedValue([{id:"install-1",_count:{channels:1,externalUsers:0}}]);
+    prismaMock.communicationMessage.findMany.mockImplementation(async()=>{
+      requireMembershipMock.mockRejectedValue(new AppError(403,"NOT_A_MEMBER","Removed while counting"));
+      return [];
+    });
+    await expect(listCommunicationInstallations({kind:"user",user:{id:"admin",email:"admin@example.test",displayName:"Admin"}},"workspace-1")).rejects.toMatchObject({code:"NOT_A_MEMBER"});
+  });
+
+  it("enumerates one fixed Slack count window when inserts straddle the admission cursor", async()=>{
+    const {listCommunicationInstallations}=await import("./communication");
+    prismaMock.communicationInstallation.findMany.mockResolvedValue([{id:"install-1",_count:{channels:1,externalUsers:0}}]);
+    const rows=Array.from({length:150},(_,i)=>({id:`row-${String(100+i).padStart(3,"0")}`,workspaceId:"workspace-1",installationId:"install-1"}));
+    prismaMock.communicationMessage.findMany.mockImplementation(async({where,take}:any)=>rows.filter(row=>!where.id?.gt||row.id>where.id.gt).slice(0,take));
+    let changed=false;
+    captureDigestProofMock.mockImplementation(async(_actor,_ws,inputs:any[])=>{
+      if(!changed){changed=true;rows.unshift({...rows[0],id:"row-099"});rows.push({...rows[0],id:"row-250"});}
+      return inputs.map(input=>({kind:input.kind,id:input.id,fingerprint:"a".repeat(64)}));
+    });
+    const [installation]=await listCommunicationInstallations({kind:"user",user:{id:"admin",email:"admin@example.test",displayName:"Admin"}},"workspace-1");
+    expect(rows).toHaveLength(152);
+    expect(installation.messageCount).toEqual({count:150,complete:true,available:true});
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledOnce();
   });
 
   it("bounds Slack digest messages by an optional upper cutoff", async () => {
@@ -501,11 +549,15 @@ describe("communication Slack integration", () => {
     }));
   });
 
-  it("fills the 500-message digest sample after discarding earlier unauthorized snapshots", async () => {
+  it.each([
+    { denied: 550, total: 1070, unavailable: true, selectedCount: 0, pages: 5 },
+    { denied: 50, total: 120, unavailable: false, selectedCount: 70, pages: 2 },
+    { denied: 0, total: 1070, unavailable: false, selectedCount: 500, pages: 5 },
+  ])("bounds the digest raw window and retains permitted snapshots ($denied denied of $total)", async ({ denied, total, unavailable, selectedCount, pages }) => {
     const { listSlackMessagesForDigest } = await authenticatedCommunicationFixture();
     const actor = { kind: "agent" as const, authProvider: "bootstrap" as const, label: "Digest test", workspaceIds: ["workspace-1"] };
     const since = new Date("2026-04-29T12:00:00Z");
-    const rows = Array.from({ length: 1070 }, (_, index) => ({
+    const rows = Array.from({ length: total }, (_, index) => ({
       id: `digest-${String(index).padStart(4, "0")}`, workspaceId: "workspace-1", installationId: "install-1", provider: "SLACK",
       externalChannelId: "C1", receivedAt: new Date(since.getTime() + index), text: `Synthetic Slack input ${index}`,
       isBot: false, isHidden: false, isDeleted: false, textRedactedAt: null,
@@ -516,16 +568,29 @@ describe("communication Slack integration", () => {
         || (row.receivedAt.getTime() === cursor[1].receivedAt.getTime() && row.id > cursor[1].id.gt)).slice(0, query.take);
     });
     captureDigestProofMock.mockImplementation(async (_actor, _workspaceId, inputs) => {
-      if (Number(inputs[0].id.split("-")[1]) < 550) throw new AppError(409, "SOURCE_RESTRICTED", "Synthetic revoked input");
-      return [{ kind: "CommunicationMessage", id: inputs[0].id, fingerprint: "a".repeat(64) }];
+      if (inputs.some((input: { id: string }) => Number(input.id.split("-")[1]) < denied)) throw new AppError(409, "SOURCE_RESTRICTED", "Synthetic revoked input");
+      return inputs.map((input: { id: string }) => ({ kind: "CommunicationMessage", id: input.id, fingerprint: "a".repeat(64) }));
     });
 
-    const selected = await listSlackMessagesForDigest(actor, "workspace-1", since);
-
-    expect(selected).toHaveLength(500);
-    expect(selected[0].id).toBe("digest-0550");
-    expect(selected.at(-1)?.id).toBe("digest-1049");
-    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledTimes(11);
+    captureDigestProofMock.mockClear();
+    digestProofReadableMock.mockClear();
+    if (unavailable) {
+      await expect(listSlackMessagesForDigest(actor, "workspace-1", since))
+        .rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
+      expect(captureDigestProofMock).toHaveBeenCalledTimes(500);
+      expect(digestProofReadableMock).not.toHaveBeenCalled();
+    } else {
+      const selected = await listSlackMessagesForDigest(actor, "workspace-1", since);
+      expect(selected).toEqual(rows.slice(denied, denied + selectedCount));
+      expect(selected).toHaveLength(selectedCount);
+      // The final guard must retain the exact selected snapshots, not re-read and
+      // certify newer messages or include the discarded denied prefix.
+      expect(captureDigestProofMock).toHaveBeenLastCalledWith(actor, "workspace-1",
+        selected.map(message => ({ kind: "CommunicationMessage", id: message.id, snapshot: message })));
+      expect(digestProofReadableMock).toHaveBeenLastCalledWith(actor, "workspace-1",
+        selected.map(message => ({ kind: "CommunicationMessage", id: message.id, fingerprint: "a".repeat(64) })));
+    }
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledTimes(pages);
     expect(prismaMock.communicationMessage.findMany.mock.calls.every(([query]) => query.take === 100)).toBe(true);
     expect(prismaMock.communicationMessage.findMany.mock.calls[1][0]).toMatchObject({
       orderBy: [{ receivedAt: "asc" }, { id: "asc" }],
@@ -1983,6 +2048,54 @@ describe("communication Slack integration", () => {
     expect(reviewPublicationMock).toHaveBeenCalledWith(actor, { workspaceId: "workspace-1", installationId: "install-1", channelId: "C1", lineageRoots: update.lineageRoots });
     expect(reviewPublicationMock.mock.invocationCallOrder[0]).toBeLessThan(slackWebClientMock.chat.update.mock.invocationCallOrder[0]);
     expect(slackWebClientMock.chat.update).toHaveBeenCalledWith(expect.objectContaining({ text: "Synthetic complete review" }));
+  });
+
+  it.each((["interaction", "modal", "web"] as const).flatMap(path => (["credentials", "retry"] as const).flatMap(boundary =>
+    (["source", "member", "installation", "policy", "during-policy", "none"] as const).map(change => ({ path, boundary, change })))))("guards rendered review $path at $boundary after $change change", async ({ path, boundary, change }) => {
+    const { handleSlackInteraction, syncSlackMeetingActionReviewAfterWebApply } = await authenticatedCommunicationFixture();
+    const user = { id: "user-1", email: "user@example.test", displayName: "User", globalRole: "USER" as const };
+    const actor = { kind: "user" as const, user };
+    const installation = { id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", disconnectedAt: null, botTokenEnc: "enc:bot-token", externalWorkspaceId: "T1" };
+    prismaMock.communicationInstallation.findFirst.mockResolvedValue(installation);
+    prismaMock.communicationExternalUser.findUnique.mockResolvedValue({ userId: user.id });
+    prismaMock.user.findUnique.mockResolvedValue(user);
+    const update = { channelId: "C1", messageTs: "1.1", blocks: [], text: "Synthetic rendered review", responseText: "Updated",
+      lineageRoots: [{ kind: "Meeting", id: "meeting-1", fingerprint: "original" }] };
+    const original = [...update.lineageRoots, { kind: "CommunicationChannel", id: "channel-1", fingerprint: "original-destination" }];
+    meetingReviewConfirmMock.mockResolvedValue(update); meetingReviewModalUpdateMock.mockResolvedValue(update);
+    reviewRefreshMock.mockResolvedValue({ installationId: "install-1", update });
+    let armed = false; let changed = false; let sends = 0;
+    const mutate = () => {
+      changed = true;
+      if (change === "source") digestProofReadableMock.mockResolvedValue(false);
+      if (change === "member") requireMembershipMock.mockRejectedValue(new AppError(403, "NOT_A_MEMBER", "Revoked member"));
+      if (change === "installation") prismaMock.communicationInstallation.findFirst.mockResolvedValue(null);
+    };
+    reviewPublicationMock.mockImplementation(async (_actor, params) => {
+      if (!armed) { armed = true; return original; }
+      expect(params.lineageRoots).toEqual(original);
+      if (changed && change === "policy") throw new AppError(403, "SOURCE_RESTRICTED", "Revoked destination policy");
+      if (changed && change === "during-policy") digestProofReadableMock.mockResolvedValue(false);
+      return [...original, { kind: "CommunicationChannel", id: "channel-1", fingerprint: "replacement-must-not-replace-original" }];
+    });
+    prismaMock.communicationInstallation.findUnique.mockImplementation(async () => {
+      if (armed && boundary === "credentials") mutate();
+      return installation;
+    });
+    attemptFixture.enabled = true;
+    attemptFixture.http.mockImplementation(async config => {
+      sends++;
+      if (boundary === "retry" && sends === 1) { mutate(); return { status: 500, data: {}, headers: {}, config }; }
+      return { status: 200, data: { ok: true, ts: "1.1" }, headers: {}, request: { path: "/api/chat.update" }, config };
+    });
+    const request = path === "web" ? syncSlackMeetingActionReviewAfterWebApply(actor, { workspaceId: "workspace-1", insightId: "insight-1" })
+      : handleSlackInteraction({ team: { id: "T1" }, user: { id: "U1" }, ...(path === "modal" ? {
+        type: "view_submission", view: { callback_id: "corgtex_meeting_review_edit_modal", private_metadata: "{}", state: { values: {} } },
+      } : { type: "block_actions", actions: [{ action_id: "corgtex_meeting_review_confirm", value: JSON.stringify({ reviewId: "review-1", insightId: "insight-1" }) }] }) });
+    const result = await request.catch(error => error);
+    expect(sends).toBe(change === "none" ? (boundary === "retry" ? 2 : 1) : boundary === "retry" ? 1 : 0);
+    if (change !== "none") expect(result instanceof Error || (typeof result === "object" && result !== null && "response_type" in result)).toBe(true);
+    if (change === "none") expect(result).not.toBeInstanceOf(Error);
   });
 
   it.each(["interaction", "modal", "web"] as const)("blocks the %s Slack review update when its publication proof is revoked", async (path) => {

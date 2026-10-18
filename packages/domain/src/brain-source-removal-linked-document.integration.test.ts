@@ -51,10 +51,10 @@ async function restoredRetirement() {
   await restoreWorkspaceArtifact(f.actor, { workspaceId: f.workspace.id, entityType: "BrainArticle", entityId: article.id });
   const restored = await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id } });
   expect(await readableArtifactIds(f.actor, f.workspace.id, "BrainArticle", [restored])).toEqual(new Set());
-  await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING" } });
+  await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "fixture-worker" } });
   const obsoleteModel = vi.fn(async () => "Never publish old request");
   expect(await generateBrainSourceRemovalCandidate({ workspaceId: f.workspace.id, jobId: request.jobId,
-    expectedAttempt: 0, expectedOwner: null, generate: obsoleteModel })).toEqual({ phase: "STALE" });
+    expectedAttempt: 1, expectedOwner: "fixture-worker", generate: obsoleteModel })).toEqual({ phase: "STALE" });
   expect(obsoleteModel).not.toHaveBeenCalled();
   await prisma.workflowJob.update({ where: { id: request.jobId }, data: { status: "COMPLETED" } });
   const oldPayload = (await prisma.workflowJob.findUniqueOrThrow({ where: { id: request.jobId } })).payload;
@@ -62,7 +62,7 @@ async function restoredRetirement() {
   if (fresh.status !== "pending") throw new Error("Expected fresh native retirement");
   expect(fresh.jobId).not.toBe(request.jobId);
   expect((await prisma.workflowJob.findUniqueOrThrow({ where: { id: request.jobId } })).payload).toEqual(oldPayload);
-  await prisma.workflowJob.update({ where: { id: fresh.jobId }, data: { status: "RUNNING" } });
+  await prisma.workflowJob.update({ where: { id: fresh.jobId }, data: { status: "RUNNING", lockedAt: new Date(), startedAt: new Date(), attempts: 1, lockedBy: "fixture-worker" } });
   return { ...f, article, fresh };
 }
 
@@ -83,8 +83,9 @@ describe("native linked document removal and retirement", () => {
     const f = await restoredRetirement();
     const generate = vi.fn(async () => "Fresh independent body");
     expect(await generateBrainSourceRemovalCandidate({ workspaceId: f.workspace.id, jobId: f.fresh.jobId,
-      expectedAttempt: 0, expectedOwner: null, generate })).toEqual({ phase: "READY", candidateCount: 1 });
-    expect(generate).toHaveBeenCalledWith({ id: f.article.id, title: f.remaining.title }, [expect.objectContaining({ id: f.remaining.id })]);
+      expectedAttempt: 1, expectedOwner: "fixture-worker", generate })).toEqual({ phase: "READY", candidateCount: 1 });
+    expect(generate).toHaveBeenCalledWith({ id: f.article.id, title: f.remaining.title }, [expect.objectContaining({ id: f.remaining.id })],
+      expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
     expect(JSON.stringify(generate.mock.calls)).not.toContain("Excluded");
     await prisma.workflowJob.update({ where: { id: f.fresh.jobId }, data: { status: "COMPLETED" } });
     expect(await resolveBrainSourceRemoval(f.actor, { workspaceId: f.workspace.id, jobId: f.fresh.jobId, decision: "accept" }))
@@ -98,7 +99,7 @@ describe("native linked document removal and retirement", () => {
   it("rejects the fresh candidate when the excluded document is restored during generation", async () => {
     const f = await restoredRetirement();
     expect(await generateBrainSourceRemovalCandidate({ workspaceId: f.workspace.id, jobId: f.fresh.jobId,
-      expectedAttempt: 0, expectedOwner: null, generate: async () => {
+      expectedAttempt: 1, expectedOwner: "fixture-worker", generate: async () => {
         await restoreWorkspaceArtifact(f.actor, { workspaceId: f.workspace.id, entityType: "Document", entityId: f.document.id });
         return "Never publish across document restoration";
       } })).toEqual({ phase: "STALE" });

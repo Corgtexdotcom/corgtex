@@ -87,7 +87,7 @@ describe("listDocuments", () => {
         accessDomain: { in: ["WORKSPACE", "FINANCE"] },
         archivedAt: null,
       },
-      orderBy: { id: "asc" }, take: 100,
+      orderBy: { id: "asc" }, take: 10001,
     });
   });
 
@@ -117,7 +117,7 @@ describe("listDocuments", () => {
         accessDomain: { in: ["WORKSPACE"] },
         archivedAt: { not: null },
       },
-      orderBy: { id: "asc" }, take: 100,
+      orderBy: { id: "asc" }, take: 10001,
     });
   });
 });

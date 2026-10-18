@@ -2,6 +2,11 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { prisma } from "@corgtex/shared";
 import { SOURCE_PERMISSION_POLICY_VERSION } from "./source-permission-epochs";
 
+const lineageReadMocks = vi.hoisted(() => ({
+  readable: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set<string>(records.map((row: {id: string}) => row.id))),
+  capture: vi.fn().mockResolvedValue([]),
+}));
+
 const makeTension = (id = "t-1", overrides = {}) => ({
   id, workspaceId: "ws-1", title: `Tension ${id}`, bodyMd: "Tension body", circleId: null, meetingId: null,
   assigneeMemberId: null, raisedByMemberId: null, proposalId: null, priority: 1, status: "OPEN", version: 1, ...overrides,
@@ -35,8 +40,9 @@ vi.mock("@corgtex/shared", () => ({
     circle: {
       findUnique: vi.fn(),
     },
+    adviceRequest: {findMany: vi.fn().mockResolvedValue([])},
     action: {
-      findMany: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
       updateMany: vi.fn(),
       update: vi.fn(),
     },
@@ -91,7 +97,25 @@ vi.mock("@corgtex/shared", () => ({
   },
 }));
 
+vi.mock("./digest-lineage", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./digest-lineage")>(),
+  captureReadableDigestInputs: vi.fn(async ({actor, workspaceId, kind, records}) => {
+    const ids = await lineageReadMocks.readable(actor, workspaceId, kind, records);
+    const admitted = records.filter((row: {id: string}) => ids.has(row.id));
+    return {records: admitted, roots: await lineageReadMocks.capture(actor, workspaceId,
+      admitted.map((row: {id: string}) => ({kind, id: row.id, snapshot: row})))};
+  }),
+}));
 vi.mock("./source-lineage", async () => ({
+  collectWorkItemReadSnapshot: vi.fn(async (_workspaceId: string, read: (tx: typeof prisma) => Promise<unknown>) => read(prisma)),
+  currentArtifactInputRootsBatch: vi.fn(async (_db, _workspace, _kind, rows: Array<{id: string}>) => new Map(rows.map(row => [row.id, []]))),
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  captureReadableWorkItemInputs: vi.fn(async (actor, workspaceId, kind, records) => {
+    const ids = await lineageReadMocks.readable(actor, workspaceId, kind, records);
+    return {ids, roots: await lineageReadMocks.capture(actor, workspaceId,
+      records.filter((row: {id: string}) => ids.has(row.id)).map((row: {id: string}) => ({kind, id: row.id, snapshot: row}))), heads: new Map()};
+  }),
+  mergeLineageInputRoot: (previous: unknown, root: unknown) => previous ?? root,
   sealArtifactInputActor: (await import("./artifact-input-actor")).sealArtifactInputActor,
   isLineageKind: (value: unknown) => ["Proposal"].includes(String(value)),
   assertArtifactInputWriteFence: vi.fn().mockResolvedValue(undefined),
@@ -99,7 +123,8 @@ vi.mock("./source-lineage", async () => ({
   isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
   withArtifactCountReleaseSnapshot: vi.fn(async (_actor, _workspaceId, _roots, _remote, finish) => finish({})),
   advanceHumanArtifactInputLineage: vi.fn(),
-  captureArtifactInputProof: vi.fn().mockResolvedValue([]),
+  captureHumanArtifactInputAdvance: vi.fn(),
+  captureArtifactInputProof: lineageReadMocks.capture,
   captureArtifactInputSnapshotProof: vi.fn().mockResolvedValue([]),
   captureImmutableArtifactInputProof: vi.fn(async (_actor, _workspaceId, roots) => roots),
   invalidateArtifactInputLineage: vi.fn(),
@@ -107,7 +132,7 @@ vi.mock("./source-lineage", async () => ({
   preserveUnknownArtifactInputSnapshot: vi.fn(),
   recordArtifactInputLineage: vi.fn(),
   currentArtifactInputRoots: vi.fn().mockResolvedValue([]),
-  readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.map((record: { id: string }) => record.id))),
+  readableArtifactIds: lineageReadMocks.readable,
 }));
 
 vi.mock("./auth", () => ({
@@ -194,6 +219,22 @@ describe("proposal AI summaries", () => {
         summary: "Generated summary for the proposal.",
       }),
     }));
+  });
+
+  it("summarizes a human original without treating an empty inherited proof as an artifact", async () => {
+    const { isArtifactInputProofReadable } = await import("./source-lineage");
+    const { defaultModelGateway } = await import("@corgtex/models");
+    const { createProposal } = await import("./proposals");
+    vi.mocked(isArtifactInputProofReadable).mockImplementation(async (_actor, _workspaceId, roots) => roots.length > 0);
+    vi.mocked(defaultModelGateway.extract).mockImplementationOnce(async request => {
+      await request.authorizeAttempt?.({ signal: request.signal! });
+      return { output: { summary: "Human original summary" } } as never;
+    });
+    vi.mocked(prisma.proposal.create).mockResolvedValueOnce(makeProposal("p-human", { authorUserId: "u-1", bodyMd: words(130), summary: "Human original summary" }) as never);
+    try {
+      await expect(createProposal({ kind: "user", user: { id: "u-1" } } as never,
+        { workspaceId: "ws-1", title: "Human original", bodyMd: words(130), includeAiSummary: true })).resolves.toMatchObject({ summary: "Human original summary" });
+    } finally { vi.mocked(isArtifactInputProofReadable).mockResolvedValue(true); }
   });
 
   it("does not generate AI summaries for short proposals", async () => {
@@ -1037,6 +1078,8 @@ describe("updateProposal AI-summary transaction scope", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    const { defaultModelGateway } = await import("@corgtex/models");
+    vi.mocked(defaultModelGateway.extract).mockReset();
     const { requireWorkspaceMembership } = await import("./auth");
     vi.mocked(requireWorkspaceMembership).mockReset().mockResolvedValue({
       id: "mem-1", workspaceId: "ws-1", userId: "u-1", role: "MEMBER", isActive: true,
@@ -1150,6 +1193,7 @@ describe("updateProposal AI-summary transaction scope", () => {
       drifted: Record<string, unknown>,
       admissionOverrides: Record<string, unknown> = {},
       expected: Record<string, unknown> = { status: 409, code: "VERSION_CONFLICT" },
+      afterStarted?: () => void,
     ) => {
       const { defaultModelGateway } = await import("@corgtex/models");
       const { updateProposal } = await import("./proposals");
@@ -1176,8 +1220,9 @@ describe("updateProposal AI-summary transaction scope", () => {
         ...params,
       } as any);
       const rejection = expect(promise).rejects.toMatchObject(expected);
-      await extractStarted;
+      await Promise.race([extractStarted, promise.then(() => { throw new Error("Update completed before model admission"); })]);
       expect(defaultModelGateway.extract).toHaveBeenCalledTimes(1);
+      afterStarted?.();
       releaseExtract({ output: { summary: "Drifted summary." } });
 
       await rejection;
@@ -1251,13 +1296,14 @@ describe("updateProposal AI-summary transaction scope", () => {
       ["demoted", { id: "mem-1", userId: "u-1", role: "MEMBER", isActive: true }, { status: 403, code: "FORBIDDEN" }],
     ])("rejects a %s member after inference before any write", async (_label, finalMembership, expected) => {
       const { requireWorkspaceMembership } = await import("./auth");
-      vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+      vi.mocked(requireWorkspaceMembership).mockResolvedValue({
         id: "mem-1", workspaceId: "ws-1", userId: "u-1", role: "ADMIN", isActive: true,
       } as any);
-      if (finalMembership) vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce(finalMembership as any);
-      else vi.mocked(requireWorkspaceMembership).mockRejectedValueOnce(expected);
-      await runDriftScenario({ bodyMd: words(140) }, {}, { authorUserId: "u-other" }, expected);
-      expect(requireWorkspaceMembership).toHaveBeenCalledTimes(2);
+      await runDriftScenario({ bodyMd: words(140) }, {}, { authorUserId: "u-other" }, expected, () => {
+        if (finalMembership) vi.mocked(requireWorkspaceMembership).mockResolvedValue(finalMembership as any);
+        else vi.mocked(requireWorkspaceMembership).mockRejectedValue(expected);
+      });
+      expect(requireWorkspaceMembership).toHaveBeenCalledTimes(3);
     });
   });
 
@@ -1828,13 +1874,7 @@ describe("getProposal", () => {
           { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
         ],
       },
-      include: expect.objectContaining({
-        adviceProcess: {
-          include: {
-            requests: true,
-          },
-        },
-      }),
+      include: expect.objectContaining({circle: true}),
     }));
   });
 
@@ -3128,6 +3168,9 @@ describe("proposal lineage integration", () => {
       actions: [{ id: "public-action", title: "Allowed", bodyMd: "Permitted body", status: "OPEN" }],
       adviceProcess: { id: "advice-process", requests: [{ id: "secret-request", status: "OPEN", messageMd: "Secret request body" }] },
     } as any);
+    vi.mocked(prisma.tension.findMany).mockResolvedValueOnce([{id: "secret-tension", proposalId: "safe", title: "Hidden tension", bodyMd: "Secret tension body", status: "OPEN"}] as any);
+    vi.mocked(prisma.action.findMany).mockResolvedValueOnce([{id: "public-action", proposalId: "safe", title: "Allowed", bodyMd: "Permitted body", status: "OPEN"}] as any);
+    vi.mocked(prisma.adviceRequest.findMany).mockResolvedValueOnce([{id: "secret-request", process: {proposalId: "safe"}, status: "OPEN", messageMd: "Secret request body"}] as any);
     vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, kind, rows) => new Set(["Tension", "AdviceRequest"].includes(kind) ? [] : rows.map((row) => row.id)));
     try {
       const result = await getProposal(actor, { workspaceId: "ws-1", proposalId: "safe" });
@@ -3138,6 +3181,22 @@ describe("proposal lineage integration", () => {
       expect(readableArtifactIds).toHaveBeenCalledWith(actor, "ws-1", "AdviceRequest", [expect.objectContaining({ messageMd: "Secret request body" })]);
     } finally {
       vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row) => row.id)));
+    }
+  });
+
+  it("rejects an incomplete exact detail after one bounded relation window", async () => {
+    const {getProposal} = await import("./proposals");
+    const rows = Array.from({length: 5101}, (_, i) => ({id: `r-${String(i).padStart(5, "0")}`, title: `Relation ${i}`, bodyMd: "Full canonical fixture", status: "OPEN"}));
+    const page = ({where, take}: any) => Promise.resolve(rows.filter(row => !where.id?.gt || row.id > where.id.gt).slice(0, take));
+    vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce(makeProposal("many-relations") as any);
+    const actions = vi.mocked(prisma.action.findMany).mockImplementation(page as typeof prisma.action.findMany);
+    const tensions = vi.mocked(prisma.tension.findMany).mockImplementation(page as typeof prisma.tension.findMany);
+    const requests = vi.mocked(prisma.adviceRequest.findMany).mockImplementation(page as unknown as typeof prisma.adviceRequest.findMany);
+    try {
+      await expect(getProposal(actor, {workspaceId: "ws-1", proposalId: "many-relations"})).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+      for (const mock of [actions, tensions, requests]) expect(mock.mock.calls.at(-1)?.[0]?.take).toBe(200);
+    } finally {
+      actions.mockResolvedValue([]); tensions.mockResolvedValue([]); requests.mockResolvedValue([]);
     }
   });
 

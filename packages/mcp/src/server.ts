@@ -17,6 +17,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
   withMcpToolInput,
+  DigestReadRelease,
+  WorkItemReadRelease,
+  captureReadableDigestInputs,
+  loadReadableArtifactSample,
   createConversation,
   listProposals,
   getProposal,
@@ -178,7 +182,7 @@ import {
 import type { AgentScope } from "@corgtex/domain";
 import { fetchReadableKnowledgeChunk, searchIndexedKnowledge } from "@corgtex/knowledge";
 import { processConversationTurn } from "@corgtex/agents";
-import { prisma, env, toInputJson, withMcpRequiredScopes } from "@corgtex/shared";
+import { prisma, env, toInputJson, withMcpRequiredScopes, getMcpOrigin, runWithMcpOrigin } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import type { McpSessionContext } from "./auth";
 import { requireScope } from "./auth";
@@ -411,31 +415,38 @@ function memberDisplayName(member: any) {
 }
 
 const memberUserInclude = {
-  user: {
-    select: {
-      displayName: true,
-      email: true,
-    },
-  },
-};
+  user: { select: { displayName: true, email: true } },
+} as const;
 
-async function loadActionWorkItemResponse(actor: AppActor, workspaceId: string, actionId: string, fallback: any) {
+async function readableWorkItemResponseMembers<T extends { id: string; userId: string;
+  user: { displayName: string | null; email: string } }>(actor: AppActor, workspaceId: string,
+  release: WorkItemReadRelease, members: T[]) {
+  const captured = await release.observeRead(() => captureReadableDigestInputs({
+    actor, workspaceId, kind: "Member", records: members,
+    additionalInputs: member => [{ kind: "User", id: member.userId, snapshot: { ...member.user, id: member.userId } }],
+  }));
+  release.add(captured.roots);
+  return new Set(captured.records.map(member => member.id));
+}
+
+async function loadActionWorkItemResponse(actor: AppActor, workspaceId: string, actionId: string, release: WorkItemReadRelease) {
   const action = await prisma.action.findFirst({
     where: { id: actionId, workspaceId },
-    include: {
-      assigneeMember: { include: memberUserInclude },
-    },
-  }) ?? fallback;
-  if (!action?.id) return action;
-  if (!(await readableArtifactIds(actor, workspaceId, "Action", [action])).has(action.id)) return { id: action.id, contentWithheld: true };
-  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", [action.id]);
+    include: { assigneeMember: { include: memberUserInclude } },
+  });
+  if (!action || !(await release.admit("Action", [action])).length) return { id: actionId, contentWithheld: true as const };
+  const members = await readableWorkItemResponseMembers(actor, workspaceId, release, action.assigneeMember ? [action.assigneeMember] : []);
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", [action.id],
+    requests => release.observe("AdviceRequest", requests));
   return {
     ...action,
+    assigneeMemberId: action.assigneeMember && members.has(action.assigneeMember.id) ? action.assigneeMemberId : null,
+    assigneeMember: action.assigneeMember && members.has(action.assigneeMember.id) ? action.assigneeMember : null,
     ...requestCountSummaries.get(action.id),
   };
 }
 
-async function loadTensionWorkItemResponse(actor: AppActor, workspaceId: string, tensionId: string, fallback: any) {
+async function loadTensionWorkItemResponse(actor: AppActor, workspaceId: string, tensionId: string, release: WorkItemReadRelease) {
   const tension = await prisma.tension.findFirst({
     where: { id: tensionId, workspaceId },
     include: {
@@ -443,12 +454,24 @@ async function loadTensionWorkItemResponse(actor: AppActor, workspaceId: string,
       raisedByMember: { include: memberUserInclude },
       upvotes: true,
     },
-  }) ?? fallback;
-  if (!tension?.id) return tension;
-  if (!(await readableArtifactIds(actor, workspaceId, "Tension", [tension])).has(tension.id)) return { id: tension.id, contentWithheld: true };
-  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", [tension.id]);
+  });
+  if (!tension || !(await release.admit("Tension", [tension])).length) return { id: tensionId, contentWithheld: true as const };
+  const members = await readableWorkItemResponseMembers(actor, workspaceId, release,
+    [tension.assigneeMember, tension.raisedByMember].filter(member => member !== null));
+  const votes = await release.observeRead(() => captureReadableDigestInputs({
+    actor, workspaceId, kind: "TensionUpvote", records: tension.upvotes,
+    additionalInputs: vote => [{ kind: "User", id: vote.userId }],
+  }));
+  release.add(votes.roots);
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", [tension.id],
+    requests => release.observe("AdviceRequest", requests));
   return {
     ...tension,
+    assigneeMemberId: tension.assigneeMember && members.has(tension.assigneeMember.id) ? tension.assigneeMemberId : null,
+    assigneeMember: tension.assigneeMember && members.has(tension.assigneeMember.id) ? tension.assigneeMember : null,
+    raisedByMemberId: tension.raisedByMember && members.has(tension.raisedByMember.id) ? tension.raisedByMemberId : null,
+    raisedByMember: tension.raisedByMember && members.has(tension.raisedByMember.id) ? tension.raisedByMember : null,
+    upvotes: votes.records,
     ...requestCountSummaries.get(tension.id),
   };
 }
@@ -746,28 +769,48 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     }
     return withMcpRequiredScopes(prisma, sessionCtx.mcpOrigin, scopes, work);
   };
+  // These four write responses retain their original source proofs through
+  // permalink and audit awaits. The receipt is private, never serialized.
+  const workItemReleases = new WeakMap<object, WorkItemReadRelease>();
+  const workItemResponse = (release: WorkItemReadRelease, value: unknown) => {
+    const result = jsonResult(value);
+    workItemReleases.set(result, release);
+    return result;
+  };
   const tool = (name: string, description: string, inputSchema: Record<string, unknown>, handler: unknown) => {
     if (!hasToolCapability(name)) throw new AppError(403, "AGENT_OPERATION_UNDECLARED", "This operation is unavailable to agent credentials.");
     const guardedHandler = typeof handler === "function"
       ? async (...args: unknown[]) => {
-        return withLiveMcpScopes(TOOL_CAPABILITIES[name].scopes, async () => {
-          requireToolCapability(name);
-          try {
-            const capability = TOOL_CAPABILITIES[name];
-            const writesContent = name !== "chat" && (capability.destructive || capability.scopes.some(scope => /:(write|propose|approve)$/.test(scope)));
-            const result = writesContent ? await withMcpToolInput(actor, { workspaceId, toolName: name,
-              args: args[0] ?? {}, requiredScopes: capability.scopes }, submitted => handler(submitted, ...args.slice(1))) : await handler(...args);
-            if (isVersionConflictResult(result)) {
-              await auditToolExecution(name, args[0], null, new Error("VERSION_CONFLICT"));
-            } else {
-              await auditToolExecution(name, args[0], result);
+        let preparedWorkItem: object | undefined;
+        let responseOrigin: ReturnType<typeof getMcpOrigin>;
+        try {
+          const result = await withLiveMcpScopes(TOOL_CAPABILITIES[name].scopes, async () => {
+            requireToolCapability(name);
+            try {
+              const capability = TOOL_CAPABILITIES[name];
+              const writesContent = name !== "chat" && (capability.destructive || capability.scopes.some(scope => /:(write|propose|approve)$/.test(scope)));
+              const result = writesContent ? await withMcpToolInput(actor, { workspaceId, toolName: name,
+                args: args[0] ?? {}, requiredScopes: capability.scopes }, submitted => handler(submitted, ...args.slice(1))) : await handler(...args);
+              if (result && typeof result === "object" && workItemReleases.has(result)) preparedWorkItem = result;
+              if (isVersionConflictResult(result)) {
+                await auditToolExecution(name, args[0], null, new Error("VERSION_CONFLICT"));
+              } else {
+                await auditToolExecution(name, args[0], result);
+              }
+              responseOrigin = getMcpOrigin();
+              return name === "archive_tool_link" || name === "complete_action" ? jsonResult(result) : result;
+            } catch (error) {
+              await auditToolExecution(name, args[0], null, error);
+              throw error;
             }
-            return name === "archive_tool_link" || name === "complete_action" ? jsonResult(result) : result;
-          } catch (error) {
-            await auditToolExecution(name, args[0], null, error);
-            throw error;
-          }
-        });
+          });
+          const release = result && typeof result === "object" ? workItemReleases.get(result) : undefined;
+          // The live-scope wrapper itself awaits its post-call origin check.
+          // Replay the original proofs after that read, in the same origin context.
+          return release ? await runWithMcpOrigin(responseOrigin, () => release.finish(result)) : result;
+        } finally {
+          if (preparedWorkItem) workItemReleases.delete(preparedWorkItem);
+        }
       }
       : handler;
     return server.tool(name, description, inputSchema, annotationsForTool(name), guardedHandler);
@@ -907,47 +950,38 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ objectType, status, take }: { objectType?: string; status?: string; take?: number }) => {
       requireToolCapability("query_context_graph");
       const limit = Math.trunc(Math.min(Math.max(take ?? 50, 1), 100));
-      const scan = async (kind: "ContextGraphObject" | "ContextGraphRelationship", wanted: number,
-        load: (page: {take: number; cursor?: {id: string}; skip?: number}) => Promise<Array<{id: string}>>) => {
-        const result: Array<{id: string}> = [];
-        const seen = new Set<string>();
-        let cursor: {id: string} | undefined;
-        let scanned = 0;
-        while (result.length < wanted) {
-          const take = Math.min(100, 5_001 - scanned);
-          const rows = await load({take, ...(cursor ? {cursor, skip: 1} : {})});
-          if (scanned + rows.length > 5_000) throw new AppError(413, "CONTEXT_GRAPH_SCAN_LIMIT", "Narrow the context graph query to complete its permission scan.");
-          const fresh = rows.filter(row => !seen.has(row.id));
-          if (rows.length > take || fresh.length !== rows.length) throw new AppError(409, "SOURCE_CHANGED", "Context graph changed while reading.");
-          const visible = await readableArtifactIds(actor, workspaceId, kind, rows);
-          result.push(...rows.filter(row => visible.has(row.id)).slice(0, wanted - result.length));
-          rows.forEach(row => seen.add(row.id));
-          scanned += rows.length;
-          if (rows.length < take) break;
-          cursor = {id: rows.at(-1)!.id};
-        }
-        return result;
-      };
-      const objects = await scan("ContextGraphObject", limit, page => prisma.contextGraphObject.findMany({
-        where: {
-          workspaceId,
-          ...(objectType ? { objectType } : {}),
-          ...(status ? { status } : { status: { not: "archived" } }),
-        },
-        orderBy: [{ objectType: "asc" }, { updatedAt: "desc" }, {id: "asc"}],
-        ...page,
-      }));
-      const relationships = objects.length ? await scan("ContextGraphRelationship", limit * 2, page => prisma.contextGraphRelationship.findMany({
-        where: {
-          workspaceId,
-          sourceObjectId: { in: objects.map((object) => object.id) },
-          targetObjectId: { in: objects.map((object) => object.id) },
-          status: { not: "archived" },
-        },
-        orderBy: {id: "asc"},
-        ...page,
-      })) : [];
-      return structuredJsonResult({ objects, relationships, webUrl: webUrl(workspaceId, "/maps") });
+      const release = new DigestReadRelease(actor, workspaceId);
+      const objects = (await loadReadableArtifactSample({
+        actor, workspaceId, kind: "ContextGraphObject", limit, release,
+        loadBatch: (after, take) => prisma.contextGraphObject.findMany({
+          where: { AND: [{
+            workspaceId,
+            ...(objectType ? { objectType } : {}),
+            ...(status ? { status } : { status: { not: "archived" } }),
+          }, ...(after ? [{ OR: [
+            { objectType: { gt: after.objectType } },
+            { objectType: after.objectType, updatedAt: { lt: after.updatedAt } },
+            { objectType: after.objectType, updatedAt: after.updatedAt, id: { gt: after.id } },
+          ] }] : [])] },
+          orderBy: [{ objectType: "asc" }, { updatedAt: "desc" }, { id: "asc" }],
+          take,
+        }),
+      })).records;
+      const relationships = objects.length ? (await loadReadableArtifactSample({
+        actor, workspaceId, kind: "ContextGraphRelationship", limit: limit * 2, release,
+        loadBatch: (after, take) => prisma.contextGraphRelationship.findMany({
+          where: {
+            workspaceId,
+            sourceObjectId: { in: objects.map(object => object.id) },
+            targetObjectId: { in: objects.map(object => object.id) },
+            status: { not: "archived" },
+            ...(after ? { id: { gt: after.id } } : {}),
+          },
+          orderBy: { id: "asc" },
+          take,
+        }),
+      })).records : [];
+      return structuredJsonResult(await release.finish({ objects, relationships, webUrl: webUrl(workspaceId, "/maps") }));
     },
   );
 
@@ -988,18 +1022,22 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       const owner = objectId
         ? await prisma.contextGraphObject.findFirst({ where: { id: objectId, workspaceId } })
         : await prisma.contextGraphRelationship.findFirst({ where: { id: relationshipId, workspaceId } });
-      if (!owner || !(await readableArtifactIds(actor, workspaceId, ownerKind, [owner])).has(owner.id))
-        return structuredJsonResult({ evidenceRefs: [] });
-      const candidates = await prisma.contextGraphEvidenceRef.findMany({
-        where: {
-          workspaceId,
-          ...(objectId ? { objectId } : { relationshipId }),
-        },
-        orderBy: { createdAt: "desc" },
+      const release = new DigestReadRelease(actor, workspaceId);
+      const ownerProof = owner ? await release.capture(ownerKind, [owner]) : null;
+      if (!ownerProof?.records.length) return structuredJsonResult(await release.finish({ evidenceRefs: [] }));
+      const selected = await loadReadableArtifactSample({
+        actor, workspaceId, kind: "ContextGraphEvidenceRef", release,
+        limit: Math.min(Math.max(Math.trunc(take ?? 20), 1), 50),
+        loadBatch: (after, pageSize) => prisma.contextGraphEvidenceRef.findMany({
+          where: {
+            workspaceId, knowledgeChunkId: null,
+            ...(objectId ? { objectId } : { relationshipId }),
+            ...(after ? { OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] } : {}),
+          },
+          orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: pageSize,
+        }),
       });
-      const visibleEvidenceIds = await readableArtifactIds(actor, workspaceId, "ContextGraphEvidenceRef", candidates.filter((ref) => !ref.knowledgeChunkId));
-      const evidenceRefs = candidates.filter((ref) => visibleEvidenceIds.has(ref.id)).slice(0, Math.min(Math.max(take ?? 20, 1), 50));
-      return structuredJsonResult({ evidenceRefs });
+      return structuredJsonResult(await release.finish({ evidenceRefs: selected.records }));
     },
   );
 
@@ -2482,6 +2520,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           responsibleMemberId: item.responsibleMemberId,
           responsibleMemberName: item.responsibleMemberName,
           responsiblePerson: item.responsiblePerson,
+          relationWindow: item.relationWindow,
           adviceRequestCount: item.adviceRequestCount,
           activeAdviceRequestCount: item.activeAdviceRequestCount,
           inputRequestCount: item.inputRequestCount,
@@ -2501,7 +2540,10 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ proposalId }: { proposalId: string }) => {
       requireScope(sessionCtx, "proposals:read");
-      const proposal = await getProposal(actor, { workspaceId, proposalId }).catch(() => null);
+      const proposal = await getProposal(actor, { workspaceId, proposalId }).catch((error: unknown) => {
+        if (error instanceof AppError && error.status === 404) return null;
+        throw error;
+      });
       if (!proposal) return jsonResult({ error: "Not found" });
       const item = normalizeProposalWorkItem(proposal);
       return jsonResult({
@@ -2886,10 +2928,12 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           duplicateGuard: duplicateGuardOptionsFromParams(params),
           source: params.idempotencyKey === undefined ? undefined : actionRequestSource("MCP_REQUEST", sessionActorId, params.idempotencyKey),
         });
-        const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, action.id, action);
+        const release = new WorkItemReadRelease(actor, workspaceId);
+        const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, action.id, release);
+        if ("contentWithheld" in actionForResponse) return workItemResponse(release, actionForResponse);
         const permanent = await permanentUrl(workspaceId, "Action", action.id);
         const item = normalizeActionWorkItem(actionForResponse);
-        return jsonResult({
+        return workItemResponse(release, {
           id: item.id,
           status: item.status,
           priority: item.priority,
@@ -2966,9 +3010,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         }
         throw error;
       }
-      const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, updated.id, updated);
+      const release = new WorkItemReadRelease(actor, workspaceId);
+      const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, updated.id, release);
+      if ("contentWithheld" in actionForResponse) return workItemResponse(release, actionForResponse);
       const item = normalizeActionWorkItem(actionForResponse);
-      return jsonResult({
+      return workItemResponse(release, {
         id: item.id,
         status: item.status,
         priority: item.priority,
@@ -3109,10 +3155,12 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           authorMemberId: params.authorMemberId,
           duplicateGuard: duplicateGuardOptionsFromParams(params),
         });
-        const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, tension.id, tension);
+        const release = new WorkItemReadRelease(actor, workspaceId);
+        const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, tension.id, release);
+        if ("contentWithheld" in tensionForResponse) return workItemResponse(release, tensionForResponse);
         const permanent = await permanentUrl(workspaceId, "Tension", tension.id);
         const item = normalizeTensionWorkItem(tensionForResponse);
-        return jsonResult({
+        return workItemResponse(release, {
           id: item.id,
           status: item.status,
           priority: item.priority,
@@ -3193,9 +3241,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         }
         throw error;
       }
-      const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, updated.id, updated);
+      const release = new WorkItemReadRelease(actor, workspaceId);
+      const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, updated.id, release);
+      if ("contentWithheld" in tensionForResponse) return workItemResponse(release, tensionForResponse);
       const item = normalizeTensionWorkItem(tensionForResponse);
-      return jsonResult({
+      return workItemResponse(release, {
         id: item.id,
         status: item.status,
         priority: item.priority,
@@ -4629,7 +4679,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       take: z.number().optional(),
       skip: z.number().optional(),
       includeRestored: z.boolean().optional(),
-      includePurged: z.boolean().optional(),
+      includePurged: z.boolean().optional().describe("Retained for compatibility; purged source identities remain withheld by current source permissions."),
     },
     async (params: {
       entityType?: string;

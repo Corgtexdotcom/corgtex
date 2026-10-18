@@ -174,6 +174,16 @@ vi.mock("@corgtex/domain", async () => ({
   recordArtifactInputLineage: vi.fn().mockResolvedValue(undefined),
   assertArtifactInputWriteFence: vi.fn().mockResolvedValue(undefined),
   scanSourceReadableRecords: vi.fn(async ({ load }) => load(undefined, 5001)),
+  // These orchestration tests already mock source admission; model the new
+  // release/sample ports while leaving the actual reader and version ledger real.
+  DigestReadRelease: class {
+    async capture<T>( _kind: unknown, records: T[]) { return { records: records.filter(Boolean), roots: [] }; }
+    async finish<T>(value: T) { return value; }
+  },
+  loadReadableArtifactSample: vi.fn(async ({ loadBatch, release, kind, limit }) => {
+    const captured = await release.capture(kind, await loadBatch(undefined, 100));
+    return { records: captured.records.slice(0, limit), roots: [] };
+  }),
   captureReadableDigestInputs: vi.fn(async ({ records }) => ({ records: records.filter(Boolean), roots: [{ kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64) }] })),
   getWorkspaceToolLinkInputRoots: vi.fn().mockResolvedValue([{ kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64) }]),
   duplicateGuardErrorPayload: vi.fn(),

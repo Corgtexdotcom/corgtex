@@ -10,7 +10,6 @@ export {
   resolveProposalAction,
   returnProposalToDraftAction,
   submitProposalAction,
-  updateProposalAction,
 } from "./proposals/actions";
 export * from "./leads/actions";
 export * from "./governance/actions";

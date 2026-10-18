@@ -154,4 +154,18 @@ describe("native direct transcript capture", () => {
       .rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
     expect(captureArtifactInputProof).not.toHaveBeenCalled();
   });
+  it("mints a renewable same-attempt lease that retains the original proof", async () => {
+    const now = new Date();
+    db.meetingAudioAsset.findFirst.mockResolvedValue({ id: "audio-1", workspaceId: "ws-1" });
+    db.nativeTranscriptInput.findFirst.mockResolvedValue({ id: "native-1", ownerMemberId: "member-1",
+      submittedByUserId: "user-1", grantHash: "a".repeat(64) });
+    db.workflowJob.findFirst.mockResolvedValue({ id: "job-1", workspaceId: "ws-1", type: "meeting-audio.transcribe",
+      status: "RUNNING", lockedBy: "worker-1", lockedAt: now, startedAt: now,
+      attempts: 1, payload: { audioAssetId: "audio-1" } });
+    const { createAudioTranscriptWorkerActor } = await import("./native-transcript-input");
+    const worker = await createAudioTranscriptWorkerActor({ workspaceId: "ws-1", audioAssetId: "audio-1",
+      workflowJobId: "job-1", expectedLease: { attempts: 1, lockedBy: "worker-1", lockedAt: now } });
+    expect(worker).toHaveProperty("renewLease", expect.any(Function));
+  });
+
 });

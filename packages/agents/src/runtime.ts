@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentRunStatus, AgentTriggerType } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { env, prisma, toInputJson, type AppActor } from "@corgtex/shared";
-import { resolveModel } from "@corgtex/models";
+import { resolveModel, type ModelAttemptGuard, type ModelRequestControls } from "@corgtex/models";
 import { isAgentEnabled, getAgentModelOverride, AGENT_REGISTRY, type RegisteredAgentKey } from "@corgtex/domain";
 import {
   resolveAgentIdentityLimits, captureArtifactInputProof, captureImmutableArtifactInputProof,
@@ -23,13 +23,18 @@ export type AgentOutcome = {
   };
 };
 
+export type AgentOperationContext = {
+  /** Bind a model request to this operation's original, server-owned receipt. */
+  modelRequest<T extends object>(request: T & ModelRequestControls): T & ModelRequestControls;
+};
+
 export type AgentHelpers = {
   captureInputs(roots: readonly LineageRoot[]): Promise<AgentInputReceipt>;
   readonly plannedInputReceipt: AgentInputReceipt | undefined;
   readonly behaviorContext: string | null;
   readonly behaviorLineageRoots: readonly LineageRoot[];
-  step<T>(name: string, input: unknown, work: () => Promise<T>, proof?: AgentOperationReceipt): Promise<T>;
-  tool<T>(name: string, input: unknown, work: () => Promise<T>, proof?: AgentOperationReceipt): Promise<T>;
+  step<T>(name: string, input: unknown, work: (operation: AgentOperationContext) => Promise<T>, proof?: AgentOperationReceipt): Promise<T>;
+  tool<T>(name: string, input: unknown, work: (operation: AgentOperationContext) => Promise<T>, proof?: AgentOperationReceipt): Promise<T>;
 };
 
 export type AgentRunParams<TPayload extends Record<string, unknown>, TContext extends Record<string, unknown>> = {
@@ -198,15 +203,21 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
   }
 
   const receipts = new WeakMap<AgentInputReceipt, LineageRoot[]>();
+  const attemptReceipts = new WeakMap<AgentInputReceipt, LineageRoot[]>();
+  const liveJobRoots = (roots: readonly LineageRoot[]) => structuredClone(roots.filter(root => root.kind === "WorkflowJobInput"));
   const freezeRoots = async (roots: readonly LineageRoot[]): Promise<LineageRoot[]> => {
     invariant(roots.length > 0, 409, "UNKNOWN_LINEAGE", "Agent inputs need a complete current receipt.");
     invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots),
       409, "SOURCE_CHANGED", "Agent inputs changed before their receipt was captured.");
     return prisma.$transaction(tx => captureImmutableArtifactInputProof(actor, params.workspaceId, roots, tx));
   };
+  const initialLiveJobRoots = liveJobRoots(params.lineageRoots ?? []);
   const initialRoots = params.lineageActor && params.lineageRoots?.length ? await freezeRoots(params.lineageRoots) : null;
   const plannedInputReceipt: AgentInputReceipt | undefined = initialRoots ? Object.freeze({ kind: "agent-input-receipt" }) : undefined;
-  if (plannedInputReceipt && initialRoots) receipts.set(plannedInputReceipt, initialRoots);
+  if (plannedInputReceipt && initialRoots) {
+    receipts.set(plannedInputReceipt, initialRoots);
+    attemptReceipts.set(plannedInputReceipt, mergeArtifactInputProofs(initialRoots, initialLiveJobRoots));
+  }
   const writeReceipt = async (tx: Prisma.TransactionClient, kind: "AgentRun" | "AgentStep" | "AgentToolCall",
     row: { id: string }, roots: LineageRoot[] | null) => {
     // A source may be revoked after model completion. Keep operational history,
@@ -234,7 +245,7 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
   let behaviorLineageRoots: LineageRoot[] = [];
   let contextRoots: LineageRoot[] | null = null;
   const operation = async <T>(kind: "AgentStep" | "AgentToolCall", name: string, input: unknown,
-    work: () => Promise<T>, proof?: AgentOperationReceipt): Promise<T> => {
+    work: (operation: AgentOperationContext) => Promise<T>, proof?: AgentOperationReceipt): Promise<T> => {
     const list = kind === "AgentStep" ? accumulatedSteps : accumulatedToolCalls;
     const startedAt = new Date();
     const id = randomUUID();
@@ -242,13 +253,44 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
     // A forged token or revoked input must be rejected before executing a model/tool.
     if (proof?.receipt) invariant(roots && await isArtifactInputProofReadable(actor, params.workspaceId, roots),
       409, "UNKNOWN_LINEAGE", "Agent operation has no valid captured input receipt.");
+    const attemptRoots = proof?.receipt ? attemptReceipts.get(proof.receipt) : undefined;
+    const controller = new AbortController();
+    const requestSignals: AbortSignal[] = [];
+    const operationContext: AgentOperationContext = {
+      modelRequest(request) {
+        invariant(attemptRoots?.length, 409, "UNKNOWN_LINEAGE", "Model operations require a captured input receipt.");
+        const priorGuard = request.authorizeAttempt;
+        const signal = request.signal ? AbortSignal.any([controller.signal, request.signal]) : controller.signal;
+        requestSignals.push(signal);
+        const authorizeAttempt: ModelAttemptGuard = async context => {
+          try {
+            signal.throwIfAborted();
+            context.signal.throwIfAborted();
+            await priorGuard?.(context);
+            signal.throwIfAborted();
+            context.signal.throwIfAborted();
+            invariant(await isArtifactInputProofReadable(actor, params.workspaceId, attemptRoots),
+              409, "SOURCE_CHANGED", "Agent model inputs changed before the provider attempt.");
+            signal.throwIfAborted();
+            context.signal.throwIfAborted();
+          } catch (error) {
+            controller.abort(error);
+            throw error;
+          }
+        };
+        return { ...request, signal, authorizeAttempt };
+      },
+    };
+    const invoke = () => work(operationContext);
     try {
       let output: T;
       if (proof?.auditedRead && roots) {
-        const observed = await withArtifactInputReadCapture(actor, params.workspaceId, work);
+        const observed = await withArtifactInputReadCapture(actor, params.workspaceId, invoke);
         output = observed.value;
         roots = mergeArtifactInputProofs(roots, (observed.roots.length ? await freezeRoots(observed.roots) : []));
-      } else output = await work();
+      } else output = await invoke();
+      controller.signal.throwIfAborted();
+      for (const signal of requestSignals) signal.throwIfAborted();
       list.push({ data: { id, agentRunId: run.id, name, status: "COMPLETED", inputJson: toJson(input),
         outputJson: toJson(output), startedAt, completedAt: new Date(), createdAt: startedAt, error: null }, roots });
       return output;
@@ -261,9 +303,11 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
   };
   const helpers: AgentHelpers = {
     async captureInputs(roots) {
+      const originalJobRoots = liveJobRoots(roots);
       const frozen = await freezeRoots(roots);
       const receipt: AgentInputReceipt = Object.freeze({ kind: "agent-input-receipt" });
       receipts.set(receipt, frozen);
+      attemptReceipts.set(receipt, mergeArtifactInputProofs(frozen, originalJobRoots, initialLiveJobRoots));
       return receipt;
     },
     get plannedInputReceipt() { return plannedInputReceipt; },

@@ -5,7 +5,7 @@ import { WorkItemReadRelease } from "./work-item-readable-page";
 import { redactAgentRunContent } from "./agent-runs";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
-import { mergeLineageInputRoot, withArtifactCountReleaseSnapshot, captureArtifactInputProof, isArtifactInputProofReadable, isLineageKind, readableArtifactIds, sealArtifactInputActor, type LineageKind, type LineageRoot } from "./source-lineage";
+import { captureArtifactReadHeadObservation, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, captureArtifactInputProof, isArtifactInputProofReadable, isLineageKind, readableArtifactIds, sealArtifactInputActor, type LineageKind, type LineageRoot } from "./source-lineage";
 
 export async function recordAudit(
   tx: Prisma.TransactionClient,
@@ -33,17 +33,21 @@ export async function recordAudit(
 // Only server-defined operation vocabulary is an operational fact. Historical
 // free text is never certified by the current target's content receipt.
 const AUDIT_OPERATIONS: Partial<Record<LineageKind, readonly string[]>> = {
-  Action: ["action.checklist_item.created", "action.checklist_item.deleted", "action.checklist_item.updated", "action.completed", "action.created", "action.duplicate_resolved", "action.published", "action.returned_to_draft", "action.updated", "create_action"],
+  ConversationTurn: ["legacy-history.recovered"],
+  ConversationSession: ["legacy-history.recovered"],
+  KeyResult: ["legacy-history.recovered"],
+  GoalUpdate: ["legacy-history.recovered"],
+  Action: ["legacy-history.recovered", "action.checklist_item.created", "action.checklist_item.deleted", "action.checklist_item.updated", "action.completed", "action.created", "action.duplicate_resolved", "action.published", "action.returned_to_draft", "action.updated", "create_action"],
   AdviceRequest: ["advice.request.completed", "advice.request.withdrawn", "advice.requested"],
   AgentRun: ["agentRun.feedbackSubmitted"],
   ApprovalFlow: ["approval.decision_recorded", "approval.finalized", "approval.objection_created", "approval.objection_resolved", "approval.withdrawn"],
   BrainArticle: ["brain-article.created", "brain-article.published", "brain-article.regenerated", "brain-article.returned_to_draft", "brain-article.updated", "brain-article.variant.created"],
-  BrainSource: ["brain-source.created", "brain-source.reconciled", "brain-source.updated"],
-  BuildArtifact: ["build_artifact.public_revoked"],
+  BrainSource: ["legacy-history.recovered", "brain-source.created", "brain-source.reconciled", "brain-source.updated"],
+  BuildArtifact: ["build_artifact.created", "build_artifact.updated", "build_artifact.public_revoked"],
   BuildArtifactAsset: ["build_artifact_asset.created", "managed_release.inventory_frozen"],
-  Circle: ["circle.created", "circle.updated"],
+  Circle: ["legacy-history.recovered", "circle.created", "circle.updated"],
   ContextGraphObject: ["context-graph.object.upserted"],
-  ContextGraphProposedDiff: ["context-graph.diff.applied", "context-graph.diff.edited", "context-graph.diff.proposed"],
+  ContextGraphProposedDiff: ["context-graph.diff.applied", "context-graph.diff.approved", "context-graph.diff.edited", "context-graph.diff.proposed"],
   ContextGraphRelationship: ["context-graph.relationship.upserted"],
   ContextMapView: ["context-graph.map.imported", "context-map.layout.updated", "context-map.view.personal.created"],
   CrmAccount: ["crm.account.converted_to_client", "crm.account.created", "crm.account.customer_lifecycle_registered", "crm.account.updated"],
@@ -52,18 +56,18 @@ const AUDIT_OPERATIONS: Partial<Record<LineageKind, readonly string[]>> = {
   CrmContact: ["crm.contact.created", "crm.contact.updated"],
   CrmDeal: ["crm.deal.created", "crm.deal.updated"],
   DeliberationEntry: ["deliberation.entry_posted", "deliberation.entry_resolved", "deliberation.entry_updated"],
-  Document: ["document.created", "document.updated"],
+  Document: ["legacy-history.recovered", "document.created", "document.updated"],
   ExecutionRequest: ["execution_request.created", "execution_result.submitted"],
   ExternalContentSource: ["external-content-source.selected", "external-content-source.sync_requested"],
   FinanceImportBatch: ["finance-report-import.applied", "finance-report-import.extracted", "finance-report-import.extraction-failed", "finance-report-import.proposed", "finance-report-import.reconciled", "finance-report-import.uploaded"],
   FinanceImportCandidate: ["finance-report-import.candidate-edited"],
-  Goal: ["goal.created", "goal.updated", "workspace-artifact.archived"],
+  Goal: ["legacy-history.recovered", "goal.created", "goal.updated", "workspace-artifact.archived"],
   Meeting: ["meeting.agenda.edited", "meeting.created", "meeting.intelligence-regeneration-requested", "meeting.processed_content_updated", "meeting.scheduled", "meeting.transcript-uploaded", "meeting.updated", "meeting_follow_up_review_posted"],
   MeetingAudioAsset: ["meeting-audio.ingested", "meeting-audio.uploaded"],
   MeetingSeries: ["meeting-invite.imported", "meeting-series.created", "meeting-series.recorder-url-updated"],
-  Member: ["member.access_link.created", "member.created", "member.merged", "procurement_trial.admin_created"],
+  Member: ["member.access_link.created", "member.created", "member.deactivated", "member.merged", "member.reactivated", "member.updated", "procurement_trial.admin_created"],
   Proposal: ["proposal.created", "proposal.created_from_tension", "proposal.opened", "proposal.published", "proposal.reopened", "proposal.resolved", "proposal.returned_to_draft", "proposal.support_reopened_resolved", "proposal.updated", "workspace-artifact.archived"],
-  Role: ["role.created", "role.updated", "workspace-artifact.archived"],
+  Role: ["legacy-history.recovered", "role.created", "role.updated", "workspace-artifact.archived"],
   RoleAssignment: ["role.assigned", "role.unassigned"],
   Tension: ["tension.created", "tension.published", "tension.returned_to_draft", "tension.updated"],
   WorkspaceToolLink: ["tool_link.created", "tool_link.credential_revealed", "tool_link.updated"],
@@ -94,7 +98,7 @@ const EVENT_OPERATIONS: Partial<Record<LineageKind, readonly string[]>> = {
   Goal: ["goal.created", "goal.updated"],
   GoalLink: ["goal-link.created"],
   Meeting: ["meeting.created", "meeting.processed-content-updated", "meeting.scheduled", "meeting.transcript-uploaded"],
-  Member: ["member.created", "member.deactivated", "member.merged"],
+  Member: ["member.created", "member.deactivated", "member.merged", "member.reactivated", "member.updated"],
   Proposal: ["proposal.created", "proposal.opened", "proposal.published", "proposal.reopened", "proposal.returned_to_draft", "proposal.support_reopened_resolved", "proposal.updated"],
   Role: ["role.created", "role.updated"],
   RoleAssignment: ["role.assigned", "role.assignment.updated", "role.unassigned"],
@@ -123,23 +127,46 @@ async function captureAuditTarget(actor: AppActor, workspaceId: string, kind: st
   }
 }
 
-export async function listAuditLogs(actor: AppActor, workspaceId: string, opts?: {
+type AuditLogOptions = {
   take?: number;
   entityType?: string;
   entityId?: string;
   action?: string;
   actorUserId?: string;
-}) {
+  cursor?: string;
+};
+
+export async function listAuditLogs(actor: AppActor, workspaceId: string, opts?: AuditLogOptions) {
+  const page = await listAuditLogsPage(actor, workspaceId, opts);
+  invariant(!page.scanLimited, 409, "SOURCE_READ_SCAN_LIMIT", "Audit scan reached its safe limit; use bounded audit pagination or narrow the filters.");
+  return page.items;
+}
+
+export async function listAuditLogsPage(actor: AppActor, workspaceId: string, opts?: AuditLogOptions) {
   sealArtifactInputActor(actor);
   opts = opts ? { ...opts } : undefined;
   await requireWorkspaceMembership({ actor, workspaceId });
-  if (opts?.entityType && !isLineageKind(opts.entityType)) return [];
-  if (opts?.entityType && opts.entityId && !await captureAuditTarget(actor, workspaceId, opts.entityType, opts.entityId)) return [];
+  const empty = { items: [] as ReturnType<typeof auditOperationalFields>[], nextCursor: null as string | null, scanLimited: false };
+  if (opts?.entityType && !isLineageKind(opts.entityType)) return empty;
+  if (opts?.entityType && opts.entityId && !await captureAuditTarget(actor, workspaceId, opts.entityType, opts.entityId)) return empty;
   const take = Math.max(0, Math.min(opts?.take ?? 50, AUDIT_SCAN_LIMIT));
   const release = new WorkItemReadRelease(actor, workspaceId);
   const visible = [];
-  let after: AuditOperationalRow | undefined;
-  while (visible.length < take) {
+  let after: { id: string; createdAt: Date } | undefined;
+  if (opts?.cursor) {
+    try {
+      invariant(opts.cursor.length <= 2048, 400, "VALIDATION_ERROR", "Invalid audit cursor.");
+      const value = JSON.parse(Buffer.from(opts.cursor, "base64url").toString("utf8"));
+      invariant(value && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 256
+        && typeof value.createdAt === "string" && new Date(value.createdAt).toISOString() === value.createdAt,
+      400, "VALIDATION_ERROR", "Invalid audit cursor.");
+      after = { id: value.id, createdAt: new Date(value.createdAt) };
+    } catch { throw new AppError(400, "VALIDATION_ERROR", "Invalid audit cursor."); }
+  }
+  let examined = 0;
+  let mayHaveMore = false;
+  const proofs = new Map<string, LineageRoot[] | null>();
+  while (visible.length < take && examined < AUDIT_SCAN_LIMIT) {
     const rows = await prisma.auditLog.findMany({
       where: { workspaceId,
         ...(opts?.entityType ? { entityType: opts.entityType } : {}),
@@ -153,9 +180,12 @@ export async function listAuditLogs(actor: AppActor, workspaceId: string, opts?:
     });
     invariant(rows.length <= 100 && (!rows.length || rows.at(-1)!.id !== after?.id),
       503, "SOURCE_READ_SCAN_CHANGED", "Audit page changed; retry.");
-    // Denied candidates do not consume the visible sample or accumulate bodies.
-    const proofs = new Map<string, LineageRoot[] | null>();
-    for (const row of rows) {
+    // Every examined row consumes the bounded window, including denied facts.
+    mayHaveMore = rows.length === 100;
+    for (const [index, row] of rows.entries()) {
+      after = row;
+      examined += 1;
+      mayHaveMore = index < rows.length - 1 || rows.length === 100;
       if (!isLineageKind(row.entityType) || !(AUDIT_OPERATIONS[row.entityType]?.includes(row.action) || ARCHIVE_OPERATIONS.has(row.action))) continue;
       const key = JSON.stringify([row.entityType, row.entityId]);
       if (!proofs.has(key)) proofs.set(key, await release.observeRead(() => captureAuditTarget(actor, workspaceId, row.entityType, row.entityId)));
@@ -166,10 +196,12 @@ export async function listAuditLogs(actor: AppActor, workspaceId: string, opts?:
       if (visible.length === take) break;
     }
     if (rows.length < 100) break;
-    after = rows.at(-1);
   }
   await requireWorkspaceMembership({ actor, workspaceId });
-  return release.finish(visible);
+  return release.finish({ items: visible,
+    nextCursor: mayHaveMore && after ? Buffer.from(JSON.stringify({ id: after.id, createdAt: after.createdAt.toISOString() })).toString("base64url") : null,
+    scanLimited: examined === AUDIT_SCAN_LIMIT && mayHaveMore,
+  });
 }
 
 export async function getEntityTimeline(actor: AppActor, workspaceId: string, entityType: string, entityId: string) {
@@ -283,51 +315,60 @@ export async function getModelUsageSummary(actor: AppActor, workspaceId: string,
   }>();
 
   const roots = new Map<string, LineageRoot>();
-  let afterId: string | undefined;
+  const heads = new Map<string, string>();
   let totalCalls = 0;
-  for (;;) {
-    const candidates = await prisma.modelUsage.findMany({
-      where: {
-        workspaceId,
-        createdAt: { gte: since },
-        ...(afterId ? {id: {gt: afterId}} : {}),
-      },
-      select: {
-        id: true,
-        workspaceId: true,
-        agentRunId: true,
-        provider: true,
-        model: true,
-        taskType: true,
-        inputTokens: true,
-        outputTokens: true,
-        latencyMs: true,
-        estimatedCostUsd: true,
-        billableCostUsd: true,
-        createdAt: true,
-        agentRun: true,
-      },
-      orderBy: {id: "asc"},
-      take: 100,
-    });
-    const costRows = candidates.map(({ id, workspaceId: rowWorkspaceId, estimatedCostUsd, billableCostUsd, createdAt }) =>
-      ({ id, workspaceId: rowWorkspaceId, estimatedCostUsd, billableCostUsd, createdAt }));
-    const readableCosts = await readableArtifactIds(actor, workspaceId, "ModelUsageCost", costRows);
-    const runs = [...new Map(candidates.flatMap(row => row.agentRun ? [[row.agentRun.id, row.agentRun] as const] : [])).values()];
-    const readableRuns = await readableArtifactIds(actor, workspaceId, "AgentRun", runs);
-    const usages = candidates.filter(row => readableCosts.has(row.id)
-      && (!row.agentRunId || (row.agentRun?.id === row.agentRunId && readableRuns.has(row.agentRunId))));
+  // One bounded enumeration avoids mixed completeness from concurrent inserts.
+  const window = await prisma.modelUsage.findMany({
+    where: {
+      workspaceId,
+      createdAt: { gte: since },
+    },
+    select: {
+      id: true,
+      workspaceId: true,
+      agentRunId: true,
+      provider: true,
+      model: true,
+      taskType: true,
+      inputTokens: true,
+      outputTokens: true,
+      latencyMs: true,
+      estimatedCostUsd: true,
+      billableCostUsd: true,
+      createdAt: true,
+      agentRun: true,
+    },
+    orderBy: [{createdAt: "desc"}, {id: "desc"}],
+    take: 200,
+  });
+  for (let offset = 0; offset < window.length; offset += 100) {
+    const candidates = window.slice(offset, offset + 100);
+    const observed = await captureArtifactReadHeadObservation(async () => {
+      const costRows = candidates.map(({ id, workspaceId: rowWorkspaceId, estimatedCostUsd, billableCostUsd, createdAt }) =>
+        ({ id, workspaceId: rowWorkspaceId, estimatedCostUsd, billableCostUsd, createdAt }));
+      const readableCosts = await readableArtifactIds(actor, workspaceId, "ModelUsageCost", costRows);
+      const runs = [...new Map(candidates.flatMap(row => row.agentRun ? [[row.agentRun.id, row.agentRun] as const] : [])).values()];
+      const readableRuns = await readableArtifactIds(actor, workspaceId, "AgentRun", runs);
+      const usages = candidates.filter(row => readableCosts.has(row.id)
+        && (!row.agentRunId || (row.agentRun?.id === row.agentRunId && readableRuns.has(row.agentRunId))));
 
-    if (usages.length) {
-      const proof = await captureArtifactInputProof(actor, workspaceId, usages.flatMap(usage => [
-        {kind: "ModelUsageCost" as const, id: usage.id, snapshot: usage},
-        ...(usage.agentRun ? [{kind: "AgentRun" as const, id: usage.agentRun.id, snapshot: usage.agentRun}] : []),
-      ]));
-      for (const root of proof) {
-        const key = `${root.kind}:${root.id}`;
-        roots.set(key, mergeLineageInputRoot(roots.get(key), root));
+      if (usages.length) {
+        const proof = await captureArtifactInputProof(actor, workspaceId, usages.flatMap(usage => [
+          {kind: "ModelUsageCost" as const, id: usage.id, snapshot: usage},
+          ...(usage.agentRun ? [{kind: "AgentRun" as const, id: usage.agentRun.id, snapshot: usage.agentRun}] : []),
+        ]));
+        for (const root of proof) {
+          const key = `${root.kind}:${root.id}`;
+          roots.set(key, mergeLineageInputRoot(roots.get(key), root));
+        }
       }
+      return usages;
+    });
+    for (const [key, stamp] of observed.heads) {
+      invariant(!heads.has(key) || heads.get(key) === stamp, 409, "SOURCE_CHANGED", "Usage lineage changed during collection.");
+      heads.set(key, stamp);
     }
+    const usages = observed.value;
     totalCalls += usages.length;
     for (const usage of usages) {
       const costUsd = parseCost(usage.billableCostUsd ?? usage.estimatedCostUsd);
@@ -380,8 +421,6 @@ export async function getModelUsageSummary(actor: AppActor, workspaceId: string,
       dayEntry.callCount += 1;
       byDay.set(dateKey, dayEntry);
     }
-    if (candidates.length < 100) break;
-    afterId = candidates[candidates.length - 1].id;
   }
 
   const totalCostUsd = [...byModel.values()].reduce((sum, m) => sum + m.totalCostUsd, 0);
@@ -392,6 +431,7 @@ export async function getModelUsageSummary(actor: AppActor, workspaceId: string,
     invariant(actor.kind === "user" && current?.role === "ADMIN", 403, "FORBIDDEN", "Model usage costs require a current workspace administrator.");
     return {
       periodDays,
+      readWindow: {scope: "WINDOW" as const, complete: window.length < 200},
       totalCostUsd,
       totalTokens,
       totalCalls,
@@ -399,7 +439,7 @@ export async function getModelUsageSummary(actor: AppActor, workspaceId: string,
       byAgent: [...byAgent.values()].sort((a, b) => b.totalCostUsd - a.totalCostUsd),
       byDay: [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date)),
     };
-  });
+  }, heads);
 }
 
 function parseCost(value: unknown): number {

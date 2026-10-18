@@ -431,15 +431,33 @@ describe("build artifacts", () => {
     }));
   });
 
-  it("returns permitted build artifacts after more than 5000 unknown candidates",async()=>{
+  it("bounds legacy build discovery instead of exhausting more than 5000 unknown candidates",async()=>{
     const hidden=Array.from({length:5001},(_,index) => artifactFixture({id:`a-${String(index).padStart(5,"0")}`,createdBy:null,assets:[]}));
     const allowed=artifactFixture({id:"z-allowed",createdBy:null,assets:[]});
     receipts.set(receiptKey("BuildArtifact",allowed.id),allowed);
     const rows=[...hidden,allowed];
     prismaMock.buildArtifact.findMany.mockImplementation(async ({where,take}) => rows.filter(row => !where.id || row.id > where.id.gt).slice(0,take));
     const {listBuildArtifacts}=await import("./build-artifacts");
-    expect((await listBuildArtifacts(actor,{workspaceId:"workspace-1"})).map(row => row.id)).toEqual([allowed.id]);
-    expect(prismaMock.buildArtifact.findMany.mock.calls.every(([query]) => query.take === 100)).toBe(true);
+    await expect(listBuildArtifacts(actor,{workspaceId:"workspace-1"})).rejects.toMatchObject({code:"SOURCE_READ_SCAN_LIMIT"});
+    expect(prismaMock.buildArtifact.findMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.buildArtifact.findMany.mock.calls[0][0].take).toBe(200);
+  });
+
+  it("continues hidden build windows with stable timestamp ties and scope-bound cursors", async () => {
+    const rows = Array.from({length: 202}, (_, index) => artifactFixture({id:`artifact-${String(index).padStart(4,"0")}`,createdBy:null,assets:[]}));
+    for (const row of rows.slice(200)) receipts.set(receiptKey("BuildArtifact", row.id), row);
+    prismaMock.buildArtifact.findMany.mockImplementation(async ({where,take}) => rows.filter(row => !where.OR || row.id > where.OR[2].id.gt).slice(0,take));
+    const {listBuildArtifactPage} = await import("./build-artifacts");
+    const first = await listBuildArtifactPage(actor, {workspaceId:"workspace-1",status:"OPEN",take:1});
+    expect(first).toMatchObject({items:[],complete:false,hasMore:true});
+    expect(prismaMock.buildArtifact.findMany).toHaveBeenCalledTimes(1);
+    const second = await listBuildArtifactPage(actor, {workspaceId:"workspace-1",status:"OPEN",take:1,cursor:first.nextCursor!});
+    expect(second.items.map(row=>row.id)).toEqual([rows[200].id]); expect(second.complete).toBe(false);
+    const third = await listBuildArtifactPage(actor, {workspaceId:"workspace-1",status:"OPEN",take:1,cursor:second.nextCursor!});
+    expect(third.items.map(row=>row.id)).toEqual([rows[201].id]); expect(third.complete).toBe(true);
+    await expect(listBuildArtifactPage(actor,{workspaceId:"other",status:"OPEN",cursor:first.nextCursor!})).rejects.toMatchObject({code:"INVALID_INPUT"});
+    await expect(listBuildArtifactPage(actor,{workspaceId:"workspace-1",status:"MERGED",cursor:first.nextCursor!})).rejects.toMatchObject({code:"INVALID_INPUT"});
+    await expect(listBuildArtifactPage(actor,{workspaceId:"workspace-1",cursor:"garbage"})).rejects.toMatchObject({code:"INVALID_INPUT"});
   });
 
   it("excludes operational inventory artifacts from the customer build-artifact feed", async () => {

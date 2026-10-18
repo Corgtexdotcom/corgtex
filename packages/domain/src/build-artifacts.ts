@@ -421,31 +421,61 @@ function githubPullRequestSummary(params: GitHubPullRequestInput) {
   return lines.filter(Boolean).join("\n\n");
 }
 
-export async function listBuildArtifacts(actor: AppActor, params: {
-  workspaceId: string;
-  status?: BuildArtifactStatus;
+type BuildArtifactPosition = { id: string; updatedAt: string; createdAt: string };
+function buildArtifactCursor(cursor: string | undefined, scope: string): BuildArtifactPosition | undefined {
+  if (!cursor) return;
+  let value;
+  try { if (cursor.length <= 2048) value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")); } catch { /* validated below */ }
+  const date = (input: unknown) => typeof input === "string" && Number.isFinite(Date.parse(input)) && new Date(input).toISOString() === input;
+  invariant(value?.v === 1 && value.scope === scope && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 256
+    && date(value.updatedAt) && date(value.createdAt), 400, "INVALID_INPUT", "Invalid build artifact continuation.");
+  return {id: value.id, updatedAt: value.updatedAt, createdAt: value.createdAt};
+}
+
+/** One finite candidate window. Hidden rows advance continuation without granting access. */
+export async function listBuildArtifactPage(actor: AppActor, params: {
+  workspaceId: string; status?: BuildArtifactStatus; take?: number; cursor?: string;
 }) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  params = Object.freeze({...params});
+  const take = params.take ?? 50;
+  invariant(Number.isSafeInteger(take) && take >= 1 && take <= 100, 400, "INVALID_INPUT", "Build artifact window is out of range.");
+  const scope = sha256(JSON.stringify([params.workspaceId, params.status ?? null]));
+  let after = buildArtifactCursor(params.cursor, scope);
+  const membership = await requireWorkspaceMembership({actor, workspaceId: params.workspaceId});
   const release = new DigestReadRelease(actor, params.workspaceId);
+  const rows = await prisma.buildArtifact.findMany({
+    where: {workspaceId: params.workspaceId, ...(params.status ? {status: params.status} : {}), NOT: OPERATIONAL_ARTIFACT_FILTER,
+      ...(after ? {OR: [{updatedAt: {lt: new Date(after.updatedAt)}},
+        {updatedAt: new Date(after.updatedAt), createdAt: {lt: new Date(after.createdAt)}},
+        {updatedAt: new Date(after.updatedAt), createdAt: new Date(after.createdAt), id: {gt: after.id}}]} : {})},
+    orderBy: [{updatedAt: "desc"}, {createdAt: "desc"}, {id: "asc"}], select: buildArtifactSelect, take: 200,
+  });
   const permitted: BuildArtifactRecord[] = [];
-  let afterId: string | undefined;
-  while (true) {
-    const artifacts = await prisma.buildArtifact.findMany({
-      where: {workspaceId: params.workspaceId, ...(params.status ? {status: params.status} : {}),
-        NOT: OPERATIONAL_ARTIFACT_FILTER, ...(afterId ? {id: {gt: afterId}} : {})},
-      orderBy: {id: "asc"}, select: buildArtifactSelect, take: 100,
-    });
-    const captured = await release.capture("BuildArtifact", artifacts);
-    for (const artifact of captured.records) {
+  let consumed = 0;
+  for (let offset = 0; offset < rows.length && permitted.length < take; offset += 100) {
+    const page = rows.slice(offset, offset + 100);
+    const captured = await release.capture("BuildArtifact", page);
+    const admitted = new Set(captured.records.map(row => row.id));
+    for (const artifact of page) {
+      after = {id: artifact.id, updatedAt: artifact.updatedAt.toISOString(), createdAt: artifact.createdAt.toISOString()};
+      consumed++;
+      if (!admitted.has(artifact.id)) continue;
       const assets = await release.capture("BuildArtifactAsset", artifact.assets);
       const creators = await release.capture("User", artifact.createdBy ? [artifact.createdBy] : []);
       permitted.push({...artifact, assets: assets.records, createdBy: creators.records[0] ?? null});
+      if (permitted.length === take) break;
     }
-    if (artifacts.length < 100) break;
-    afterId = artifacts.at(-1)!.id;
   }
-  permitted.sort((a,b) => b.updatedAt.getTime()-a.updatedAt.getTime() || b.createdAt.getTime()-a.createdAt.getTime() || a.id.localeCompare(b.id));
-  return release.finish(permitted.map(artifact => serializeArtifact(actor, membership, artifact)));
+  const complete = consumed === rows.length && rows.length < 200;
+  const nextCursor = !complete && after ? Buffer.from(JSON.stringify({v: 1, scope, ...after})).toString("base64url") : null;
+  return release.finish({items: permitted.map(artifact => serializeArtifact(actor, membership, artifact)), complete, nextCursor, hasMore: Boolean(nextCursor)});
+}
+
+/** Legacy complete-array contract: never silently return a partial corpus. */
+export async function listBuildArtifacts(actor: AppActor, params: {workspaceId: string; status?: BuildArtifactStatus}) {
+  const page = await listBuildArtifactPage(actor, {...params, take: 100});
+  invariant(page.complete, 503, "SOURCE_READ_SCAN_LIMIT", "Use build artifact continuation to read more history.");
+  return page.items;
 }
 
 export async function listBuildArtifactWorkspaceIdsForGithubRepository(params: {
@@ -481,9 +511,15 @@ export async function getBuildArtifact(actor: AppActor, params: {
     select: buildArtifactSelect,
   });
   invariant(artifact, 404, "NOT_FOUND", "Build artifact not found.");
-  const readable = await readableArtifact(actor, artifact);
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  const captured = await release.capture("BuildArtifact", [artifact]);
+  const readable = captured.records[0];
   invariant(readable, 404, "NOT_FOUND", "Build artifact not found.");
-  return serializeArtifact(actor, membership, readable);
+  const assets = await release.capture("BuildArtifactAsset", readable.assets);
+  const creators = await release.capture("User", readable.createdBy ? [readable.createdBy] : []);
+  return release.finish(serializeArtifact(actor, membership, {
+    ...readable, assets: assets.records, createdBy: creators.records[0] ?? null,
+  }));
 }
 
 export async function upsertBuildArtifact(actor: AppActor, params: ArtifactInput) {
@@ -845,7 +881,8 @@ export async function getBuildArtifactAssetSignedUrl(actor: AppActor, params: {
       404, "NOT_FOUND", "Build artifact asset not found.");
   };
   await authorize();
-  return { signedUrl: null, file, authorize };
+  return { signedUrl: null, file, mimeType: asset.mimeType, authorize,
+    byteBinding: { sha256: asset.sha256, sizeBytes: asset.sizeBytes } };
 }
 
 export async function revokeBuildArtifactPublicAccess(actor: AppActor, params: {
@@ -944,7 +981,8 @@ export async function resolvePublicBuildArtifactAsset(params: {
   invariant(typeof asset.sha256 === "string" && createHash("sha256").update(file.data).digest("hex") === asset.sha256,
     409, "SOURCE_CHANGED", "Public proof asset changed.");
   await authorize();
-  return { signedUrl: null, file, authorize };
+  return { signedUrl: null, file, mimeType: asset.mimeType, authorize,
+    byteBinding: { sha256: asset.sha256, sizeBytes: asset.sizeBytes } };
 }
 
 export async function markBuildArtifactClosedFromGitHub(params: {

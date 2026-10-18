@@ -6,8 +6,9 @@ import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { lockWorkspaceMembership } from "./workspace-support-access";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
-import { AppError, invariant } from "./errors";
-import { captureArtifactInputProof, readableArtifactIds } from "./source-lineage";
+import { invariant } from "./errors";
+import { DigestReadRelease } from "./digest-lineage";
+import { readableArtifactIds } from "./source-lineage";
 import {
   closeRoleLifecycleForRoles,
   createRoleVersionSnapshot,
@@ -76,10 +77,10 @@ export async function listRoles(actor: AppActor, workspaceId: string, opts?: { a
       circle: true,
     },
   });
-  const visibleRoles = await readableArtifactIds(actor, workspaceId, "Role", roles);
-  const admitted = roles.filter((role) => visibleRoles.has(role.id));
-  const visibleCircles = await readableArtifactIds(actor, workspaceId, "Circle", admitted.map((role) => role.circle));
-  return admitted
+  const release = new DigestReadRelease(actor, workspaceId);
+  const admitted = (await release.capture("Role", roles)).records;
+  const visibleCircles = new Set((await release.capture("Circle", admitted.map((role) => role.circle))).records.map(row => row.id));
+  return release.finish(admitted
     .sort((left, right) => {
       // Withheld circle metadata must not influence grouping or ranking.
       const leftOrder = visibleCircles.has(left.circleId) ? left.circle.sortOrder : 0;
@@ -89,33 +90,27 @@ export async function listRoles(actor: AppActor, workspaceId: string, opts?: { a
     .map((role) => ({ ...role,
       circleId: visibleCircles.has(role.circleId) ? role.circleId : null,
       circle: visibleCircles.has(role.circleId) ? { id: role.circle.id, name: role.circle.name } : null,
-    }));
+    })));
 }
 
 /** Gate association and profile content before exposing role filler counts. */
 export async function filterReadableRoleAssignments<T extends {
   id: string;
   member: { id: string; user: { id: string; email: string; displayName: string | null; bio?: string | null } };
-}>(actor: AppActor, workspaceId: string, assignments: T[]): Promise<T[]> {
-  const visibleAssignments = await readableArtifactIds(actor, workspaceId, "RoleAssignment", assignments);
-  const admitted = assignments.filter((assignment) => visibleAssignments.has(assignment.id));
-  const visibleMembers = await readableArtifactIds(actor, workspaceId, "Member", admitted.map(({ member }) => ({
+}>(actor: AppActor, workspaceId: string, assignments: T[], readRelease?: DigestReadRelease): Promise<T[]> {
+  const release = readRelease ?? new DigestReadRelease(actor, workspaceId);
+  const admitted = (await release.capture("RoleAssignment", assignments)).records;
+  const visibleMembers = new Set((await release.capture("Member", admitted.map(({ member }) => ({
     ...member, user: { id: member.user.id, email: member.user.email, displayName: member.user.displayName },
-  })));
-  const visibleProfiles = new Set<string>();
-  for (const assignment of admitted) {
-    if (!visibleMembers.has(assignment.member.id)) continue;
-    try {
-      // Label projections omit profile fields. Capture the authoritative User
-      // receipt and verify only observed fields, without inventing null values.
-      await captureArtifactInputProof(actor, workspaceId, [{ kind: "User", id: assignment.member.user.id,
-        snapshot: assignment.member.user }]);
-      visibleProfiles.add(assignment.id);
-    } catch (error) {
-      if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
-    }
-  }
-  return admitted.filter((assignment) => visibleProfiles.has(assignment.id));
+  })))).records.map(row => row.id));
+  // A projected User is checked against its authoritative receipt without
+  // inventing omitted profile fields; retain that same proof for final release.
+  const visibleProfiles = new Set((await release.capture("User", admitted
+    .filter(assignment => visibleMembers.has(assignment.member.id))
+    .map(assignment => assignment.member.user))).records.map(row => row.id));
+  const result = admitted.filter(assignment => visibleMembers.has(assignment.member.id)
+    && visibleProfiles.has(assignment.member.user.id));
+  return readRelease ? result : release.finish(result);
 }
 
 async function roleMutationResult(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string,
@@ -169,18 +164,18 @@ export async function getRole(actor: AppActor, params: {
   });
 
   invariant(role, 404, "NOT_FOUND", "Role not found.");
-  const visible = await readableArtifactIds(actor, params.workspaceId, "Role", [role]);
-  invariant(visible.has(role.id), 404, "NOT_FOUND", "Role not found.");
-  const visibleCircles = await readableArtifactIds(actor, params.workspaceId, "Circle", [role.circle]);
-  const assignments = await filterReadableRoleAssignments(actor, params.workspaceId, role.assignments);
-  return { ...role,
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  invariant((await release.capture("Role", [role])).records.length === 1, 404, "NOT_FOUND", "Role not found.");
+  const visibleCircles = new Set((await release.capture("Circle", [role.circle])).records.map(row => row.id));
+  const assignments = await filterReadableRoleAssignments(actor, params.workspaceId, role.assignments, release);
+  return release.finish({ ...role,
     circleId: visibleCircles.has(role.circleId) ? role.circleId : null,
     circle: visibleCircles.has(role.circleId) ? {
       id: role.circle.id, name: role.circle.name, purposeMd: role.circle.purposeMd,
       domainMd: role.circle.domainMd, maturityStage: role.circle.maturityStage,
     } : null,
     assignments: assignments.sort((left, right) => right.assignedAt.getTime() - left.assignedAt.getTime()),
-  };
+  });
 }
 
 export async function createRole(actor: AppActor, params: ProducerLineageParams & {
@@ -888,11 +883,12 @@ export async function listRoleAssignments(actor: AppActor, workspaceId: string) 
       },
     },
   });
-  const visibleRoles = await readableArtifactIds(actor, workspaceId, "Role", assignments.map((assignment) => assignment.role));
+  const release = new DigestReadRelease(actor, workspaceId);
+  const visibleRoles = new Set((await release.capture("Role", assignments.map((assignment) => assignment.role))).records.map(row => row.id));
   const admitted = await filterReadableRoleAssignments(actor, workspaceId,
-    assignments.filter((assignment) => visibleRoles.has(assignment.roleId)));
-  const visibleCircles = await readableArtifactIds(actor, workspaceId, "Circle", admitted.map((assignment) => assignment.role.circle));
-  return admitted
+    assignments.filter((assignment) => visibleRoles.has(assignment.roleId)), release);
+  const visibleCircles = new Set((await release.capture("Circle", admitted.map((assignment) => assignment.role.circle))).records.map(row => row.id));
+  return release.finish(admitted
     .sort((left, right) => right.assignedAt.getTime() - left.assignedAt.getTime())
     .map((assignment) => ({ ...assignment,
       role: { id: assignment.role.id, name: assignment.role.name,
@@ -900,5 +896,5 @@ export async function listRoleAssignments(actor: AppActor, workspaceId: string) 
           ? { id: assignment.role.circle.id, name: assignment.role.circle.name } : null },
       member: { ...assignment.member, user: { id: assignment.member.user.id,
         email: assignment.member.user.email, displayName: assignment.member.user.displayName } },
-    }));
+    })));
 }

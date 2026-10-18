@@ -47,7 +47,6 @@ export function meetingAgendaInputProjection(meeting: Record<string, unknown>) {
 type CapturedContextInput = LineageInput & { snapshot: Record<string, unknown> };
 
 const MEETING_READ_BATCH_SIZE = 100;
-const MEETING_READ_SCAN_BUDGET = 5_000;
 
 type MeetingInputPage = { take: number; cursor?: { id: string }; skip?: number };
 
@@ -57,18 +56,16 @@ export async function readMeetingInputBatches<T extends { id: string }>(
   admit: (rows: T[]) => Promise<T[]>,
   take?: number,
 ): Promise<T[]> {
-  invariant(take === undefined || (Number.isInteger(take) && take >= 0 && take <= MEETING_READ_SCAN_BUDGET),
+  invariant(take === undefined || (Number.isSafeInteger(take) && take >= 0),
     400, "INVALID_INPUT", "Meeting result limit is invalid.");
   if (take === 0) return [];
   const results: T[] = [];
   const seen = new Set<string>();
   let cursor: { id: string } | undefined;
-  let scanned = 0;
-  while (scanned < MEETING_READ_SCAN_BUDGET) {
-    const batchSize = Math.min(MEETING_READ_BATCH_SIZE, MEETING_READ_SCAN_BUDGET - scanned);
+  while (true) {
+    const batchSize = MEETING_READ_BATCH_SIZE;
     const rows = await readPage({ take: batchSize, ...(cursor ? { cursor, skip: 1 } : {}) });
     invariant(rows.length <= batchSize, 409, "SOURCE_CHANGED", "Meeting query returned an invalid page.");
-    scanned += rows.length;
     const fresh = rows.filter((row) => !seen.has(row.id));
     fresh.forEach((row) => seen.add(row.id));
     results.push(...await admit(fresh));
@@ -78,7 +75,6 @@ export async function readMeetingInputBatches<T extends { id: string }>(
     invariant(next.id !== cursor?.id && fresh.length > 0, 409, "SOURCE_CHANGED", "Meeting inputs changed while reading.");
     cursor = { id: next.id };
   }
-  invariant(false, 413, "MEETING_READ_BUDGET", "This meeting query is too broad. Narrow the date range and try again.");
 }
 
 async function queryVisibleContextRows<T extends { id: string }>(actor: AppActor, workspaceId: string,
@@ -324,6 +320,8 @@ export type MeetingIntelligenceContext = {
   }>;
   knowledgeSearchQuery: string;
   knowledge: ContextKnowledgeResult[];
+  /** False when discovery or the ranked top-eight selection is only a sample. */
+  knowledgeComplete?: boolean;
 };
 
 const STOP_WORDS = new Set([
@@ -425,32 +423,47 @@ async function searchContextKnowledge(params: {
   allowedSources: AllowedKnowledgeSources;
 }) {
   const tokens = normalizeTokens(params.query);
-  if (tokens.length === 0) return [];
+  if (tokens.length === 0) return { results: [], complete: true };
 
   const allowedSources = compactAllowedSources(params.allowedSources);
-  if (Object.keys(allowedSources).length === 0) return [];
+  if (Object.keys(allowedSources).length === 0) return { results: [], complete: true };
 
-  const visibleChunks = await queryVisibleContextRows(params.actor, params.workspaceId, "KnowledgeChunk", (page) => prisma.knowledgeChunk.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      sensitivity: "PUBLIC",
-      accessDomain: "WORKSPACE",
-      sourceType: { in: CONTEXT_KNOWLEDGE_SOURCE_TYPES },
-      ...knowledgeSourceWhere(allowedSources),
-    },
-    orderBy: [{ createdAt: "desc" }, { chunkIndex: "asc" }, { id: "asc" }],
-    ...page,
-  }));
+  const visibleChunks: ContextKnowledgeChunkRecord[] = [];
+  let cursor: { id: string } | undefined;
+  let complete = false;
+  // This is lexical candidate sampling, not an exhaustive corpus search. Denied
+  // candidates consume the same budget so private history cannot extend the scan.
+  for (let examined = 0; examined < 300;) {
+    const take = Math.min(100, 300 - examined);
+    const rows = await prisma.knowledgeChunk.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        sensitivity: "PUBLIC",
+        accessDomain: "WORKSPACE",
+        sourceType: { in: CONTEXT_KNOWLEDGE_SOURCE_TYPES },
+        ...knowledgeSourceWhere(allowedSources),
+      },
+      orderBy: [{ createdAt: "desc" }, { chunkIndex: "asc" }, { id: "asc" }],
+      take, ...(cursor ? { cursor, skip: 1 } : {}),
+    });
+    invariant(rows.length <= take, 409, "SOURCE_CHANGED", "Knowledge candidate page changed.");
+    visibleChunks.push(...await visibleContextRows(params.actor, params.workspaceId, "KnowledgeChunk", rows));
+    examined += rows.length;
+    if (rows.length < take) { complete = true; break; }
+    const next = rows.at(-1)!;
+    invariant(next.id !== cursor?.id, 409, "SOURCE_CHANGED", "Knowledge candidates did not advance.");
+    cursor = { id: next.id };
+  }
 
-  const results = visibleChunks
+  const ranked = visibleChunks
     .filter((chunk) => isAllowedKnowledgeChunk(chunk, allowedSources))
     .map((chunk) => ({
       chunk,
       score: lexicalScore(tokens, chunk.content, chunk.sourceTitle),
     }))
     .filter((entry) => entry.score > 0)
-    .sort((left, right) => right.score - left.score)
-    .slice(0, 8)
+    .sort((left, right) => right.score - left.score);
+  const results = ranked.slice(0, 8)
     .map(({ chunk, score }) => {
       params.capture("KnowledgeChunk", [chunk]);
       return ({
@@ -462,7 +475,7 @@ async function searchContextKnowledge(params: {
       snippet: snippet(chunk.content),
       score,
     }); });
-  return results;
+  return { results, complete: complete && ranked.length <= 8 };
 }
 
 async function buildAllowedKnowledgeSources(params: {
@@ -563,6 +576,7 @@ function emptyContext(meeting: ContextMeetingRecord, contextualIntelligenceEnabl
     deliberationEntries: [],
     knowledgeSearchQuery: "",
     knowledge: [],
+    knowledgeComplete: true,
   };
 }
 
@@ -950,6 +964,7 @@ export async function buildMeetingIntelligenceContext(params: {
     })),
     knowledgeSearchQuery: "",
     knowledge: [] as ContextKnowledgeResult[],
+    knowledgeComplete: true as boolean,
   } satisfies MeetingIntelligenceContext;
 
   context.knowledgeSearchQuery = buildKnowledgeQuery({
@@ -974,14 +989,16 @@ export async function buildMeetingIntelligenceContext(params: {
       ]),
     })
     : {};
-  context.knowledge = contextualIntelligenceEnabled && params.mode !== "agenda"
+  const knowledge = contextualIntelligenceEnabled && params.mode !== "agenda"
     ? await searchContextKnowledge({
       actor, capture,
       workspaceId: params.workspaceId,
       query: context.knowledgeSearchQuery,
       allowedSources: allowedKnowledgeSources,
     })
-    : [];
+    : { results: [], complete: true };
+  context.knowledge = knowledge.results;
+  context.knowledgeComplete = knowledge.complete;
 
   return finish(context);
 }

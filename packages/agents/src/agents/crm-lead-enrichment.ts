@@ -41,13 +41,13 @@ export async function runCrmLeadEnrichmentAgent(params: {
       await revalidate();
       const receipt = await helpers.captureInputs(mergeArtifactInputProofs(context.lineageRoots, [...helpers.behaviorLineageRoots]));
       // Global search credentials do not establish a workspace provider grant. No query or transient result is admitted.
-      const extracted = await helpers.tool("model.extract", { searchUsed: false }, async () => {
+      const extracted = await helpers.tool("model.extract", { searchUsed: false }, async (operation) => {
         await revalidate();
-        return defaultModelGateway.extract({ model, workspaceId: params.workspaceId, agentRunId: runId,
+        return defaultModelGateway.extract(operation.modelRequest({ model, workspaceId: params.workspaceId, agentRunId: runId,
           instruction: `${helpers.behaviorContext ?? ""}\n\nDraft company profile data from parametric knowledge only. No web results were fetched or verified. Use null for uncertain fields and score confidence conservatively (0.0 to 1.0).`,
           input: `Company hint: ${context.companyHint}. Search unavailable: no workspace provider grant.`,
           schemaHint: JSON.stringify({ description: "string | null", industry: "string | null", headquarters: "string | null", confidence: "number" }),
-        });
+        }));
       }, { receipt });
       await helpers.step("apply-enrichment", {}, async () => {
         await revalidate();

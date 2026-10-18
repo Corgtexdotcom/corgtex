@@ -79,13 +79,14 @@ function matches(row: Record<string, any>, where: Record<string, any>): boolean 
   return Object.entries(where).every(([key, value]) => {
     if (key === "OR") return value.some((clause: Record<string, any>) => matches(row, clause));
     if (key === "AND") return value.every((clause: Record<string, any>) => matches(row, clause));
-    if (value && typeof value === "object") {
+    if (value && typeof value === "object" && !(value instanceof Date)) {
       if (value.gt !== undefined) return row[key] > value.gt;
+      if (value.lt !== undefined) return row[key] < value.lt;
       if (value.in) return value.in.includes(row[key]);
       if (value.notIn) return !value.notIn.includes(row[key]);
       throw new Error(`Unsupported synthetic predicate: ${key}`);
     }
-    return row[key] === value;
+    return value instanceof Date ? row[key].getTime() === value.getTime() : row[key] === value;
   });
 }
 
@@ -137,7 +138,8 @@ beforeEach(() => {
     return { id: "member-1", workspaceId, userId: caller.user.id, role: "MEMBER", isActive: true };
   });
   for (const mock of readMocks) {
-    mock.mockImplementation(async ({ where, take }) => rows.filter(row => matches(row, where)).sort((a, b) => a.id.localeCompare(b.id)).slice(0, take));
+    mock.mockImplementation(async ({ where, take, orderBy }) => rows.filter(row => matches(row, where))
+      .sort((a, b) => Array.isArray(orderBy) ? b.createdAt.getTime() - a.createdAt.getTime() || b.id.localeCompare(a.id) : a.id.localeCompare(b.id)).slice(0, take));
   }
   for (const mock of [tensionCountMock, actionCountMock, proposalCountMock, goalCountMock]) {
     mock.mockImplementation(async ({ where }) => rows.filter(row => matches(row, where)).length);
@@ -227,7 +229,7 @@ describe("authenticated workspace readers", () => {
       const drafts = await queryProposals("ws-1", "DRAFT", caller);
       expect(drafts).toHaveLength(2);
       const overview = await getWorkspaceOverview("ws-1", caller);
-      expect(overview).toEqual({ memberCount: 2, circleCount: 1, openTensions: 1, openActions: 1, activeProposals: proposals.length, activeGoals: 1 });
+      expect(overview).toMatchObject({ memberCount: 2, circleCount: 1, openTensions: 1, openActions: 1, activeProposals: proposals.length, activeGoals: 1 });
       expect((await queryActions("ws-1", "OPEN", undefined, undefined, caller)).length).toBe(overview.openActions);
       expect((await queryTensions("ws-1", "OPEN", undefined, undefined, caller)).length).toBe(overview.openTensions);
     }
@@ -300,8 +302,8 @@ describe("authenticated workspace readers", () => {
     expect(await queryActions("ws-1", undefined, undefined, undefined, actor)).toEqual([
       expect.objectContaining({ id: row.id, title: row.title, author: null, assignee: null }),
     ]);
-    expect(captureProofMock).toHaveBeenCalledWith(actor, "ws-1", [expect.objectContaining({ kind: "User", id: "user-1" })]);
-    expect(captureProofMock).toHaveBeenCalledWith(actor, "ws-1", [expect.objectContaining({ kind: "Member", id: "member-2" })]);
+    expect(captureProofMock).toHaveBeenCalledWith(actor, "ws-1", [expect.objectContaining({ kind: "User", id: "user-1" })], undefined);
+    expect(captureProofMock).toHaveBeenCalledWith(actor, "ws-1", [expect.objectContaining({ kind: "Member", id: "member-2" })], undefined);
   });
 
   it("returns only public fields after proving full rows and excludes related private records", async () => {
@@ -313,7 +315,7 @@ describe("authenticated workspace readers", () => {
       const args = mock.mock.calls[0][0];
       // Full current rows prove visibility before the public result projection.
       expect(args).not.toHaveProperty("select");
-      expect(args).toMatchObject({ take: 100, orderBy: { id: "asc" }, include: { author: expect.any(Object) } });
+      expect(args).toMatchObject({ take: 100, orderBy: [{ createdAt: "desc" }, { id: "desc" }], include: { author: expect.any(Object) } });
       expect(args.include).not.toHaveProperty("proposal");
       expect(args.include).not.toHaveProperty("actions");
       expect(args.include).not.toHaveProperty("tensions");
@@ -323,4 +325,17 @@ describe("authenticated workspace readers", () => {
     expect(Object.keys(proposals[0]).sort()).toEqual(["id", "title", "status", "author", "createdAt"].sort());
     expect(JSON.stringify({ actions, tensions, proposals })).not.toMatch(/hidden@example|hidden-proposal|hidden-action|hidden-tension|Private related/);
   });
+});
+
+it.each(["Action", "Tension", "Proposal"] as const)("samples twenty recent %s rows without scanning an older workspace corpus", async kind => {
+  const api = await import("./workspace");
+  const mock = kind === "Action" ? findManyActionsMock : kind === "Tension" ? findManyTensionsMock : findManyProposalsMock;
+  const corpus = Array.from({ length: 5001 }, (_, i) => fixture(`recent-${String(i).padStart(5, "0")}`, { createdAt: new Date(2026, 0, 1), lineageReadable: i < 4901 }));
+  mock.mockImplementation(async ({ where, take, orderBy }) => corpus.filter(row => matches(row, where))
+    .sort((a, b) => Array.isArray(orderBy) ? b.createdAt.getTime() - a.createdAt.getTime() || b.id.localeCompare(a.id) : a.id.localeCompare(b.id)).slice(0, take));
+  const result = kind === "Proposal" ? await api.queryProposals("ws-1", undefined, actor)
+    : await (kind === "Action" ? api.queryActions : api.queryTensions)("ws-1", undefined, undefined, undefined, actor);
+  expect(result.map(row => row.id)).toEqual(Array.from({ length: 20 }, (_, i) => `recent-${String(4900 - i).padStart(5, "0")}`));
+  expect(mock).toHaveBeenCalledTimes(2);
+  expect(mock.mock.calls.every(([args]) => args.take === 100)).toBe(true);
 });

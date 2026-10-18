@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Prisma } from "@prisma/client";
 
 const {
+  assertMeetingTranscriptWorkerCurrentMock,
   buildMeetingIntelligenceContextMock,
   createActionMock,
   publishActionMock,
@@ -18,6 +19,7 @@ const {
   updateTensionMock,
   postDeliberationEntryMock,
 } = vi.hoisted(() => ({
+  assertMeetingTranscriptWorkerCurrentMock: vi.fn(),
   buildMeetingIntelligenceContextMock: vi.fn(),
   createActionMock: vi.fn(),
   publishActionMock: vi.fn(),
@@ -101,6 +103,8 @@ vi.mock("@corgtex/models", () => ({
     extract: vi.fn(),
   },
 }));
+
+vi.mock("./native-meeting-workflow-principal", () => ({ assertMeetingTranscriptWorkerCurrent: assertMeetingTranscriptWorkerCurrentMock }));
 
 vi.mock("./actions", () => ({
   createAction: createActionMock,
@@ -188,8 +192,13 @@ const mockActor = {
 };
 
 describe("meeting-intelligence", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    const { isArtifactInputProofReadable } = await import("./source-lineage");
+    vi.mocked(isArtifactInputProofReadable).mockReset().mockResolvedValue(true);
+    const { defaultModelGateway } = await import("@corgtex/models");
+    vi.mocked(defaultModelGateway.extract).mockReset();
+    assertMeetingTranscriptWorkerCurrentMock.mockReset().mockResolvedValue(undefined);
     
     // Default mocks
     (prisma.$transaction as ReturnType<typeof vi.fn>).mockImplementation((cb) => cb(prisma));
@@ -262,6 +271,59 @@ describe("meeting-intelligence", () => {
   });
 
   describe("extractMeetingInsights", () => {
+    it.each(["credentials", "retry"] as const)("checks original source, caller and claim at every %s boundary", async boundary => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const { isArtifactInputProofReadable } = await import("./source-lineage");
+      for (const change of ["source", "caller", "claim", "none"] as const) {
+        let live = true; let sends = 0;
+        vi.mocked(isArtifactInputProofReadable).mockImplementation(async () => live);
+        assertMeetingTranscriptWorkerCurrentMock.mockReset().mockResolvedValue(undefined);
+        vi.mocked(defaultModelGateway.extract).mockImplementationOnce(async request => {
+          const context = { signal: request.signal ?? new AbortController().signal };
+          if (boundary === "retry") { await request.authorizeAttempt?.(context); sends++; }
+          await Promise.resolve(); // credential resolution / retry backoff boundary
+          if (change === "source" || change === "caller") live = false;
+          if (change === "claim") assertMeetingTranscriptWorkerCurrentMock.mockRejectedValue(new Error("claim replaced"));
+          await request.authorizeAttempt?.(context);
+          sends++;
+          return { output: { insights: [] } } as never;
+        });
+        const result = await extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" }).catch(error => error);
+        expect(sends).toBe((boundary === "retry" ? 1 : 0) + (change === "none" ? 1 : 0));
+        if (change === "none") expect(result).toEqual([]);
+        else expect(result).toBeInstanceOf(Error);
+        vi.mocked(isArtifactInputProofReadable).mockResolvedValue(true);
+        assertMeetingTranscriptWorkerCurrentMock.mockReset().mockResolvedValue(undefined);
+      }
+    });
+
+    it("latches swallowed attempt denial so restored authority cannot publish the returned output", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const { isArtifactInputProofReadable } = await import("./source-lineage");
+      vi.mocked(defaultModelGateway.extract).mockImplementationOnce(async request => {
+        vi.mocked(isArtifactInputProofReadable).mockResolvedValue(false);
+        await request.authorizeAttempt?.({ signal: request.signal ?? new AbortController().signal }).catch(() => {});
+        vi.mocked(isArtifactInputProofReadable).mockResolvedValue(true);
+        return { output: { insights: [{ type: "ACTION_ITEM", title: "Do not publish", body: "Untrusted output", confidence: 1 }] } } as never;
+      });
+      await expect(extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" })).rejects.toBeInstanceOf(Error);
+      expect(prisma.meetingInsight.updateMany).not.toHaveBeenCalled();
+      expect(prisma.meetingInsight.createMany).not.toHaveBeenCalled();
+    });
+
+    it("honors the gateway attempt cancellation context and aborts the whole extraction", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const cancellation = new Error("request cancelled");
+      vi.mocked(defaultModelGateway.extract).mockImplementationOnce(async request => {
+        const gateway = new AbortController(); gateway.abort(cancellation);
+        await expect(request.authorizeAttempt!({ signal: gateway.signal })).rejects.toBe(cancellation);
+        expect(request.signal?.aborted).toBe(true);
+        return { output: { insights: [] } } as never;
+      });
+      await expect(extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" })).rejects.toBe(cancellation);
+      expect(prisma.meetingInsight.updateMany).not.toHaveBeenCalled();
+    });
+
     it("should call model gateway to extract structured insights and create records", async () => {
       const { defaultModelGateway } = await import("@corgtex/models");
       (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({

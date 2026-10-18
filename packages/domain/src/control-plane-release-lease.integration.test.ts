@@ -27,7 +27,7 @@ import {
   managedReleaseRecoveryIntentRevisionSuffix,
   type ManagedReleaseRecoveryIntentRole,
 } from "./managed-azure-recovery-intent";
-import { managedAzureRecoveryAuthorityDigest, managedAzureTargetDigest, managedAzureTargets } from "./managed-azure-targets";
+import { SELFSERVE_RELEASE_HOST_ID, SELFSERVE_RELEASE_ORIGIN, SELFSERVE_RELEASE_PROFILE, managedAzureRecoveryAuthorityDigest, managedAzureTargetDigest, managedAzureTargets } from "./managed-azure-targets";
 const prisma = getPrismaClient();
 const BASE = `sha-${"a".repeat(40)}`; const NEXT = `sha-${"b".repeat(40)}`;
 const SYNTHETIC_CANARY_PREFLIGHT_DEPLOYMENT_ID = "123e4567-e89b-42d3-a456-426614174099";
@@ -105,7 +105,7 @@ async function authorizeHosted(row: Awaited<ReturnType<typeof deployment>>, acti
     targets: [{
       deploymentId: row.id,
       customerAccountId: row.customerAccountId,
-      deploymentKind: "HOSTED_DEDICATED",
+      deploymentKind: row.deploymentKind,
       origin: row.url.replace(/\/$/, ""),
       subscriptionId: row.providerSubscriptionId,
       resourceGroup: row.providerResourceGroup,
@@ -126,7 +126,7 @@ async function authorizeHosted(row: Awaited<ReturnType<typeof deployment>>, acti
   }));
 }
 async function acquire(deploymentId: string, overrides = {}) {
-  const protectedTarget = managedAzureTargets().find((target) => target.deploymentId === deploymentId && target.deploymentKind === "HOSTED_DEDICATED");
+  const protectedTarget = managedAzureTargets().find((target) => target.deploymentId === deploymentId);
   const result = await acquireManagedReleaseLease({ deploymentId, expectedImageTag: BASE, incomingImageTag: NEXT, incomingVersion: "release-2", owner: "fleet:test",
     ...(protectedTarget ? { expectedTargetDigest: managedAzureTargetDigest(protectedTarget) } : {}), ...overrides });
   return { deploymentId: result.deploymentId, leaseId: result.leaseId, capability: result.capability, fence: result.fence };
@@ -980,4 +980,79 @@ it("applies the exact hosted migration without changing retained remote leases, 
   await authorizeHosted(hosted);
   const hostedHandle = await acquire(hosted.id);
   await abortManagedReleaseLease(hostedHandle);
+});
+
+
+describe("configured selfserve host protected release", () => {
+  async function host() {
+    const row = await deployment({ id: SELFSERVE_RELEASE_HOST_ID, url: SELFSERVE_RELEASE_ORIGIN });
+    await authorizeHosted(row);
+    return row;
+  }
+  function exclusivePayload() {
+    return { ...rollbackPayloadV2(), schemaVersion: 3 as const,
+      exclusiveActivation: { originalMode: "Single", temporaryMode: "Multiple",
+        configurationDigests: { web: `sha256:${"8".repeat(64)}`, worker: `sha256:${"9".repeat(64)}` } } };
+  }
+  it("emits server-derived profile and exact target digest without relabelling the host", async () => {
+    const row = await host();
+    const target = managedAzureTargets()[0]!;
+    const before = await releaseState(row.id);
+    await expect(getManagedReleaseTargetPreflight(row.id, ACR_IDENTITY)).resolves.toMatchObject({
+      protectedReleaseProfile: SELFSERVE_RELEASE_PROFILE, targetDigest: managedAzureTargetDigest(target),
+      deployment: { deploymentKind: "REMOTE_MANAGED", releaseEligible: true },
+    });
+    expect(await releaseState(row.id)).toEqual(before);
+    const handle = await acquire(row.id);
+    await expect(getManagedReleaseLeaseTarget(handle, ACR_IDENTITY)).resolves.toMatchObject({ targetDigest: managedAzureTargetDigest(target) });
+    await abortManagedReleaseLease(handle);
+    expect((await releaseState(row.id)).deployment.deploymentKind).toBe("REMOTE_MANAGED");
+  });
+  it("denies missing config, wrong primary and tenant identity without granting a lease", async () => {
+    const row = await host(); const config = process.env.MANAGED_RELEASE_TARGETS_JSON!;
+    vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", "");
+    await expect(getManagedReleaseTargetPreflight(row.id, ACR_IDENTITY)).rejects.toMatchObject({ code: "MANAGED_RELEASE_TARGET_CONFIG_REQUIRED" });
+    vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", config);
+    await prisma.customerAccount.update({ where: { id: row.customerAccountId! }, data: { primaryDeploymentId: null } });
+    await expect(getManagedReleaseTargetPreflight(row.id, ACR_IDENTITY)).rejects.toMatchObject({ status: 409 });
+    await prisma.customerAccount.update({ where: { id: row.customerAccountId! }, data: { primaryDeploymentId: row.id } });
+    await prisma.customerDeployment.update({ where: { id: row.id }, data: { deploymentKind: "SHARED_WORKSPACE" } });
+    await expect(acquire(row.id)).rejects.toMatchObject({ status: 409 });
+    expect((await releaseState(row.id)).deployment.releaseLeaseId).toBeNull();
+  });
+  it("rejects stale approval, legacy envelopes, and configuration removal during forward work", async () => {
+    const row = await host();
+    await expect(acquire(row.id, { expectedTargetDigest: "0".repeat(64) })).rejects.toMatchObject({ code: "MANAGED_RELEASE_TARGET_CONFIG_CONFLICT" });
+    const handle = await acquire(row.id);
+    await expect(recordManagedReleaseRollbackRecord(handle, rollbackPayload())).rejects.toMatchObject({ code: "MANAGED_RELEASE_TARGET_CONFIG_CONFLICT" });
+    await expect(recordManagedReleaseRollbackRecord(handle, rollbackPayloadV2())).rejects.toMatchObject({ code: "MANAGED_RELEASE_TARGET_CONFIG_CONFLICT" });
+    const bad = exclusivePayload(); bad.compatibleRecovery.schemaCompatibilityApprovalDigest = `sha256:${"0".repeat(64)}`;
+    await expect(recordManagedReleaseRollbackRecord(handle, bad)).rejects.toMatchObject({ code: "MANAGED_RELEASE_TARGET_CONFIG_CONFLICT" });
+    await recordManagedReleaseRollbackRecord(handle, exclusivePayload());
+    await beginManagedReleaseMutation(handle);
+    vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", "");
+    await expect(heartbeatManagedReleaseLease(handle)).rejects.toMatchObject({ code: "MANAGED_RELEASE_TARGET_CONFIG_REQUIRED" });
+    expect((await releaseState(row.id)).deployment.releaseLeaseId).toBe(handle.leaseId);
+  });
+  it("retains V3 ownership through recovery and rechecks configuration even after completion", async () => {
+    const row = await host(); const config = process.env.MANAGED_RELEASE_TARGETS_JSON!;
+    const original = await acquire(row.id); const payload = exclusivePayload();
+    await recordManagedReleaseRollbackRecord(original, payload); await beginManagedReleaseMutation(original);
+    await markManagedReleaseRecoveryRequired(original, { stage: "WORKER", code: "SYNTHETIC_RECOVERY" });
+    await expire(row.id);
+    vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", "");
+    const claim = () => claimManagedReleaseRecovery({ deploymentId: row.id, expectedLeaseId: original.leaseId, expectedFence: original.fence, owner: "recovery:selfserve-test" });
+    await expect(claim()).rejects.toMatchObject({ code: "MANAGED_RELEASE_TARGET_CONFIG_REQUIRED" });
+    vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", config);
+    const claimed = await claim(); const handle = { deploymentId: row.id, leaseId: claimed.leaseId, capability: claimed.capability, fence: claimed.fence };
+    await expect(getManagedReleaseRecoveryStatus(row.id, ACR_IDENTITY)).resolves.toMatchObject({ protectedReleaseProfile: SELFSERVE_RELEASE_PROFILE });
+    await expect(getManagedReleaseRollbackRecord(handle)).resolves.toEqual(payload);
+    await expect(finalizeManagedReleaseRollback(handle)).rejects.toMatchObject({ code: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" });
+    await expect(heartbeatManagedReleaseLease(original, true)).rejects.toMatchObject({ code: "MANAGED_RELEASE_LEASE_CONFLICT" });
+    await finalizeManagedReleaseCompatibleRecovery(handle, { gitSha: "c".repeat(40), imageTag: `sha-${"c".repeat(40)}`, releaseVersion: "recovery-1",
+      webDigest: DIGESTS[0], workerDigest: DIGESTS[1], acceptanceEvidenceDigest: `sha256:${"7".repeat(64)}` });
+    await expect(getManagedReleaseRecoveryStatus(row.id, ACR_IDENTITY)).resolves.toMatchObject({ protectedReleaseProfile: SELFSERVE_RELEASE_PROFILE, status: "RECOVERED_COMPATIBLE" });
+    vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", "");
+    await expect(getManagedReleaseRecoveryStatus(row.id, ACR_IDENTITY)).rejects.toMatchObject({ code: "MANAGED_RELEASE_TARGET_CONFIG_REQUIRED" });
+  });
 });

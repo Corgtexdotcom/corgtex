@@ -26,6 +26,24 @@ async function fixture() {
 describe("digest input receipts", () => {
   beforeEach(async () => { await truncateAllTables(); });
 
+  it("bounds 5020 proven deliveries to a qualified count window in PostgreSQL", async () => {
+    const { workspace, ownerActor, ownerMember } = await fixture();
+    const roots = await captureArtifactInputProof(ownerActor, workspace.id,
+      [{kind: "Workspace", id: workspace.id}, {kind: "Member", id: ownerMember.id}]);
+    for (let run = 0; run < 20; run++) {
+      for (let recipient = 0; recipient < 251; recipient++) {
+        await recordNewspaperDelivery({workspaceId: workspace.id, runKey: `synthetic-scale-${run}`,
+          kind: "MEMBER_NEWSPAPER", memberId: ownerMember.id, recipientEmail: `recipient-${recipient}@example.test`,
+          subject: "Synthetic scale", status: "SENT", actor: ownerActor, lineageRoots: roots});
+      }
+    }
+    expect(await prisma.newspaperDelivery.count({where: {workspaceId: workspace.id}})).toBe(5020);
+    const result = await listNewspaperDeliverySummaries(ownerActor, workspace.id);
+    expect(result).toMatchObject({complete: false, deliveriesComplete: false, scope: "WINDOW"});
+    expect(result.items.reduce((sum, run) => sum + run.recipientCount, 0)).toBe(200);
+    expect(result.items.every(run => run.sentCount === run.recipientCount)).toBe(true);
+  }, 300_000);
+
   it("keeps the former owner's private article body out of the new owner's history", async () => {
     const { workspace, ownerActor, readerActor, readerMember } = await fixture();
     const original = await createArticle(ownerActor, { workspaceId: workspace.id, title: "Private synthetic original",
@@ -89,14 +107,14 @@ describe("digest input receipts", () => {
       memberId: readerMember.id, recipientEmail: "reader@example.test", subject: "Workspace briefing", status: "FAILED",
       error: "Synthetic provider failure", actor: ownerActor, lineageRoots: roots });
     expect(await listNewspaperDeliveryDetails(readerActor, workspace.id)).toHaveLength(1);
-    expect(await listNewspaperDeliverySummaries(readerActor, workspace.id)).toMatchObject([{ failedCount: 1, recipientCount: 1 }]);
+    expect(await listNewspaperDeliverySummaries(readerActor, workspace.id)).toMatchObject({complete: true, items: [{ failedCount: 1, recipientCount: 1 }]});
     const otherRoots = await captureArtifactInputProof(ownerActor, workspace.id,
       [{ kind: "Workspace", id: workspace.id }, { kind: "Member", id: (await prisma.member.findFirstOrThrow({ where: { userId: ownerActor.kind === "user" ? ownerActor.user.id : "", workspaceId: workspace.id } })).id }]);
     await recordNewspaperDelivery({ workspaceId: workspace.id, runKey: "other-recipient", kind: "MEMBER_NEWSPAPER",
       memberId: (otherRoots.find((root) => root.kind === "Member"))!.id, recipientEmail: "other@example.test",
       subject: "Other recipient", status: "FAILED", error: "Other synthetic outcome", actor: ownerActor, lineageRoots: otherRoots });
     expect(await listNewspaperDeliveryDetails(readerActor, workspace.id)).toHaveLength(1);
-    expect(await listNewspaperDeliverySummaries(readerActor, workspace.id)).toHaveLength(1);
+    expect((await listNewspaperDeliverySummaries(readerActor, workspace.id)).items).toHaveLength(1);
     expect(await listNewspaperDeliveryDetails(ownerActor, workspace.id)).toHaveLength(2);
     const edition = await upsertNewspaperEdition({ workspaceId: workspace.id, cadence: "DAILY", dateKey: "2026-10-12",
       runKey: "synthetic-safe", title: "Safe edition", slug: "safe", digestJson: {}, bodyMd: "Safe original name",
@@ -161,7 +179,7 @@ describe("digest input receipts", () => {
     expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: article.id } })).bodyMd).toBe("Independent human revision");
   });
 
-  it("filters unknown and private contributors before the editorial limit and rejects another workspace", async () => {
+  it("bounds unknown candidate discovery while preserving private and foreign source denial", async () => {
     const { workspace, other, ownerActor, readerActor } = await fixture();
     const safe = await createArticle(ownerActor, { workspaceId: workspace.id, slug: "safe", title: "Safe synthetic input", type: "PROJECT",
       authority: "REFERENCE", isPrivate: false, bodyMd: "Permitted text" });
@@ -169,20 +187,19 @@ describe("digest input receipts", () => {
     const privateRoots = await captureArtifactInputProof(ownerActor, workspace.id, [{ kind: "BrainArticle", id: privateOriginal.id }]);
     const mixed = await createArticle(ownerActor, { workspaceId: workspace.id, title: "Copied private canary", type: "PROJECT",
       authority: "REFERENCE", isPrivate: false, bodyMd: "Private body copied", completeInputRoots: privateRoots });
-    await prisma.brainArticle.createMany({ data: Array.from({ length: 55 }, (_, index) => ({ workspaceId: workspace.id,
+    await prisma.brainArticle.createMany({ data: Array.from({ length: 5001 }, (_, index) => ({ workspaceId: workspace.id,
       slug: `unknown-${index}`, title: `Unknown ${index}`, type: "PROJECT" as const, authority: "REFERENCE" as const,
       bodyMd: "Unknown synthetic input", updatedAt: new Date(Date.now() + index),
     })) });
-    const candidates = await collectWorkspaceBriefingCandidates({ workspaceId: workspace.id, actor: ownerActor,
-      audience: [ownerActor, readerActor], since: new Date(Date.now() - 60_000), until: new Date(Date.now() + 60_000) });
-    expect(candidates.map((candidate) => candidate.sourceId)).toEqual([safe.id]);
-    expect(JSON.stringify(candidates)).not.toContain("Private body");
+    await expect(collectWorkspaceBriefingCandidates({ workspaceId: workspace.id, actor: ownerActor,
+      audience: [ownerActor, readerActor], since: new Date(Date.now() - 60_000), until: new Date(Date.now() + 60_000) }))
+      .rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
     const common = await captureReadableDigestInputs({ actor: ownerActor, audience: [ownerActor, readerActor],
       workspaceId: workspace.id, kind: "BrainArticle", records: [safe, mixed] });
     expect(common.records.map((record) => record.id)).toEqual([safe.id]);
     await expect(captureArtifactInputProof(readerActor, other.id, [{ kind: "BrainArticle", id: safe.id }]))
       .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
-  });
+  }, 180_000);
 
   it("gates personalized redirects and delivery counts separately from a readable shared edition", async () => {
     const { workspace, ownerActor, readerActor } = await fixture();
@@ -202,8 +219,8 @@ describe("digest input receipts", () => {
     await recordNewspaperDelivery({ workspaceId: workspace.id, runKey: "synthetic-personal", kind: "MEMBER_NEWSPAPER",
       recipientEmail: "owner@example.test", subject: "Private supplement", status: "SENT", actor: ownerActor, lineageRoots: privateRoots });
     expect(await listNewspaperDeliveryDetails(readerActor, workspace.id)).toEqual([]);
-    expect(await listNewspaperDeliverySummaries(readerActor, workspace.id)).toEqual([]);
-    expect((await listNewspaperDeliverySummaries(ownerActor, workspace.id))[0]).toMatchObject({ recipientCount: 1, totalClickCount: 2 });
+    expect(await listNewspaperDeliverySummaries(readerActor, workspace.id)).toMatchObject({items: [], complete: true});
+    expect((await listNewspaperDeliverySummaries(ownerActor, workspace.id)).items[0]).toMatchObject({ recipientCount: 1, totalClickCount: 2 });
   });
 
   it("retains requester ownership through conversation copies and refuses unknown turn provenance", async () => {

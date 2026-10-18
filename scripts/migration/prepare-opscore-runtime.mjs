@@ -163,6 +163,24 @@ export async function prepareRuntime(input, domain, { retain = retainOpsCoreRunt
     inputSha256: archiveEvidenceHash(input), result: validateRuntimePreparationReceipt(result, validated) };
 }
 
+export function runtimePreparationDiagnostic(error) {
+  const report = { status: "RUNTIME_PREPARATION_FAILED",
+    code: /^[A-Z0-9_]+$/.test(error?.message ?? "") ? error.message : "RUNTIME_PREPARATION_UNEXPECTED" };
+  if (report.code !== "RUNTIME_AZURE_ONLY_CONFIGURATION_INVALID" || !Array.isArray(error.findings)) return report;
+  // Project the diagnostic fields explicitly; never serialize an error, raw
+  // endpoint, credential, or additional metadata attached to a finding.
+  const findings = error.findings.flatMap(finding => {
+    const { role, setting, code } = finding ?? {};
+    if (!["web", "worker"].includes(role)) return [];
+    if (["POLICY_INVALID", "CONFIG_INVALID"].includes(code) && setting === undefined) return [{ role, code }];
+    if (["RAILWAY_HOST", "LEGACY_ORIGIN", "INVALID_ENDPOINT"].includes(code)
+      && typeof setting === "string" && /^[A-Z][A-Z0-9_]{0,127}$/.test(setting)) return [{ role, setting, code }];
+    return [];
+  });
+  if (findings.length) report.findings = findings;
+  return report;
+}
+
 async function main() {
   const [domain, inputPath, receiptPath] = process.argv.slice(2);
   need(["core", "ops"].includes(domain) && inputPath && receiptPath && process.argv.length === 5,
@@ -177,8 +195,7 @@ async function main() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   main().catch(error => {
-    console.error(JSON.stringify({ status: "RUNTIME_PREPARATION_FAILED",
-      code: /^[A-Z0-9_]+$/.test(error?.message ?? "") ? error.message : "RUNTIME_PREPARATION_UNEXPECTED" }));
+    console.error(JSON.stringify(runtimePreparationDiagnostic(error)));
     process.exitCode = 1;
   });
 }

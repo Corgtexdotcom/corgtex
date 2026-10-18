@@ -7,7 +7,7 @@ import { assertArtifactInputWriteFence } from "../../domain/src/artifact-input-w
 import { AppError } from "../../domain/src/errors";
 import { assertSqlIngestionAttemptCurrent, completeSqlIngestionAttempt, failSqlIngestionAttempt, lockSqlIngestionAttempt,
   renewSqlIngestionAttempt } from "../../domain/src/sql-ingestion-attempt";
-import { assertSqlNativeCaptureCurrent, disposeSqlIngestionCapture, finalizeSqlNativeCapture,
+import { assertSqlNativeCaptureCurrent, assertSqlNativeModelInputCurrent, disposeSqlIngestionCapture, finalizeSqlNativeCapture,
   sqlNativeCaptureForPreparation } from "../../domain/src/sql-native-input";
 import { artifactPermissionEpochIdentities, capturePermissionEpochs, mergePermissionEpochProofs,
   parsePermissionEpochProof } from "../../domain/src/source-permission-epochs";
@@ -16,6 +16,7 @@ import { sourceCommitCanonical } from "../../domain/src/source-commit-lock-plan"
 import type { AuthenticatedSqlRunReceipt, CommittedSqlKnowledgePublication, PreparedSqlKnowledgeAttempt,
   SqlIngestionAttempt, SqlKnowledgePublicationPort, SqlPublicationIdentity } from "@corgtex/domain/sql-ingestion-contract";
 import { chunkText } from "./chunks";
+import { sqlKnowledgeSourceId } from "./sql-source-identity";
 import { classifyChunkSensitivity } from "./sensitivity";
 import { invalidateKnowledgeCache } from "./retrieval";
 
@@ -46,7 +47,7 @@ export async function prepareSqlKnowledgeAttempt(input: {attempt: SqlIngestionAt
     const sourceContentHash = capture.fingerprint;
     const root: LineageRoot = {kind: "SqlNativeRunInput", id: capture.input.id, fingerprint: sourceContentHash,
       permissionEpochs: parsePermissionEpochProof(capture.input.permissionEpochsJson)!};
-    const rowIds = capture.payload.rows.map(row => `byodb:${attempt.sourceId}:${row.table}:${row.primaryKey}`);
+    const rowIds = capture.payload.rows.map(row => sqlKnowledgeSourceId(attempt.sourceId, row.table, row.primaryKey));
     const outputs: Output[] = capture.payload.rows.flatMap((native, rowIndex) => chunkText(native.content).map((content, chunkIndex) => {
       const sensitivity = classifyChunkSensitivity(content);
       const row: KnowledgeChunk = {id: randomUUID(), workspaceId: attempt.workspaceId, sourceType: "EXTERNAL_DATABASE",
@@ -71,7 +72,20 @@ export async function prepareSqlKnowledgeAttempt(input: {attempt: SqlIngestionAt
     for (let offset = 0; offset < outputs.length; offset += VECTOR_BATCH_SIZE) {
       const batch = outputs.slice(offset, offset + VECTOR_BATCH_SIZE);
       await assertSqlIngestionAttemptCurrent(attempt);
-      const embedded = await defaultModelGateway.embed({workspaceId: attempt.workspaceId, input: batch.map(output => output.row.content)});
+      const controller = new AbortController();
+      const embedded = await defaultModelGateway.embed({workspaceId: attempt.workspaceId, input: batch.map(output => output.row.content),
+        signal: controller.signal,
+        authorizeAttempt: async ({ signal }) => {
+          try {
+            signal.throwIfAborted();
+            await assertSqlNativeModelInputCurrent(attempt, receipt);
+            signal.throwIfAborted();
+          } catch (error) { controller.abort(error); throw error; }
+        },
+      });
+      // An adapter may ignore cancellation or swallow an attempt-guard error.
+      // Such a response cannot become staged SQL output.
+      controller.signal.throwIfAborted();
       await assertSqlIngestionAttemptCurrent(attempt);
       invariant(embedded.embeddings.length === batch.length && embedded.embeddings.every(vector =>
         Array.isArray(vector) && vector.length > 0 && vector.every(value => Number.isFinite(value))),
@@ -153,8 +167,8 @@ export async function publishPreparedSqlKnowledgeAttempt(input: Parameters<SqlKn
       invariant(staged.length === outputs.length && staged.every((row, index) => row.ordinal === index
         && row.id === outputs[index].id && row.rowIndex === outputs[index].rowIndex && row.contentHash === outputs[index].hash)
         && digest(outputs) === publication.outputSetHash, "SQL_PUBLICATION_SET_CHANGED", "SQL output set changed before publication.");
-      // Native identities remain the historical namespace. This incremental run
-      // replaces only the rows it actually captured; it never invents a resync.
+      // Tuple-safe native identities isolate replacements even when table or key
+      // contains delimiters. Incremental runs replace only captured rows.
       for (let offset = 0; offset < state.rowIds.length; offset += IDENTITY_BATCH_SIZE) await tx.knowledgeChunk.deleteMany({where: {
         workspaceId: attempt.workspaceId, sourceType: "EXTERNAL_DATABASE", sourceId: {in: state.rowIds.slice(offset, offset + IDENTITY_BATCH_SIZE)}}});
       for (let offset = 0; offset < outputs.length; offset += VECTOR_BATCH_SIZE) {

@@ -25,6 +25,10 @@ vi.mock("./pptx-extraction", async (importOriginal) => {
 vi.mock("./retrieval", () => ({ invalidateKnowledgeCache: vi.fn() }));
 vi.mock("../../domain/src/source-lineage", () => ({
   currentArtifactInputRoots: vi.fn().mockResolvedValue(null),
+  // These replacement fixtures have no certified article manifests. Explicit
+  // source links still classify as unproven impacts and must block replacement.
+  currentArtifactInputRootsBatch: vi.fn(async (_tx, _workspaceId, _kind, rows: Array<{ id: string }>) =>
+    new Map(rows.map(row => [row.id, null]))),
 }));
 
 vi.mock("../../domain/src/producer-lineage", () => ({
@@ -660,14 +664,17 @@ describe("file-ingestion", () => {
     expect(txObj.brainSource.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ metadata: { path: ["documentId"], equals: "doc-existing" } }),
     }));
-    expect(txObj.brainArticle.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { workspaceId: "ws_1", archivedAt: null },
-    }));
+    // No metadata candidates means no article-body hydration is necessary.
+    expect(txObj.brainArticle.findMany).not.toHaveBeenCalled();
+    expect(txObj.$queryRaw.mock.calls.some(([query]) => !Array.isArray(query)
+      && query.sql.includes('FROM "BrainArticle" a') && query.sql.includes('a."workspaceId" =')
+      && query.sql.includes('a."archivedAt" IS NULL') && query.sql.includes('LIMIT 100')
+      && query.values.includes("ws_1") && query.values.includes("source-existing"))).toBe(true);
     expect(archiveWorkspaceArtifact).not.toHaveBeenCalled();
     expect(txObj.knowledgeChunk.deleteMany).toHaveBeenCalledWith({
       where: { workspaceId: "ws_1", sourceType: "DOCUMENT", sourceId: "doc-existing" },
     });
-    const sourceLocks = txObj.$queryRaw.mock.calls.map(([query]) => query.join("?"));
+    const sourceLocks = txObj.$queryRaw.mock.calls.map(([query]) => Array.isArray(query) ? query.join("?") : query.sql);
     expect(sourceLocks[0]).toContain('FROM "BrainSource"');
     expect(sourceLocks[1]).toContain('FROM "BrainSource"');
     expect(sourceLocks[2]).toContain('FROM "Document"');
@@ -740,7 +747,9 @@ describe("file-ingestion", () => {
     };
     vi.mocked((prisma as any).document.findFirst).mockResolvedValue(existingDocument);
     const makeTx = () => ({
-      $queryRaw: vi.fn().mockResolvedValue([]),
+      $queryRaw: vi.fn(async (query: TemplateStringsArray | { sql: string }) =>
+        "sql" in query && query.sql.includes('FROM "BrainArticle" a')
+          ? [{ id: "article-old", candidate: true }] : []),
       document: {
         findFirst: vi.fn().mockResolvedValue(existingDocument),
         update: vi.fn().mockImplementation(async (args: any) => ({ ...existingDocument, ...args.data })),
@@ -763,6 +772,7 @@ describe("file-ingestion", () => {
       .mockImplementationOnce(async (callback: any) => callback(firstTx))
       .mockImplementationOnce(async (callback: any) => callback(retryTx));
     retryTx.brainArticle.findMany.mockResolvedValue([]);
+    retryTx.$queryRaw.mockResolvedValue([]);
     const input = {
       workspaceId: "ws_1", fileName: "replacement.txt", mimeType: "text/plain",
       fileBuffer: Buffer.from("Replacement"), uploadSource: "FILE_UPLOAD",
@@ -770,6 +780,9 @@ describe("file-ingestion", () => {
     };
 
     await expect(ingestFile(actor, input)).rejects.toMatchObject({ status: 409, code: "DOCUMENT_REPLACEMENT_REVIEW_REQUIRED" });
+    expect(firstTx.brainArticle.findMany).toHaveBeenCalledWith({
+      where: { workspaceId: "ws_1", archivedAt: null, id: { in: ["article-old"] } }, orderBy: { id: "asc" },
+    });
     expect(firstTx.document.update).not.toHaveBeenCalled();
     expect(firstTx.brainSource.update).not.toHaveBeenCalled();
     expect(archiveWorkspaceArtifact).not.toHaveBeenCalled();
