@@ -15,6 +15,8 @@ import { withCompanyLegacyRecoveryCapture } from "./legacy-recovery-context";
 import { inspectSourceLineageBackfill } from "./source-lineage-backfill";
 
 export const LEGACY_RECOVERY_OPERATION = "LEGACY_RECOVERY_PUBLICATION";
+// Request deduplication only. An alias is never an input receipt or content authority.
+const LEGACY_RECOVERY_REUSE = "LEGACY_RECOVERY_REQUEST_REUSE";
 export const LEGACY_RECOVERY_KINDS = ["Action", "Goal", "GoalUpdate", "KeyResult", "ConversationSession", "ConversationTurn", "Document", "BrainSource", "Role", "Circle"] as const;
 export type LegacyRecoveryKind = typeof LEGACY_RECOVERY_KINDS[number];
 type Row = Record<string, unknown> & { id: string };
@@ -271,6 +273,56 @@ async function verifyFile(selection: Selection, row: Row): Promise<ByteBinding |
   return { storageKey: row.fileStorageKey, sha256, sizeBytes: size };
 }
 
+async function resolveRecoveryRequest(actor: AppActor, workspaceId: string, outcome: Row, requestHash: string, db: Db) {
+  let receipt = outcome;
+  const alias = outcome.operation === LEGACY_RECOVERY_REUSE;
+  if (alias) {
+    invariant(actor.kind === "user" && outcome.actorKind === "user" && outcome.userId === actor.user.id
+      && outcome.workspaceId === workspaceId && record(outcome.controlJson) && outcome.controlJson.version === 1
+      && outcome.controlJson.requestHash === requestHash && typeof outcome.controlJson.receiptId === "string",
+    409,"RECOVERY_CONFLICT","This recovery request cannot be reused.");
+    const original = await db.conversationOperationOutcome.findFirst({ where: { id: outcome.controlJson.receiptId,
+      workspaceId, operation: LEGACY_RECOVERY_OPERATION } });
+    invariant(original,409,"RECOVERY_CONFLICT","The original recovery is no longer available.");
+    receipt = original;
+  }
+  const capsule = await currentLegacyRecoveryPublication(actor,workspaceId,receipt,db);
+  invariant(capsule && (alias || capsule.requestHash === requestHash),409,"RECOVERY_CONFLICT","This recovery request cannot be reused.");
+  {
+    const head = await db.artifactInputLineage.findFirst({ where: { workspaceId, artifactType: capsule.targetKind,
+      artifactId: capsule.targetId }, orderBy: { revision: "desc" } });
+    invariant(actor.kind === "user" && capsule.userId === actor.user.id && head?.id === capsule.targetManifestId
+      && await isArtifactPermissionEpochProofCurrent(workspaceId,capsule.operationEpochs,db),
+    409,"RECOVERY_CONFLICT","The original recovery head or operator authority changed.");
+  }
+  return { receipt, capsule };
+}
+
+async function reusableBrainSourceRecovery(actor: AppActor, selection: Selection, fingerprint: string, file: ByteBinding | null, db: Db) {
+  if (selection.kind !== "BrainSource") return null;
+  const head = await db.artifactInputLineage.findFirst({ where: { workspaceId: selection.workspaceId,
+    artifactType: selection.kind, artifactId: selection.id }, orderBy: { revision: "desc" } });
+  if (!head || head.origin !== "DERIVED" || head.contentHash !== fingerprint || !Array.isArray(head.rootsJson)) return null;
+  // Follow only the currently published direct receipt, never search for an older
+  // matching fingerprint that may have been superseded or lost its authority.
+  for (const root of head.rootsJson) {
+    if (!record(root) || root.kind !== "ConversationOperationOutcome" || typeof root.id !== "string") continue;
+    const receipt = await db.conversationOperationOutcome.findFirst({ where: { id: root.id,
+      workspaceId: selection.workspaceId, operation: LEGACY_RECOVERY_OPERATION } });
+    if (!receipt) continue;
+    const capsule = await currentLegacyRecoveryPublication(actor,selection.workspaceId,receipt,db);
+    invariant(capsule?.targetKind === selection.kind && capsule.targetId === selection.id && capsule.targetFingerprint === fingerprint
+      && capsule.targetManifestId === head.id && root.fingerprint === lineageContentFingerprint("ConversationOperationOutcome",receipt)
+      && actor.kind === "user" && capsule.userId === actor.user.id
+      && hash(capsule.file) === hash(file)
+      && await isArtifactPermissionEpochProofCurrent(selection.workspaceId,capsule.operationEpochs,db)
+      && await isArtifactInputProofReadable(actor,selection.workspaceId,[{kind:selection.kind,id:selection.id,fingerprint}],db),
+    409,"RECOVERY_CONFLICT","The current recovery cannot be adopted by this request. Refresh its source and operator authority.");
+    return { receipt, capsule };
+  }
+  return null;
+}
+
 export async function recoverLegacyArtifact(actor: AppActor, submission: Selection & { expectedFingerprint: string; requestId: string; consent: "RESTORE_SELECTED_HISTORY" }) {
   const request = structuredClone(submission);
   invariant(request.consent === "RESTORE_SELECTED_HISTORY" && /^[a-f0-9]{64}$/.test(request.expectedFingerprint)
@@ -286,10 +338,17 @@ export async function recoverLegacyArtifact(actor: AppActor, submission: Selecti
   const requestHash = hash(request);
   const existing = await prisma.conversationOperationOutcome.findUnique({where:{workspaceId_requestKey:{workspaceId:request.workspaceId,requestKey}}});
   if (existing) {
-    const capsule = await currentLegacyRecoveryPublication(actor, request.workspaceId, existing, prisma);
-    invariant(capsule?.requestHash === requestHash, 409, "RECOVERY_CONFLICT", "This recovery request cannot be reused.");
-    await captureArtifactInputProof(actor, request.workspaceId, [{kind:request.kind,id:request.id}]);
-    return { id: request.id, kind: request.kind, method: "CURRENT_RECOVERY" as const, basis: capsule.basis, receiptId: existing.id };
+    const observed = await captureArtifactReadHeadObservation(async () => {
+      await resolveRecoveryRequest(actor,request.workspaceId,existing,requestHash,prisma);
+      return captureArtifactInputProof(actor,request.workspaceId,[{kind:request.kind,id:request.id}]);
+    });
+    return withArtifactCountReleaseSnapshot(actor,request.workspaceId,observed.value,async () => {},async tx => {
+      const current = await tx.conversationOperationOutcome.findUnique({where:{workspaceId_requestKey:{workspaceId:request.workspaceId,requestKey}}});
+      invariant(current && hash(current) === hash(existing),409,"RECOVERY_CONFLICT","The original recovery request changed.");
+      await selectionForRecovery(actor,request,tx);
+      const { receipt, capsule } = await resolveRecoveryRequest(actor,request.workspaceId,current,requestHash,tx);
+      return {id:request.id,kind:request.kind,method:"CURRENT_RECOVERY" as const,basis:capsule.basis,receiptId:receipt.id};
+    },observed.heads);
   }
   // Reuse genuinely complete evidence instead of introducing a new permission basis.
   const operator = await prisma.member.findFirst({where:{workspaceId:request.workspaceId,userId,isActive:true}});
@@ -312,13 +371,15 @@ export async function recoverLegacyArtifact(actor: AppActor, submission: Selecti
   invariant(Buffer.byteLength(JSON.stringify(content)) <= 1_048_576, 413, "RECOVERY_CONTENT_LIMIT", "Select a bounded historical record.");
   const publish = () => prisma.$transaction(async tx => {
     const write = async () => {
+    const targetKey = hash([LEGACY_RECOVERY_OPERATION,request.workspaceId,request.kind,request.id]);
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${targetKey},0))`;
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${requestKey},0))`;
     const prior = await tx.conversationOperationOutcome.findUnique({where:{workspaceId_requestKey:{workspaceId:request.workspaceId,requestKey}}});
     if (prior) {
-      const capsule = await currentLegacyRecoveryPublication(actor,request.workspaceId,prior,tx);
-      invariant(capsule?.requestHash === requestHash && await isArtifactInputProofReadable(actor,request.workspaceId,
+      const { receipt, capsule } = await resolveRecoveryRequest(actor,request.workspaceId,prior,requestHash,tx);
+      invariant(await isArtifactInputProofReadable(actor,request.workspaceId,
         [{kind:request.kind,id:request.id,fingerprint:request.expectedFingerprint}],tx),409,"RECOVERY_CONFLICT","The original recovery is no longer valid.");
-      return {id:request.id,kind:request.kind,method:"CURRENT_RECOVERY" as const,basis:capsule.basis,receiptId:prior.id};
+      return {id:request.id,kind:request.kind,method:"CURRENT_RECOVERY" as const,basis:capsule.basis,receiptId:receipt.id};
     }
     const table = request.kind;
     await tx.$queryRaw(Prisma.sql`SELECT id FROM ${Prisma.raw(`"${table}"`)} WHERE id=${request.id} FOR UPDATE`);
@@ -328,6 +389,13 @@ export async function recoverLegacyArtifact(actor: AppActor, submission: Selecti
       && await isArtifactPermissionEpochProofCurrent(request.workspaceId,operationEpochs,tx)
       && await isArtifactPermissionEpochProofCurrent(request.workspaceId,epochs,tx)
       && (!inheritedRoots.length || await isArtifactInputProofReadable(actor,request.workspaceId,inheritedRoots,tx)),409,"RECOVERY_STALE","Recovery sources or permissions changed.");
+    const reusable = await reusableBrainSourceRecovery(actor,request,request.expectedFingerprint,file,tx);
+    if (reusable) {
+      await tx.conversationOperationOutcome.create({ data: { workspaceId: request.workspaceId, actorKind: "user", userId,
+        operation: LEGACY_RECOVERY_REUSE, requestKey, requiredScopes: [],
+        controlJson: { version: 1, requestHash, receiptId: reusable.receipt.id } } });
+      return {id:request.id,kind:request.kind,method:"CURRENT_RECOVERY" as const,basis:reusable.capsule.basis,receiptId:reusable.receipt.id};
+    }
     const freshRoots = await knownRoots(actor,request,current,tx);
     invariant(hash(freshRoots) === hash(roots),409,"RECOVERY_STALE","Historical evidence changed during recovery.");
     let publicationRoots = basis === "EXISTING_EVIDENCE"
@@ -364,8 +432,9 @@ export async function recoverLegacyArtifact(actor: AppActor, submission: Selecti
     const known = error instanceof Prisma.PrismaClientKnownRequestError;
     const target = known && Array.isArray(error.meta?.target) ? error.meta.target : [];
     const requestRace = known && error.code === "P2002" && target.length === 2 && target.includes("workspaceId") && target.includes("requestKey");
+    const headRace = known && error.code === "P2002" && target.includes("artifactType") && target.includes("artifactId") && target.includes("revision");
     const serialization = known && (error.code === "P2034" || error.code === "P2010" && error.meta?.code === "40001");
-    if(attempt>=2 || !requestRace && !serialization) throw error;
+    if(attempt>=2 || !requestRace && !headRace && !serialization) throw error;
   }}
   };
   return company ? withCompanyLegacyRecoveryCapture({actor,workspaceId:request.workspaceId,targetKind:request.kind,targetId:request.id},perform) : perform();
@@ -373,11 +442,16 @@ export async function recoverLegacyArtifact(actor: AppActor, submission: Selecti
 
 export async function legacyRecoveryFileBinding(actor: AppActor, workspaceId: string, sourceId: string): Promise<ByteBinding | null> {
   let after: { createdAt: Date; id: string } | undefined;
+  let examined = 0;
   for (;;) {
+    const take = Math.min(100, RECOVERY_EVIDENCE_CANDIDATES - examined) || 1;
     const rows = await prisma.conversationOperationOutcome.findMany({where:{workspaceId,operation:LEGACY_RECOVERY_OPERATION,
       controlJson:{path:["targetId"],equals:sourceId},
       ...(after ? { OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { lt: after.id } }] } : {}),
-    },orderBy:[{createdAt:"desc"},{id:"desc"}],take:100});
+    },orderBy:[{createdAt:"desc"},{id:"desc"}],take});
+    invariant(examined + rows.length <= RECOVERY_EVIDENCE_CANDIDATES,413,"RECOVERY_EVIDENCE_LIMIT",
+      "The recovery receipt history exceeds this file lookup's safe bound.");
+    examined += rows.length;
     for(const row of rows) {
       const capsule = await currentLegacyRecoveryPublication(actor,workspaceId,row,prisma);
       if(capsule?.targetKind!=="BrainSource" || !capsule.file) continue;
@@ -387,7 +461,7 @@ export async function legacyRecoveryFileBinding(actor: AppActor, workspaceId: st
       await captureArtifactInputProof(actor,workspaceId,[{kind:"ConversationOperationOutcome",id:row.id}]);
       return capsule.file;
     }
-    if(rows.length < 100) return null;
+    if(rows.length < take) return null;
     const last = rows[rows.length - 1];
     after = { createdAt: last.createdAt, id: last.id };
   }
