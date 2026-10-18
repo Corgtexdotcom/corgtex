@@ -194,8 +194,13 @@ describe("internal validation owner adoption on migrated PostgreSQL", { concurre
     ["seed update", "AuditLog", tx => tx.auditLog.update({ where: { id: provenance.id }, data: { meta: { sampleDataSeeded: false } } }), /seed provenance/],
     ["seed deletion", "AuditLog", tx => tx.auditLog.delete({ where: { id: provenance.id } }), /seed provenance/],
   ]) {
-    it(`rejects ${name} committed before its child lock`, async () => {
-      const client = atLock(table, "before", () => prisma.$transaction(mutate, { isolationLevel: "ReadCommitted" }));
+    // Member permission triggers insert Events, whose Workspace FK needs a
+    // parent lock too. Commit those mutations before adoption locks Workspace;
+    // awaiting a separate writer after that lock creates a fixture wait cycle.
+    const lockTable = table === "Member" ? "Workspace" : table;
+    const boundary = table === "Member" ? "the first Workspace parent lock" : "its child lock";
+    it(`rejects ${name} committed before ${boundary}`, async () => {
+      const client = atLock(lockTable, "before", () => prisma.$transaction(mutate, { isolationLevel: "ReadCommitted" }));
       await assert.rejects(adopt(true, {}, client), error);
       await unchanged();
     });

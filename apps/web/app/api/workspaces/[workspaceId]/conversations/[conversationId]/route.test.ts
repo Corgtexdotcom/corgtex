@@ -10,6 +10,8 @@ const {
   renameConversation,
   resolveRequestActor,
   titleChat,
+  isArtifactInputProofReadable,
+  requireWorkspaceMembership,
 } = vi.hoisted(() => ({
   addConversationTurn: vi.fn(),
   completeRoleOnboardingConversation: vi.fn(),
@@ -20,6 +22,8 @@ const {
   renameConversation: vi.fn(),
   resolveRequestActor: vi.fn(),
   titleChat: vi.fn(),
+  isArtifactInputProofReadable: vi.fn(),
+  requireWorkspaceMembership: vi.fn(),
 }));
 
 vi.mock("@corgtex/domain", () => ({
@@ -27,6 +31,8 @@ vi.mock("@corgtex/domain", () => ({
   completeRoleOnboardingConversation,
   deleteConversation,
   getConversation,
+  isArtifactInputProofReadable,
+  requireWorkspaceMembership,
   renameConversation,
 }));
 
@@ -92,7 +98,11 @@ async function readRemainingBody(reader: ReadableStreamDefaultReader<Uint8Array>
 describe("POST /api/workspaces/[workspaceId]/conversations/[conversationId]", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    titleChat.mockReset().mockResolvedValue({ content: "Generated title" });
+    requireWorkspaceMembership.mockReset().mockResolvedValue({ id: "member-1" });
     resolveRequestActor.mockResolvedValue(actor);
+    isArtifactInputProofReadable.mockReset().mockResolvedValue(true);
+    addConversationTurn.mockResolvedValue({id: "persisted-turn-1", sequenceNumber: 1, createdAt: new Date("2026-10-14T00:00:00Z")});
     getConversation.mockResolvedValue({
       agentKey: "assistant",
       systemPrompt: null,
@@ -103,6 +113,115 @@ describe("POST /api/workspaces/[workspaceId]/conversations/[conversationId]", ()
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it.each(["before-title", "after-title"])("closes a committed response when title permission is denied %s", async (phase) => {
+    getConversation.mockResolvedValue({ agentKey: "assistant", systemPrompt: null, topic: null });
+    isArtifactInputProofReadable.mockResolvedValueOnce(phase === "after-title").mockResolvedValueOnce(false);
+    titleChat.mockResolvedValue({ content: "Generated title" });
+    async function* reply() {
+      yield "Saved reply";
+      return { assistantMessage: "Saved reply", contextUsed: {}, promptInputId: "prompt-1", lineageRoots: [{ kind: "PROMPT", id: "prompt-1" }] };
+    }
+    processConversationTurnStream.mockReturnValue(reply());
+    const { POST } = await import("./route");
+    const response = await POST(request() as never, routeParams());
+    const body = await response.text();
+    expect(body).toContain('"committedTurn":{"id":"persisted-turn-1"');
+    expect(body).toContain("data: [DONE]");
+    expect(addConversationTurn).toHaveBeenCalledOnce();
+    expect(renameConversation).not.toHaveBeenCalled();
+    expect(titleChat).toHaveBeenCalledTimes(phase === "after-title" ? 1 : 0);
+  }, 2_000);
+
+  it.each([["credentials", "lineage"], ["retry", "lineage"], ["credentials", "caller"], ["retry", "caller"]] as const)("does not send an auto-title during %s after %s revocation", async (phase, authority) => {
+    getConversation.mockResolvedValue({ agentKey: "assistant", systemPrompt: null, topic: null });
+    const roots = [{ kind: "ConversationPromptInput", id: "original-prompt", fingerprint: "original-fingerprint" }];
+    let permitted = true;
+    isArtifactInputProofReadable.mockImplementation(async (_actor, _workspaceId, proof) => {
+      expect(proof).toEqual(roots);
+      return authority === "lineage" ? permitted : true;
+    });
+    requireWorkspaceMembership.mockImplementation(async () => {
+      if (authority === "caller" && !permitted) throw new Error("Caller revoked");
+      return { id: "member-1" };
+    });
+    let sends = 0;
+    titleChat.mockImplementation(async request => {
+      if (phase === "retry") {
+        await request.authorizeAttempt?.({ signal: request.signal });
+        sends++;
+      }
+      // Credential acquisition / retry delay completed after authority changed.
+      permitted = false;
+      await request.authorizeAttempt?.({ signal: request.signal });
+      sends++;
+      return { content: "Must not publish" };
+    });
+    async function* reply() { yield "Saved reply"; return { assistantMessage: "Saved reply", contextUsed: {}, lineageRoots: roots }; }
+    processConversationTurnStream.mockReturnValue(reply());
+    const { POST } = await import("./route");
+    const body = await (await POST(request() as never, routeParams())).text();
+    expect(sends).toBe(phase === "retry" ? 1 : 0);
+    expect(renameConversation).not.toHaveBeenCalled();
+    expect(body).toContain('"committedTurn"');
+    expect(body).toContain("data: [DONE]");
+  });
+
+  it("retains the original proof through every authorized title attempt and rename", async () => {
+    getConversation.mockResolvedValue({ agentKey: "assistant", systemPrompt: null, topic: null });
+    const roots = [{ kind: "ConversationPromptInput", id: "original-prompt", fingerprint: "original-fingerprint" }];
+    titleChat.mockImplementation(async input => {
+      expect(input.signal).toBeInstanceOf(AbortSignal);
+      expect(input.messages[1]).toEqual({ role: "user", content: "Hello" });
+      await input.authorizeAttempt({ signal: input.signal });
+      await input.authorizeAttempt({ signal: input.signal });
+      return { content: "  Original title  " };
+    });
+    async function* reply() { yield "Saved reply"; return { assistantMessage: "Saved reply", contextUsed: {}, lineageRoots: roots }; }
+    processConversationTurnStream.mockReturnValue(reply());
+    const { POST } = await import("./route");
+    const body = await (await POST(request() as never, routeParams())).text();
+    expect(requireWorkspaceMembership).toHaveBeenCalledTimes(2);
+    expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor, workspaceId: "ws-1" });
+    expect(isArtifactInputProofReadable).toHaveBeenCalledTimes(4);
+    const original = isArtifactInputProofReadable.mock.calls[0][2];
+    expect(original).toEqual(roots);
+    expect(original).not.toBe(roots);
+    for (const call of isArtifactInputProofReadable.mock.calls) expect(call[2]).toBe(original);
+    expect(renameConversation).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", conversationId: "conversation-1", topic: "Original title", lineageRoots: original });
+    expect(body).toContain('"topic":"Original title"');
+    expect(body).toContain("data: [DONE]");
+  });
+
+  it.each(["before", "during-membership", "during-lineage"] as const)("preserves title attempt cancellation %s", async phase => {
+    getConversation.mockResolvedValue({ agentKey: "assistant", systemPrompt: null, topic: null });
+    const attempt = new AbortController();
+    let inAttempt = false;
+    isArtifactInputProofReadable.mockImplementation(async () => {
+      if (inAttempt && phase === "during-lineage") attempt.abort();
+      return true;
+    });
+    requireWorkspaceMembership.mockImplementation(async () => {
+      if (phase === "during-membership") attempt.abort();
+      return { id: "member-1" };
+    });
+    let sends = 0;
+    titleChat.mockImplementation(async input => {
+      inAttempt = true;
+      if (phase === "before") attempt.abort();
+      await input.authorizeAttempt({ signal: attempt.signal });
+      sends++;
+      return { content: "Must not publish" };
+    });
+    async function* reply() { yield "Saved reply"; return { assistantMessage: "Saved reply", contextUsed: {}, lineageRoots: [{ kind: "ConversationPromptInput", id: "original" }] }; }
+    processConversationTurnStream.mockReturnValue(reply());
+    const { POST } = await import("./route");
+    const body = await (await POST(request() as never, routeParams())).text();
+    expect(sends).toBe(0);
+    expect(renameConversation).not.toHaveBeenCalled();
+    expect(body).toContain("data: [DONE]");
+    expect(requireWorkspaceMembership).toHaveBeenCalledTimes(phase === "before" ? 0 : 1);
   });
 
   it("flushes keepalive frames while waiting for the first assistant chunk", async () => {
@@ -145,6 +264,7 @@ describe("POST /api/workspaces/[workspaceId]/conversations/[conversationId]", ()
     const remaining = await readRemainingBody(reader);
     expect(remaining).toContain("Assistant reply");
     expect(remaining).toContain("data: [DONE]");
+    expect(remaining).toContain('"committedTurn":{"id":"persisted-turn-1","sequenceNumber":1');
     expect(addConversationTurn).toHaveBeenCalledWith(actor, expect.objectContaining({
       workspaceId: "ws-1",
       conversationId: "conversation-1",
@@ -209,6 +329,8 @@ describe("POST /api/workspaces/[workspaceId]/conversations/[conversationId]", ()
     expect(returnMock).toHaveBeenCalledWith({
       assistantMessage: "",
       contextUsed: {},
+      lineageRoots: [],
+      promptInputId: "",
     });
     const conversationContext = processConversationTurnStream.mock.calls[0]?.[0] as { signal?: AbortSignal } | undefined;
     expect(conversationContext?.signal).toBeInstanceOf(AbortSignal);

@@ -296,7 +296,7 @@ export async function RoleDirectorySurface({
     const activeAssignments = activeHumanRoleAssignments(role, now);
     const assignedMemberIds = new Set(activeAssignments.map((assignment) => assignment.memberId));
     const addableMembers = members.filter((member) => !assignedMemberIds.has(member.id));
-    const movableCircles = circles.filter((circle) => circle.id !== role.circle.id);
+    const movableCircles = circles.filter((circle) => circle.id !== role.circle?.id);
     const moreItems: ReactNode[] = [];
 
     moreItems.push(
@@ -419,7 +419,7 @@ export async function RoleDirectorySurface({
       </details>,
     );
 
-    moreItems.push(
+    if (role.circle) moreItems.push(
       <details key="move-circle">
         <summary className="nr-hide-marker nr-action-summary">{t("actionMoveCircle")}</summary>
         <form action={updateRoleAction} className="action-menu-form">
@@ -515,7 +515,7 @@ export async function RoleDirectorySurface({
           )}
           {compact ? (
             <div className="nr-card-chip-row">
-              <a href={circleHref(workspaceId, role.circle.id)} className="nr-card-chip" draggable={false}>{role.circle.name}</a>
+              {role.circle && <a href={circleHref(workspaceId, role.circle.id)} className="nr-card-chip" draggable={false}>{role.circle.name}</a>}
               <span className="nr-card-chip">{t("holderCount", { count: holderCount })}</span>
               <span className="nr-card-chip">{t("accountabilityCount", { count: role.accountabilities.length })}</span>
               {holderLinks(role, true)}
@@ -523,7 +523,7 @@ export async function RoleDirectorySurface({
           ) : (
             <>
               <div className="nr-item-meta" style={{ marginTop: 8 }}>
-                <a href={circleHref(workspaceId, role.circle.id)} draggable={false}>{role.circle.name}</a>
+                {role.circle && <a href={circleHref(workspaceId, role.circle.id)} draggable={false}>{role.circle.name}</a>}
                 {" · "}
                 {t("holderCount", { count: holderCount })}
                 {" · "}
@@ -594,11 +594,11 @@ export async function RoleDirectorySurface({
             {activeAssignments.length > 0 ? holderLinks(role) : roleTableText(null, t("unassigned"))}
           </div>
         ),
-        circle: (
+        circle: role.circle ? (
           <a href={circleHref(workspaceId, role.circle.id)} className="nr-work-item-table-title">
             {role.circle.name}
           </a>
-        ),
+        ) : null,
         definition: (
           <div className="nr-work-item-table-meta">
             <div>{t("accountabilityCount", { count: role.accountabilities.length })}</div>

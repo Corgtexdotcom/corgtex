@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isSelfserveReleaseHost, SELFSERVE_RELEASE_PROFILE } from "./managed-azure-selfserve-profile.mjs";
 import { createManagedAzureExclusiveActivation } from "./managed-azure-exclusive-activation.mjs";
 import { spawn as nodeSpawn } from "node:child_process";
 import {
@@ -353,6 +354,9 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
   let deps = dependencies;
   let exclusive = null;
   const status = await deps.lease("get_recovery", { deploymentId: input.deploymentId, acrName: input.acrName, acrServer: input.acrServer });
+  if (isSelfserveReleaseHost(input.deploymentId, status.origin) && status.protectedReleaseProfile !== SELFSERVE_RELEASE_PROFILE) {
+    return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: "SELFSERVE_PROTECTED_RELEASE_PROTOCOL_REQUIRED" });
+  }
   const alreadyCompleted = compatibleRecoveryTerminal(status, input);
   if (alreadyCompleted) return compatibleRecoveryResult(input, alreadyCompleted, true);
   if (status.deploymentId !== input.deploymentId || (status.phase !== "MUTATING" && status.phase !== "RECOVERY_REQUIRED")
@@ -374,6 +378,8 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
       fail(code, detail);
     };
     const rollback = await deps.lease("get_rollback", leaseArgs(handle));
+    if (isSelfserveReleaseHost(input.deploymentId, status.origin) && (rollback.schemaVersion !== 3
+      || rollback.compatibleRecovery.activationPolicy !== "EXCLUSIVE")) fail("SELFSERVE_PROTECTED_RELEASE_PROTOCOL_REQUIRED");
     const baseline = releaseIdentity(status.release?.baselineImageTag, rollback?.previous?.releaseVersion);
     if (!same(rollback.target, status.target)) fail("MANAGED_RELEASE_RECOVERY_TARGET_DRIFT");
     const originatingLease = originatingReleaseLease(status);
@@ -415,7 +421,9 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
     }
     const exclusiveCompatibleRecovery = rollback.schemaVersion !== 1
       && rollback.compatibleRecovery.activationPolicy === "EXCLUSIVE";
-    if (exclusiveCompatibleRecovery && web.kind === "BASELINE" && worker.kind === "BASELINE") {
+    // V3 retains exclusive fencing across ambiguous migration startup. Only the
+    // historical V2 protocol may reactivate predecessors as containment.
+    if (rollback.schemaVersion === 2 && exclusiveCompatibleRecovery && web.kind === "BASELINE" && worker.kind === "BASELINE") {
       const heartbeat = () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason }));
       for (const role of ["web", "worker"]) {
         const activated = await deps.setRevisionActive({ target: status.target, role, revisionName: rollback.previous[role].readyRevision,

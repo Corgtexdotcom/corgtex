@@ -8,6 +8,8 @@ import {
   writeManagedAzureRecoveryCliResult,
 } from "./managed-azure-release-recovery.mjs";
 
+import { SELFSERVE_RELEASE_HOST_ID, SELFSERVE_RELEASE_PROFILE } from "./managed-azure-selfserve-profile.mjs";
+
 const deploymentId = "123e4567-e89b-42d3-a456-426614174001";
 const previousLeaseId = "123e4567-e89b-42d3-a456-426614174002";
 const claimedLeaseId = "123e4567-e89b-42d3-a456-426614174003";
@@ -115,11 +117,11 @@ function rig(overrides = {}) {
     lease: vi.fn(async (operation, args) => {
       calls.push([operation, args]);
       if (operation === "get_recovery") return statusValue;
-      if (operation === "claim_recovery") return { deploymentId, leaseId: claimedLeaseId, fence: 8, capability: "private-capability" };
+      if (operation === "claim_recovery") return { deploymentId: recoveryStatus.deploymentId, leaseId: claimedLeaseId, fence: 8, capability: "private-capability" };
       if (operation === "get_rollback") return rollbackPayload;
-      if (operation === "finalize_rollback") return { deploymentId, fence: 8, status: "ROLLED_BACK", releaseImageTag: `sha-${baseSha}`, releaseVersion: "release-1" };
-      if (operation === "heartbeat" || operation === "heartbeat_recovery") return { deploymentId, fence: 8, phase: "RECOVERY_REQUIRED" };
-      if (operation === "mark_recovery") return { deploymentId, leaseId: claimedLeaseId, fence: 8, phase: "RECOVERY_REQUIRED", recovery: { stage: args.stage, code: args.code } };
+      if (operation === "finalize_rollback") return { deploymentId: recoveryStatus.deploymentId, fence: 8, status: "ROLLED_BACK", releaseImageTag: `sha-${baseSha}`, releaseVersion: "release-1" };
+      if (operation === "heartbeat" || operation === "heartbeat_recovery") return { deploymentId: recoveryStatus.deploymentId, fence: 8, phase: "RECOVERY_REQUIRED" };
+      if (operation === "mark_recovery") return { deploymentId: recoveryStatus.deploymentId, leaseId: claimedLeaseId, fence: 8, phase: "RECOVERY_REQUIRED", recovery: { stage: args.stage, code: args.code } };
       if (operation === "record_recovery_intent") {
         if (recoveryJournal.schemaVersion !== 2) {
           recoveryJournal.schemaVersion = 2;
@@ -127,10 +129,10 @@ function rig(overrides = {}) {
         }
         recoveryJournal.intents = recoveryJournal.intents.filter((intent) => intent.role !== args.intent.role).concat([args.intent]);
         recordedIntentTemplates.set(args.intent.role, { intent: args.intent, templateDigest: args.intent.templateDigest, kind: "ABSENT" });
-        return { deploymentId, leaseId: claimedLeaseId, fence: 8, phase: "RECOVERY_REQUIRED", created: true, intent: args.intent };
+        return { deploymentId: recoveryStatus.deploymentId, leaseId: claimedLeaseId, fence: 8, phase: "RECOVERY_REQUIRED", created: true, intent: args.intent };
       }
-      if (operation === "finalize_success") return { deploymentId, fence: 8, status: "SUCCEEDED", releaseImageTag: `sha-${nextSha}`, releaseVersion: "release-2" };
-      if (operation === "finalize_compatible_recovery") return { deploymentId, fence: 8, status: "RECOVERED_COMPATIBLE", releaseImageTag: `sha-${"c".repeat(40)}`, releaseVersion: "recovery-1" };
+      if (operation === "finalize_success") return { deploymentId: recoveryStatus.deploymentId, fence: 8, status: "SUCCEEDED", releaseImageTag: `sha-${nextSha}`, releaseVersion: "release-2" };
+      if (operation === "finalize_compatible_recovery") return { deploymentId: recoveryStatus.deploymentId, fence: 8, status: "RECOVERED_COMPATIBLE", releaseImageTag: `sha-${"c".repeat(40)}`, releaseVersion: "recovery-1" };
       throw new Error("unexpected lease operation");
     }),
     readApp: vi.fn(async ({ role }) => state(role)),
@@ -246,6 +248,40 @@ function compatibleTerminalReceipt({
     acceptanceEvidenceDigest: evidence.acceptanceEvidenceDigest ?? `sha256:${"7".repeat(64)}`,
   };
 }
+
+describe("selfserve recovery capability", () => {
+  it("never reactivates incompatible baselines before V3 inventory rejects an unknown importer", async () => {
+    const digest = `sha256:${"f".repeat(64)}`;
+    const payload = { ...compatibleRollbackPayload(), schemaVersion: 3,
+      exclusiveActivation: { originalMode: "Single", temporaryMode: "Multiple", configurationDigests: { web: digest, worker: digest } } };
+    const operations = [];
+    const { deps } = rig({ rollbackPayload: payload,
+      setRevisionActive: vi.fn(async ({ role, active }) => { operations.push(["activation", role, active]); return { terminal: true, succeeded: true }; }),
+      readExclusiveState: vi.fn(async ({ role }) => { operations.push(["inventory", role]); return {
+        mode: "Multiple", configurationDigest: digest, provisioningState: "Succeeded",
+        latestRevisionName: rollback.previous[role].readyRevision, latestReadyRevisionName: rollback.previous[role].readyRevision,
+        revisions: [{ revisionName: rollback.previous[role].readyRevision, active: false, replicaCount: 0 },
+          { revisionName: `${target.webAppName}--unknown-forward`, active: true, replicaCount: 1 }],
+      }; }),
+      recoveryStatus: { deploymentId: SELFSERVE_RELEASE_HOST_ID, protectedReleaseProfile: SELFSERVE_RELEASE_PROFILE,
+        writeIntentProtocolVersion: 2, leaseId: previousLeaseId, fence: 7, phase: "RECOVERY_REQUIRED",
+        release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1", target: { kind: "FORWARD", imageTag: `sha-${nextSha}`, version: "release-2" } },
+        origin: "https://selfserve.corgtex.com", target, originatingLease: { leaseId: previousLeaseId, fence: 7 },
+        recovery: { stage: "READBACK", code: "WEB_READBACK_AMBIGUOUS" } },
+    });
+    const result = await runManagedAzureReleaseRecovery({ deploymentId: SELFSERVE_RELEASE_HOST_ID, reason: "Keep predecessor importers fenced.", acrName: "acr12" }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_BLOCKED", code: "AZURE_EXCLUSIVE_REVISION_UNOWNED" });
+    expect(operations.some(([kind, , active]) => kind === "activation" && active)).toBe(false);
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+  });
+  it("rejects a legacy server before claiming or touching Azure", async () => {
+    const { deps } = rig({ recoveryStatus: { deploymentId: SELFSERVE_RELEASE_HOST_ID, writeIntentProtocolVersion: 2 } });
+    await expect(runManagedAzureReleaseRecovery({ deploymentId: SELFSERVE_RELEASE_HOST_ID, reason: "Recover protected host.", acrName: "acr12" }, deps))
+      .resolves.toMatchObject({ status: "RECOVERY_BLOCKED", code: "SELFSERVE_PROTECTED_RELEASE_PROTOCOL_REQUIRED" });
+    expect(deps.lease.mock.calls.map(([operation]) => operation)).toEqual(["get_recovery"]);
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+  });
+});
 
 describe("managed Azure release recovery", () => {
   it("preserves the actual revision read failure and the sanitized provider context", async () => {
@@ -379,7 +415,9 @@ describe("managed Azure release recovery", () => {
     expect(deps.acceptanceProbe).toHaveBeenCalledTimes(1);
   });
 
-  it.each([2, 3])("resumes a V%s READY intent while preserving the recovery web during worker replacement", async (version) => {
+  it.each([2, 3, "selfserve"])("resumes a V%s READY intent while preserving the recovery web during worker replacement", async (profile) => {
+    const version = profile === "selfserve" ? 3 : profile;
+    const deploymentId = profile === "selfserve" ? SELFSERVE_RELEASE_HOST_ID : "123e4567-e89b-42d3-a456-426614174001";
     const rollbackPayload = compatibleRollbackPayload();
     rollbackPayload.schemaVersion = version;
     const configDigest = `sha256:${"f".repeat(64)}`;
@@ -447,6 +485,7 @@ describe("managed Azure release recovery", () => {
         return { terminal: true, succeeded: true, replicaCount: active ? 1 : 0 };
       }),
       recoveryStatus: {
+      ...(profile === "selfserve" ? { protectedReleaseProfile: SELFSERVE_RELEASE_PROFILE } : {}),
       writeIntentProtocolVersion: version === 3 ? 2 : 1,
       deploymentId, leaseId: previousLeaseId, fence: 7, phase: "RECOVERY_REQUIRED",
       release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1", target: { kind: "FORWARD", imageTag: `sha-${nextSha}`, version: "release-2" } },

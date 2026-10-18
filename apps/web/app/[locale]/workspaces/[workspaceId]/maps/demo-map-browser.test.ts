@@ -8,8 +8,9 @@ import { expect, it } from "vitest";
 it.runIf(process.env.MAP_BROWSER_QA === "1")("navigates, refreshes and reloads a read-only graph without action requests", async () => {
   const { build } = await import("esbuild");
   const { chromium } = await import("playwright");
-  const output = new URL("../../../../../../../.artifacts/pun-55/", import.meta.url);
+  const output = new URL("../../../../../../../.artifacts/source-e42b-main-map-integration/browser/", import.meta.url);
   await mkdir(output, { recursive: true });
+  const webRoot = new URL("../../../../", import.meta.url);
   const component = fileURLToPath(new URL("./ContextMapClient.tsx", import.meta.url));
   const baseObject = {
     objectType: "ProcessStep", summary: "Synthetic process evidence", properties: {}, confidence: 0.9,
@@ -26,16 +27,20 @@ it.runIf(process.env.MAP_BROWSER_QA === "1")("navigates, refreshes and reloads a
     permissions: { canSavePersonalView: true, canUpdateMasterView: true, canRequestMasterUpdate: true },
   };
   const bundle = await build({
-    stdin: { contents: `import React from "react"; import {createRoot} from "react-dom/client"; import Map from ${JSON.stringify(component)}; createRoot(document.getElementById("root")).render(<Map workspaceId="demo" data={${JSON.stringify(data)}} readOnly={!new URLSearchParams(location.search).has("member")} />);`, resolveDir: process.cwd(), loader: "tsx" },
+    stdin: { contents: `import React from "react"; import {createRoot} from "react-dom/client"; import ${JSON.stringify(fileURLToPath(new URL("globals.css", webRoot)))}; import Map from ${JSON.stringify(component)}; const params = new URLSearchParams(location.search); const data = ${JSON.stringify(data)}; if(params.has("partial")) data.readWindow={scope:"WINDOW",complete:false,objectsComplete:false,relationshipsComplete:true,evidenceComplete:true,proposedDiffsComplete:true,variantsComplete:true}; if(params.has("empty")) data.objects=[]; createRoot(document.getElementById("root")).render(<Map workspaceId="demo" data={data} readOnly={!params.has("member")} />);`, resolveDir: process.cwd(), loader: "tsx" },
+    alias: { "@": fileURLToPath(new URL("../", webRoot)) },
     bundle: true, write: false, outdir: "fixture", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' },
-    plugins: [{ name: "stub-server-actions", setup(buildApi) {
+    plugins: [{ name: "fixture-styles", setup(buildApi) {
+      buildApi.onLoad({ filter: /globals\.css$/ }, async args => ({
+        contents: (await readFile(args.path, "utf8")).replace(/@tailwind[^;]+;/g, ""), loader: "css", resolveDir: fileURLToPath(webRoot),
+      }));
+    } }, { name: "stub-server-actions", setup(buildApi) {
       buildApi.onResolve({ filter: /^\.\/actions$/ }, (args) => args.importer === component ? { path: "actions", namespace: "fixture" } : undefined);
       buildApi.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({ contents: `const action = async () => { await fetch(location.pathname, {method:"POST"}); return {mode:"updated", id:"personal", name:"Personal"}; }; export {action as applyContextGraphProposedDiffAction, action as createContextMapManualEditProposalAction, action as createPersonalContextMapViewAction, action as reviewContextGraphProposedDiffAction, action as saveContextMapLayoutAction, action as updateContextGraphProposedDiffAction};` }));
     } }],
   });
   const js = bundle.outputFiles.find((file) => file.path.endsWith(".js"))!.text;
   const css = bundle.outputFiles.find((file) => file.path.endsWith(".css"))?.text ?? "";
-  const globalStyles = await readFile(new URL("../../../../globals.css", import.meta.url), "utf8");
   const requests: Array<{ method: string; path: string }> = [];
   let failNext = false;
   const server = createServer((request, response) => {
@@ -49,7 +54,7 @@ it.runIf(process.env.MAP_BROWSER_QA === "1")("navigates, refreshes and reloads a
     if (request.method === "POST") { response.setHeader("Content-Type", "application/json"); response.end("{}"); return; }
     if (url.pathname === "/fixture.js") { response.setHeader("Content-Type", "text/javascript"); response.end(js); return; }
     response.setHeader("Content-Type", "text/html");
-    response.end(`<html><head><style>${globalStyles.replace(/@import[^;]+;/g, "")}${css}body{margin:0}.context-map-canvas{height:650px}</style></head><body><div id="root"></div><script src="/fixture.js"></script></body></html>`);
+    response.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}:root{--font-inter:system-ui}</style></head><body><div id="root"></div><script src="/fixture.js"></script></body></html>`);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -83,6 +88,40 @@ it.runIf(process.env.MAP_BROWSER_QA === "1")("navigates, refreshes and reloads a
     await page.screenshot({ path: fileURLToPath(new URL("demo-map.png", output)), fullPage: true });
     expect(requests.filter((request) => request.method !== "GET")).toEqual([]);
     expect(errors).toEqual([]);
+    await page.goto(origin + "/en/workspaces/demo/maps?partial=1");
+    await expect.poll(() => page.getByRole("status").textContent()).toContain("Showing a limited window");
+    expect(await page.locator('.react-flow__node').count()).toBe(2);
+    await page.screenshot({ path: fileURLToPath(new URL("partial-populated.png", output)), fullPage: true });
+    await page.goto(origin + "/en/workspaces/demo/maps?partial=1&empty=1");
+    await expect.poll(() => page.getByRole("heading", { name: "No visible facts in this window" }).count()).toBe(1);
+    expect(await page.getByText("This limited window does not establish that the map is empty.").count()).toBe(1);
+    expect(await page.locator('.react-flow__node').count()).toBe(0);
+    await page.screenshot({ path: fileURLToPath(new URL("partial-empty.png", output)), fullPage: true });
+    expect(errors).toEqual([]);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(origin + "/en/workspaces/demo/maps?partial=1");
+    await page.getByRole("combobox", { name: "Map card" }).selectOption("node-b");
+    await page.getByRole("button", { name: "Show Inspector", exact: true }).click();
+    expect(await page.locator(".context-map-selection-title").first().textContent()).toBe("Review evidence");
+    expect(await page.getByRole("status").textContent()).toContain("Showing a limited window");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+    const boxes = await page.evaluate(() => {
+      const canvas = document.querySelector(".context-map-canvas")!.getBoundingClientRect();
+      const inspector = document.querySelector(".context-map-inspector")!.getBoundingClientRect();
+      return { canvasBottom: canvas.bottom, inspectorTop: inspector.top };
+    });
+    expect(boxes.canvasBottom).toBeLessThanOrEqual(boxes.inspectorTop);
+    await page.screenshot({ path: fileURLToPath(new URL("partial-mobile-populated.png", output)), fullPage: true });
+    await page.getByRole("button", { name: "Hide Inspector", exact: true }).click();
+    await page.goto(origin + "/en/workspaces/demo/maps?partial=1&empty=1");
+    await page.getByRole("heading", { name: "No visible facts in this window" }).waitFor();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+    await page.screenshot({ path: fileURLToPath(new URL("partial-mobile-empty.png", output)), fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await Promise.all([
+      page.waitForResponse((response) => response.url().includes("/context?")),
+      page.goto(origin + "/en/workspaces/demo/maps"),
+    ]);
     // Recoverable read failure stays in the inspector and can be retried.
     failNext = true;
     await Promise.all([

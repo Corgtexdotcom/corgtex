@@ -219,6 +219,10 @@
     "workspacesTab": "Espacios de Trabajo"
   },
   "agents": {
+    "usageWindowNotice": "Los totales, promedios y porcentajes de uso cubren una ventana limitada de llamadas legibles del período, no todo el período. Los límites de presupuesto no cambian.",
+    "usageWindowMetric": "{label} · ventana",
+    "usageWindowLabel": "ventana",
+    "usageWindowEmpty": "No hay uso legible en esta ventana; el total del período es desconocido.",
     "agentKey": "Clave del agente:",
     "authorityDashboardDesc": "Revisa el alcance de rol, acceso vinculado, límites, postura de aprobación y actividad reciente de cada agente en un solo lugar.",
     "authorityDashboardTitle": "Panel de autoridad de agentes",
@@ -356,8 +360,20 @@
     "metadata": "Metadatos",
     "movedDesc": "Las trazas de agentes y la analítica de costos se trasladaron al centro dedicado de Gobernanza de agentes.",
     "movedTitle": "Trasladado a Gobernanza de agentes",
+    "archiveWindowLimited": "Se muestra una ventana limitada del archivo. Puede haber registros anteriores fuera de esta ventana.",
+    "archiveWindowEmpty": "No hay registros archivados visibles en esta ventana.",
+    "archiveWindowNext": "Registros archivados anteriores",
+    "archiveWindowStart": "Volver al archivo más reciente",
     "noArchivedRecords": "No se encontraron registros archivados.",
     "noAuditEntries": "No se encontraron entradas de auditoría.",
+    "scanLimited": "Esta ventana alcanzó el límite de búsqueda. Continúa para ver entradas anteriores.",
+    "nextWindow": "Entradas de auditoría anteriores",
+    "newspaperWindowLimited": "Se muestra una ventana limitada de entregas y enlaces. Los recuentos y las fechas pueden no cubrir todo el historial.",
+    "noNewspaperDeliveriesInWindow": "No hay entregas legibles en esta ventana. No se incluye el historial anterior.",
+    "newspaperWindowCounts": "En esta ventana: {sent} enviados, {failed} fallidos y {skipped} omitidos para {recipients} destinatarios.",
+    "newspaperWindowClicks": "En esta ventana de enlaces: {clicks} clics en {clickedLinks} de {links} enlaces rastreados.",
+    "newspaperWindowFirstSent": "Primer envío en la ventana: {date}",
+    "newspaperWindowLastSent": "Último envío en la ventana: {date}",
     "noNewspaperDeliveries": "Aún no hay entregas de periódicos registradas.",
     "newspaperClickCounts": "{clicks} clics totales en {clickedLinks} de {links} enlaces rastreados.",
     "newspaperFirstSent": "Primer envío: {date}",
@@ -450,6 +466,8 @@
     "workEmailLabel": "Correo laboral"
   },
   "brain": {
+    "countWindowLimited": "Los recuentos cubren una ventana limitada. + indica al menos esa cantidad; … indica un total aún desconocido.",
+    "typeCountWindowLimited": "Los recuentos por tipo cubren una ventana limitada. Todos los filtros siguen disponibles.",
     "meetingUploadGuidance": "Sube las transcripciones de reuniones en Reuniones para obtener un resumen y seguimientos revisables. Usa Brain para artículos, búsquedas y otros documentos.",
     "openMeetings": "Abrir Reuniones",
     "agentSynthesis": "Síntesis del Agente",
@@ -657,6 +675,8 @@
     "errorFailedToSend": "No se pudo enviar el mensaje.",
     "errorStreamUnavailable": "El flujo de respuesta no está disponible.",
     "newConversation": "Nueva conversación",
+    "historyLimited": "Se muestra un historial reciente limitado. Algunas conversaciones o vistas previas pueden no estar disponibles en esta ventana.",
+    "historyWindowEmpty": "No hay conversaciones visibles en esta ventana.",
     "noConversations": "Aún no hay conversaciones",
     "pageDescription": "Interactúa con Corgtex y los datos de tu espacio de trabajo.",
     "pageTitle": "Chat de agentes",
@@ -669,7 +689,25 @@
     "titleBackToConversations": "Volver a conversaciones",
     "titleClickToRename": "Haz clic para cambiar el nombre",
     "titleExpandChat": "Expandir chat",
-    "titleRemoveAttachment": "Quitar adjunto"
+    "titleRemoveAttachment": "Quitar adjunto",
+    "brainExport": {
+      "open": "Guardar en Brain",
+      "explanation": "Comparte esta respuesta con tu empresa, respetando los permisos de sus fuentes originales. Tu conversación privada sigue siendo privada.",
+      "title": "Título en Brain",
+      "transcript": "Metadatos de transcripción incluidos",
+      "none": "Ninguno: solo la respuesta",
+      "partial": "Turnos seleccionados",
+      "full": "Conversación completa",
+      "chooseTurns": "Elige los turnos que quieres incluir",
+      "fullUnavailable": "Las transcripciones completas están disponibles para conversaciones de hasta {limit} turnos. Elige turnos seleccionados en su lugar.",
+      "selectionLimit": "Elige hasta {limit} turnos ({count} seleccionados).",
+      "includesPrompts": "La transcripción seleccionada incluye tus mensajes y las respuestas del asistente.",
+      "confirm": "Confirmar y guardar",
+      "saving": "Guardando…",
+      "saved": "Guardado",
+      "success": "Guardado en Brain y en cola para su incorporación.",
+      "failed": "No se pudo guardar. Vuelve a cargar la conversación e inténtalo de nuevo."
+    }
   },
   "circles": {
     "addMemberWithPlusHint": "Usa el botón + para añadir miembros a roles en este círculo.",
@@ -837,6 +875,10 @@
     "trigger": "Comentario"
   },
   "workItems": {
+    "adviceCountWindow": "esta ventana",
+    "adviceWindowLimited": "Solo se muestran y cuentan las solicitudes de esta ventana. Puede haber otras solicitudes.",
+    "olderAdviceRequests": "Solicitudes anteriores",
+    "newestAdviceRequests": "Solicitudes más recientes",
     "allCircles": "Todos los círculos",
     "allAssignees": "Todas las personas asignadas",
     "allPeople": "Todas las personas",
@@ -1000,6 +1042,8 @@
     "attentionProposals": "Propuestas",
     "attentionStripLabel": "Atención del espacio",
     "attentionTensions": "Tensiones",
+    "limitedSnapshot": "Vista parcial. Los recuentos con + pueden ser mayores. Abre una sección para ver más.",
+    "snapshotEmpty": "No hay elementos en esta vista parcial. Abre una sección para ver más.",
     "attentionTileAria": "{label}: {personal} para ti, {total} abiertas en total",
     "attentionTileTotalAria": "{label}: {total} abiertas en total",
     "attentionTotalOpen": "Total abierto",
@@ -1095,6 +1139,11 @@
     "emptyUnread": "No hay notificaciones sin leer.",
     "eyebrow": "Sistema",
     "markAllRead": "Marcar todo como leído",
+    "markAllContinue": "Continuar marcando como leídas",
+    "markAllPending": "Marcando como leídas…",
+    "markAllPartial": "Esta revisión no ha terminado. Continúa con las notificaciones anteriores.",
+    "markAllComplete": "Revisión terminada. Las notificaciones nuevas pueden quedar sin leer.",
+    "markAllError": "No se pudo terminar este lote. Inténtalo de nuevo.",
     "markRead": "Marcar como leído",
     "next": "Siguiente",
     "openRelated": "Abrir elemento relacionado",
@@ -1105,7 +1154,11 @@
     "tabUnread": "Sin leer ({count})",
     "title": "Notificaciones",
     "unread": "Sin leer",
-    "unreadSummary": "{count, plural, =0 {No hay notificaciones sin leer} =1 {# notificación sin leer} other {# notificaciones sin leer}}"
+    "unreadSummary": "{count, plural, =0 {No hay notificaciones sin leer} =1 {# notificación sin leer} other {# notificaciones sin leer}}",
+    "latest": "Volver a las más recientes",
+    "continueHistory": "No hay notificaciones visibles aquí. Continúa a las notificaciones anteriores.",
+    "unreadSummaryMore": "Al menos {count} notificaciones sin leer",
+    "unreadSummaryUnknown": "El recuento de notificaciones sin leer aún no está disponible."
   },
   "error": {
     "defaultMessage": "Ocurrió un error inesperado.",
@@ -1114,6 +1167,16 @@
     "tryAgain": "Intentar de nuevo"
   },
   "goals": {
+    "myWindowLimited": "Estos son los objetivos propios legibles en esta ventana. Puede haber más objetivos fuera de ella.",
+    "recognitionWindowLimited": "Estos son los reconocimientos legibles en esta ventana. Puede haber más historial fuera de ella.",
+    "recognitionWindowNext": "Siguiente ventana de reconocimientos",
+    "recognitionWindowStart": "Primera ventana de reconocimientos",
+    "recognitionWindowEmpty": "No hay reconocimientos legibles en esta ventana.",
+
+    "windowLimited": "Esta ventana de objetivos también proporciona las opciones de objetivo padre. Puede haber otros objetivos fuera de ella; los objetivos con un padre fuera de esta ventana aparecen en el nivel superior.",
+    "windowNext": "Siguiente ventana de objetivos",
+    "windowStart": "Primera ventana de objetivos",
+    "windowEmpty": "No hay objetivos legibles en esta ventana.",
     "contributesTo": "contribuye a:",
     "addKeyResultTitle": "Agregar resultado clave",
     "editKeyResultTitle": "Editar resultado clave",
@@ -1223,6 +1286,12 @@
     "related": "Trabajo relacionado"
   },
   "agreements": {
+    "windowCounts": "Los recuentos corresponden a la ventana mostrada. Puede haber políticas anteriores.",
+    "selectedCircle": "Círculo seleccionado",
+    "noPoliciesInWindow": "No hay políticas visibles en esta ventana. Continúa a las políticas anteriores.",
+    "olderPolicies": "Políticas anteriores",
+    "latestPolicies": "Volver a las políticas recientes",
+
     "accepted": "Aceptada {date}",
     "constitutionMeta": "v{version} · {date}",
     "constitutionOrigins": "Fuentes por punto de la Constitución",
@@ -1253,6 +1322,12 @@
     "workingAgreementSource": "Fuente"
   },
   "governance": {
+    "historyLimited": "Se muestra una ventana del historial de constitución. Puede haber versiones anteriores.",
+    "historyUnavailable": "El historial de constitución no está disponible. Inténtalo de nuevo.",
+    "historyOlder": "Versiones anteriores",
+    "historyLatest": "Versiones recientes",
+    "historyEmpty": "No hay versiones legibles en esta ventana.",
+    "historyCount": "Versiones en esta ventana ({count})",
     "approvalPoliciesDesc": "Configura cómo se toman las decisiones para propuestas.",
     "btnRecalculate": "Recalcular puntuación",
     "btnSynthesize": "Sintetizar constitución",
@@ -1966,6 +2041,13 @@
     "updatedAt": "Actualizado {date}"
   },
   "built": {
+    "historyLimited": "Se muestra una ventana de artefactos. Puede haber artefactos anteriores. Los recuentos y las secciones vacías corresponden solo a esta ventana.",
+    "historyUnavailable": "El historial no está disponible. Inténtalo de nuevo.",
+    "historyOlder": "Artefactos anteriores",
+    "historyLatest": "Artefactos recientes",
+    "historyEmpty": "No hay artefactos legibles en esta ventana",
+    "historyEmptySection": "No hay artefactos legibles en esta sección de la ventana actual.",
+    "historyCount": "{count} artefactos en esta ventana",
     "artifact": "Artefacto",
     "artifactCount": "{count, plural, =0 {Sin artefactos de build} one {# artefacto de build} other {# artefactos de build}}",
     "asset": "Archivo",
@@ -2652,6 +2734,7 @@
     "usageSummary": "Uso {inTokens} entrada · {outTokens} salida · {latency} ms · {cost}"
   },
   "proposals": {
+    "relationWindowLimited": "Los elementos relacionados son una muestra limitada; puede haber más.",
     "aboutCreated": "Creado:",
     "aboutRelated": "Relacionado:",
     "aboutSummary": "Resumen:",

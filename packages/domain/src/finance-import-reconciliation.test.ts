@@ -3,12 +3,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   access: vi.fn(),
-  prisma: { $transaction: vi.fn(), $executeRaw: vi.fn(), financeImportBatch: { findUnique: vi.fn(), updateMany: vi.fn() },
-    financeReport: { create: vi.fn(), update: vi.fn() }, financeReportFact: { findMany: vi.fn(), create: vi.fn(), update: vi.fn() },
-    financeImportApplication: { create: vi.fn() }, financeTransaction: { create: vi.fn() }, financeImportCandidate: { updateMany: vi.fn() },
+  prisma: { $transaction: vi.fn(), $executeRaw: vi.fn(), financeImportBatch: { findUniqueOrThrow: vi.fn(), findUnique: vi.fn(), updateMany: vi.fn() },
+    financeReport: { findMany: vi.fn(), create: vi.fn(), update: vi.fn() }, financeReportFact: { findMany: vi.fn(), create: vi.fn(), update: vi.fn() },
+    financeImportApplication: { create: vi.fn() }, financeTransaction: { create: vi.fn() }, financeImportCandidate: { findMany: vi.fn(), updateMany: vi.fn() },
     event: { create: vi.fn(), findFirst: vi.fn() }, auditLog: { create: vi.fn() } },
 }));
 vi.mock("@corgtex/shared", () => ({ prisma: mocks.prisma }));
+vi.mock("./source-lineage", () => ({ captureArtifactInputProof: vi.fn(async () => []), captureImmutableArtifactInputProof: vi.fn(async () => []), recordArtifactInputLineage: vi.fn() }));
 vi.mock("./finance", () => ({ requireFinanceReportImportHumanWriteAccess: mocks.access }));
 
 import { buildFinanceReportFactSemanticKey, reconcileFinanceImportCandidates, rerunFinanceReportImportReconciliation } from "./finance-import-reconciliation";
@@ -30,6 +31,8 @@ evidenceClaims: ["type", "basis", "cadence", "scale"].map(textClaim), exceptions
 describe("Finance report reconciliation", () => {
   beforeEach(() => {
     vi.clearAllMocks(); mocks.access.mockResolvedValue({}); mocks.prisma.$transaction.mockImplementation((work) => work(mocks.prisma));
+    mocks.prisma.financeImportBatch.findUniqueOrThrow.mockImplementation(async () => await mocks.prisma.financeImportBatch.findUnique.mock.results.at(-1)?.value);
+    mocks.prisma.financeImportCandidate.findMany.mockImplementation(async () => (await mocks.prisma.financeImportBatch.findUnique.mock.results.at(-1)?.value)?.candidates ?? []);
     mocks.prisma.$executeRaw.mockResolvedValue(1); mocks.prisma.financeImportBatch.updateMany.mockResolvedValue({ count: 1 });
     mocks.prisma.financeImportCandidate.updateMany.mockResolvedValue({ count: 1 }); mocks.prisma.financeReportFact.findMany.mockResolvedValue([]);
     mocks.prisma.event.create.mockResolvedValue({}); mocks.prisma.event.findFirst.mockResolvedValue(null); mocks.prisma.auditLog.create.mockResolvedValue({});
@@ -113,7 +116,8 @@ describe("Finance report reconciliation", () => {
     expect(mocks.prisma.financeImportCandidate.updateMany).not.toHaveBeenCalled();
     const legacy = { stage: "RECONCILING", candidates: [candidate("a", { proposalJson: { version: 1 } })] };
     mocks.prisma.event.findFirst.mockResolvedValue({ payload: { version: 5, stage: "RECONCILING", candidateCount: 1 } });
-    await expect(run(legacy)).resolves.toMatchObject({ stage: "READY_FOR_REVIEW" });
+    await expect(run(legacy)).rejects.toMatchObject({ code: "FINANCE_REPORT_CLARIFICATION_REQUIRED" });
+    expect(mocks.prisma.event.findFirst).not.toHaveBeenCalled();
     mocks.prisma.event.findFirst.mockResolvedValue({ payload: { version: 4, stage: "RECONCILING", candidateCount: 1 } });
     await expect(run(legacy)).rejects.toMatchObject({ code: "FINANCE_REPORT_CLARIFICATION_REQUIRED" });
   });

@@ -1,5 +1,6 @@
 import {
-  listConstitutionVersions,
+  listConstitutionVersionPage,
+  DigestReadRelease,
   listPolicyCorpus,
   getApprovalPolicies,
   getLatestGovernanceScore,
@@ -17,6 +18,8 @@ import { getTranslations } from "next-intl/server";
 import { MarkdownExcerpt, MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 
+import { HistoryWindowNavigation } from "@/lib/components/HistoryWindowNavigation";
+
 export const dynamic = "force-dynamic";
 
 function scoreColor(score: number): string {
@@ -33,24 +36,29 @@ function scoreLabel(score: number, t: any): string {
 }
 
 export default async function GovernancePage({
-  params,
+  params, searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
+  searchParams?: Promise<{constitutionCursor?: string}>;
 }) {
   const { workspaceId } = await params;
   await requireWorkspaceFeature(workspaceId, "OS_METRICS");
   const actor = await requirePageActor();
   const t = await getTranslations("governance");
 
-  const constitutionResult = await listConstitutionVersions(actor, workspaceId, { take: 10 }).catch(() => ({ items: [], total: 0 }));
+  const constitutionRelease = new DigestReadRelease(actor, workspaceId);
+  const constitutionCursor = (await searchParams)?.constitutionCursor;
+  const constitutionResult = await listConstitutionVersionPage(actor, workspaceId, { take: 10, cursor: constitutionCursor }, constitutionRelease)
+    .then(window => ({...window, available: true})).catch(() => ({items: [], complete: false, nextCursor: null, available: false}));
   const constitutions = constitutionResult.items;
   const policies = await listPolicyCorpus(actor, workspaceId).catch(() => []);
   const approvalPolicies = await getApprovalPolicies(actor, workspaceId).catch(() => []);
   const latestScore = await getLatestGovernanceScore(workspaceId).catch(() => null);
   const scoreHistory = await listGovernanceScores(actor, workspaceId, { take: 6 }).catch(() => []);
-  const currentConstitution = await getCurrentConstitution(workspaceId).catch(() => null);
+  const currentConstitution = await getCurrentConstitution(actor, workspaceId).catch(() => null);
   const currentWorkspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } });
   const isDemo = currentWorkspace?.slug === "jnj-demo";
+  await constitutionRelease.finish(undefined);
 
   return (
     <>
@@ -187,10 +195,15 @@ export default async function GovernancePage({
             <p className="nr-item-meta">{t("noConstitution")}</p>
           )}
 
-          {constitutions.length > 1 && (
+          <HistoryWindowNavigation limited={!constitutionResult.complete || Boolean(constitutionCursor)} unavailable={!constitutionResult.available}
+            nextHref={constitutionResult.nextCursor ? `?constitutionCursor=${encodeURIComponent(constitutionResult.nextCursor)}` : null}
+            latestHref={constitutionCursor ? "?" : null}
+            labels={{limited: t("historyLimited"), unavailable: t("historyUnavailable"), older: t("historyOlder"), latest: t("historyLatest")}} />
+          {constitutions.length === 0 && constitutionResult.available && <p className="nr-item-meta">{t("historyEmpty")}</p>}
+          {constitutions.length > 0 && (
             <details style={{ marginTop: 16 }}>
               <summary className="nr-meta" style={{ cursor: "pointer", fontSize: "0.82rem" }}>
-                {t("versionHistory", { count: constitutions.length })}
+                {t("historyCount", { count: constitutions.length })}
               </summary>
               <div style={{ marginTop: 8 }}>
                 {constitutions.map((c) => (
@@ -225,7 +238,7 @@ export default async function GovernancePage({
                     {p.circle && <span className="tag">{p.circle.name}</span>}
                   </div>
                   <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
-                    {t("policyAccepted", { title: p.proposal.title, date: new Date(p.acceptedAt).toLocaleDateString() })}
+                    {t("policyAccepted", { title: p.proposal?.title ?? p.title, date: new Date(p.acceptedAt).toLocaleDateString() })}
                   </div>
                   <details style={{ marginTop: 8 }}>
                     <summary className="nr-meta" style={{ cursor: "pointer", fontSize: "0.82rem" }}>

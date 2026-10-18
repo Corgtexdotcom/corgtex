@@ -1,3 +1,6 @@
+import { createArtifactSampleBudget } from "./digest-lineage";
+import { captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot, readableArtifactIds, withArtifactCountReleaseSnapshot, type LineageInput, type LineageRoot } from "./source-lineage";
+import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 import { Prisma, type RoleOnboardingStatus } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -60,7 +63,10 @@ export async function createRoleVersionSnapshot(
   });
   const version = (latestVersion._max.version ?? 0) + 1;
 
-  return tx.roleVersion.create({
+  const receipt = await prepareProducerLineage({ tx, actor: params.actor, workspaceId: params.workspaceId,
+    completeCopy: true, copied: true, dependencies: [{ kind: "Role", id: params.role.id }],
+    snapshotDependencies: [{ kind: "Role", id: params.role.id }] });
+  const snapshot = await tx.roleVersion.create({
     data: {
       workspaceId: params.workspaceId,
       roleId: params.role.id,
@@ -76,6 +82,9 @@ export async function createRoleVersionSnapshot(
       changedByUserId: actorUserId(params.actor),
     },
   });
+  await finishProducerLineage({ tx, actor: params.actor, workspaceId: params.workspaceId,
+    artifact: { kind: "RoleVersion", id: snapshot.id }, content: snapshot, receipt });
+  return snapshot;
 }
 
 export async function startRoleHolderHistory(
@@ -90,7 +99,14 @@ export async function startRoleHolderHistory(
   },
 ) {
   const holderKind = params.memberId ? "MEMBER" : "AGENT";
-  await tx.roleHolderHistory.create({
+  const receipt = await prepareProducerLineage({ tx, actor: params.actor, workspaceId: params.workspaceId,
+    completeCopy: true, dependencies: [
+      { kind: "Role", id: params.roleId },
+      ...(params.memberId ? [{ kind: "Member" as const, id: params.memberId }] : []),
+      ...(params.agentIdentityId ? [{ kind: "AgentIdentity" as const, id: params.agentIdentityId }] : []),
+      ...(params.assignmentId ? [{ kind: "RoleAssignment" as const, id: params.assignmentId }] : []),
+    ], snapshotDependencies: [{ kind: "Role", id: params.roleId }] });
+  const history = await tx.roleHolderHistory.create({
     data: {
       workspaceId: params.workspaceId,
       roleId: params.roleId,
@@ -101,6 +117,29 @@ export async function startRoleHolderHistory(
       startedByUserId: actorUserId(params.actor),
     },
   });
+  await finishProducerLineage({ tx, actor: params.actor, workspaceId: params.workspaceId,
+    artifact: { kind: "RoleHolderHistory", id: history.id }, content: history, receipt });
+}
+
+
+export async function endVerifiedRoleHolderHistories(tx: Prisma.TransactionClient, params: {
+  workspaceId: string;
+  actor: AppActor;
+  where: Prisma.RoleHolderHistoryWhereInput;
+  data: Prisma.RoleHolderHistoryUncheckedUpdateManyInput;
+}) {
+  const histories = await tx.roleHolderHistory.findMany({ where: params.where });
+  const receipts = await Promise.all(histories.map((history) => prepareProducerLineage({
+    tx, actor: params.actor, workspaceId: params.workspaceId,
+    artifact: { kind: "RoleHolderHistory", id: history.id }, before: history, allowSystemTransition: true,
+  })));
+  await tx.roleHolderHistory.updateMany({ where: params.where, data: params.data });
+  const updated = await tx.roleHolderHistory.findMany({ where: { id: { in: histories.map((history) => history.id) } } });
+  for (const history of updated) {
+    const index = histories.findIndex((prior) => prior.id === history.id);
+    await finishProducerLineage({ tx, actor: params.actor, workspaceId: params.workspaceId,
+      artifact: { kind: "RoleHolderHistory", id: history.id }, content: history, receipt: receipts[index] });
+  }
 }
 
 export async function endRoleHolderHistory(
@@ -113,7 +152,8 @@ export async function endRoleHolderHistory(
     actor: AppActor;
   },
 ) {
-  await tx.roleHolderHistory.updateMany({
+  await endVerifiedRoleHolderHistories(tx, {
+    workspaceId: params.workspaceId, actor: params.actor,
     where: {
       workspaceId: params.workspaceId,
       roleId: params.roleId,
@@ -132,6 +172,7 @@ export async function ensureRoleOnboardingForAssignment(
   tx: Prisma.TransactionClient,
   params: {
     workspaceId: string;
+    actor: AppActor;
     role: RoleForOnboarding;
     member: MemberForOnboarding;
   },
@@ -153,6 +194,11 @@ export async function ensureRoleOnboardingForAssignment(
   }
 
   const assigneeName = params.member.user?.displayName ?? params.member.user?.email ?? "New role holder";
+  const receipt = await prepareProducerLineage({ tx, actor: params.actor, workspaceId: params.workspaceId,
+    completeCopy: true, dependencies: [
+      { kind: "Role", id: params.role.id, snapshot: params.role },
+      { kind: "Member", id: params.member.id, snapshot: params.member },
+    ] });
   const conversation = await tx.conversationSession.create({
     data: {
       workspaceId: params.workspaceId,
@@ -162,6 +208,9 @@ export async function ensureRoleOnboardingForAssignment(
       systemPrompt: null,
     },
   });
+  await finishProducerLineage({ tx, actor: params.actor, workspaceId: params.workspaceId,
+    artifact: { kind: "ConversationSession", id: conversation.id }, content: conversation, receipt });
+
 
   const session = await tx.roleOnboardingSession.create({
     data: {
@@ -172,8 +221,22 @@ export async function ensureRoleOnboardingForAssignment(
     },
     include: { conversation: true },
   });
+  await finishProducerLineage({ tx, actor: params.actor, workspaceId: params.workspaceId,
+    artifact: { kind: "RoleOnboardingSession", id: session.id }, content: session, receipt });
 
+
+  let notificationRoots: LineageRoot[] = [];
+  try {
+    notificationRoots = await captureArtifactInputProof(params.actor, params.workspaceId, [
+      { kind: "Role", id: params.role.id, snapshot: params.role },
+      { kind: "Member", id: params.member.id, snapshot: params.member },
+    ], tx);
+  } catch (error) {
+    if (typeof error !== "object" || error === null || !("code" in error)
+      || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(String(error.code))) throw error;
+  }
   await createNotificationIntent(tx, {
+    lineageActor: params.actor, lineageRoots: notificationRoots,
     workspaceId: params.workspaceId,
     type: "role-onboarding.assigned",
     recipientUserIds: [params.member.userId],
@@ -187,6 +250,28 @@ export async function ensureRoleOnboardingForAssignment(
   return { ...session, wasCreated: true };
 }
 
+
+async function transitionRoleOnboardingSessions(tx: Prisma.TransactionClient, params: {
+  workspaceId: string;
+  actor?: AppActor;
+  where: Prisma.RoleOnboardingSessionWhereInput;
+  data: Prisma.RoleOnboardingSessionUpdateManyMutationInput;
+}) {
+  const actor: AppActor = params.actor ?? { kind: "agent", authProvider: "bootstrap",
+    label: "role-onboarding-lifecycle", workspaceIds: [params.workspaceId] };
+  const sessions = await tx.roleOnboardingSession.findMany({ where: params.where });
+  const receipts = await Promise.all(sessions.map((session) => prepareProducerLineage({ tx, actor,
+    workspaceId: params.workspaceId, artifact: { kind: "RoleOnboardingSession", id: session.id },
+    before: session, allowSystemTransition: true })));
+  await tx.roleOnboardingSession.updateMany({ where: params.where, data: params.data });
+  const after = await tx.roleOnboardingSession.findMany({ where: { id: { in: sessions.map((session) => session.id) } } });
+  for (const session of after) {
+    const index = sessions.findIndex((prior) => prior.id === session.id);
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "RoleOnboardingSession", id: session.id }, content: session, receipt: receipts[index] });
+  }
+}
+
 export async function dismissRoleOnboardingForAssignment(
   tx: Prisma.TransactionClient,
   params: {
@@ -195,7 +280,8 @@ export async function dismissRoleOnboardingForAssignment(
     memberId: string;
   },
 ) {
-  await tx.roleOnboardingSession.updateMany({
+  await transitionRoleOnboardingSessions(tx, {
+    workspaceId: params.workspaceId,
     where: {
       workspaceId: params.workspaceId,
       roleId: params.roleId,
@@ -221,7 +307,8 @@ export async function closeRoleLifecycleForRoles(
   if (params.roleIds.length === 0) return;
   const now = params.now ?? new Date();
 
-  await tx.roleHolderHistory.updateMany({
+  await endVerifiedRoleHolderHistories(tx, {
+    workspaceId: params.workspaceId, actor: params.actor,
     where: {
       workspaceId: params.workspaceId,
       roleId: { in: params.roleIds },
@@ -233,7 +320,8 @@ export async function closeRoleLifecycleForRoles(
     },
   });
 
-  await tx.roleOnboardingSession.updateMany({
+  await transitionRoleOnboardingSessions(tx, {
+    workspaceId: params.workspaceId,
     where: {
       workspaceId: params.workspaceId,
       roleId: { in: params.roleIds },
@@ -266,7 +354,8 @@ export async function closeRoleLifecycleForMember(
 ) {
   const now = params.now ?? new Date();
 
-  await tx.roleHolderHistory.updateMany({
+  await endVerifiedRoleHolderHistories(tx, {
+    workspaceId: params.workspaceId, actor: params.actor,
     where: {
       workspaceId: params.workspaceId,
       memberId: params.memberId,
@@ -278,7 +367,8 @@ export async function closeRoleLifecycleForMember(
     },
   });
 
-  await tx.roleOnboardingSession.updateMany({
+  await transitionRoleOnboardingSessions(tx, {
+    workspaceId: params.workspaceId,
     where: {
       workspaceId: params.workspaceId,
       memberId: params.memberId,
@@ -309,7 +399,8 @@ export async function closeRoleLifecycleForAgent(
 ) {
   const now = params.now ?? new Date();
 
-  await tx.roleHolderHistory.updateMany({
+  await endVerifiedRoleHolderHistories(tx, {
+    workspaceId: params.workspaceId, actor: params.actor,
     where: {
       workspaceId: params.workspaceId,
       agentIdentityId: params.agentIdentityId,
@@ -365,6 +456,7 @@ async function loadRoleOnboardingContext(params: {
   workspaceId: string;
   conversationId: string;
   userId: string;
+  actor?: AppActor;
 }) {
   const session = await prisma.roleOnboardingSession.findFirst({
     where: {
@@ -375,21 +467,14 @@ async function loadRoleOnboardingContext(params: {
     include: {
       role: {
         include: {
-          circle: {
-            select: {
-              id: true,
-              name: true,
-              purposeMd: true,
-              domainMd: true,
-            },
-          },
+          circle: true,
           assignments: {
             where: activeRoleAssignmentWhere(),
             include: {
               member: {
                 include: {
                   user: {
-                    select: { displayName: true, email: true },
+                    select: { id: true, displayName: true, email: true },
                   },
                 },
               },
@@ -399,21 +484,21 @@ async function loadRoleOnboardingContext(params: {
           agentAssignments: {
             include: {
               agentIdentity: {
-                select: { displayName: true, memberType: true },
+                select: { id: true, workspaceId: true, agentKey: true, memberType: true, displayName: true,
+                  purposeMd: true, behaviorMd: true, isActive: true, archivedAt: true, createdAt: true, updatedAt: true },
               },
             },
             orderBy: { assignedAt: "desc" },
           },
           versions: {
             orderBy: { createdAt: "desc" },
-            take: 3,
           },
         },
       },
       member: {
         include: {
           user: {
-            select: { displayName: true, email: true, bio: true },
+            select: { id: true, displayName: true, email: true },
           },
         },
       },
@@ -432,92 +517,172 @@ async function loadRoleOnboardingContext(params: {
       { isPrivate: true, status: "DRAFT" as const, authorUserId: params.userId },
     ];
 
-  const [policies, actions, tensions, proposals, meetings] = await Promise.all([
-    prisma.policyCorpus.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        OR: [
-          { circleId: null },
-          { circleId: session.role.circleId },
-        ],
-      },
-      select: { title: true, bodyMd: true, acceptedAt: true },
-      orderBy: { acceptedAt: "desc" },
-      take: 5,
-    }),
-    prisma.action.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        archivedAt: null,
-        status: { not: "COMPLETED" },
-        AND: [
-          { OR: privateDraftVisibility },
-          {
-            OR: [
-              { assigneeMemberId: session.memberId },
-              { circleId: session.role.circleId },
-            ],
-          },
-        ],
-      },
-      select: { title: true, status: true, dueAt: true },
-      orderBy: { updatedAt: "desc" },
-      take: 8,
-    }),
-    prisma.tension.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        archivedAt: null,
-        status: "OPEN",
-        AND: [
-          { OR: privateDraftVisibility },
-          {
-            OR: [
-              { assigneeMemberId: session.memberId },
-              { raisedByMemberId: session.memberId },
-              { circleId: session.role.circleId },
-            ],
-          },
-        ],
-      },
-      select: { title: true, priority: true },
-      orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
-      take: 8,
-    }),
-    prisma.proposal.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        archivedAt: null,
-        status: "OPEN",
-        circleId: session.role.circleId,
-        OR: privateDraftVisibility,
-      },
-      select: { title: true, summary: true },
-      orderBy: { updatedAt: "desc" },
-      take: 5,
-    }),
-    prisma.meeting.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        archivedAt: null,
-        OR: [
-          { participantIds: { has: session.memberId } },
-          { participantIds: { has: params.userId } },
-        ],
-      },
-      select: { title: true, recordedAt: true, summaryMd: true },
-      orderBy: { recordedAt: "desc" },
-      take: 5,
-    }),
-  ]);
+  const actor: AppActor = params.actor ?? { kind: "user", user: {
+    id: params.userId, email: session.member.user.email,
+    displayName: session.member.user.displayName, globalRole: "USER",
+  } };
+  invariant(actor.kind === "user" && actor.user.id === params.userId, 403, "FORBIDDEN", "Onboarding context requires its owner.");
+  const roots = new Map<string, LineageRoot>();
+  const heads = new Map<string, string>();
+  async function admitted<T extends { id: string }>(kind: LineageInput["kind"], records: T[], take?: number) {
+    const visible = await readableArtifactIds(actor, params.workspaceId, kind, records);
+    const selected = records.filter((record) => visible.has(record.id)).slice(0, take);
+    if (!selected.length) return selected;
+    const observed = await captureArtifactReadHeadObservation(async () => {
+      const proof = await captureArtifactInputProof(actor, params.workspaceId,
+        selected.map((snapshot) => ({ kind, id: snapshot.id, snapshot })));
+      for (const root of proof) {
+        const key = JSON.stringify([root.kind, root.id]);
+        roots.set(key, mergeLineageInputRoot(roots.get(key), root));
+      }
+      return selected;
+    });
+    // Retain exact original heads across awaited pages and joins. Never refresh
+    // an earlier selected input's proof from a later permission observation.
+    for (const [key, stamp] of observed.heads) {
+      invariant(!heads.has(key) || heads.get(key) === stamp, 409, "SOURCE_CHANGED", "Onboarding inputs changed during collection.");
+      heads.set(key, stamp);
+    }
+    return observed.value;
+  }
+  async function sample<T extends { id: string }>(kind: LineageInput["kind"], take: number,
+    fetch: (page: { take: number; cursor?: { id: string }; skip?: number }) => Promise<T[]>) {
+    const selected: T[] = [];
+    const budget = createArtifactSampleBudget(take);
+    let cursor: { id: string } | undefined;
+    for (;;) {
+      const pageTake = budget.nextTake();
+      const page = await fetch({ take: pageTake, ...(cursor ? { cursor, skip: 1 } : {}) });
+      budget.consume(page.length, pageTake);
+      invariant(page.length <= 100, 409, "SOURCE_CHANGED", "Invalid onboarding candidate page.");
+      selected.push(...await admitted(kind, page, take - selected.length));
+      if (selected.length === take || page.length < pageTake) return selected;
+      const last = page.at(-1)!;
+      invariant(last.id !== cursor?.id, 409, "SOURCE_CHANGED", "Onboarding candidates changed during collection.");
+      cursor = { id: last.id };
+    }
+  }
+  try {
+    const [sessions, roles, circles, members] = await Promise.all([
+      admitted("RoleOnboardingSession", [session]), admitted("Role", [session.role]),
+      admitted("Circle", [session.role.circle]), admitted("Member", [session.member]),
+    ]);
+    if (!sessions.length || !roles.length || !circles.length || !members.length) return null;
+    const [policies, actions, tensions, proposals, meetings] = await Promise.all([
+      sample("PolicyCorpus", 5, (page) => prisma.policyCorpus.findMany({
+        ...page,
+        where: {
+          workspaceId: params.workspaceId,
+          OR: [
+            { circleId: null },
+            { circleId: session.role.circleId },
+          ],
+        },
+        orderBy: [{ acceptedAt: "desc" }, { id: "asc" }],
+      })),
+      sample("Action", 8, (page) => prisma.action.findMany({
+        ...page,
+        where: {
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+          status: { not: "COMPLETED" },
+          AND: [
+            { OR: privateDraftVisibility },
+            {
+              OR: [
+                { assigneeMemberId: session.memberId },
+                { circleId: session.role.circleId },
+              ],
+            },
+          ],
+        },
+        orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+      })),
+      sample("Tension", 8, (page) => prisma.tension.findMany({
+        ...page,
+        where: {
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+          status: "OPEN",
+          AND: [
+            { OR: privateDraftVisibility },
+            {
+              OR: [
+                { assigneeMemberId: session.memberId },
+                { raisedByMemberId: session.memberId },
+                { circleId: session.role.circleId },
+              ],
+            },
+          ],
+        },
+        orderBy: [{ priority: "desc" }, { updatedAt: "desc" }, { id: "asc" }],
+      })),
+      sample("Proposal", 5, (page) => prisma.proposal.findMany({
+        ...page,
+        where: {
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+          status: "OPEN",
+          circleId: session.role.circleId,
+          OR: privateDraftVisibility,
+        },
+        orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+      })),
+      sample("Meeting", 5, (page) => prisma.meeting.findMany({
+        ...page,
+        where: {
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+          OR: [
+            { participantIds: { has: session.memberId } },
+            { participantIds: { has: params.userId } },
+          ],
+        },
+        orderBy: [{ recordedAt: "desc" }, { id: "asc" }],
+      })),
+    ]);
 
-  return { session, policies, actions, tensions, proposals, meetings };
+    const [versions, humanAssignments, agentIdentities, agentAssignments] = await Promise.all([
+      admitted("RoleVersion", session.role.versions, 3),
+      admitted("RoleAssignment", session.role.assignments.filter((assignment) => isRoleAssignmentActive(assignment))),
+      admitted("AgentIdentity", session.role.agentAssignments.map((assignment) => assignment.agentIdentity)),
+      admitted("CircleAgentAssignment", session.role.agentAssignments),
+    ]);
+    const holderMembers = await admitted("Member", humanAssignments.map((assignment) => assignment.member));
+    const memberIds = new Set(holderMembers.map((member) => member.id));
+    const identityIds = new Set(agentIdentities.map((identity) => identity.id));
+    const assignments = humanAssignments.filter((assignment) => memberIds.has(assignment.member.id));
+    const safeSession = { ...session, role: { ...session.role, assignments, versions,
+      agentAssignments: agentAssignments.filter((assignment) => identityIds.has(assignment.agentIdentity.id)),
+    } };
+    const captured: Array<LineageInput & { snapshot: Record<string, unknown> }> = [];
+    function append(kind: LineageInput["kind"], records: Array<{ id: string }>) {
+      records.forEach((snapshot) => captured.push({ kind, id: snapshot.id, snapshot }));
+    }
+    append("RoleOnboardingSession", [session]); append("Role", [session.role]);
+    append("Circle", [session.role.circle]); append("Member", [session.member, ...holderMembers]);
+    append("RoleAssignment", assignments); append("AgentIdentity", agentIdentities);
+    append("CircleAgentAssignment", safeSession.role.agentAssignments); append("RoleVersion", versions);
+    append("PolicyCorpus", policies); append("Action", actions); append("Tension", tensions);
+    append("Proposal", proposals); append("Meeting", meetings);
+    const lineageRoots = [...roots.values()];
+    return await withArtifactCountReleaseSnapshot(actor, params.workspaceId, lineageRoots, async () => {}, async (tx) => {
+      await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
+      return { session: safeSession, policies, actions, tensions, proposals, meetings,
+        lineageInputs: captured.map(({ kind, id }) => ({ kind, id })), lineageRoots };
+    }, heads);
+  } catch (error) {
+    if (typeof error !== "object" || error === null || !("code" in error)
+      || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED", "PERMISSION_CHANGED"].includes(String(error.code))) throw error;
+    return null;
+  }
 }
 
-export async function buildRoleOnboardingContextForConversation(params: {
+export async function buildRoleOnboardingContextWithLineageForConversation(params: {
   workspaceId: string;
   conversationId: string;
   userId: string;
+  actor?: AppActor;
 }) {
   const context = await loadRoleOnboardingContext(params);
   if (!context) return null;
@@ -534,7 +699,7 @@ export async function buildRoleOnboardingContextForConversation(params: {
   ));
   const holderNames = [...humanHolders, ...agentHolders];
 
-  return [
+  const text = [
     "ROLE ONBOARDING CONTEXT",
     `Session status: ${context.session.status}`,
     `Role: ${role.name}`,
@@ -572,6 +737,16 @@ export async function buildRoleOnboardingContextForConversation(params: {
     ),
     "Use this context to introduce the role, answer follow-up questions, and explain why the work matters. If the user asks about current state, stay grounded in this context and the available workspace tools.",
   ].join("\n\n");
+  return { context: text, lineageInputs: context.lineageInputs, lineageRoots: context.lineageRoots };
+}
+
+export async function buildRoleOnboardingContextForConversation(params: {
+  workspaceId: string;
+  conversationId: string;
+  userId: string;
+  actor?: AppActor;
+}) {
+  return (await buildRoleOnboardingContextWithLineageForConversation(params))?.context ?? null;
 }
 
 export async function createRoleOnboardingIntro(params: {
@@ -588,12 +763,12 @@ export async function createRoleOnboardingIntro(params: {
         conversation: true,
         role: {
           include: {
-            circle: { select: { name: true, purposeMd: true, domainMd: true } },
+            circle: true,
           },
         },
         member: {
           include: {
-            user: { select: { displayName: true, email: true } },
+            user: { select: { id: true, displayName: true, email: true } },
           },
         },
       },
@@ -606,6 +781,17 @@ export async function createRoleOnboardingIntro(params: {
       SELECT pg_advisory_xact_lock(hashtext('conversation_turn'), hashtext(${onboarding.conversationId}))
     `;
 
+    const actor: AppActor = { kind: "agent", authProvider: "bootstrap", label: "role-onboarding-intro",
+      workspaceIds: [params.workspaceId] };
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      completeCopy: true, copied: true, dependencies: [
+        { kind: "RoleOnboardingSession", id: onboarding.id, snapshot: onboarding },
+        { kind: "Role", id: onboarding.role.id, snapshot: onboarding.role },
+        { kind: "Circle", id: onboarding.role.circle.id, snapshot: onboarding.role.circle },
+        { kind: "Member", id: onboarding.member.id, snapshot: onboarding.member },
+      ], snapshotDependencies: [{ kind: "RoleOnboardingSession", id: onboarding.id }] });
+    const sessionReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "RoleOnboardingSession", id: onboarding.id }, before: onboarding, allowSystemTransition: true });
     const assigneeName = onboarding.member.user.displayName ?? onboarding.member.user.email;
     const intro = [
       `Welcome to your **${onboarding.role.name}** onboarding, ${assigneeName}.`,
@@ -624,7 +810,7 @@ export async function createRoleOnboardingIntro(params: {
     });
 
     if (!lastTurn) {
-      await tx.conversationTurn.create({
+      const turn = await tx.conversationTurn.create({
         data: {
           conversationId: onboarding.conversationId,
           sequenceNumber: 1,
@@ -632,6 +818,9 @@ export async function createRoleOnboardingIntro(params: {
           assistantMessage: intro,
         },
       });
+      await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "ConversationTurn", id: turn.id }, content: turn, receipt });
+
     }
 
     const startedAt = onboarding.startedAt ?? new Date();
@@ -656,6 +845,10 @@ export async function createRoleOnboardingIntro(params: {
       return current;
     }
 
+    const after = await tx.roleOnboardingSession.findFirst({ where: { id: onboarding.id, workspaceId: params.workspaceId } });
+    invariant(after, 404, "NOT_FOUND", "Role onboarding session not found.");
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "RoleOnboardingSession", id: onboarding.id }, content: after, receipt: sessionReceipt });
     return { ...onboarding, status: "ACTIVE" as const, startedAt };
   });
 }
@@ -672,24 +865,30 @@ export async function updateRoleOnboardingStatusByConversation(
   invariant(userId, 401, "AUTH_REQUIRED", "Role onboarding status requires a user actor.");
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
-  const onboarding = await prisma.roleOnboardingSession.findFirst({
-    where: {
-      workspaceId: params.workspaceId,
-      conversationId: params.conversationId,
-      conversation: { userId },
-      status: { in: ACTIVE_ONBOARDING_STATUSES },
-    },
-    select: { id: true },
+  return prisma.$transaction(async (tx) => {
+    const onboarding = await tx.roleOnboardingSession.findFirst({
+      where: {
+        workspaceId: params.workspaceId,
+        conversationId: params.conversationId,
+        conversation: { userId },
+        status: { in: ACTIVE_ONBOARDING_STATUSES },
+      },
   });
   invariant(onboarding, 404, "NOT_FOUND", "Role onboarding session not found.");
 
   const now = new Date();
-  return prisma.roleOnboardingSession.update({
+  const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+    artifact: { kind: "RoleOnboardingSession", id: onboarding.id }, before: onboarding, allowSystemTransition: true });
+  const after = await tx.roleOnboardingSession.update({
     where: { id: onboarding.id },
     data: {
       status: params.status,
       completedAt: params.status === "COMPLETED" ? now : null,
       dismissedAt: params.status === "DISMISSED" ? now : null,
     },
+  });
+  await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+    artifact: { kind: "RoleOnboardingSession", id: after.id }, content: after, receipt });
+  return after;
   });
 }

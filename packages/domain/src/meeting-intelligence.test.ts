@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Prisma } from "@prisma/client";
 
 const {
+  assertMeetingTranscriptWorkerCurrentMock,
   buildMeetingIntelligenceContextMock,
   createActionMock,
   publishActionMock,
@@ -18,6 +19,7 @@ const {
   updateTensionMock,
   postDeliberationEntryMock,
 } = vi.hoisted(() => ({
+  assertMeetingTranscriptWorkerCurrentMock: vi.fn(),
   buildMeetingIntelligenceContextMock: vi.fn(),
   createActionMock: vi.fn(),
   publishActionMock: vi.fn(),
@@ -42,6 +44,8 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
     prisma: {
       workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
       $transaction: vi.fn(),
+      $queryRaw: vi.fn(),
+      $executeRaw: vi.fn(),
       member: {
         findMany: vi.fn(),
         findUnique: vi.fn().mockResolvedValue({ id: "member-123", workspaceId: "ws-1", userId: "user-123", role: "ADMIN", isActive: true }),
@@ -53,6 +57,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
         findUniqueOrThrow: vi.fn(),
       },
       action: {
+        findFirst: vi.fn(),
         findMany: vi.fn().mockResolvedValue([]),
       },
       tension: {
@@ -65,8 +70,10 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
         update: vi.fn(),
       },
       policyCorpus: {
+        findFirst: vi.fn().mockResolvedValue(null),
         upsert: vi.fn(),
       },
+      approvalFlow: { findFirst: vi.fn().mockResolvedValue(null) },
       auditLog: {
         create: vi.fn(),
       },
@@ -96,6 +103,8 @@ vi.mock("@corgtex/models", () => ({
     extract: vi.fn(),
   },
 }));
+
+vi.mock("./native-meeting-workflow-principal", () => ({ assertMeetingTranscriptWorkerCurrent: assertMeetingTranscriptWorkerCurrentMock }));
 
 vi.mock("./actions", () => ({
   createAction: createActionMock,
@@ -139,8 +148,30 @@ vi.mock("./deliberation", () => ({
   postDeliberationEntry: postDeliberationEntryMock,
 }));
 
-vi.mock("./meeting-intelligence-context", () => ({
+vi.mock("./source-lineage", () => ({
+  captureArtifactInputProof: vi.fn(async (_actor, _workspace, inputs) => inputs.map(({kind, id}: {kind: string; id: string}) => ({kind, id, fingerprint: "fixture-state"}))),
+  invalidateArtifactInputLineage: vi.fn(),
+  captureArtifactInputSnapshotProof: vi.fn(async () => [{ kind: "ArtifactInputSnapshot", id: "snapshot-1", fingerprint: "a".repeat(64) }]),
+  captureImmutableArtifactInputProof: vi.fn(async () => [{ kind: "ArtifactInputSnapshot", id: "snapshot-1", fingerprint: "a".repeat(64) }]),
+  assertArtifactInputWriteFence: vi.fn(),
+  currentArtifactInputRoots: vi.fn(async () => [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }]),
+  isArtifactInputProofReadable: vi.fn(async () => true),
+  lineageContentFingerprint: vi.fn(() => "fixture-state"),
+  recordArtifactInputLineage: vi.fn(),
+  readableArtifactIds: vi.fn(async (_actor: unknown, _workspace: string, _kind: string, records: Array<{ id: string }>) => new Set(records.map((record) => record.id))),
+}));
+
+// This suite exercises formatting/caller ABI; the separate actual-helper
+// resolution suite verifies preflight, immutable ancestry and live grants.
+vi.mock("./artifact-commit-preflight", () => ({
+  prepareArtifactCommitPreflight: vi.fn(async () => Object.freeze({})),
+  withArtifactCommitPreflight: vi.fn(async (_actor, _workspace, _tx, _roots, _token, work) => work()),
+}));
+
+vi.mock("./meeting-intelligence-context", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./meeting-intelligence-context")>(),
   buildMeetingIntelligenceContext: buildMeetingIntelligenceContextMock,
+  preserveMeetingLineageAfterMetadataWrite: vi.fn(),
 }));
 
 import { prisma } from "@corgtex/shared";
@@ -161,12 +192,23 @@ const mockActor = {
 };
 
 describe("meeting-intelligence", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    const { isArtifactInputProofReadable } = await import("./source-lineage");
+    vi.mocked(isArtifactInputProofReadable).mockReset().mockResolvedValue(true);
+    const { defaultModelGateway } = await import("@corgtex/models");
+    vi.mocked(defaultModelGateway.extract).mockReset();
+    assertMeetingTranscriptWorkerCurrentMock.mockReset().mockResolvedValue(undefined);
     
     // Default mocks
     (prisma.$transaction as ReturnType<typeof vi.fn>).mockImplementation((cb) => cb(prisma));
+    (prisma.$queryRaw as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    vi.mocked(prisma.action.findFirst).mockResolvedValue({id: "action-1", workspaceId: "ws-1", status: "OPEN", isPrivate: false, archivedAt: null} as never);
+    vi.mocked(prisma.proposal.findFirst).mockResolvedValue({id: "proposal-1", workspaceId: "ws-1", status: "OPEN", isPrivate: false, archivedAt: null} as never);
     buildMeetingIntelligenceContextMock.mockResolvedValue({
+      lineageInputs: [{ kind: "MeetingTranscript", id: "meeting-1" }, { kind: "Meeting", id: "meeting-1" }],
+      lineageRoots: [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }],
+      sourceStateHash: "fixture-state",
       contextualIntelligenceEnabled: false,
       meeting: {
         id: "meeting-1",
@@ -216,7 +258,10 @@ describe("meeting-intelligence", () => {
     createTensionMock.mockResolvedValue({ id: "tension-1" });
     updateTensionMock.mockResolvedValue({ id: "tension-1" });
     postDeliberationEntryMock.mockResolvedValue({ id: "deliberation-1" });
-    (prisma.meeting.findFirst as ReturnType<typeof vi.fn>).mockReset().mockResolvedValue(null);
+    (prisma.meeting.findFirst as ReturnType<typeof vi.fn>).mockReset().mockImplementation(async ({ where }) =>
+      where.archivedAt?.not ? null : { id: "meeting-1", workspaceId: "ws-1", transcript: "Alice: I will follow up tomorrow.", summaryMd: null });
+    (prisma.meeting.update as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "meeting-1", workspaceId: "ws-1" });
+    (prisma.meetingInsight.update as ReturnType<typeof vi.fn>).mockImplementation(async ({ where, data }) => ({ id: where.id, ...data }));
     (prisma.meetingInsight.findFirst as ReturnType<typeof vi.fn>).mockReset().mockResolvedValue(null);
     (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockReset().mockResolvedValue([]);
     (prisma.meetingInsight.updateMany as ReturnType<typeof vi.fn>).mockReset().mockResolvedValue({ count: 0 });
@@ -226,6 +271,59 @@ describe("meeting-intelligence", () => {
   });
 
   describe("extractMeetingInsights", () => {
+    it.each(["credentials", "retry"] as const)("checks original source, caller and claim at every %s boundary", async boundary => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const { isArtifactInputProofReadable } = await import("./source-lineage");
+      for (const change of ["source", "caller", "claim", "none"] as const) {
+        let live = true; let sends = 0;
+        vi.mocked(isArtifactInputProofReadable).mockImplementation(async () => live);
+        assertMeetingTranscriptWorkerCurrentMock.mockReset().mockResolvedValue(undefined);
+        vi.mocked(defaultModelGateway.extract).mockImplementationOnce(async request => {
+          const context = { signal: request.signal ?? new AbortController().signal };
+          if (boundary === "retry") { await request.authorizeAttempt?.(context); sends++; }
+          await Promise.resolve(); // credential resolution / retry backoff boundary
+          if (change === "source" || change === "caller") live = false;
+          if (change === "claim") assertMeetingTranscriptWorkerCurrentMock.mockRejectedValue(new Error("claim replaced"));
+          await request.authorizeAttempt?.(context);
+          sends++;
+          return { output: { insights: [] } } as never;
+        });
+        const result = await extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" }).catch(error => error);
+        expect(sends).toBe((boundary === "retry" ? 1 : 0) + (change === "none" ? 1 : 0));
+        if (change === "none") expect(result).toEqual([]);
+        else expect(result).toBeInstanceOf(Error);
+        vi.mocked(isArtifactInputProofReadable).mockResolvedValue(true);
+        assertMeetingTranscriptWorkerCurrentMock.mockReset().mockResolvedValue(undefined);
+      }
+    });
+
+    it("latches swallowed attempt denial so restored authority cannot publish the returned output", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const { isArtifactInputProofReadable } = await import("./source-lineage");
+      vi.mocked(defaultModelGateway.extract).mockImplementationOnce(async request => {
+        vi.mocked(isArtifactInputProofReadable).mockResolvedValue(false);
+        await request.authorizeAttempt?.({ signal: request.signal ?? new AbortController().signal }).catch(() => {});
+        vi.mocked(isArtifactInputProofReadable).mockResolvedValue(true);
+        return { output: { insights: [{ type: "ACTION_ITEM", title: "Do not publish", body: "Untrusted output", confidence: 1 }] } } as never;
+      });
+      await expect(extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" })).rejects.toBeInstanceOf(Error);
+      expect(prisma.meetingInsight.updateMany).not.toHaveBeenCalled();
+      expect(prisma.meetingInsight.createMany).not.toHaveBeenCalled();
+    });
+
+    it("honors the gateway attempt cancellation context and aborts the whole extraction", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const cancellation = new Error("request cancelled");
+      vi.mocked(defaultModelGateway.extract).mockImplementationOnce(async request => {
+        const gateway = new AbortController(); gateway.abort(cancellation);
+        await expect(request.authorizeAttempt!({ signal: gateway.signal })).rejects.toBe(cancellation);
+        expect(request.signal?.aborted).toBe(true);
+        return { output: { insights: [] } } as never;
+      });
+      await expect(extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" })).rejects.toBe(cancellation);
+      expect(prisma.meetingInsight.updateMany).not.toHaveBeenCalled();
+    });
+
     it("should call model gateway to extract structured insights and create records", async () => {
       const { defaultModelGateway } = await import("@corgtex/models");
       (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -310,7 +408,10 @@ describe("meeting-intelligence", () => {
       });
 
       buildMeetingIntelligenceContextMock.mockResolvedValueOnce({
-        contextualIntelligenceEnabled: true,
+        lineageInputs: [{ kind: "MeetingTranscript", id: "meeting-1" }, { kind: "Meeting", id: "meeting-1" }],
+      lineageRoots: [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }],
+      sourceStateHash: "fixture-state",
+      contextualIntelligenceEnabled: true,
         meeting: {
           id: "meeting-1",
           workspaceId: "ws-1",
@@ -396,7 +497,10 @@ describe("meeting-intelligence", () => {
       ].join("\n");
 
       buildMeetingIntelligenceContextMock.mockResolvedValueOnce({
-        contextualIntelligenceEnabled: false,
+        lineageInputs: [{ kind: "MeetingTranscript", id: "meeting-1" }, { kind: "Meeting", id: "meeting-1" }],
+      lineageRoots: [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }],
+      sourceStateHash: "fixture-state",
+      contextualIntelligenceEnabled: false,
         meeting: {
           id: "meeting-1",
           workspaceId: "ws-1",
@@ -555,6 +659,33 @@ describe("meeting-intelligence", () => {
       expect(rows[0]).toMatchObject({ targetEntityType: null, targetEntityId: null, confidence: 0.9 });
     });
 
+
+    it("withholds unknown commitment bodies from duplicate postprocessing and captures admitted bodies", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const { readableArtifactIds, captureArtifactInputSnapshotProof, recordArtifactInputLineage } = await import("./source-lineage");
+      const existing = { id: "unknown-commitment", workspaceId: "ws-1", meetingId: "meeting-1", sourceRecordId: "source-1",
+        type: "ACTION_ITEM", operation: "CREATE", title: "Prepare report", assigneeHint: "Milan", bodyMd: "Milan will prepare the report.",
+        status: "CONFIRMED", supersededAt: null, metadataJson: {} };
+      (prisma.meetingTranscriptSourceRecord.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "source-1", recordedAt: new Date() });
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockImplementation(async ({ where }) => where.sourceRecordId === "source-1" ? [existing] : []);
+      vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _ws, kind, rows) => new Set(rows.filter((row) => kind !== "MeetingInsight" || row.id !== existing.id).map((row) => row.id)));
+      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({ output: { insights: [{ ...existing,
+        body: "Milan owns preparing the report.", dedupeKey: "variant" }] } });
+      let created: any;
+      (prisma.meetingInsight.createMany as ReturnType<typeof vi.fn>).mockImplementation(async ({ data }) => { created = { id: "created-safe", ...data[0] }; return { count: 1 }; });
+      (prisma.meetingInsight.findFirst as ReturnType<typeof vi.fn>).mockImplementation(async ({ where }) => where.dedupeKey ? created : null);
+      await extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" });
+      expect(created.metadataJson.requiresCommitmentReview).toBeUndefined();
+      expect(captureArtifactInputSnapshotProof).not.toHaveBeenCalledWith(mockActor, "ws-1", expect.objectContaining({ id: existing.id }), expect.anything());
+      expect(recordArtifactInputLineage).toHaveBeenCalledWith(expect.objectContaining({ artifact: { kind: "MeetingInsight", id: "created-safe" } }));
+      vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _ws, _kind, rows) => new Set(rows.map((row) => row.id)));
+      created = undefined;
+      await extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" });
+      expect(created.metadataJson.requiresCommitmentReview).toBe(true);
+      expect(captureArtifactInputSnapshotProof).toHaveBeenCalledWith(mockActor, "ws-1", expect.objectContaining({ kind: "MeetingInsight", id: existing.id }), prisma);
+      expect(recordArtifactInputLineage).toHaveBeenLastCalledWith(expect.objectContaining({ inheritedRoots: expect.arrayContaining([
+        expect.objectContaining({ kind: "ArtifactInputSnapshot", id: "snapshot-1" }) ]) }));
+    });
     it.each([false, true])("flags the whole same-source pending group on replay (repeats original: %s)", async (repeatOriginal) => {
       const { defaultModelGateway } = await import("@corgtex/models");
       const shared = { type: "ACTION_ITEM", operation: "CREATE", title: "Prepare report", assigneeHint: "Milan", confidence: 0.99 };
@@ -567,7 +698,11 @@ describe("meeting-intelligence", () => {
       (prisma.meetingTranscriptSourceRecord.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "source-1", recordedAt: new Date() });
       (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([pending]);
       (prisma.meetingInsight.findFirst as ReturnType<typeof vi.fn>).mockImplementation(({ where }) =>
-        where.OR?.some((item: Record<string, unknown>) => item.bodyMd === original.body) ? pending : null);
+        where.id === pending.id || where.OR?.some((item: Record<string, unknown>) => item.bodyMd === original.body) ? pending : null);
+      (prisma.meetingInsight.update as ReturnType<typeof vi.fn>).mockImplementation(({ where, data }) => {
+        if (where.id === pending.id) { pending.metadataJson = data.metadataJson; return pending; }
+        return { id: where.id, ...data };
+      });
       (prisma.meetingInsight.updateMany as ReturnType<typeof vi.fn>).mockImplementation(({ where, data }) => {
         if (where.id === pending.id) pending.metadataJson = data.metadataJson;
         return { count: 1 };
@@ -577,11 +712,11 @@ describe("meeting-intelligence", () => {
         { ...shared, body: "Milan owns preparing the report.", dedupeKey: "variant" },
       ] } });
       await extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" });
-      expect(prisma.meetingInsight.findMany).toHaveBeenCalledWith({ where: expect.objectContaining({
+      expect(prisma.meetingInsight.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 100, where: expect.objectContaining({
         workspaceId: "ws-1", meetingId: "meeting-1", sourceRecordId: "source-1", status: { in: ["SUGGESTED", "CONFIRMED", "APPLIED", "DISMISSED"] }, supersededAt: null,
-      }) });
-      expect(prisma.meetingInsight.updateMany).toHaveBeenCalledWith({
-        where: expect.objectContaining({ id: pending.id, workspaceId: "ws-1", sourceRecordId: "source-1", status: "SUGGESTED", reviewedAt: null }),
+      }) }));
+      expect(prisma.meetingInsight.update).toHaveBeenCalledWith({
+        where: { id: pending.id },
         data: { metadataJson: { retained: "existing metadata", requiresCommitmentReview: true } },
       });
       expect(pending.dedupeKey).toBe("legacy-key");
@@ -699,9 +834,9 @@ describe("meeting-intelligence", () => {
         where: expect.objectContaining({ id: legacy.id }),
       }));
       expect(prisma.meetingInsight.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({
-        where: expect.objectContaining({ sourceRecordId: null }),
+        where: expect.objectContaining({ sourceRecordId: null, id: legacy.id }),
       }));
-      expect(prisma.meetingInsight.findMany).toHaveBeenCalledWith({ where: {
+      expect(prisma.meetingInsight.findMany).toHaveBeenCalledWith({ take: 100, orderBy: { id: "asc" }, where: {
         workspaceId: "ws-1", meetingId: "meeting-1", sourceRecordId: null, supersededAt: null,
         operation: "CREATE", type: { in: ["ACTION_ITEM", "FOLLOW_UP"] },
         OR: [{ status: { in: ["CONFIRMED", "APPLIED", "DISMISSED"] } }, { status: "SUGGESTED", reviewedAt: { not: null } }],
@@ -758,7 +893,8 @@ describe("meeting-intelligence", () => {
       expect(rows).toHaveLength(1);
       expect(rows[0].metadataJson.requiresCommitmentReview).toBe(true);
       expect(JSON.stringify(reviewed)).toBe(baseline);
-      expect(prisma.meetingInsight.deleteMany).toHaveBeenCalledWith({ where: expect.objectContaining({ status: "SUGGESTED", reviewedAt: null, sourceRecordId: null }) });
+      expect(prisma.meetingInsight.deleteMany).not.toHaveBeenCalled();
+      expect(prisma.meetingInsight.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ status: "SUGGESTED", reviewedAt: null, sourceRecordId: null }) }));
       expect(prisma.meetingInsight.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: reviewed.id }) }));
       (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(rows);
       await expect(autoApplyMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" }))
@@ -923,7 +1059,10 @@ describe("meeting-intelligence", () => {
       });
 
       buildMeetingIntelligenceContextMock.mockResolvedValueOnce({
-        contextualIntelligenceEnabled: true,
+        lineageInputs: [{ kind: "MeetingTranscript", id: "meeting-1" }, { kind: "Meeting", id: "meeting-1" }],
+      lineageRoots: [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }],
+      sourceStateHash: "fixture-state",
+      contextualIntelligenceEnabled: true,
         meeting: {
           id: "meeting-1",
           workspaceId: "ws-1",
@@ -1273,10 +1412,11 @@ describe("meeting-intelligence", () => {
         return { id: "action-1" };
       });
       await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-resolve" });
-      expect(updateActionMock).toHaveBeenCalledWith(mockActor, {
+      expect(updateActionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
         workspaceId: "ws-1", actionId: "action-1", status: "COMPLETED",
         completedVia: "The owner confirmed the handoff was delivered.\n\n*Created from meeting:* [Weekly sync](/workspaces/ws-1/meetings/meeting-1)",
-      });
+        lineageCopied: true, lineageInputs: [], lineageRoots: [expect.objectContaining({kind: "ArtifactInputSnapshot"})], _tx: prisma,
+      }));
       expect(prisma.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({ status: "APPLIED", appliedEntityType: "Action", appliedEntityId: "action-1" }),
       }));
@@ -1397,7 +1537,8 @@ describe("meeting-intelligence", () => {
         proposalId: "proposal-1",
         outcome: "ADOPTED",
         decisionMd: expect.stringContaining("Created from meeting"),
-      }));
+        lineageCopied: true, lineageInputs: [], lineageRoots: [expect.objectContaining({kind: "ArtifactInputSnapshot"})],
+      }), prisma);
     });
 
     it("posts deliberation entries to validated proposal targets", async () => {
@@ -1509,7 +1650,7 @@ describe("meeting-intelligence", () => {
       });
 
       expect(createContactMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
-        workspaceId: "ws-1",
+        workspaceId: "ws-1", lineageInputs: [], lineageRoots: [expect.objectContaining({ kind: "ArtifactInputSnapshot", id: "snapshot-1" })],
         email: "buyer@example.test",
         name: "Buyer",
         company: "Example",
@@ -1567,18 +1708,25 @@ describe("meeting-intelligence", () => {
           meeting: { id: "meeting-1", title: "Pilot review" },
         });
 
+      const queued = (prisma.meetingInsight.findUnique as ReturnType<typeof vi.fn>);
+      const first = await prisma.meetingInsight.findUnique({ where: { id: "insight-crm-deal" } });
+      const second = await prisma.meetingInsight.findUnique({ where: { id: "insight-crm-activity" } });
+      queued.mockImplementation(async ({ where }) => where.id === first!.id ? first : second);
       await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-crm-deal" });
       await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-crm-activity" });
+      const { captureArtifactInputSnapshotProof } = await import("./source-lineage");
+      expect(captureArtifactInputSnapshotProof).toHaveBeenCalledWith(mockActor, "ws-1",
+        expect.objectContaining({ kind: "Meeting", id: "meeting-1", fingerprint: "fixture-state" }), prisma);
 
       expect(createDealMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
-        workspaceId: "ws-1",
+        workspaceId: "ws-1", lineageInputs: [], lineageRoots: [expect.objectContaining({ kind: "ArtifactInputSnapshot", id: "snapshot-1" })],
         accountId: "account-1",
         contactId: "contact-1",
         title: "Pilot opportunity",
         valueCents: 250000,
       }));
       expect(createActivityMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
-        workspaceId: "ws-1",
+        workspaceId: "ws-1", lineageInputs: [], lineageRoots: [expect.objectContaining({ kind: "ArtifactInputSnapshot", id: "snapshot-1" })],
         accountId: "account-1",
         contactId: "contact-1",
         title: "Follow up with buyer",
@@ -1750,7 +1898,10 @@ describe("meeting-intelligence", () => {
         },
       });
       buildMeetingIntelligenceContextMock.mockResolvedValueOnce({
-        contextualIntelligenceEnabled: true,
+        lineageInputs: [{ kind: "MeetingTranscript", id: "meeting-1" }, { kind: "Meeting", id: "meeting-1" }],
+      lineageRoots: [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }],
+      sourceStateHash: "fixture-state",
+      contextualIntelligenceEnabled: true,
         meeting: {
           id: "meeting-1",
           workspaceId: "ws-1",
@@ -1815,7 +1966,10 @@ describe("meeting-intelligence", () => {
     it("links proposal-targeted insights to the newest transcript source and supersedes older suggestions", async () => {
       const { defaultModelGateway } = await import("@corgtex/models");
       buildMeetingIntelligenceContextMock.mockResolvedValueOnce({
-        contextualIntelligenceEnabled: true,
+        lineageInputs: [{ kind: "MeetingTranscript", id: "meeting-1" }, { kind: "Meeting", id: "meeting-1" }],
+      lineageRoots: [{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "a".repeat(64) }],
+      sourceStateHash: "fixture-state",
+      contextualIntelligenceEnabled: true,
         meeting: {
           id: "meeting-1",
           workspaceId: "ws-1",
@@ -1836,7 +1990,7 @@ describe("meeting-intelligence", () => {
         knowledge: [],
         attendees: [],
       });
-      (prisma.meetingTranscriptSourceRecord.findFirst as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      (prisma.meetingTranscriptSourceRecord.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
         id: "source-record-new",
         recordedAt: new Date("2026-05-03T10:00:00.000Z"),
         sourceUpdatedAt: new Date("2026-05-03T11:00:00.000Z"),
@@ -1888,14 +2042,10 @@ describe("meeting-intelligence", () => {
           targetEntityId: "proposal-1",
         })],
       }));
-      expect(prisma.meetingInsight.deleteMany).toHaveBeenCalledWith({
-        where: {
-          workspaceId: "ws-1",
-          meetingId: "meeting-1",
-          status: "SUGGESTED",
-          reviewedAt: null,
-          sourceRecordId: null,
-        },
+      expect(prisma.meetingInsight.deleteMany).not.toHaveBeenCalled();
+      expect(prisma.meetingInsight.updateMany).toHaveBeenCalledWith({
+        where: { workspaceId: "ws-1", meetingId: "meeting-1", status: "SUGGESTED", reviewedAt: null,
+          sourceRecordId: null, supersededAt: null, NOT: { type: { in: ["CRM_CONTACT", "CRM_DEAL", "CRM_ACTIVITY"] } } }, data: { supersededAt: expect.any(Date) },
       });
       expect(prisma.meetingInsight.updateMany).toHaveBeenCalledWith(expect.objectContaining({
         where: expect.objectContaining({
@@ -1929,14 +2079,10 @@ describe("meeting-intelligence", () => {
         meetingId: "meeting-123"
       });
 
-      expect(prisma.meetingInsight.updateMany).toHaveBeenCalledWith({
+      expect(prisma.meetingInsight.findMany).toHaveBeenCalledWith({ take: 100, orderBy: { id: "asc" },
         where: { meetingId: "meeting-123", workspaceId: "ws-1", status: "SUGGESTED", supersededAt: null },
-        data: {
-          status: "CONFIRMED",
-          reviewedByUserId: "user-123",
-          reviewedAt: expect.any(Date),
-        },
       });
+      expect(prisma.meetingInsight.updateMany).not.toHaveBeenCalled();
     });
   });
 
@@ -2257,4 +2403,70 @@ describe("meeting-intelligence", () => {
       expect(prisma.meetingInsight.findUnique).not.toHaveBeenCalled();
     });
   });
+  it("rejects extraction without an explicit complete context receipt before any model calls", async () => {
+    const { defaultModelGateway } = await import("@corgtex/models");
+    vi.mocked(defaultModelGateway.extract).mockClear();
+    const context = await buildMeetingIntelligenceContextMock();
+    delete context.lineageInputs; delete context.lineageRoots;
+    buildMeetingIntelligenceContextMock.mockResolvedValue(context);
+    await expect(extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" }))
+      .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+    expect(prisma.meetingInsight.createMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects revoked prompt inputs after extraction before superseding or persisting any insight", async () => {
+    const { isArtifactInputProofReadable } = await import("./source-lineage");
+    const { defaultModelGateway } = await import("@corgtex/models");
+    vi.mocked(isArtifactInputProofReadable).mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    vi.mocked(defaultModelGateway.extract).mockResolvedValueOnce({ output: { insights: [{ type: "ACTION_ITEM",
+      title: "Prepare report", body: "Alice will prepare the report", assigneeHint: "Alice", confidence: 0.9 }] } } as any);
+    await expect(extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" }))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(prisma.meetingInsight.updateMany).not.toHaveBeenCalled();
+    expect(prisma.meetingInsight.createMany).not.toHaveBeenCalled();
+    expect(prisma.meetingInsight.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects a retry when its active transcript source was replaced during extraction", async () => {
+    const { defaultModelGateway } = await import("@corgtex/models");
+    (prisma.meetingTranscriptSourceRecord.findFirst as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ id: "source-old", recordedAt: new Date("2026-05-01") })
+      .mockResolvedValueOnce({ id: "source-new", recordedAt: new Date("2026-05-01") });
+    vi.mocked(defaultModelGateway.extract).mockResolvedValueOnce({ output: { insights: [] } } as any);
+    await expect(extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" }))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(prisma.meetingInsight.updateMany).not.toHaveBeenCalled();
+    expect(prisma.meetingInsight.createMany).not.toHaveBeenCalled();
+  });
+
+  it("persists every context input for extracted insights even when outputs do not cite them", async () => {
+    const { defaultModelGateway } = await import("@corgtex/models");
+    const { recordArtifactInputLineage } = await import("./source-lineage");
+    const context = await buildMeetingIntelligenceContextMock();
+    context.lineageInputs.push({ kind: "BrainSource", id: "finance-context" });
+    context.lineageRoots.push({ kind: "BrainSource", id: "finance-context", fingerprint: "f".repeat(64) });
+    buildMeetingIntelligenceContextMock.mockResolvedValue(context);
+    vi.mocked(defaultModelGateway.extract).mockResolvedValueOnce({ output: { insights: [{ type: "ACTION_ITEM",
+      title: "Prepare report", body: "Alice will prepare the report", assigneeHint: "Alice", confidence: 0.9 }] } } as any);
+    (prisma.meetingInsight.findFirst as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null).mockResolvedValueOnce({
+      id: "created-insight", meetingId: "meeting-1", title: "Prepare report", workspaceId: "ws-1" });
+    await extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" });
+    expect(recordArtifactInputLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prisma,
+      artifact: { kind: "MeetingInsight", id: "created-insight" }, inputs: context.lineageInputs,
+      inheritedRoots: context.lineageRoots, transitiveOnlyKinds: ["Meeting"],
+    }));
+  });
+
+  it("excludes unreadable insights before auto-apply counts and record creation", async () => {
+    const { readableArtifactIds } = await import("./source-lineage");
+    vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set());
+    (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: "hidden", confidence: 0.99,
+      type: "ACTION_ITEM", operation: "CREATE", title: "Finance secret", bodyMd: "Restricted", status: "SUGGESTED" }]);
+    await expect(autoApplyMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" }))
+      .resolves.toMatchObject({ applied: 0, failed: 0, skipped: 0 });
+    expect(createActionMock).not.toHaveBeenCalled();
+    expect(prisma.meetingInsight.findUnique).not.toHaveBeenCalled();
+  });
+
 });

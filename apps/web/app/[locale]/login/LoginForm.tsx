@@ -17,7 +17,7 @@ function SubmitButton({ label, loadingLabel }: { label: string, loadingLabel: st
   );
 }
 
-export function LoginForm({ initialEmail = "" }: { initialEmail?: string }) {
+export function LoginForm({ initialEmail = "", next = null }: { initialEmail?: string; next?: string | null }) {
   const [state, formAction] = useActionState(loginAction, initialLoginActionState);
   const locale = useLocale();
   const forgotPasswordHref = locale === "es" ? "/es/forgot-password" : "/forgot-password";
@@ -33,6 +33,7 @@ export function LoginForm({ initialEmail = "" }: { initialEmail?: string }) {
   return (
     <form action={formAction} className="stack" style={{ marginTop: 20 }}>
       <input type="hidden" name="locale" value={locale} />
+      {next ? <input type="hidden" name="next" value={next} /> : null}
       <label>
         {t("emailLabel")}
         <input

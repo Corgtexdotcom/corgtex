@@ -12,6 +12,7 @@ import {
   listContacts, listCrmActivities, listDeals, updateActivity,
 } from "./crm";
 import { purgeWorkspaceArtifact, restoreWorkspaceArtifact } from "./archive";
+import { recordArtifactInputLineage, type LineageKind } from "./source-lineage";
 
 describe("CRM Integration Lifecycle", () => {
   let adminActor: any;
@@ -78,6 +79,12 @@ describe("CRM Integration Lifecycle", () => {
     const deal = await prisma.crmDeal.create({ data: { workspaceId: workspace.id, accountId: account.id, contactId: contact.id, title: "Archive deal" } });
     const activity = await prisma.crmActivity.create({ data: { workspaceId: workspace.id, accountId: account.id, contactId: contact.id,
       dealId: deal.id, title: "Archive activity" } });
+    // Direct human fixture inputs receive their receipts before any archive transition.
+    for (const [kind, row] of [["CrmAccount", account], ["CrmContact", contact], ["CrmContact", unlinked],
+      ["CrmDeal", deal], ["CrmActivity", activity]] as const) {
+      await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: adminActor, workspaceId: workspace.id,
+        artifact: { kind: kind as LineageKind, id: row.id }, content: row, origin: "HUMAN_ORIGINAL", inputs: [] }));
+    }
     await archiveCrmAccount(adminActor, { workspaceId: workspace.id, accountId: account.id });
     expect(await prisma.crmContact.findUnique({ where: { id: contact.id } })).toMatchObject({ archivedAt: null });
     expect((await listContacts(adminActor, workspace.id)).items.map((item) => item.id)).toContain(unlinked.id);

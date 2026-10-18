@@ -1,3 +1,4 @@
+import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   addKeyResult,
@@ -6,6 +7,10 @@ import {
   deleteGoal,
   getGoal,
   getMyGoalSlice,
+  listGoals,
+  listGoalsPage,
+  listRecognitions,
+  buildGoalTree,
   listCompanyDirectionFromBrain,
   postGoalUpdate,
   recomputeGoalProgress,
@@ -14,6 +19,12 @@ import {
   updateGoal,
 } from "./goals";
 import { prisma } from "@corgtex/shared";
+import { captureHumanArtifactInputAdvance, advanceHumanArtifactInputLineage, readableArtifactIds } from "./source-lineage";
+
+vi.mock("./producer-lineage", () => ({
+  prepareProducerLineage: vi.fn().mockResolvedValue({ mode: "HUMAN_ORIGINAL", inputs: [], roots: [] }),
+  finishProducerLineage: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
@@ -39,6 +50,7 @@ vi.mock("@corgtex/shared", () => ({
       update: vi.fn(),
       delete: vi.fn(),
     },
+    recognition: { create: vi.fn(), findMany: vi.fn() },
     goalUpdate: {
       create: vi.fn(),
     },
@@ -53,9 +65,11 @@ vi.mock("@corgtex/shared", () => ({
     },
     brainSource: {
       findMany: vi.fn(),
+      findFirst: vi.fn(),
     },
     brainArticle: {
       findMany: vi.fn(),
+      findFirst: vi.fn(),
     },
     checkIn: {
       findMany: vi.fn(),
@@ -83,6 +97,41 @@ vi.mock("./auth", () => ({
     role: "MEMBER",
     isActive: true,
   }),
+}));
+
+vi.mock("./source-lineage", () => ({
+  isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
+  captureHumanArtifactInputAdvance: vi.fn().mockResolvedValue(undefined),
+  advanceHumanArtifactInputLineage: vi.fn(),
+  recordArtifactInputLineage: vi.fn(),
+  readableArtifactIds: vi.fn(async (_actor: unknown, _workspaceId: string, _kind: string, records: Array<{ id: string }>) =>
+    new Set(records.map((record) => record.id))),
+  readableBrainSourceIds: vi.fn(async (_actor: unknown, _workspaceId: string, records: Array<{ id: string }>) =>
+    new Set(records.map((record) => record.id))),
+}));
+
+// This legacy domain suite controls admission through its existing readable-ID mock.
+// Actual original-head/epoch release behavior is exercised by goals.read.integration.test.ts.
+vi.mock("./digest-lineage", () => {
+  const capture = async ({ actor, workspaceId, kind, records }: { actor: unknown; workspaceId: string; kind: string; records: Array<{ id: string }> }) => {
+    const ids = await readableArtifactIds(actor as never, workspaceId, kind as never, records);
+    const admitted = records.filter(row => ids.has(row.id));
+    return { records: admitted, roots: [], proofs: new Map(admitted.map(row => [row.id, []])) };
+  };
+  return {
+    captureReadableDigestInputs: capture,
+    DigestReadRelease: class {
+      constructor(readonly actor: unknown, readonly workspaceId: string) {}
+      capture(kind: string, records: Array<{ id: string }>) { return capture({ actor: this.actor, workspaceId: this.workspaceId, kind, records }); }
+      observeRead<T>(read: () => Promise<T>) { return read(); }
+      add() {}
+      finish<T>(value: T) { return Promise.resolve(value); }
+    },
+  };
+});
+
+vi.mock("./brain-access", () => ({
+  resolveKnowledgeAccessDomains: vi.fn(async () => ["WORKSPACE"]),
 }));
 
 vi.mock("./events", () => ({
@@ -150,6 +199,30 @@ describe("Goals Domain", () => {
   });
 
   describe("createGoal", () => {
+  it.each(["credential-a", "credential-b"])("rejects private creation by %s before duplicate reads or writes", async credentialId => {
+    const {createGoal} = await import("./goals");
+    const credential = {kind: "agent", authProvider: "credential", credentialId, workspaceIds: ["ws-1"], scopes: ["support:write"]} as any;
+    await expect(createGoal(credential, {workspaceId: "ws-1", title: "Private", isPrivate: true})).rejects.toMatchObject({code: "PRIVATE_AGENT_ARTIFACT_UNSUPPORTED"});
+    expect(prisma.goal.create).not.toHaveBeenCalled();
+    expect(prisma.goal.findMany).not.toHaveBeenCalled();
+    expect(prisma.goal.findFirst).not.toHaveBeenCalled();
+  });
+  it("rejects public agent creation without complete inputs before looking for duplicates", async () => {
+    const {createGoal} = await import("./goals");
+    await expect(createGoal({kind: "agent", workspaceIds: ["ws-1"]} as any, {...{workspaceId: "ws-1", title: "Private", isPrivate: true}, isPrivate: false}))
+      .rejects.toMatchObject({code: "UNKNOWN_LINEAGE"});
+    expect(prisma.goal.create).not.toHaveBeenCalled();
+    expect(prisma.goal.findMany).not.toHaveBeenCalled();
+  });
+
+    it.each(["credential-a", "credential-b"])("does not let %s use a human-attributed private parent", async credentialId => {
+      const credential = {kind: "agent", authProvider: "credential", credentialId, workspaceIds: ["ws-1"], scopes: ["goals:write"]} as any;
+      vi.mocked(prisma.goal.findUnique).mockResolvedValue({id: "private-parent", workspaceId: "ws-1", status: "DRAFT", isPrivate: true,
+        archivedAt: null, authorUserId: "user-1"} as any);
+      await expect(createGoal(credential, {workspaceId: "ws-1", title: "Child", parentGoalId: "private-parent", lineageRoots: [{kind: "BrainSource", id: "source-1", fingerprint: "current"}]}))
+        .rejects.toMatchObject({code: "INVALID_INPUT"});
+      expect(prisma.goal.create).not.toHaveBeenCalled();
+    });
     it("creates a goal successfully", async () => {
       vi.mocked(prisma.goal.create).mockResolvedValueOnce({
         id: "goal-1",
@@ -189,6 +262,7 @@ describe("Goals Domain", () => {
       await createGoal(agentActor, {
         workspaceId: "ws-1",
         title: "Agent Goal",
+        lineageRoots: [{kind: "BrainSource", id: "source-1", fingerprint: "current"}],
       });
 
       expect(prisma.goal.create).toHaveBeenCalledWith(
@@ -464,6 +538,7 @@ describe("Goals Domain", () => {
 
   describe("createGoalLink", () => {
     it("stores evidence confidence and generated source metadata", async () => {
+      vi.mocked(prisma.brainSource.findFirst).mockResolvedValueOnce({ id: "source-1" } as any);
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
         id: "goal-1",
         workspaceId: "ws-1",
@@ -700,6 +775,26 @@ describe("Goals Domain", () => {
   });
 
   describe("updateGoal", () => {
+    it("denies a credential draft edit even when an earlier read gate admitted the candidate", async () => {
+      const credential = {kind: "agent", authProvider: "credential", credentialId: "credential-a", workspaceIds: ["ws-1"], scopes: ["goals:write"]} as any;
+      vi.mocked(prisma.goal.findUnique).mockResolvedValue({id: "private", workspaceId: "ws-1", status: "DRAFT", isPrivate: true,
+        archivedAt: null, authorUserId: "user-1", version: 1} as any);
+      await expect(updateGoal(credential, {workspaceId: "ws-1", goalId: "private", title: "Replacement", expectedVersion: 1}))
+        .rejects.toMatchObject({code: "FORBIDDEN"});
+      expect(prisma.goal.update).not.toHaveBeenCalled();
+    });
+    it("does not return a revoked derived goal through a no-op update", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1", workspaceId: "ws-1", archivedAt: null, title: "Sensitive goal",
+        authorUserId: "user-1", status: "ACTIVE", isPrivate: false, version: 1,
+      } as any);
+      vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set());
+
+      await expect(updateGoal(actor, { workspaceId: "ws-1", goalId: "goal-1", title: "Sensitive goal", expectedVersion: 1 }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(prisma.goal.update).not.toHaveBeenCalled();
+    });
+
     it("rejects using itself as the parent goal", async () => {
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
         id: "goal-1",
@@ -1399,6 +1494,7 @@ describe("Goals Domain", () => {
         ownerMemberId: "member-1",
         status: "ACTIVE",
         archivedAt: null,
+        circle: null,
       };
       vi.mocked(prisma.goal.findMany).mockResolvedValueOnce([activeGoal] as any);
 
@@ -1414,6 +1510,7 @@ describe("Goals Domain", () => {
         orderBy: [
           { targetDate: "asc" },
           { updatedAt: "desc" },
+          { id: "asc" },
         ],
       }));
     });
@@ -1673,10 +1770,13 @@ describe("Goals Domain", () => {
     });
 
     it("atomically records history and advances version in postGoalUpdate on successful progress update", async () => {
+      const admission = Object.freeze({});
+      vi.mocked(captureHumanArtifactInputAdvance).mockResolvedValueOnce(admission);
       const activeGoal = makeGoalFixture("goal-post", { progressPercent: 20, version: 2 });
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(activeGoal as any);
       vi.mocked(prisma.goalUpdate.create).mockResolvedValueOnce({ id: "gu-1" } as any);
-      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...activeGoal, progressPercent: 60, version: 3 } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce(activeGoal as any)
+        .mockResolvedValueOnce({ ...activeGoal, progressPercent: 60, version: 3 } as any);
 
       await postGoalUpdate(actor, {
         workspaceId: "ws-1",
@@ -1686,6 +1786,14 @@ describe("Goals Domain", () => {
         expectedVersion: 2,
       });
 
+      expect(captureHumanArtifactInputAdvance).toHaveBeenCalledWith(expect.objectContaining({
+        tx: prisma, actor, artifact: { kind: "Goal", id: activeGoal.id }, before: activeGoal,
+      }));
+      expect(vi.mocked(captureHumanArtifactInputAdvance).mock.invocationCallOrder[0])
+        .toBeLessThan(vi.mocked(prisma.goal.update).mock.invocationCallOrder[0]);
+      expect(advanceHumanArtifactInputLineage).toHaveBeenCalledWith(expect.objectContaining({
+        admission, before: activeGoal, after: expect.objectContaining({ progressPercent: 60, version: 3 }),
+      }));
       expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({ entityType: "Goal", entityId: "goal-post", version: 2, changedFields: ["progressPercent"] }),
       }));
@@ -2327,4 +2435,121 @@ describe("Goals Domain", () => {
       expect(lockOrder5).toBeLessThan(updateOrder5);
     });
   });
+});
+
+it("filters source-restricted goals before pagination", async () => {
+  vi.mocked(prisma.goal.findMany).mockResolvedValueOnce([
+    { id: "restricted", title: "Restricted" },
+    { id: "permitted", title: "Permitted" },
+  ] as any);
+  vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set(["permitted"]));
+  const actor = { kind: "user", user: { id: "user-1", email: "user@example.com" } } as any;
+  const goals = await listGoals(actor, { workspaceId: "ws-1", take: 1 });
+  expect(goals.map((goal) => goal.id)).toEqual(["permitted"]);
+  expect(prisma.goal.findMany).toHaveBeenCalledWith(expect.not.objectContaining({ take: 1 }));
+
+
+});
+
+
+  it("retains old GoalLink metadata and its earlier proof when a human omits replacement metadata", async () => {
+    vi.clearAllMocks();
+    const actor = { kind: "user", user: { id: "user-1" } } as any;
+    const prior = { id: "link-existing", goalId: "goal-1", entityType: "BrainSource", entityId: "source-1",
+      metadata: { quote: "Synthetic restricted quote" } };
+    vi.mocked(prisma.goal.findUnique).mockResolvedValue({ id: "goal-1", workspaceId: "ws-1", status: "ACTIVE", isPrivate: false, archivedAt: null } as any);
+    vi.mocked(prisma.brainSource.findFirst).mockResolvedValue({ id: "source-1" } as any);
+    vi.mocked(prisma.goalLink.findUnique).mockResolvedValue(prior as any);
+    vi.mocked(prisma.goalLink.upsert).mockResolvedValue({ ...prior, confidence: 0.5 } as any);
+    await createGoalLink(actor, { workspaceId: "ws-1", goalId: "goal-1", entityType: "BrainSource", entityId: "source-1", confidence: 0.5 });
+    expect(prepareProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ before: prior,
+      artifact: { kind: "GoalLink", id: prior.id } }));
+    expect(finishProducerLineage).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.objectContaining({ metadata: prior.metadata }) }));
+    const { recordArtifactInputLineage } = await import("./source-lineage");
+    expect(recordArtifactInputLineage).not.toHaveBeenCalled();
+  });
+
+  it("excludes source-restricted duplicate candidates before matching and returning snippets", async () => {
+    vi.clearAllMocks();
+    const actor = { kind: "user", user: { id: "user-1" } } as any;
+    vi.mocked(prisma.goal.findMany).mockResolvedValue([{ id: "hidden-goal", workspaceId: "ws-1",
+      title: "Synthetic operating goal", descriptionMd: "Synthetic restricted detail", status: "ACTIVE", isPrivate: false } ] as any);
+    vi.mocked(readableArtifactIds).mockResolvedValue(new Set());
+    vi.mocked(prisma.goal.create).mockResolvedValue({ id: "new-goal", workspaceId: "ws-1", title: "Synthetic operating goal" } as any);
+    await expect(createGoal(actor, { workspaceId: "ws-1", title: "Synthetic operating goal",
+      duplicateGuard: { onExact: "use_existing" } })).resolves.toMatchObject({ id: "new-goal" });
+    expect(prisma.goal.create).toHaveBeenCalled();
+  });
+
+  it("records recognition and its goal dependency in the same transaction", async () => {
+    const actor = { kind: "user", user: { id: "user-1", email: "synthetic@example.com", displayName: "Synthetic" } } as any;
+    vi.mocked(prisma.recognition.create).mockResolvedValue({ id: "recognition-proof", workspaceId: "ws-1" } as any);
+    const { createRecognition } = await import("./goals");
+    await createRecognition(actor, { workspaceId: "ws-1", goalId: "goal-1", recipientMemberId: "member-2",
+      title: "Synthetic appreciation", storyMd: "Synthetic story" });
+    expect(prepareProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prisma,
+      dependencies: [{ kind: "Goal", id: "goal-1" }] }));
+    expect(finishProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prisma,
+      artifact: { kind: "Recognition", id: "recognition-proof" } }));
+  });
+
+it("replenishes a bounded ordered page for visible skip/take in a 5001-goal corpus", async () => {
+  vi.clearAllMocks();
+  const rows = Array.from({ length: 5001 }, (_, index) => ({
+    id: `goal-${String(index).padStart(5, "0")}`, sortOrder: 0, createdAt: new Date("2026-01-01"),
+    title: `Goal ${index}`, ownerMember: null, keyResults: [], circle: null,
+  }));
+  const query = vi.mocked(prisma.goal.findMany);
+  query.mockImplementation((async (args?: { where?: { AND?: Array<{ OR?: Array<{ id?: { gt?: string } }> }> }; take?: number }) => {
+    const after = args?.where?.AND?.[1]?.OR?.[2]?.id?.gt;
+    const start = after ? rows.findIndex(row => row.id === after) + 1 : 0;
+    return rows.slice(start, args?.take === undefined ? undefined : start + args.take);
+  }) as unknown as typeof prisma.goal.findMany);
+  vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspace, _kind, records) =>
+    new Set(records.filter(row => Number(row.id.slice(-5)) >= 100).map(row => row.id)));
+  const actor = { kind: "user", user: { id: "user-1" } } as Parameters<typeof listGoals>[0];
+  const selected = await listGoals(actor, { workspaceId: "ws-1", skip: 5, take: 20 });
+  expect(selected.map(row => row.id)).toEqual(rows.slice(105, 125).map(row => row.id));
+  expect(query).toHaveBeenCalledOnce();
+  expect(query.mock.calls.every(([args]) => args?.take === 200)).toBe(true);
+  expect(query).toHaveBeenLastCalledWith(expect.objectContaining({ orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }, { id: "asc" }] }));
+});
+
+
+it("refuses an incomplete default goal array rather than scanning 5001 hidden rows",async()=>{
+  vi.clearAllMocks();
+  const rows=Array.from({length:5001},(_,i)=>({id:`goal-${String(i).padStart(5,"0")}`,sortOrder:0,createdAt:new Date("2026-01-01"),title:"Unknown",ownerMember:null,circle:null,keyResults:[]}));
+  const query=vi.mocked(prisma.goal.findMany);
+  query.mockImplementation((async(args:any)=>{const after=args.where?.AND?.[1]?.OR?.[2]?.id?.gt;return rows.filter(row=>!after||row.id>after).slice(0,args.take);}) as unknown as typeof prisma.goal.findMany);
+  vi.mocked(readableArtifactIds).mockResolvedValue(new Set());
+  const error=await listGoals({kind:"user",user:{id:"user-1"}} as any,{workspaceId:"ws-1"}).then(()=>null,error=>error);
+  expect(query).toHaveBeenCalledOnce();expect(query.mock.calls[0][0]?.take).toBe(200);
+  expect(error).toMatchObject({code:"SOURCE_READ_SCAN_LIMIT"});
+});
+
+it("continues after the last selected goal rather than the prefetched end",async()=>{
+  vi.clearAllMocks();
+  const rows=Array.from({length:150},(_,i)=>({id:`goal-${String(i).padStart(5,"0")}`,parentGoalId:i===1?"outside":null,sortOrder:0,createdAt:new Date("2026-01-01"),title:"Visible",ownerMember:null,circle:null,keyResults:[]}));
+  const query=vi.mocked(prisma.goal.findMany);
+  query.mockImplementation((async(args:any)=>{const after=args.where?.AND?.[1]?.OR?.[2]?.id?.gt;return rows.filter(row=>!after||row.id>after).slice(0,args.take);}) as unknown as typeof prisma.goal.findMany);
+  vi.mocked(readableArtifactIds).mockImplementation(async(_a,_w,_k,records)=>new Set(records.map(row=>row.id)));
+  const actor={kind:"user",user:{id:"user-1"}} as any;
+  const first=await listGoalsPage(actor,{workspaceId:"ws-1",take:1});
+  const second=await listGoalsPage(actor,{workspaceId:"ws-1",take:1,cursor:first.nextCursor!});
+  expect(first.items[0].id).toBe(rows[0].id);expect(second.items[0].id).toBe(rows[1].id);
+  expect(buildGoalTree(second.items).map(row=>row.id)).toEqual([rows[1].id]);
+  await expect(listGoalsPage(actor,{workspaceId:"other",cursor:first.nextCursor!})).rejects.toMatchObject({code:"INVALID_INPUT"});
+});
+
+it.each(["owned", "recognition"] as const)("refuses an incomplete 5001-row %s array after one bounded enumeration",async kind=>{
+  vi.clearAllMocks();
+  const rows=Array.from({length:5001},(_,i)=>({id:`item-${i.toString().padStart(5,"0")}`,updatedAt:new Date("2026-01-01"),createdAt:new Date("2026-01-01"),targetDate:null}));
+  const query=kind==="owned"?vi.mocked(prisma.goal.findMany):vi.mocked(prisma.recognition.findMany);
+  query.mockImplementation((async(args:any)=>rows.slice(0,args.take)) as any);
+  vi.mocked(readableArtifactIds).mockResolvedValue(new Set());
+  const actor={kind:"user",user:{id:"user-1"}} as any;
+  const error=await (kind==="owned"?getMyGoalSlice(actor,"member-1","ws-1"):listRecognitions(actor,{workspaceId:"ws-1"})).then(()=>null,error=>error);
+  expect(query).toHaveBeenCalledOnce();expect(query.mock.calls[0][0]?.take).toBe(200);
+  expect(error).toMatchObject({code:"SOURCE_READ_SCAN_LIMIT"});
 });

@@ -46,6 +46,7 @@ describe("GET /api/workspaces/[workspaceId]/brain/search", () => {
     expect(response.status).toBe(200);
     expect(resolveKnowledgeAccessDomains).toHaveBeenCalledWith(actor, "workspace-1");
     expect(searchIndexedKnowledge).toHaveBeenCalledWith({
+      actor,
       workspaceId: "workspace-1",
       query: "forecast",
       limit: 12,

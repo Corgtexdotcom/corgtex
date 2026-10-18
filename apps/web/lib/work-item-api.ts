@@ -1,5 +1,8 @@
 import {
+  captureReadableDigestInputs,
+  WorkItemReadRelease,
   coerceWorkItemPriorityInput,
+  getProposal,
   loadAdviceRequestCountSummaries,
   normalizeActionWorkItem,
   normalizeGoalWorkItem,
@@ -9,6 +12,7 @@ import {
   workItemUserDisplayName,
 } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
+import type { AppActor } from "@corgtex/shared";
 
 type UserLike = {
   displayName?: string | null;
@@ -69,11 +73,17 @@ export function memberDisplayName(member: MemberLike) {
   return workItemMemberDisplayName(member);
 }
 
-export function serializeActionWorkItem<T extends ActionLike>(action: T) {
+export function serializeActionWorkItem<T extends ActionLike>(action: T): ReturnType<typeof normalizeActionWorkItem<T>>;
+export function serializeActionWorkItem<T extends ActionLike>(action: T | { id: string; contentWithheld: boolean }): ReturnType<typeof normalizeActionWorkItem<T>> | { id: string; contentWithheld: boolean };
+export function serializeActionWorkItem<T extends ActionLike>(action: T | { id: string; contentWithheld: boolean }) {
+  if ("contentWithheld" in action) return { id: action.id, contentWithheld: true };
   return normalizeActionWorkItem(action);
 }
 
-export function serializeTensionWorkItem<T extends TensionLike>(tension: T) {
+export function serializeTensionWorkItem<T extends TensionLike>(tension: T): ReturnType<typeof normalizeTensionWorkItem<T>>;
+export function serializeTensionWorkItem<T extends TensionLike>(tension: T | { id: string; contentWithheld: boolean }): ReturnType<typeof normalizeTensionWorkItem<T>> | { id: string; contentWithheld: boolean };
+export function serializeTensionWorkItem<T extends TensionLike>(tension: T | { id: string; contentWithheld: boolean }) {
+  if ("contentWithheld" in tension) return { id: tension.id, contentWithheld: true };
   return normalizeTensionWorkItem(tension);
 }
 
@@ -85,7 +95,21 @@ export function serializeGoalWorkItem<T extends GoalLike>(goal: T) {
   return normalizeGoalWorkItem(goal);
 }
 
-export async function loadActionWorkItemResponse(workspaceId: string, actionId: string) {
+// A member's presentation includes a separately governed user profile. Retain
+// both original proofs and lineage heads until the complete response is ready.
+async function readableResponseMembers<T extends { id: string; userId: string; user: UserLike }>(
+  actor: AppActor, workspaceId: string, release: WorkItemReadRelease, members: T[],
+) {
+  const captured = await release.observeRead(() => captureReadableDigestInputs({
+    actor, workspaceId, kind: "Member", records: members,
+    additionalInputs: member => [{ kind: "User", id: member.userId, snapshot: { ...member.user, id: member.userId } }],
+  }));
+  release.add(captured.roots);
+  return new Set(captured.records.map(member => member.id));
+}
+
+export async function loadActionWorkItemResponse(actor: AppActor, workspaceId: string, actionId: string) {
+  const release = new WorkItemReadRelease(actor, workspaceId);
   const action = await prisma.action.findFirst({
     where: { id: actionId, workspaceId },
     include: {
@@ -93,14 +117,20 @@ export async function loadActionWorkItemResponse(workspaceId: string, actionId: 
     },
   });
   if (!action) return null;
-  const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "ACTION", [action.id]);
-  return {
+  if (!(await release.admit("Action", [action])).length) return { id: action.id, contentWithheld: true };
+  const members = await readableResponseMembers(actor, workspaceId, release, action.assigneeMember ? [action.assigneeMember] : []);
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", [action.id],
+    requests => release.observe("AdviceRequest", requests));
+  return release.finish({
     ...action,
+    assigneeMemberId: action.assigneeMember && members.has(action.assigneeMember.id) ? action.assigneeMemberId : null,
+    assigneeMember: action.assigneeMember && members.has(action.assigneeMember.id) ? action.assigneeMember : null,
     ...requestCountSummaries.get(action.id),
-  };
+  });
 }
 
-export async function loadTensionWorkItemResponse(workspaceId: string, tensionId: string) {
+export async function loadTensionWorkItemResponse(actor: AppActor, workspaceId: string, tensionId: string) {
+  const release = new WorkItemReadRelease(actor, workspaceId);
   const tension = await prisma.tension.findFirst({
     where: { id: tensionId, workspaceId },
     include: {
@@ -110,25 +140,27 @@ export async function loadTensionWorkItemResponse(workspaceId: string, tensionId
     },
   });
   if (!tension) return null;
-  const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "TENSION", [tension.id]);
-  return {
+  if (!(await release.admit("Tension", [tension])).length) return { id: tension.id, contentWithheld: true };
+  const members = await readableResponseMembers(actor, workspaceId, release,
+    [tension.assigneeMember, tension.raisedByMember].filter(member => member !== null));
+  const votes = await release.observeRead(() => captureReadableDigestInputs({
+    actor, workspaceId, kind: "TensionUpvote", records: tension.upvotes,
+    additionalInputs: vote => [{ kind: "User", id: vote.userId }],
+  }));
+  release.add(votes.roots);
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", [tension.id],
+    requests => release.observe("AdviceRequest", requests));
+  return release.finish({
     ...tension,
+    assigneeMemberId: tension.assigneeMember && members.has(tension.assigneeMember.id) ? tension.assigneeMemberId : null,
+    assigneeMember: tension.assigneeMember && members.has(tension.assigneeMember.id) ? tension.assigneeMember : null,
+    raisedByMemberId: tension.raisedByMember && members.has(tension.raisedByMember.id) ? tension.raisedByMemberId : null,
+    raisedByMember: tension.raisedByMember && members.has(tension.raisedByMember.id) ? tension.raisedByMember : null,
+    upvotes: votes.records,
     ...requestCountSummaries.get(tension.id),
-  };
+  });
 }
 
-export async function loadProposalWorkItemResponse(workspaceId: string, proposalId: string) {
-  return prisma.proposal.findFirst({
-    where: { id: proposalId, workspaceId },
-    include: {
-      ownerMember: { include: memberUserInclude },
-      adviceProcess: {
-        include: {
-          requests: {
-            select: { status: true },
-          },
-        },
-      },
-    },
-  });
+export async function loadProposalWorkItemResponse(actor: AppActor, workspaceId: string, proposalId: string) {
+  return getProposal(actor, { workspaceId, proposalId });
 }

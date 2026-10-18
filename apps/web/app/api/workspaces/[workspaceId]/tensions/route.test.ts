@@ -1,13 +1,29 @@
 import { NextRequest } from "next/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+// Keep real response/release orchestration; only the synthetic proof backend is mocked.
+const readBoundary = vi.hoisted(() => ({finish: vi.fn(async (_actor: unknown, _workspaceId: string, _roots: unknown,
+  remote: () => Promise<void>, finish: (tx: object) => Promise<unknown>) => {await remote(); return finish({});})}));
+vi.mock("../../../../../../../packages/domain/src/auth", () => ({requireWorkspaceMembership: vi.fn(async () => ({id: "member-1", role: "ADMIN"}))}));
+vi.mock("../../../../../../../packages/domain/src/source-lineage", () => ({
+  captureArtifactInputProof: async (_actor: unknown, _workspaceId: string, inputs: Array<{kind: string; id: string; snapshot?: unknown}>) =>
+    inputs.map(input => ({kind: input.kind, id: input.id, fingerprint: JSON.stringify(input.snapshot ?? input.id)})),
+  captureReadableWorkItemInputs: async (_actor: unknown, _workspaceId: string, kind: string, rows: Array<{id: string}>) => ({
+    ids: new Set(rows.map(row => row.id)), roots: rows.map(row => ({kind, id: row.id, fingerprint: JSON.stringify(row)})), heads: new Map(),
+  }),
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  mergeLineageInputRoot: (_prior: unknown, root: unknown) => root,
+  withArtifactCountReleaseSnapshot: (...args: Parameters<typeof readBoundary.finish>) => readBoundary.finish(...args),
+}));
+
+
 const actor = {
   kind: "user" as const,
   user: {
     id: "user-1",
     email: "user@example.com",
     displayName: "User",
-    globalRole: "USER",
+    globalRole: "USER" as const,
   },
 };
 
@@ -53,6 +69,8 @@ vi.mock("@corgtex/domain", async () => {
   } = await import("../../../../../../../packages/domain/src/work-item-normalization");
 
   return {
+    ...await import("../../../../../../../packages/domain/src/work-item-readable-page"),
+    ...await import("../../../../../../../packages/domain/src/digest-lineage"),
     AppError: class AppError extends Error {
       status: number;
       code: string;
@@ -68,7 +86,15 @@ vi.mock("@corgtex/domain", async () => {
     deleteTension,
     formatWorkItemPriority,
     getWorkspacePermanentPathForEntity,
-    loadAdviceRequestCountSummaries,
+    loadAdviceRequestCountSummaries: async (...args: unknown[]) => {
+      const summaries = await loadAdviceRequestCountSummaries(...args);
+      const observe = args[4] as ((rows: Array<{id: string}>) => Promise<void>) | undefined;
+      const requests = [...summaries.entries()].flatMap(([id, summary]) =>
+        Array.from({length: summary.inputRequestCount ?? 0}, (_, index) => ({id: `${id}-request-${index}`})));
+      await observe?.(requests);
+      return summaries;
+    },
+    readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row: { id: string }) => row.id))),
     listTensions,
     normalizeActionWorkItem,
     normalizeGoalWorkItem,
@@ -152,8 +178,9 @@ describe("POST /api/workspaces/[workspaceId]/tensions", () => {
       priority: 3,
       assigneeMemberId: "member-responsible",
       raisedByMemberId: "member-raiser",
-      assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
-      raisedByMember: { id: "member-raiser", user: { displayName: "Raiser", email: "raiser@example.test" } },
+      assigneeMember: { id: "member-responsible", userId: "user-member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
+      upvotes: [],
+      raisedByMember: { id: "member-raiser", userId: "user-member-raiser", user: { displayName: "Raiser", email: "raiser@example.test" } },
     });
     loadAdviceRequestCountSummaries.mockResolvedValueOnce(new Map([
       ["tension-1", {
@@ -201,7 +228,12 @@ describe("POST /api/workspaces/[workspaceId]/tensions", () => {
         raisedBy: "Raiser",
       },
     });
-    expect(loadAdviceRequestCountSummaries).toHaveBeenCalledWith("workspace-1", "TENSION", ["tension-1"]);
+    expect(loadAdviceRequestCountSummaries).toHaveBeenCalledWith(actor, "workspace-1", "TENSION", ["tension-1"], expect.any(Function));
+    expect(readBoundary.finish).toHaveBeenCalledWith(actor, "workspace-1", expect.arrayContaining([
+      expect.objectContaining({kind: "Tension", id: "tension-1"}),
+      expect.objectContaining({kind: "Member", id: "member-responsible"}),
+      expect.objectContaining({kind: "User", id: "user-member-responsible"}),
+    ]), expect.any(Function), expect.any(Function), expect.any(Map));
   });
 });
 
@@ -220,7 +252,9 @@ describe("PATCH /api/workspaces/[workspaceId]/tensions/[tensionId]", () => {
       priority: 2,
       assigneeMemberId: "member-responsible",
       version: 3,
-      assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
+      raisedByMember: null,
+      upvotes: [],
+      assigneeMember: { id: "member-responsible", userId: "user-member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
     });
     loadAdviceRequestCountSummaries.mockResolvedValueOnce(new Map([
       ["tension-1", {
@@ -328,4 +362,12 @@ describe("PATCH /api/workspaces/[workspaceId]/tensions/[tensionId]", () => {
     expect(response.status).toBe(status);
     await expect(response.json()).resolves.toEqual({ error: { code, message } });
   });
+});
+
+it("withholds the tension response when its final release rejects", async () => {
+  prisma.tension.findFirst.mockResolvedValue({id: "tension-release", assigneeMember: null, raisedByMember: null, upvotes: []});
+  loadAdviceRequestCountSummaries.mockResolvedValue(new Map());
+  readBoundary.finish.mockRejectedValueOnce(new Error("Synthetic final release denied"));
+  const {loadTensionWorkItemResponse} = await import("@/lib/work-item-api");
+  await expect(loadTensionWorkItemResponse(actor, "workspace-1", "tension-release")).rejects.toThrow("Synthetic final release denied");
 });
