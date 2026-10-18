@@ -2,7 +2,7 @@ import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
-import { captureReadableDirectoryInputs, captureReadableWorkItemInputs, captureReadableNewspaperDeliveryInputs, captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, isArtifactInputProofReadable, type LineageInput, type LineageKind, type LineageRoot } from "./source-lineage";
+import { readableArtifactIds, captureReadableDirectoryInputs, captureReadableWorkItemInputs, captureReadableNewspaperDeliveryInputs, captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, isArtifactInputProofReadable, type LineageInput, type LineageKind, type LineageRoot } from "./source-lineage";
 import { mergePermissionEpochProofs } from "./source-permission-epochs";
 
 /** One request's original compact observations, released together in a fresh snapshot. */
@@ -27,6 +27,20 @@ export class DigestReadRelease {
   }
   async capture<T extends {id: string}>(kind: LineageKind, records: T[]) {
     const captured = await this.observeRead(() => captureReadableDigestInputs({actor: this.actor, workspaceId: this.workspaceId, kind, records}));
+    this.add(captured.roots);
+    return captured;
+  }
+  /** Source scans share admission work within one bounded page. Capture only
+   * admitted original snapshots and retain every observed head through release. */
+  async captureSourcePage<T extends {id: string}>(kind: LineageKind, records: T[]) {
+    invariant(records.length <= 100, 400, "INVALID_INPUT", "Capture one bounded source page.");
+    const captured = await this.observeRead(async () => {
+      const ids = await readableArtifactIds(this.actor, this.workspaceId, kind, records);
+      const admitted = records.filter(record => ids.has(record.id));
+      const roots = admitted.length ? await captureArtifactInputProof(this.actor, this.workspaceId,
+        admitted.map(record => ({kind, id: record.id, snapshot: record}))) : [];
+      return {records: admitted, roots};
+    });
     this.add(captured.roots);
     return captured;
   }

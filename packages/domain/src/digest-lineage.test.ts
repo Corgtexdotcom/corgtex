@@ -1,18 +1,50 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "./errors";
 
-const { capture, readable } = vi.hoisted(() => ({ capture: vi.fn(), readable: vi.fn() }));
+const { capture, readable, readIds, releasedRoots } = vi.hoisted(() => ({ capture: vi.fn(), readable: vi.fn(), readIds: vi.fn(), releasedRoots: vi.fn() }));
 vi.mock("./source-lineage", async importOriginal => ({
   mergeLineageInputRoot: (await importOriginal<typeof import("./source-lineage")>()).mergeLineageInputRoot,
+  readableArtifactIds: readIds,
   captureReadableNewspaperDeliveryInputs: async () => null,
   captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
-  withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {await remote();return finish({});}, captureArtifactInputProof: capture, isArtifactInputProofReadable: readable }));
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {releasedRoots(_roots);await remote();return finish({});}, captureArtifactInputProof: capture, isArtifactInputProofReadable: readable }));
 import { DigestReadRelease, isDigestInputProofShared, loadReadableArtifactSample, loadReadableDigestQuery, mergeArtifactInputProofs } from "./digest-lineage";
 vi.mock("./auth", () => ({requireWorkspaceMembership: async () => ({id: "member"})}));
 import { SOURCE_PERMISSION_POLICY_VERSION, type PermissionEpochProof } from "./source-permission-epochs";
 
 describe("digest permission selection", () => {
   beforeEach(() => { vi.resetAllMocks(); });
+
+  it("captures an admitted source page once using its original snapshots", async () => {
+    const actor = {} as any, rows = [{id: "hidden", content: "Unknown"}, {id: "visible", content: "Original"}];
+    const roots = [{kind: "BrainSource", id: "visible", fingerprint: "a".repeat(64)}];
+    readIds.mockResolvedValue(new Set(["visible"])); capture.mockResolvedValue(roots);
+    const release = new DigestReadRelease(actor, "ws");
+    expect(await release.captureSourcePage("BrainSource", rows)).toEqual({records: [rows[1]], roots});
+    expect(readIds).toHaveBeenCalledExactlyOnceWith(actor, "ws", "BrainSource", rows);
+    expect(capture).toHaveBeenCalledExactlyOnceWith(actor, "ws", [{kind: "BrainSource", id: "visible", snapshot: rows[1]}]);
+    expect(capture.mock.calls[0][2][0].snapshot).toBe(rows[1]);
+    await release.finish("complete"); expect(releasedRoots).toHaveBeenCalledWith(roots);
+  });
+
+  it("rejects a source batch capture race without retrying or adopting another receipt", async () => {
+    const release = new DigestReadRelease({} as any, "ws");
+    readIds.mockResolvedValue(new Set(["visible"]));
+    capture.mockRejectedValue(new AppError(409, "SOURCE_CHANGED", "Original changed after admission"));
+    await expect(release.captureSourcePage("BrainSource", [{id: "visible", content: "Original"}]))
+      .rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    expect(readIds).toHaveBeenCalledTimes(1); expect(capture).toHaveBeenCalledTimes(1);
+    await release.finish("unused"); expect(releasedRoots).toHaveBeenCalledWith([]);
+  });
+
+  it("does not capture denied rows and rejects oversized source pages before reading", async () => {
+    const release = new DigestReadRelease({} as any, "ws"); readIds.mockResolvedValue(new Set());
+    expect(await release.captureSourcePage("BrainSource", [{id: "hidden"}])).toEqual({records: [], roots: []});
+    expect(capture).not.toHaveBeenCalled(); readIds.mockClear();
+    await expect(release.captureSourcePage("BrainSource", Array.from({length: 101}, (_, id) => ({id: String(id)}))))
+      .rejects.toMatchObject({code: "INVALID_INPUT"});
+    expect(readIds).not.toHaveBeenCalled();
+  });
 
   it("retains pre-generation permission epochs when a later receipt omits them", () => {
     const permissionEpochs: PermissionEpochProof = { version: 1, policyVersion: SOURCE_PERMISSION_POLICY_VERSION,

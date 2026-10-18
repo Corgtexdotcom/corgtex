@@ -3,7 +3,7 @@ import type { AppActor } from "@corgtex/shared";
 const probe = vi.hoisted(() => ({ admissions: [] as number[], finish: vi.fn(async (value: unknown) => value) }));
 vi.mock("@corgtex/shared", () => ({ prisma: {} }));
 vi.mock("./digest-lineage", () => ({ DigestReadRelease: class {
-  async capture(_kind: string, records: {id: string}[]) { probe.admissions.push(records.length); return { records }; }
+  async captureSourcePage(_kind: string, records: {id: string}[]) { probe.admissions.push(records.length); return { records }; }
   finish(value: unknown) { return probe.finish(value); }
 } }));
 vi.mock("./source-lineage", () => ({ readableArtifactIds: vi.fn(async (_actor, _workspace, _kind, rows: {id: string}[]) => {
@@ -25,13 +25,13 @@ it("source exact collection uses one candidate snapshot despite insertions aroun
     return result;
   });
   expect(await scanSourceReadableRecords({actor, workspaceId: "ws", kind: "Document", load})).toHaveLength(150);
-  expect(load).toHaveBeenCalledExactlyOnceWith(undefined, 5001);
+  expect(load).toHaveBeenCalledExactlyOnceWith(undefined, 10001);
   expect(probe.admissions).toEqual([100, 50]);
 });
-it.each([5000, 5001])("source exact enumeration has an explicit %i-row boundary", async count => {
+it.each([10000, 10001])("source exact enumeration has an explicit %i-row boundary", async count => {
   const data = rows(count), load = vi.fn(async (after: string | undefined, take: number) => data.filter(row => !after || row.id > after).slice(0,take));
   const result = scanSourceReadableRecords({actor,workspaceId:"ws",kind:"Document",load});
-  if(count===5000) expect(await result).toHaveLength(count);
+  if(count===10000) expect(await result).toHaveLength(count);
   else { await expect(result).rejects.toMatchObject({code:"SOURCE_READ_SCAN_LIMIT"}); expect(probe.admissions).toEqual([]); }
   expect(load).toHaveBeenCalledTimes(1);
   expect(probe.admissions.every(count => count<=100)).toBe(true);

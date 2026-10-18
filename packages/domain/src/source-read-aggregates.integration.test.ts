@@ -26,8 +26,8 @@ it("counts beyond 5000 canonical sources, replenishes hidden pages, and withhold
   })) });
   const queries = vi.spyOn(prisma.brainSource, "findMany");
   expect((await getBrainStatus(f.actor, f)).unabsorbedSources).toBe(0);
-  expect(queries.mock.calls.length).toBeGreaterThan(50);
-  expect(queries.mock.calls.every(([args]) => args?.take === 100 && args.select === undefined)).toBe(true);
+  expect(queries.mock.calls.length).toBe(1);
+  expect(queries.mock.calls.every(([args]) => args?.take === 10001 && args.select === undefined)).toBe(true);
   expect(await hasWorkspaceInitialKnowledgeSource(f.actor, f.workspaceId)).toBe(false);
   const source = await prisma.brainSource.create({ data: { id: "visible-last", workspaceId: f.workspaceId,
     sourceType: "DOC", tier: 1, content: "Authenticated original" } });

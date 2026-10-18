@@ -3,7 +3,7 @@ import { DigestReadRelease } from "./digest-lineage";
 import { invariant } from "./errors";
 import type { LineageKind } from "./source-lineage";
 
-const SOURCE_READ_LIMIT = 5_000;
+const SOURCE_READ_LIMIT = 10_000;
 const SOURCE_PROOF_BATCH_SIZE = 100;
 type SourceRead<T extends { id: string }> = {
   actor: AppActor;
@@ -25,7 +25,7 @@ async function sourceCandidates<T extends { id: string }>(params: SourceRead<T>)
   return rows;
 }
 function requireComplete(complete: boolean) {
-  invariant(complete, 409, "SOURCE_READ_SCAN_LIMIT", "Source result exceeds the 5000-candidate exact-read limit; narrow the request.");
+  invariant(complete, 409, "SOURCE_READ_SCAN_LIMIT", "Source result exceeds the 10000-candidate exact-read limit; narrow the request.");
 }
 
 /** Exact bounded collection. Large callers must narrow their query, never use a partial total. */
@@ -35,7 +35,7 @@ export async function scanSourceReadableRecords<T extends { id: string }>(params
   const rows: T[] = [];
   const release = params.release ?? new DigestReadRelease(params.actor, params.workspaceId);
   for (let offset = 0; offset < candidates.length; offset += SOURCE_PROOF_BATCH_SIZE) {
-    const captured = await release.capture(params.kind, candidates.slice(offset, offset + SOURCE_PROOF_BATCH_SIZE));
+    const captured = await release.captureSourcePage(params.kind, candidates.slice(offset, offset + SOURCE_PROOF_BATCH_SIZE));
     rows.push(...captured.records);
   }
   return params.release ? rows : release.finish(rows);
@@ -51,7 +51,7 @@ async function visitSourceCandidates<T extends { id: string }>(params: SourceVis
   const release = params.release ?? new DigestReadRelease(params.actor, params.workspaceId);
   let stopped = false;
   for (let offset = 0; offset < Math.min(candidates.length, SOURCE_READ_LIMIT); offset += SOURCE_PROOF_BATCH_SIZE) {
-    const captured = await release.capture(params.kind, candidates.slice(offset, Math.min(offset + SOURCE_PROOF_BATCH_SIZE, SOURCE_READ_LIMIT)));
+    const captured = await release.captureSourcePage(params.kind, candidates.slice(offset, Math.min(offset + SOURCE_PROOF_BATCH_SIZE, SOURCE_READ_LIMIT)));
     if (await params.visit(captured.records) === false) { stopped = true; break; }
   }
   requireComplete(complete || existenceOnly && stopped);

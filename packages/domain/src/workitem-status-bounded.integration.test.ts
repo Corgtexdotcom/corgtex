@@ -139,10 +139,12 @@ it("folds large Brain status from canonical pages without loading comment bodies
   await prisma.brainDiscussionComment.createMany({data:Array.from({length:205},(_,i)=>({threadId:thread.id,authorMemberId:f.member.id,bodyMd:`Comment ${i} `+"not needed ".repeat(256)}))});
   const articles=vi.spyOn(prisma.brainArticle,"findMany"),links=vi.spyOn(prisma.brainBacklink,"findMany"),threads=vi.spyOn(prisma.brainDiscussionThread,"findMany"),comments=vi.spyOn(prisma.brainDiscussionComment,"findMany");
   expect(await getBrainStatus(f.actor,f)).toMatchObject({totalArticles:3,staleArticles:3,unownedArticles:3,orphanArticles:2,openDiscussionThreads:1,articleCountByType:{PROJECT:3},articleCountByAuthority:{REFERENCE:3}});
-  expect(articles.mock.calls.length).toBeGreaterThan(50);
-  expect(articles.mock.calls.every(([query])=>query?.take===100 && query.select===undefined)).toBe(true);
+  const originalArticles = new Set(["visible-a", "visible-b", "visible-c"]);
+  expect(articles.mock.calls.filter(([query]) => query?.take === 10001)).toHaveLength(1);
+  expect(articles.mock.calls.every(([query]) => query?.take === 10001 && query.select === undefined && query.include === undefined
+    || isBoundedProofRead(query, f.workspaceId, originalArticles))).toBe(true);
   expect(links.mock.calls.every(([query])=>query?.take===100 && query.include?.fromArticle===true)).toBe(true);
-  expect(threads.mock.calls.every(([query])=>query?.take===100 && query.include===undefined)).toBe(true);
+  expect(threads.mock.calls.every(([query])=>query?.take===10001 && query.include===undefined)).toBe(true);
   expect(comments).not.toHaveBeenCalled();
   await prisma.brainArticle.update({where:{id:"visible-a"},data:{archivedAt:new Date()}});
   expect(await getBrainStatus(f.actor,f)).toMatchObject({totalArticles:2,orphanArticles:2,openDiscussionThreads:0});

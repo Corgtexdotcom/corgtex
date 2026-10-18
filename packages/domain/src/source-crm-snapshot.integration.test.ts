@@ -56,7 +56,7 @@ it("keeps CRM exact totals and selected detail in one candidate statement across
 });
 it("rejects raw over-limit unknown source and CRM cohorts without admitting partial exact results",async()=>{
   const f=await fixture();
-  await prisma.document.createMany({data:Array.from({length:5001},(_,i)=>({id:`${f.workspaceId}-doc-${i}`,workspaceId:f.workspaceId,title:"Unknown",source:"UPLOAD",storageKey:`workspaces/${f.workspaceId}/uploads/${i}/fixture.txt`}))});
+  await prisma.document.createMany({data:Array.from({length:10001},(_,i)=>({id:`${f.workspaceId}-doc-${i}`,workspaceId:f.workspaceId,title:"Unknown",source:"UPLOAD",storageKey:`workspaces/${f.workspaceId}/uploads/${i}/fixture.txt`}))});
   await prisma.crmAccount.createMany({data:Array.from({length:10001},(_,i)=>({id:`${f.workspaceId}-crm-${i}`,workspaceId:f.workspaceId,name:"Unknown",slug:`unknown-${i}`}))});
   const source=vi.fn(async(after:string|undefined,take:number)=>prisma.document.findMany({where:{workspaceId:f.workspaceId,...(after?{id:{gt:after}}:{})},orderBy:{id:"asc"},take}));
   await expect(scanSourceReadableRecords({actor:f.actor,workspaceId:f.workspaceId,kind:"Document",load:source})).rejects.toMatchObject({code:"SOURCE_READ_SCAN_LIMIT"});
