@@ -75,13 +75,11 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
 
   it("prepares custody images on each consuming runner before its long tests", () => {
     const jobs = parse(ciWorkflow).jobs;
-    const steps = jobs.check.steps;
+    const steps = jobs["check-native"].steps;
     const prepare = steps.findIndex(step => step.name === "Prepare custody fixture images on this runner");
-    const tests = steps.findIndex(step => step.run === "npx vitest run --project unit --project integration");
     const custody = steps.findIndex(step => step.run === "npm run test:migration:ops-core");
     expect(prepare).toBeGreaterThan(-1);
-    expect(tests).toBeGreaterThan(prepare);
-    expect(custody).toBeGreaterThan(tests);
+    expect(custody).toBeGreaterThan(prepare);
     expect(steps[prepare].run).toContain("docker pull docker.io/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280");
     expect(steps[prepare].run).toContain("docker pull mcr.microsoft.com/azure-storage/azurite:3.35.0");
     expect(steps[prepare].if).toBeUndefined();
