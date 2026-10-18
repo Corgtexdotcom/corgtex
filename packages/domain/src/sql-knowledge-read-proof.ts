@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
+import { createHash } from "node:crypto";
 import { prisma, type AppActor } from "@corgtex/shared";
-import type { KnowledgeChunk, SqlNativeRunInput } from "@prisma/client";
+import { Prisma, type KnowledgeChunk, type SqlKnowledgeStagedChunk, type SqlNativeRunInput } from "@prisma/client";
 import { getMcpOrigin } from "../../shared/src/mcp-context";
 import { isArtifactNativeCommitPhase } from "./artifact-native-commit-phase";
 import { lineageContentFingerprint, type LineageRoot } from "./source-lineage";
@@ -9,6 +10,55 @@ import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePe
 import { areSqlNativeRunInputsUnchanged, isSqlNativeRunInputCurrent, isSqlNativeRunInputLocallyCurrent, loadSqlNativeRunInputs } from "./sql-native-input";
 import { requireWorkspaceMembership } from "./auth";
 
+/** Compare complete database observations by values, not V8 storage layout.
+ * V8 serialization can encode equal numeric arrays differently. Stream each
+ * tuple so full vectors never accumulate in the retained observation ledger. */
+function completeObservationStamp(value: unknown): string {
+  const hash = createHash("sha256");
+  const visit = (item: unknown): void => {
+    if (item === null) {hash.update("null;"); return;}
+    if (item instanceof Date) {hash.update(`date:${item.toISOString()};`); return;}
+    switch (typeof item) {
+      case "undefined": hash.update("undefined;"); return;
+      case "string": hash.update("string:").update(JSON.stringify(item)); return;
+      case "boolean": hash.update(`boolean:${item};`); return;
+      case "number": hash.update(`number:${Object.is(item, -0) ? "-0" : String(item)};`); return;
+      case "bigint": hash.update(`bigint:${item};`); return;
+      case "object": {
+        if (Array.isArray(item)) {
+          // Database JSON arrays are dense and have no extra named fields.
+          const keys = Object.keys(item);
+          if (keys.length !== item.length || keys.some((key, index) => key !== String(index))) {
+            throw new TypeError("Unsupported SQL observation array.");
+          }
+          hash.update(`array:${item.length}:[`);
+          for (const entry of item) visit(entry);
+          hash.update("]"); return;
+        }
+        if (Object.getPrototypeOf(item) !== Object.prototype && Object.getPrototypeOf(item) !== null) break;
+        hash.update("object:{");
+        for (const key of Object.keys(item).sort()) {hash.update(JSON.stringify(key)).update(":"); visit((item as Record<string, unknown>)[key]);}
+        hash.update("}"); return;
+      }
+    }
+    throw new TypeError("Unsupported SQL observation value.");
+  };
+  visit(value);
+  return hash.digest("hex");
+}
+
+/** Transport vector-bearing JSON as one text value rather than thousands of
+ * Prisma numeric values. Parse without a reviver: JSON types and every staged
+ * field remain unchanged. The temporary wire strings do not survive this read.
+ */
+async function loadSqlKnowledgeStages(ids: readonly string[]): Promise<SqlKnowledgeStagedChunk[]> {
+  const wire = await prisma.$queryRaw<Array<Omit<SqlKnowledgeStagedChunk, "contentJson"> & {contentJson: string}>>(Prisma.sql`
+    SELECT id, "publicationId", ordinal, "rowIndex", "contentHash", "contentJson"::text AS "contentJson"
+    FROM "SqlKnowledgeStagedChunk" WHERE id IN (${Prisma.join([...ids])})
+  `);
+  return wire.map(row => ({...row, contentJson: JSON.parse(row.contentJson) as Prisma.JsonValue}));
+}
+
 /** Capture original vectors for actual current SQL candidates in one bounded
  * read. A submitted projection supplies expected bytes only; SQL rows, sealed
  * native inputs and persisted publication manifests remain authoritative. */
@@ -16,6 +66,14 @@ export async function captureSqlKnowledgeInputProof(actor: AppActor, workspaceId
   candidates: readonly KnowledgeChunk[]): Promise<LineageRoot[] | null | undefined> {
   if (actor.kind !== "user" || getMcpOrigin() || isArtifactNativeCommitPhase() || !candidates.length
     || candidates.length > 5000 || candidates.some(row => row.sourceType !== "EXTERNAL_DATABASE")) return undefined;
+  // The capture read owns full vector rows only until the compact proof is
+  // built. Do not retain those rows throughout the independent native replay.
+  const proof = await captureSqlKnowledgeRows(actor, workspaceId, candidates);
+  return proof && await isSqlKnowledgeInputProofReadable(actor, workspaceId, proof) === true ? proof : null;
+}
+
+async function captureSqlKnowledgeRows(actor: Extract<AppActor, {kind: "user"}>, workspaceId: string,
+  candidates: readonly KnowledgeChunk[]): Promise<LineageRoot[] | null> {
   const ids = [...new Set(candidates.map(row => row.id))];
   const [rows, manifests] = await Promise.all([
     prisma.knowledgeChunk.findMany({where: {workspaceId, id: {in: ids}}}),
@@ -55,7 +113,7 @@ export async function captureSqlKnowledgeInputProof(actor: AppActor, workspaceId
     try {proof.push({kind: "SqlNativeRunInput", id: input.id, fingerprint: lineageContentFingerprint("SqlNativeRunInput", input),
       permissionEpochs: mergePermissionEpochProofs(original, caller)!});} catch {return null;}
   }
-  return await isSqlKnowledgeInputProofReadable(actor, workspaceId, proof) === true ? proof : null;
+  return proof;
 }
 
 /** Fixed read-only SQL collection executor. Undefined selects the general mixed
@@ -68,7 +126,8 @@ export async function isSqlKnowledgeInputProofReadable(actor: AppActor, workspac
   const children = roots.filter(root => root.kind === "KnowledgeChunk");
   if (!children.length || children.length > 5000) return undefined;
   const ids = [...new Set(children.map(root => root.id))];
-  const firstRows = await prisma.knowledgeChunk.findMany({where: {workspaceId, id: {in: ids}}});
+  const firstRows = await prisma.knowledgeChunk.findMany({where: {workspaceId, id: {in: ids}},
+    select: {sourceType: true, metadata: true}});
   if (firstRows.some(row => row.sourceType !== "EXTERNAL_DATABASE")) return undefined;
   if (firstRows.length !== ids.length) return false;
   let union;
@@ -99,7 +158,7 @@ export async function isSqlKnowledgeInputProofReadable(actor: AppActor, workspac
     const [rows, manifests, staged, publications, nativeUnchanged] = await Promise.all([
       prisma.knowledgeChunk.findMany({where: {workspaceId, id: {in: ids}}}),
       prisma.artifactInputLineage.findMany({where: {workspaceId, artifactType: "KnowledgeChunk", artifactId: {in: ids}}, orderBy: {revision: "desc"}}),
-      prisma.sqlKnowledgeStagedChunk.findMany({where: {id: {in: ids}}}),
+      loadSqlKnowledgeStages(ids),
       prisma.sqlKnowledgePublication.findMany({where: {workspaceId, id: {in: publicationIds as string[]}, status: "COMMITTED", committedAt: {not: null}}}),
       areSqlNativeRunInputsUnchanged(workspaceId, originals),
     ]);
@@ -137,7 +196,15 @@ export async function isSqlKnowledgeInputProofReadable(actor: AppActor, workspac
     if (!await isArtifactPermissionEpochProofCurrent(workspaceId, persistedUnion, prisma)) return null;
     for (const input of originals) if (!await isSqlNativeRunInputLocallyCurrent(actor, workspaceId, input)) return null;
     if (!await isArtifactPermissionEpochProofCurrent(workspaceId, union, prisma)) return null;
-    return ids.map(id => ({row: byId.get(id), manifest: latest.get(id), stage: stages.get(id)}));
+    // Keep complete observation identity, not the semantic content fingerprint:
+    // timestamps, original manifests, staging ordinals and all vector bytes must
+    // also match after the native await. These stamps are request-local: both
+    // observations compare all values regardless of object/array storage shape;
+    // no persisted digest or native fingerprint changes. Hash one tuple at a time so neither
+    // the entry ledger nor the exit ledger retains vector-bearing ORM objects.
+    return ids.map(id => completeObservationStamp([
+      byId.get(id), latest.get(id), stages.get(id),
+    ]));
   };
   const before = await local(native);
   if (!before) return false;

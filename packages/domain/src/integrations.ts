@@ -432,6 +432,11 @@ export async function getExternalDataSource(actor: AppActor, params: {
   return source;
 }
 
+function requireSelectedSqlTables(selectedTables: readonly string[]) {
+  invariant(selectedTables.length > 0 && selectedTables.every(table => table.trim().length > 0),
+    400, "SQL_TABLE_SELECTION_REQUIRED", "Select at least one SQL table before saving or enabling this source.");
+}
+
 export async function createExternalDataSource(actor: AppActor, params: {
   workspaceId: string;
   label: string;
@@ -443,6 +448,8 @@ export async function createExternalDataSource(actor: AppActor, params: {
 }) {
   await requireDataSourceAdmin(actor, params.workspaceId);
 
+  if (params.selectedTables.length) requireSelectedSqlTables(params.selectedTables);
+
   return prisma.externalDataSource.create({
     data: {
       workspaceId: params.workspaceId,
@@ -450,6 +457,8 @@ export async function createExternalDataSource(actor: AppActor, params: {
       driverType: params.driverType,
       connectionStringEnc: params.connectionStringEnc,
       selectedTables: params.selectedTables,
+      // Keep an empty saved connection available for discovery, never polling.
+      isActive: params.selectedTables.length > 0,
       pullCadenceMinutes: params.pullCadenceMinutes,
       cursorColumn: params.cursorColumn,
     },
@@ -469,13 +478,17 @@ export async function updateExternalDataSource(actor: AppActor, params: {
 }) {
   await requireDataSourceAdmin(actor, params.workspaceId);
 
+  if (params.selectedTables !== undefined) requireSelectedSqlTables(params.selectedTables);
+
   return prisma.$transaction(async (tx) => {
     const source = await tx.externalDataSource.findFirst({
       where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null },
-      select: { id: true },
+      select: { id: true, selectedTables: true },
     });
 
     invariant(source, 404, "NOT_FOUND", "Data source not found");
+
+    if (params.isActive === true) requireSelectedSqlTables(params.selectedTables ?? source.selectedTables);
 
     const data: Prisma.ExternalDataSourceUpdateInput = {};
     if (params.label !== undefined) data.label = params.label;
@@ -518,10 +531,11 @@ export async function enqueueExternalDataSourceSync(actor: AppActor, params: {
   return prisma.$transaction(async (tx) => {
     const source = await tx.externalDataSource.findFirst({
       where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null },
-      select: { id: true },
+      select: { id: true, selectedTables: true },
     });
 
     invariant(source, 404, "NOT_FOUND", "Data source not found");
+    requireSelectedSqlTables(source.selectedTables);
 
     const timestamp = Date.now();
     return tx.workflowJob.upsert({

@@ -189,7 +189,7 @@ describe("operator import scheduler exclusion", () => {
         } });
         await tx.externalDataSource.create({ data: {
           workspaceId: id, label: "Synthetic source", connectionStringEnc: "synthetic-no-credential",
-          isActive: !inactive,
+          selectedTables: ["public.synthetic_rows"], isActive: !inactive,
         } });
       }
     });

@@ -12,6 +12,7 @@
  * packages/domain/src/agent-auth.ts — the drift-fence test in scopes.test.ts
  * will fail otherwise.
  */
+import "@corgtex/connectors-sql/native-driver";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {

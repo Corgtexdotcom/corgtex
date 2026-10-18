@@ -660,6 +660,15 @@ describe("runPendingJobs", () => {
 
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
 
+    // Every eligibility/reclaim predicate in the exclusive SQL turn must keep
+    // audio in the UTC-clock lane, including the final UPDATE recheck.
+    const [strings, ...values] = txMock.$queryRaw.mock.calls[0] as [TemplateStringsArray, ...Array<{sql?: string}>];
+    const claimSql = strings.map((part, index) => part + (values[index]?.sql ?? "")).join("");
+    const clockFamilies = [...claimSql.matchAll(/job\.type (?:NOT )?IN \(([^)]+)\)/g)]
+      .filter(match => match[1].includes("agent.action-extraction"));
+    expect(clockFamilies.length).toBeGreaterThan(4);
+    expect(clockFamilies.every(match => match[1].includes("meeting-audio.transcribe"))).toBe(true);
+
     expect(runMeetingAudioAssetTranscriptionMock).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       audioAssetId: "audio-1",
