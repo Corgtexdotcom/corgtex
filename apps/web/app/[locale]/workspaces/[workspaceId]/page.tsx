@@ -1,5 +1,7 @@
-import type { Prisma } from "@prisma/client";
+import type { BrainArticle, Meeting, Prisma } from "@prisma/client";
 import {
+  getUnreadNotificationSummary,
+  DigestReadRelease,
   filterWorkspaceBriefingSources,
   normalizeNewspaperEditionDigest,
   normalizeWorkspaceBriefingPayload,
@@ -11,6 +13,7 @@ import {
 } from "@corgtex/domain";
 import type { MemberBriefingContext, PersonalNewspaperItem } from "@corgtex/domain";
 import { prisma, workspaceBranding } from "@corgtex/shared";
+import { getReadableKnowledgeChunkSummary } from "@corgtex/knowledge";
 import { requirePageActor } from "@/lib/auth";
 import Link from "next/link";
 import { getFormatter, getTranslations } from "next-intl/server";
@@ -20,6 +23,8 @@ import {
   capDashboardUnreadNotificationCount,
   isDashboardUnreadNotificationCountCapped,
 } from "@/lib/dashboard-briefing";
+import { notificationUnreadCountLabel } from "@/lib/notification-count";
+import { findLatestReadableArtifact, scanReadableArtifactPages } from "@/lib/readable-artifact-pages";
 import { getDashboardWorkAttentionCountsFromMetrics } from "@/lib/dashboard-attention";
 
 export const dynamic = "force-dynamic";
@@ -204,6 +209,7 @@ export default async function WorkspaceDashboard({
   const t = await getTranslations("dashboard");
   const format = await getFormatter();
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const release = new DigestReadRelease(actor, workspaceId);
   const currentMember = actor.kind === "user" && actor.user.globalRole !== "OPERATOR"
     ? membership
     : actor.kind === "user"
@@ -271,304 +277,151 @@ export default async function WorkspaceDashboard({
     })
     : [];
   const memberCircleIds = memberCircleAssignments.map((assignment) => assignment.role.circleId);
-  const personalAdviceRequests = actor.kind === "user" && currentMember?.id
-    ? await prisma.adviceRequest.findMany({
-      where: {
-        workspaceId,
-        status: "ACTIVE",
-        requestedByUserId: { not: actor.user.id },
-        OR: [
-          { audienceType: "MEMBERS", recipients: { some: { memberId: currentMember.id } } },
-          { audienceType: "WORKSPACE" },
-          ...(memberCircleIds.length > 0
-            ? [{ audienceType: "CIRCLE" as const, targetCircleId: { in: memberCircleIds } }]
-            : []),
-        ],
-      },
-      select: {
-        deadlineAt: true,
-        process: { select: { subjectType: true, subjectId: true } },
-      },
-    })
-    : [];
+  const pageArgs = (cursor: string | undefined, take: number) => ({
+    orderBy: { id: "asc" as const }, take, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+  });
   const adviceDeadlinesByKind = {
     ACTION: new Map<string, Date | null>(),
     PROPOSAL: new Map<string, Date | null>(),
     TENSION: new Map<string, Date | null>(),
   };
-  for (const request of personalAdviceRequests) {
-    const kind = request.process.subjectType;
-    if (kind !== "ACTION" && kind !== "PROPOSAL" && kind !== "TENSION") continue;
-    const deadlines = adviceDeadlinesByKind[kind];
-    const previous = deadlines.get(request.process.subjectId);
-    if (previous === undefined || (request.deadlineAt && (!previous || request.deadlineAt < previous))) {
-      deadlines.set(request.process.subjectId, request.deadlineAt);
-    }
+  let adviceComplete = true;
+  if (actor.kind === "user" && currentMember?.id) {
+    const adviceWindow = await scanReadableArtifactPages({ actor, workspaceId, release, kind: "AdviceRequest",
+      loadPage: (cursor, take) => prisma.adviceRequest.findMany({
+        ...pageArgs(cursor, take),
+        where: { workspaceId, status: "ACTIVE", requestedByUserId: { not: actor.user.id },
+          OR: [
+            { audienceType: "MEMBERS", recipients: { some: { memberId: currentMember.id } } },
+            { audienceType: "WORKSPACE" },
+            ...(memberCircleIds.length ? [{ audienceType: "CIRCLE" as const, targetCircleId: { in: memberCircleIds } }] : []),
+          ],
+        },
+        include: { process: { select: { subjectType: true, subjectId: true } } },
+      }),
+      visit: (request) => {
+        const kind = request.process.subjectType;
+        if (kind !== "ACTION" && kind !== "PROPOSAL" && kind !== "TENSION") return;
+        const deadlines = adviceDeadlinesByKind[kind];
+        const previous = deadlines.get(request.process.subjectId);
+        if (previous === undefined || (request.deadlineAt && (!previous || request.deadlineAt < previous))) {
+          deadlines.set(request.process.subjectId, request.deadlineAt);
+        }
+      },
+    });
+    adviceComplete = adviceWindow.complete;
   }
-  const visiblePersonalOpenActionWhere = currentMember?.id
-    ? {
-      AND: [
-        visibleOpenActionWhere,
-        { OR: [{ assigneeMemberId: currentMember.id }, { id: { in: [...adviceDeadlinesByKind.ACTION.keys()] } }] },
-      ],
-    } satisfies Prisma.ActionWhereInput
-    : null;
-  const personalProposalConditions: Prisma.ProposalWhereInput[] = currentMember?.id
-    ? [
-      { ownerMemberId: currentMember.id },
-      { id: { in: [...adviceDeadlinesByKind.PROPOSAL.keys()] } },
-    ]
-    : [];
-  const visiblePersonalOpenProposalWhere = currentMember?.id
-    ? {
-      AND: [
-        visibleOpenProposalWhere,
-        { OR: personalProposalConditions },
-      ],
-    } satisfies Prisma.ProposalWhereInput
-    : null;
-  const visiblePersonalOpenTensionWhere = currentMember?.id
-    ? {
-      AND: [
-        visibleOpenTensionWhere,
-        { OR: [{ assigneeMemberId: currentMember.id }, { id: { in: [...adviceDeadlinesByKind.TENSION.keys()] } }] },
-      ],
-    } satisfies Prisma.TensionWhereInput
-    : null;
-  const [
-    unreadNotificationsCount,
-    articles,
-    articleTotalCount,
-    latestDailyWorkspaceBriefing,
-    latestWeeklyWorkspaceBriefing,
-    newspaperEditions,
-    meetings,
-    chunksCount,
-    workspaceData,
-    membersCount,
-    actionTotalCount,
-    actionPersonalCount,
-    proposalTotalCount,
-    proposalPersonalCount,
-    tensionTotalCount,
-    tensionPersonalCount,
-    personalActions,
-    personalProposals,
-    personalTensions,
-  ] = await prisma.$transaction([
-    prisma.notification.count({
-      where: {
-        workspaceId,
-        userId: actor.kind === "user" ? actor.user.id : "__agent_actor__",
-        readAt: null,
+  const latestPageArgs = (cursor: { id: string; generatedAt: Date } | undefined, take: number) => ({
+    orderBy: [{ generatedAt: "desc" as const }, { id: "desc" as const }], take,
+    ...(cursor ? { OR: [{ generatedAt: { lt: cursor.generatedAt } }, { generatedAt: cursor.generatedAt, id: { lt: cursor.id } }] } : {}),
+  });
+  const [unreadNotificationsSummary, briefingWindow, editionWindow, workspaceData, membersCount] = await Promise.all([
+    getUnreadNotificationSummary(actor, workspaceId),
+    findLatestReadableArtifact({ actor, workspaceId, release, kind: "WorkspaceBriefing",
+      loadPage: (cursor, take) => {
+        const { OR, ...paging } = latestPageArgs(cursor, take);
+        return prisma.workspaceBriefing.findMany({ ...paging,
+          where: { workspaceId, status: "GENERATED", period: { in: ["DAILY", "WEEKLY"] }, ...(OR ? { OR } : {}) },
+        });
       },
     }),
-    prisma.brainArticle.findMany({
-      where: {
-        workspaceId,
-        archivedAt: null,
-        isPrivate: false,
-        type: { notIn: ["DIGEST", "PERSON"] },
-      },
-      select: {
-        id: true,
-        slug: true,
-        title: true,
-        bodyMd: true,
-        type: true,
-        isPrivate: true,
-        updatedAt: true,
-        publishedAt: true,
-        createdAt: true,
-      },
-      orderBy: { updatedAt: "desc" },
-      take: 50,
-    }),
-    prisma.brainArticle.count({
-      where: { workspaceId },
-    }),
-    prisma.workspaceBriefing.findFirst({
-      where: {
-        workspaceId,
-        status: "GENERATED",
-        period: "DAILY",
-      },
-      orderBy: { generatedAt: "desc" },
-      select: {
-        id: true,
-        workflowJobId: true,
-        period: true,
-        dateKey: true,
-        runKey: true,
-        title: true,
-        status: true,
-        modelUsed: true,
-        introMd: true,
-        bodyMd: true,
-        briefingJson: true,
-        sourceRefsJson: true,
-        sourceCounts: true,
-        generatedAt: true,
-        createdAt: true,
-        updatedAt: true,
+    findLatestReadableArtifact({ actor, workspaceId, release, kind: "NewspaperEdition",
+      loadPage: (cursor, take) => {
+        const { OR, ...paging } = latestPageArgs(cursor, take);
+        return prisma.newspaperEdition.findMany({ ...paging, where: { workspaceId, ...(OR ? { OR } : {}) } });
       },
     }),
-    prisma.workspaceBriefing.findFirst({
-      where: {
-        workspaceId,
-        status: "GENERATED",
-        period: "WEEKLY",
-      },
-      orderBy: { generatedAt: "desc" },
-      select: {
-        id: true,
-        workflowJobId: true,
-        period: true,
-        dateKey: true,
-        runKey: true,
-        title: true,
-        status: true,
-        modelUsed: true,
-        introMd: true,
-        bodyMd: true,
-        briefingJson: true,
-        sourceRefsJson: true,
-        sourceCounts: true,
-        generatedAt: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    }),
-    prisma.newspaperEdition.findMany({
-      where: { workspaceId },
-      orderBy: { generatedAt: "desc" },
-      take: 1,
-      select: {
-        id: true,
-        workflowJobId: true,
-        cadence: true,
-        dateKey: true,
-        runKey: true,
-        title: true,
-        slug: true,
-        digestJson: true,
-        bodyMd: true,
-        sourceCounts: true,
-        generatedAt: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    }),
-    prisma.meeting.findMany({
-      where: {
-        workspaceId,
-        status: "COMPLETED",
-        archivedAt: null,
-      },
-      select: {
-        id: true,
-        title: true,
-        summaryMd: true,
-        recordedAt: true,
-        updatedAt: true,
-        createdAt: true,
-      },
-      orderBy: { recordedAt: "desc" },
-    }),
-    prisma.knowledgeChunk.count({ where: { workspaceId } }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } }),
     prisma.member.count({ where: { workspaceId, isActive: true } }),
-    prisma.action.count({ where: visibleOpenActionWhere }),
-    visiblePersonalOpenActionWhere
-      ? prisma.action.count({ where: visiblePersonalOpenActionWhere })
-      : prisma.action.count({ where: { id: "__no_current_member__" } }),
-    prisma.proposal.count({ where: visibleOpenProposalWhere }),
-    visiblePersonalOpenProposalWhere
-      ? prisma.proposal.count({ where: visiblePersonalOpenProposalWhere })
-      : prisma.proposal.count({ where: { id: "__no_current_member__" } }),
-    prisma.tension.count({ where: visibleOpenTensionWhere }),
-    visiblePersonalOpenTensionWhere
-      ? prisma.tension.count({ where: visiblePersonalOpenTensionWhere })
-      : prisma.tension.count({ where: { id: "__no_current_member__" } }),
-    prisma.action.findMany({
-      where: visiblePersonalOpenActionWhere ?? { id: "__no_current_member__" },
-      select: { id: true, title: true, status: true, priority: true, assigneeMemberId: true, dueAt: true, updatedAt: true },
-      orderBy: [{ priority: "desc" }, { dueAt: "asc" }, { updatedAt: "desc" }],
-    }),
-    prisma.proposal.findMany({
-      where: visiblePersonalOpenProposalWhere ?? { id: "__no_current_member__" },
-      select: {
-        id: true,
-        title: true,
-        status: true,
-        priority: true,
-        ownerMemberId: true,
-        updatedAt: true,
+  ]);
+  const latestWorkspaceBriefing = briefingWindow.item;
+  const latestNewspaperEdition = editionWindow.item;
+  const articles: BrainArticle[] = [];
+  const meetings: Meeting[] = [];
+  let actionPersonalCount = 0, proposalPersonalCount = 0, tensionPersonalCount = 0;
+  let personalItems: PersonalNewspaperItem[] = [];
+  const personalSources: MemberBriefingContext["personalSources"] = [];
+  const rankingTime = new Date();
+  const retainPersonal = (item: PersonalNewspaperItem) => {
+    personalSources.push({ type: item.kind === "ADVICE" ? "ADVICE_REQUEST" : item.kind, id: item.id, title: item.title });
+    personalItems = rankPersonalNewspaperItems([...personalItems, item], rankingTime).slice(0, 8);
+  };
+  const [articleWindow, actionWindow, proposalWindow, tensionWindow, meetingWindow] = await Promise.all([
+    scanReadableArtifactPages({ actor, workspaceId, release, kind: "BrainArticle",
+      loadPage: (cursor, take) => prisma.brainArticle.findMany({ where: { workspaceId, archivedAt: null }, ...pageArgs(cursor, take) }),
+      visit: (article) => {
+        if (article.isPrivate || article.type === "DIGEST" || article.type === "PERSON") return;
+        articles.push(article);
+        articles.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime() || a.id.localeCompare(b.id));
+        articles.length = Math.min(articles.length, 50);
       },
-      orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
     }),
-    prisma.tension.findMany({
-      where: visiblePersonalOpenTensionWhere ?? { id: "__no_current_member__" },
-      select: { id: true, title: true, status: true, priority: true, assigneeMemberId: true, updatedAt: true },
-      orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
+    scanReadableArtifactPages({ actor, workspaceId, release, kind: "Action",
+      loadPage: (cursor, take) => prisma.action.findMany({ where: visibleOpenActionWhere, ...pageArgs(cursor, take) }),
+      visit: (action) => {
+        if (!currentMember || (action.assigneeMemberId !== currentMember.id && !adviceDeadlinesByKind.ACTION.has(action.id))) return;
+        actionPersonalCount++;
+        const adviceDeadline = adviceDeadlinesByKind.ACTION.get(action.id) ?? null;
+        const useAdviceDeadline = adviceDeadline && (!action.dueAt || utcDueDay(adviceDeadline) <= utcDueDay(action.dueAt));
+        retainPersonal({ id: action.id, title: action.title, status: action.status, priority: action.priority, updatedAt: action.updatedAt,
+          kind: "ACTION", reason: action.assigneeMemberId === currentMember.id ? "assigned" : "advice",
+          dueAt: useAdviceDeadline ? adviceDeadline : action.dueAt, dueAtKind: useAdviceDeadline ? "DATETIME" : "DATE",
+          href: `/workspaces/${workspaceId}/actions/${action.id}` });
+      },
+    }),
+    scanReadableArtifactPages({ actor, workspaceId, release, kind: "Proposal",
+      loadPage: (cursor, take) => prisma.proposal.findMany({ where: visibleOpenProposalWhere, ...pageArgs(cursor, take) }),
+      visit: (proposal) => {
+        if (!currentMember || (proposal.ownerMemberId !== currentMember.id && !adviceDeadlinesByKind.PROPOSAL.has(proposal.id))) return;
+        proposalPersonalCount++;
+        retainPersonal({ id: proposal.id, title: proposal.title, status: proposal.status, priority: proposal.priority, updatedAt: proposal.updatedAt,
+          kind: "PROPOSAL", reason: proposal.ownerMemberId === currentMember.id ? "owner" : "advice",
+          dueAt: adviceDeadlinesByKind.PROPOSAL.get(proposal.id) ?? null, dueAtKind: "DATETIME",
+          href: `/workspaces/${workspaceId}/proposals/${proposal.id}` });
+      },
+    }),
+    scanReadableArtifactPages({ actor, workspaceId, release, kind: "Tension",
+      loadPage: (cursor, take) => prisma.tension.findMany({ where: visibleOpenTensionWhere, ...pageArgs(cursor, take) }),
+      visit: (tension) => {
+        if (!currentMember || (tension.assigneeMemberId !== currentMember.id && !adviceDeadlinesByKind.TENSION.has(tension.id))) return;
+        tensionPersonalCount++;
+        retainPersonal({ id: tension.id, title: tension.title, status: tension.status, priority: tension.priority, updatedAt: tension.updatedAt,
+          kind: "TENSION", reason: tension.assigneeMemberId === currentMember.id ? "assigned" : "advice",
+          dueAt: adviceDeadlinesByKind.TENSION.get(tension.id) ?? null, dueAtKind: "DATETIME",
+          href: `/workspaces/${workspaceId}/tensions/${tension.id}` });
+      },
+    }),
+    scanReadableArtifactPages({ actor, workspaceId, release, kind: "Meeting",
+      loadPage: (cursor, take) => prisma.meeting.findMany({ where: { workspaceId, status: "COMPLETED", archivedAt: null }, ...pageArgs(cursor, take) }),
+      visit: (meeting) => {
+        meetings.push(meeting);
+        meetings.sort((a, b) => latestActivityTimeBefore(rankingTime, b.updatedAt, b.recordedAt, b.createdAt)
+          - latestActivityTimeBefore(rankingTime, a.updatedAt, a.recordedAt, a.createdAt) || a.id.localeCompare(b.id));
+        meetings.length = Math.min(meetings.length, 20);
+      },
     }),
   ]);
+  const chunksSummary = await getReadableKnowledgeChunkSummary(actor, workspaceId, { release });
+  const limitedSnapshot = !chunksSummary.complete || !adviceComplete || !briefingWindow.complete || !editionWindow.complete
+    || [articleWindow, actionWindow, proposalWindow, tensionWindow, meetingWindow].some(window => !window.complete);
+  const personalComplete = adviceComplete && actionWindow.complete && proposalWindow.complete && tensionWindow.complete;
   const branding = workspaceData
     ? workspaceBranding(workspaceData)
     : { primaryName: "Corgtex", secondaryLabel: "powered by Corgtex" };
   const workAttentionCounts = getDashboardWorkAttentionCountsFromMetrics({
     currentMemberId: currentMember?.id ?? null,
     actionPersonalCount,
-    actionTotalCount,
+    actionTotalCount: actionWindow.count,
     proposalPersonalCount,
-    proposalTotalCount,
+    proposalTotalCount: proposalWindow.count,
     tensionPersonalCount,
-    tensionTotalCount,
+    tensionTotalCount: tensionWindow.count,
   });
-  const personalItems: PersonalNewspaperItem[] = rankPersonalNewspaperItems([
-    ...personalActions.map((action) => {
-      const adviceDeadline = adviceDeadlinesByKind.ACTION.get(action.id) ?? null;
-      const useAdviceDeadline = adviceDeadline
-        && (!action.dueAt || utcDueDay(adviceDeadline) <= utcDueDay(action.dueAt));
-      return {
-        ...action,
-        kind: "ACTION" as const,
-        reason: action.assigneeMemberId === currentMember?.id ? "assigned" as const : "advice" as const,
-        dueAt: useAdviceDeadline ? adviceDeadline : action.dueAt,
-        dueAtKind: useAdviceDeadline ? "DATETIME" as const : "DATE" as const,
-        href: `/workspaces/${workspaceId}/actions/${action.id}`,
-      };
-    }),
-    ...personalProposals.map((proposal) => ({
-      ...proposal,
-      kind: "PROPOSAL" as const,
-      reason: proposal.ownerMemberId === currentMember?.id ? "owner" as const : "advice" as const,
-      dueAt: adviceDeadlinesByKind.PROPOSAL.get(proposal.id) ?? null,
-      dueAtKind: "DATETIME" as const,
-      href: `/workspaces/${workspaceId}/proposals/${proposal.id}`,
-    })),
-    ...personalTensions.map((tension) => ({
-      ...tension,
-      kind: "TENSION" as const,
-      reason: tension.assigneeMemberId === currentMember?.id ? "assigned" as const : "advice" as const,
-      dueAt: adviceDeadlinesByKind.TENSION.get(tension.id) ?? null,
-      dueAtKind: "DATETIME" as const,
-      href: `/workspaces/${workspaceId}/tensions/${tension.id}`,
-    })),
-  ], new Date());
   const memberContext: MemberBriefingContext | null = currentMember ? {
     roleNames: memberCircleAssignments.map((assignment) => assignment.role.name),
     circleNames: memberCircleAssignments.map((assignment) => assignment.role.circle.name),
-    personalSources: personalItems.map((item) => ({
-      type: item.kind === "ADVICE" ? "ADVICE_REQUEST" as const : item.kind,
-      id: item.id,
-      title: item.title,
-    })),
+    personalSources,
   } : null;
-  const latestWorkspaceBriefing = [latestDailyWorkspaceBriefing, latestWeeklyWorkspaceBriefing]
-    .filter((briefing): briefing is NonNullable<typeof latestDailyWorkspaceBriefing> => Boolean(briefing))
-    .sort((left, right) => right.generatedAt.getTime() - left.generatedAt.getTime())[0] ?? null;
-  const latestNewspaperEdition = newspaperEditions[0] ?? null;
   const latestEditionDigest = latestNewspaperEdition
     ? normalizeNewspaperEditionDigest(latestNewspaperEdition)
     : null;
@@ -597,8 +450,11 @@ export default async function WorkspaceDashboard({
         .then((items) => items.map((item) => `GOAL:${item.id}`)),
       prisma.recognition.findMany({ where: { workspaceId, id: { in: idsFor("RECOGNITION") }, visibility: "WORKSPACE" }, select: { id: true } })
         .then((items) => items.map((item) => `RECOGNITION:${item.id}`)),
-      prisma.adviceRequest.findMany({ where: { workspaceId, id: { in: idsFor("ADVICE_REQUEST") }, audienceType: "WORKSPACE" }, select: { id: true } })
-        .then((items) => items.map((item) => `ADVICE_REQUEST:${item.id}`)),
+      prisma.adviceRequest.findMany({ where: { workspaceId, id: { in: idsFor("ADVICE_REQUEST") }, audienceType: "WORKSPACE" } })
+        .then(async (items) => {
+          const captured = await release.capture("AdviceRequest", items);
+          return captured.records.map((item) => `ADVICE_REQUEST:${item.id}`);
+        }),
     ])
     : [];
   const workspaceBriefing = storedBriefing
@@ -618,7 +474,7 @@ export default async function WorkspaceDashboard({
     articles,
     meetings,
     labels: {
-      intro: storedGeneratedAt ? t("newspaperLiveUpdatedIntro") : t("newspaperLiveIntro"),
+      intro: limitedSnapshot ? t("limitedSnapshot") : storedGeneratedAt ? t("newspaperLiveUpdatedIntro") : t("newspaperLiveIntro"),
       closing: t("newspaperLiveClosing"),
     },
   });
@@ -637,8 +493,9 @@ export default async function WorkspaceDashboard({
     : displayedEditionPeriod === "DAILY"
       ? t("dailyEdition")
       : t("workspaceEdition");
+  const unreadNotificationsCount = unreadNotificationsSummary.count;
   const unreadNotificationsDisplayCount = capDashboardUnreadNotificationCount(unreadNotificationsCount);
-  const isUnreadNotificationsCountCapped = isDashboardUnreadNotificationCountCapped(unreadNotificationsCount);
+  const isUnreadNotificationsCountCapped = !unreadNotificationsSummary.complete || isDashboardUnreadNotificationCountCapped(unreadNotificationsCount);
   const notificationLabel = unreadNotificationsCount > 0
     ? t(isUnreadNotificationsCountCapped ? "unreadNotificationsSummaryCapped" : "unreadNotificationsSummary", {
       count: unreadNotificationsDisplayCount,
@@ -664,18 +521,24 @@ export default async function WorkspaceDashboard({
       href: `/workspaces/${workspaceId}/actions?status=OPEN&status=IN_PROGRESS`,
       label: t("attentionActions"),
       counts: workAttentionCounts.actions,
+      complete: actionWindow.complete,
     },
     {
       href: `/workspaces/${workspaceId}/proposals?status=OPEN`,
       label: t("attentionProposals"),
       counts: workAttentionCounts.proposals,
+      complete: proposalWindow.complete,
     },
     {
       href: `/workspaces/${workspaceId}/tensions?status=OPEN`,
       label: t("attentionTensions"),
       counts: workAttentionCounts.tensions,
+      complete: tensionWindow.complete,
     },
   ];
+
+  // Release all original page and family observations together after the final async join.
+  await release.finish(undefined);
 
   return (
     <>
@@ -706,9 +569,13 @@ export default async function WorkspaceDashboard({
         </Link>
       </div>
 
+      {limitedSnapshot && <p role="status">{t("limitedSnapshot")}</p>}
+
       <section className="nr-home-attention-strip" aria-label={t("attentionStripLabel")}>
         {attentionTiles.map((tile) => {
           const hasPersonalCount = tile.counts.personalCount !== null;
+          const personalLabel = notificationUnreadCountLabel({ count: tile.counts.personalCount ?? 0, complete: tile.complete && adviceComplete });
+          const totalLabel = notificationUnreadCountLabel({ count: tile.counts.totalCount, complete: tile.complete });
           return (
             <Link
               key={tile.href}
@@ -717,24 +584,24 @@ export default async function WorkspaceDashboard({
               aria-label={hasPersonalCount
                 ? t("attentionTileAria", {
                   label: tile.label,
-                  personal: tile.counts.personalCount ?? 0,
-                  total: tile.counts.totalCount,
+                  personal: personalLabel,
+                  total: totalLabel,
                 })
                 : t("attentionTileTotalAria", {
                   label: tile.label,
-                  total: tile.counts.totalCount,
+                  total: totalLabel,
                 })}
             >
               <span className="nr-home-attention-title">{tile.label}</span>
               <span className={`nr-home-attention-metrics ${hasPersonalCount ? "" : "nr-home-attention-metrics-single"}`}>
                 {hasPersonalCount && (
                   <span className="nr-home-attention-metric">
-                    <strong>{tile.counts.personalCount}</strong>
+                    <strong>{personalLabel}</strong>
                     <span>{t("attentionForYou")}</span>
                   </span>
                 )}
                 <span className="nr-home-attention-metric">
-                  <strong>{tile.counts.totalCount}</strong>
+                  <strong>{totalLabel}</strong>
                   <span>{t("attentionTotalOpen")}</span>
                 </span>
               </span>
@@ -773,7 +640,7 @@ export default async function WorkspaceDashboard({
                 </li>
               ))}
             </ol>
-          ) : <p className="nr-personal-newspaper-empty">{t("personalNewspaperEmpty")}</p>}
+          ) : <p className="nr-personal-newspaper-empty">{t(personalComplete ? "personalNewspaperEmpty" : "snapshotEmpty")}</p>}
         </section>
       )}
 
@@ -832,7 +699,7 @@ export default async function WorkspaceDashboard({
           </div>
         ) : (
           <div className="nr-newspaper-body">
-            <p>{t("newspaperEmptyBody")}</p>
+            <p>{t(limitedSnapshot ? "limitedSnapshot" : "newspaperEmptyBody")}</p>
           </div>
         )}
 
@@ -859,15 +726,15 @@ export default async function WorkspaceDashboard({
 
       {!hasArticle && (
         <p className="nr-newspaper-empty">
-          {t("newspaperWaiting")}
+          {t(limitedSnapshot ? "limitedSnapshot" : "newspaperWaiting")}
         </p>
       )}
 
       <div className="nr-footer">
         {t("footerStats", {
-          articles: articleTotalCount,
-          meetings: meetings.length,
-          chunks: chunksCount,
+          articles: notificationUnreadCountLabel(articleWindow),
+          meetings: notificationUnreadCountLabel(meetingWindow),
+          chunks: notificationUnreadCountLabel(chunksSummary),
           members: membersCount,
         })}
       </div>

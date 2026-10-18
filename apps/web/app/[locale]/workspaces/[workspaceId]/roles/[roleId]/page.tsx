@@ -73,13 +73,13 @@ export default async function RoleDetailPage({ params }: PageProps) {
 
   const [currentWorkspace, roleDirectoryData] = await Promise.all([
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
-    loadRoleDirectoryData(workspaceId, { roleIds: [role.id] }),
+    loadRoleDirectoryData(actor, workspaceId, { roleIds: [role.id] }),
   ]);
   const currentUserId = actor.kind === "user" ? actor.user.id : null;
   const currentMemberId = membership?.id && membership.id !== "global-operator" ? membership.id : null;
   const isDemo = currentWorkspace?.slug === "jnj-demo";
   const canManageStructure = !isDemo && (membership?.role === "ADMIN" || membership?.role === "FACILITATOR");
-  const circleHref = `/workspaces/${workspaceId}/circles/${role.circle.id}`;
+  const circleHref = role.circle ? `/workspaces/${workspaceId}/circles/${role.circle.id}` : null;
 
   return (
     <>
@@ -92,9 +92,9 @@ export default async function RoleDetailPage({ params }: PageProps) {
         </Link>
         <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{role.name}</h1>
         <div className="nr-masthead-meta" style={{ marginTop: 10 }}>
-          <Link href={circleHref} style={{ color: "var(--accent)", textDecoration: "none" }}>
+          {role.circle && circleHref && <Link href={circleHref} style={{ color: "var(--accent)", textDecoration: "none" }}>
             {t("circleMeta", { name: role.circle.name })}
-          </Link>
+          </Link>}
           {role.coreRoleType && <span>{t("coreRoleMeta", { type: role.coreRoleType })}</span>}
         </div>
       </header>
@@ -202,14 +202,14 @@ export default async function RoleDetailPage({ params }: PageProps) {
             )}
           </section>
 
-          <section className="ws-section">
+          {role.circle && circleHref && <section className="ws-section">
             <h2 className="nr-section-header">{t("circle")}</h2>
             <Link href={circleHref} className="nr-item" style={{ display: "block", textDecoration: "none", color: "inherit" }}>
               <strong className="nr-item-title">{role.circle.name}</strong>
               {role.circle.purposeMd && <div className="nr-excerpt" style={{ marginTop: 6 }}>{role.circle.purposeMd}</div>}
               {role.circle.domainMd && <div className="nr-item-meta" style={{ marginTop: 6 }}>{role.circle.domainMd}</div>}
             </Link>
-          </section>
+          </section>}
         </aside>
       </div>
     </>

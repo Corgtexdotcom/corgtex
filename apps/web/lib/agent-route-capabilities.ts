@@ -4,7 +4,7 @@ import type { AppActor } from "@corgtex/shared";
 
 export type AgentRouteCapability = {
   operation: McpToolName | null;
-  feature?: "TOOL_LINKS";
+  feature?: "TOOL_LINKS" | "RELATIONSHIPS";
 };
 
 type RouteMethods = Readonly<Partial<Record<string, AgentRouteCapability>>>;
@@ -144,6 +144,9 @@ export const AGENT_REST_ROUTE_CAPABILITIES = {
   "/api/integrations/slack/install": {
     GET: { operation: null },
   },
+  "/api/newspaper/click/[token]": {
+    GET: { operation: null },
+  },
   "/api/oauth/authorize": {
     GET: { operation: null },
     POST: { operation: null },
@@ -234,6 +237,10 @@ export const AGENT_REST_ROUTE_CAPABILITIES = {
   "/api/workspaces/[workspaceId]/archive": {
     GET: { operation: "list_archived_artifacts" },
     POST: { operation: "archive_artifact" },
+  },
+  "/api/workspaces/[workspaceId]/history-recovery": {
+    GET: { operation: null },
+    POST: { operation: null },
   },
   "/api/workspaces/[workspaceId]/brain/articles/[slug]/discussions/[threadId]/comments": {
     POST: { operation: "add_discussion_comment" },
@@ -330,6 +337,13 @@ export const AGENT_REST_ROUTE_CAPABILITIES = {
   },
   "/api/workspaces/[workspaceId]/circles": {
     GET: { operation: "list_circles" },
+    POST: { operation: null },
+  },
+  "/api/workspaces/[workspaceId]/conversations/[conversationId]/brain": {
+    POST: { operation: null },
+  },
+  "/api/workspaces/[workspaceId]/information-categories": {
+    PATCH: { operation: null },
     POST: { operation: null },
   },
   "/api/workspaces/[workspaceId]/conversations/[conversationId]": {
@@ -486,6 +500,11 @@ export const AGENT_REST_ROUTE_CAPABILITIES = {
   },
   "/api/workspaces/[workspaceId]/meeting-transcript-sources": {
     GET: { operation: null },
+  },
+  // Native CRM presentation still requires current source authority at delivery;
+  // this transport policy grants only the canonical relationships read operation.
+  "/api/workspaces/[workspaceId]/leads/archive": {
+    GET: { operation: "list_relationship_accounts", feature: "RELATIONSHIPS" },
   },
   "/api/workspaces/[workspaceId]/meetings/[meetingId]/recording/cancel": {
     // REST returns raw recorder details that MCP deliberately redacts.

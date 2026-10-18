@@ -11,7 +11,7 @@ const { prismaMock, requireWorkspaceMembershipMock, recorderSnapshotMock } = vi.
   recorderSnapshotMock: vi.fn(),
 }));
 
-vi.mock("@corgtex/shared", () => ({ prisma: prismaMock }));
+vi.mock("@corgtex/shared", async (original) => ({ ...await original<any>(), prisma: prismaMock }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership: requireWorkspaceMembershipMock }));
 vi.mock("./meeting-recorders", () => ({ getMeetingRecorderEnterpriseServiceSnapshot: recorderSnapshotMock }));
 

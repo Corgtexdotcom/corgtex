@@ -1,10 +1,22 @@
 import { createHash, randomUUID } from "node:crypto";
-import { decryptSecret, encryptSecret, getRedisClient, getSharedStateBackend, prisma, redisKey } from "@corgtex/shared";
+import { decryptSecret, encryptSecret, getRedisClient, getSharedStateBackend, isRedisConfigured, isSecretEncryptionConfigured, prisma, redisKey } from "@corgtex/shared";
 
 const PENDING_TRANSCRIPT_TTL_SECONDS = 20 * 60;
 
+/** Redis can serve ordinary shared state without encryption, but private pending
+ * transcripts require durable encryption configuration before accepting work. */
+export function assertPendingTranscriptStorageConfiguration() {
+  if (getSharedStateBackend() === "redis" && isRedisConfigured() && !isSecretEncryptionConfigured()) {
+    throw Object.assign(new Error("Pending transcript Redis storage requires ENCRYPTION_KEY to be a 32-byte hex string."),
+      { code: "PENDING_TRANSCRIPT_ENCRYPTION_REQUIRED" });
+  }
+}
+
 export type PendingTranscriptPayload = {
   workspaceId: string;
+  uploadedByUserId: string;
+  rawFileBase64: string | null;
+  rawFileMimeType: string | null;
   transcript: string;
   fileName: string | null;
   title: string | null;
@@ -23,6 +35,9 @@ function isPendingTranscriptPayload(value: unknown): value is PendingTranscriptP
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
   return typeof record.workspaceId === "string"
+    && typeof record.uploadedByUserId === "string" && record.uploadedByUserId.length > 0
+    && (typeof record.rawFileBase64 === "string" || record.rawFileBase64 === null)
+    && (typeof record.rawFileMimeType === "string" || record.rawFileMimeType === null)
     && typeof record.transcript === "string"
     && (typeof record.fileName === "string" || record.fileName === null)
     && (typeof record.title === "string" || record.title === null)
@@ -59,12 +74,13 @@ async function cleanupExpired() {
 }
 
 export async function storePendingTranscriptPayload(payload: PendingTranscriptPayload) {
+  assertPendingTranscriptStorageConfiguration();
   try {
     if (!isPendingTranscriptPayload(payload)) return null;
     const token = randomUUID();
+    // Both backends retain the original bytes encrypted, bound to the uploader.
+    const encryptedPayload = encryptSecret(JSON.stringify(payload));
     if (getSharedStateBackend() === "postgres") {
-      // Encrypt before any database operation: never write plaintext on missing keys.
-      const encryptedPayload = encryptSecret(JSON.stringify(payload));
       const now = new Date();
       await cleanupExpired();
       await prisma.pendingTranscriptUpload.create({ data: {
@@ -77,7 +93,7 @@ export async function storePendingTranscriptPayload(payload: PendingTranscriptPa
     }
     const client = await getRedisClient();
     if (!client) return null;
-    await client.setEx(pendingTranscriptKey(payload.workspaceId, token), PENDING_TRANSCRIPT_TTL_SECONDS, JSON.stringify(payload));
+    await client.setEx(pendingTranscriptKey(payload.workspaceId, token), PENDING_TRANSCRIPT_TTL_SECONDS, encryptedPayload);
     return token;
   } catch {
     console.warn("Unable to store pending meeting transcript upload.");
@@ -86,6 +102,7 @@ export async function storePendingTranscriptPayload(payload: PendingTranscriptPa
 }
 
 export async function readPendingTranscriptPayload(workspaceId: string, token: string) {
+  assertPendingTranscriptStorageConfiguration();
   try {
     let raw: string | null;
     if (getSharedStateBackend() === "postgres") {
@@ -97,7 +114,8 @@ export async function readPendingTranscriptPayload(workspaceId: string, token: s
     } else {
       const client = await getRedisClient();
       if (!client) return null;
-      raw = await client.get(pendingTranscriptKey(workspaceId, token));
+      const encryptedPayload = await client.get(pendingTranscriptKey(workspaceId, token));
+      raw = encryptedPayload ? decryptSecret(encryptedPayload) : null;
     }
     if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);

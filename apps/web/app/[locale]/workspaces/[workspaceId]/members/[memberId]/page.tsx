@@ -50,7 +50,7 @@ export default async function MemberProfilePage({ params, searchParams }: PagePr
 
   const [currentWorkspace, roleDirectoryData] = await Promise.all([
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
-    loadRoleDirectoryData(workspaceId),
+    loadRoleDirectoryData(actor, workspaceId),
   ]);
   const { member, meetings, proposals, authoredTensions, recentActivity } = data;
   const isDemo = currentWorkspace?.slug === "jnj-demo";

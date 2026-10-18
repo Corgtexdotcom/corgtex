@@ -22,6 +22,7 @@ export type TenantPurgeDerivedSelector =
   | { kind: "NO_SELECTOR_PRESERVE"; model: Prisma.ModelName; authorizesRoot: false };
 
 const SELECTOR_DSL = `
+R|SqlKnowledgeStagedChunk|publication.workspace|WORKSPACE|B|
 R|AdviceRequestRecipient|request.workspace|WORKSPACE|B|;R|AdviceRequestRecipient|member.workspace|WORKSPACE|B|
 R|AgentStep|agentRun.workspace|WORKSPACE|B|;R|AgentToolCall|agentRun.workspace|WORKSPACE|B|
 R|ApprovalDecision|flow.workspace|WORKSPACE|B|;R|ApprovalDecision|member.workspace|WORKSPACE|B|
@@ -29,7 +30,7 @@ R|BrainArticleVersion|article.workspace|WORKSPACE|B|;R|BrainDiscussionComment|th
 R|BrainDiscussionThread|article.workspace|WORKSPACE|B|;R|BrainDiscussionThread|authorMember.workspace|WORKSPACE|B|;R|BuildArtifactAsset|artifact.workspace|WORKSPACE|B|
 R|CircleAgentAssignment|circle.workspace|WORKSPACE|B|;R|CircleAgentAssignment|agentIdentity.workspace|WORKSPACE|B|;R|CircleAgentAssignment|role.circle.workspace|WORKSPACE|B|
 R|ContextMapLayoutItem|mapView.workspace|WORKSPACE|B|;R|ContextMapLayoutItem|object.workspace|WORKSPACE|B|
-R|ConversationTurn|conversation.workspace|WORKSPACE|B|;R|ConversationTurn|agentRun.workspace|WORKSPACE|B|;R|CrmConversationMessage|conversation.workspace|WORKSPACE|B|
+R|ConversationTurn|conversation.workspace|WORKSPACE|B|;R|ConversationTurn|agentRun.workspace|WORKSPACE|B|;R|ConversationTurn|promptInput.workspace|WORKSPACE|B|;R|CrmConversationMessage|conversation.workspace|WORKSPACE|B|
 R|ExternalDataSyncLog|source.workspace|WORKSPACE|B|;R|GoalLink|goal.workspace|WORKSPACE|B|;R|GoalUpdate|goal.workspace|WORKSPACE|B|;R|GoalUpdate|authorMember.workspace|WORKSPACE|B|;R|KeyResult|goal.workspace|WORKSPACE|B|
 R|MemberExpertise|member.workspace|WORKSPACE|B|;R|MemberExpertise|expertiseTag.workspace|WORKSPACE|B|;R|Objection|flow.workspace|WORKSPACE|B|
 R|Role|circle.workspace|WORKSPACE|B|;R|RoleAssignment|role.circle.workspace|WORKSPACE|B|;R|RoleAssignment|member.workspace|WORKSPACE|B|
@@ -97,7 +98,7 @@ export function decodeTenantPurgeDerivedSelectors(dsl: string): readonly TenantP
 }
 
 export const TENANT_PURGE_DERIVED_SELECTORS = decodeTenantPurgeDerivedSelectors(SELECTOR_DSL);
-export const TENANT_PURGE_INDIRECT_MODELS = Object.freeze(["AdviceRequestRecipient", "AgentStep", "AgentToolCall", "ApprovalDecision", "BrainArticleVersion", "BrainDiscussionComment", "BrainDiscussionThread", "BuildArtifactAsset", "CircleAgentAssignment", "ContextMapLayoutItem", "ConversationTurn", "CrmConversationMessage", "ExternalDataSyncLog", "GoalLink", "GoalUpdate", "KeyResult", "MemberExpertise", "Objection", "Role", "RoleAssignment", "TensionUpvote", "WebhookDelivery", "WorkspaceToolLinkCircleTag"] as const satisfies readonly Prisma.ModelName[]);
+export const TENANT_PURGE_INDIRECT_MODELS = Object.freeze(["AdviceRequestRecipient", "AgentStep", "AgentToolCall", "ApprovalDecision", "BrainArticleVersion", "BrainDiscussionComment", "BrainDiscussionThread", "BuildArtifactAsset", "CircleAgentAssignment", "ContextMapLayoutItem", "ConversationTurn", "CrmConversationMessage", "ExternalDataSyncLog", "GoalLink", "GoalUpdate", "KeyResult", "MemberExpertise", "Objection", "Role", "RoleAssignment", "SqlKnowledgeStagedChunk", "TensionUpvote", "WebhookDelivery", "WorkspaceToolLinkCircleTag"] as const satisfies readonly Prisma.ModelName[]);
 
 interface TenantPurgeSchemaField { name: string; kind: string; type: string; isId?: boolean; isUnique?: boolean; relationFromFields?: readonly string[] }
 export interface TenantPurgeSchemaModel { name: string; fields: readonly TenantPurgeSchemaField[] }
@@ -161,7 +162,7 @@ export function assertTenantPurgeDerivedSelectorRegistry(models: readonly Tenant
   };
   const pathDrift = TENANT_PURGE_INDIRECT_MODELS.filter((model) => JSON.stringify(discoverPaths(model)) !== JSON.stringify(selectors.flatMap((selector) => selector.kind === "RELATION_PATH" && selector.model === model ? [selector.path.join(".")] : []).sort()));
   const targetScalars = models.flatMap((model) => model.fields.filter((candidate) => candidate.kind === "scalar" && candidate.type === "String" && /(?:workspace|deployment|customerAccount|procurementTrial|targetAccount|targetDeployment|targetWorkspace|targetTrial)Id$/i.test(candidate.name)).map((candidate) => `${model.name}.${candidate.name}`));
-  const externalIds = new Set<string>(["CustomerDeployment.remoteWorkspaceId", "WorkspaceIntegrationBinding.externalWorkspaceId", "CommunicationInstallation.externalWorkspaceId"]);
+  const externalIds = new Set<string>(["CustomerDeployment.remoteWorkspaceId", "WorkspaceIntegrationBinding.externalWorkspaceId", "CommunicationInstallation.externalWorkspaceId", "CommunicationIngressInput.externalWorkspaceId", "CommunicationMessageNativeInput.externalWorkspaceId"]);
   const uncoveredScalars = targetScalars.filter((key) => !externalIds.has(key) && !directFields.has(key) && !scalarTargets.has(key));
   if (missing.length || sharedMissing.length || invalidPreserve.length || JSON.stringify(indirect) !== JSON.stringify([...TENANT_PURGE_INDIRECT_MODELS].sort()) || pathDrift.length || uncoveredScalars.length) throw new Error(`Tenant purge derived selector drift: missing=${missing} shared=${sharedMissing} preserve=${invalidPreserve.map((entry) => entry.model)} indirect=${indirect} paths=${pathDrift} scalar=${uncoveredScalars}`);
 }

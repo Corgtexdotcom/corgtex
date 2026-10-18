@@ -183,6 +183,8 @@ type DiffJsonInput = {
 };
 
 export type ContextMapClientData = {
+  readWindow?: { scope: "WINDOW"; complete: boolean; objectsComplete: boolean;
+    relationshipsComplete: boolean; evidenceComplete: boolean; proposedDiffsComplete: boolean; variantsComplete: boolean };
   mapView: ContextMapView;
   mapViews: ContextMapView[];
   objects: ContextGraphObject[];
@@ -1973,6 +1975,12 @@ export default function ContextMapClient({
         </div>
       </div>
 
+      {data.readWindow?.complete === false && (
+        <p role="status" style={{ margin: 0, padding: "0.625rem 1rem", fontSize: "0.875rem", color: "var(--text-muted)" }}>
+          Showing a limited window of this map. More permitted facts may exist outside this window.
+        </p>
+      )}
+
       {isCompactLayout && nodes.length > 0 && (
         <div className="context-map-card-navigation">
           <label>
@@ -2054,8 +2062,8 @@ export default function ContextMapClient({
           {nodes.length === 0 ? (
             <div className="context-map-empty">
               <CircleHelp size={32} aria-hidden="true" />
-              <h3>{data.guidance.emptyTitle}</h3>
-              <p>{data.guidance.emptyDescription}</p>
+              <h3>{data.readWindow?.complete === false ? "No visible facts in this window" : data.guidance.emptyTitle}</h3>
+              <p>{data.readWindow?.complete === false ? "This limited window does not establish that the map is empty." : data.guidance.emptyDescription}</p>
             </div>
           ) : (
             <ReactFlow<ContextMapFlowNode, ContextMapFlowEdge>

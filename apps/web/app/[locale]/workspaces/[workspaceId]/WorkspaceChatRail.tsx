@@ -46,12 +46,14 @@ function isWorkspaceHome(pathname: string, workspaceId: string) {
 export function WorkspaceChatRail({
   workspaceId,
   conversations,
+  historyLimited = false,
   companyQuestions,
   aiWorkspaceState,
   readOnly = false,
 }: {
   workspaceId: string;
   conversations: ConversationSummary[];
+  historyLimited?: boolean;
   companyQuestions: CompanyQuestionSummary[];
   aiWorkspaceState: AiWorkspaceLaunchState;
   readOnly?: boolean;
@@ -167,6 +169,7 @@ export function WorkspaceChatRail({
             <ChatInterface
               workspaceId={workspaceId}
               conversations={conversations}
+              historyLimited={historyLimited}
               companyQuestions={companyQuestions}
               activeSessionId={null}
               compact={true}

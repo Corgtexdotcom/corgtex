@@ -1,3 +1,4 @@
+import { getMeetingTranscriptWorkerPurpose, assertMeetingTranscriptWorkerCurrent } from "./native-meeting-workflow-principal";
 import type {
   MeetingTranscriptProcessingProgress,
   MeetingTranscriptProcessingStage,
@@ -7,7 +8,7 @@ import type {
 } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
-import { AppError } from "./errors";
+import { AppError, invariant } from "./errors";
 
 export type {
   MeetingTranscriptProcessingStage,
@@ -342,9 +343,8 @@ export function deriveMeetingTranscriptProcessingState(params: {
   };
 }
 
-export async function resetMeetingTranscriptProcessingProgress(
-  client: ProgressClient,
-  params: { workspaceId: string; meetingId: string; now?: Date },
+export function prepareMeetingTranscriptProcessingReset(
+  params: { workspaceId: string; meetingId: string; now?: Date; id?: string },
 ) {
   const now = params.now ?? new Date();
   const nowIso = now.toISOString();
@@ -362,7 +362,7 @@ export async function resetMeetingTranscriptProcessingProgress(
     updatedAt: nowIso,
   };
 
-  return client.meetingTranscriptProcessingProgress.upsert({
+  return {
     where: { meetingId: params.meetingId },
     update: {
       workspace: { connect: { id: params.workspaceId } },
@@ -379,16 +379,24 @@ export async function resetMeetingTranscriptProcessingProgress(
       failedAt: null,
     },
     create: {
+      ...(params.id ? { id: params.id } : {}),
       workspace: { connect: { id: params.workspaceId } },
       meeting: { connect: { id: params.meetingId } },
       currentStage: "SUMMARIZING",
       stageStatuses: jsonInput(stageStatuses),
       startedAt: now,
     },
-  });
+  } satisfies Parameters<ProgressClient["meetingTranscriptProcessingProgress"]["upsert"]>[0];
 }
 
-export async function markMeetingTranscriptProcessingStage(params: {
+
+export async function resetMeetingTranscriptProcessingProgress(client: ProgressClient,
+  params: { workspaceId: string; meetingId: string; now?: Date; id?: string }) {
+  return client.meetingTranscriptProcessingProgress.upsert(prepareMeetingTranscriptProcessingReset(params));
+}
+
+async function writeMeetingTranscriptProcessingStage(params: {
+  workerActor?: AppActor;
   client?: ProgressClient;
   workspaceId: string;
   meetingId: string;
@@ -469,6 +477,23 @@ export async function markMeetingTranscriptProcessingStage(params: {
       failedAt: params.status === "FAILED" ? now : null,
     },
   });
+}
+
+/** A selected worker must keep its real claim locked through the progress write. */
+export async function markMeetingTranscriptProcessingStage(params: Parameters<typeof writeMeetingTranscriptProcessingStage>[0]) {
+  if (params.workerActor) {
+    await assertMeetingTranscriptWorkerCurrent(params.workerActor, params.workspaceId);
+    const purpose = getMeetingTranscriptWorkerPurpose(params.workerActor, params.workspaceId);
+    if (purpose) {
+      invariant(purpose.meetingId === params.meetingId && purpose.jobId === params.workflowJobId
+        && purpose.jobType === params.workflowJobType, 409, "MEETING_WORKFLOW_JOB_LOST", "Progress does not belong to this claimed workflow.");
+      return prisma.$transaction(async tx => {
+        await assertMeetingTranscriptWorkerCurrent(params.workerActor!, params.workspaceId, tx);
+        return writeMeetingTranscriptProcessingStage({...params, client: tx, attempts: purpose.attempt});
+      });
+    }
+  }
+  return writeMeetingTranscriptProcessingStage(params);
 }
 
 export async function recordMeetingTranscriptProcessingStage(params: Parameters<typeof markMeetingTranscriptProcessingStage>[0]) {

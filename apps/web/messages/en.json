@@ -219,6 +219,10 @@
     "workspacesTab": "Workspaces"
   },
   "agents": {
+    "usageWindowNotice": "Usage totals, averages and shares cover a limited window of readable calls from this period, not the full period. Budget limits are unchanged.",
+    "usageWindowMetric": "{label} · window",
+    "usageWindowLabel": "window",
+    "usageWindowEmpty": "No readable usage in this window; the period total is unknown.",
     "agentKey": "Agent Key:",
     "authorityDashboardDesc": "Review each agent's role scope, linked access, limits, approval posture, and recent activity in one place.",
     "authorityDashboardTitle": "Agent authority dashboard",
@@ -356,8 +360,20 @@
     "metadata": "Metadata",
     "movedDesc": "Agent traces and cost analytics have moved to the dedicated Agent Governance center.",
     "movedTitle": "Moved to Agent Governance",
+    "archiveWindowLimited": "Showing a limited archive window. Older records may be outside this window.",
+    "archiveWindowEmpty": "No visible archived records in this window.",
+    "archiveWindowNext": "Older archived records",
+    "archiveWindowStart": "Back to latest archive",
     "noArchivedRecords": "No archived records found.",
     "noAuditEntries": "No audit entries found.",
+    "scanLimited": "This window reached the audit scan limit. Continue to older entries.",
+    "nextWindow": "Older audit entries",
+    "newspaperWindowLimited": "Showing a limited delivery and link window. Counts and dates may not cover the full run history.",
+    "noNewspaperDeliveriesInWindow": "No readable deliveries in this window. Older delivery history is not included.",
+    "newspaperWindowCounts": "In this window: {sent} sent, {failed} failed, {skipped} skipped across {recipients} recipients.",
+    "newspaperWindowClicks": "In this link window: {clicks} clicks across {clickedLinks} of {links} tracked links.",
+    "newspaperWindowFirstSent": "First sent in window: {date}",
+    "newspaperWindowLastSent": "Last sent in window: {date}",
     "noNewspaperDeliveries": "No newspaper deliveries recorded yet.",
     "newspaperClickCounts": "{clicks} total clicks across {clickedLinks} of {links} tracked links.",
     "newspaperFirstSent": "First sent: {date}",
@@ -450,6 +466,8 @@
     "workEmailLabel": "Work Email"
   },
   "brain": {
+    "countWindowLimited": "Counts cover a limited window. + means at least this many; … means the total is not yet known.",
+    "typeCountWindowLimited": "Article type counts cover a limited window. All type filters remain available.",
     "meetingUploadGuidance": "Upload meeting transcripts in Meetings to get a summary and reviewable follow-ups. Use Brain for articles, search, and other documents.",
     "openMeetings": "Open Meetings",
     "agentSynthesis": "Agent Synthesis",
@@ -657,6 +675,8 @@
     "errorFailedToSend": "Failed to send message.",
     "errorStreamUnavailable": "Response stream is unavailable.",
     "newConversation": "New Conversation",
+    "historyLimited": "Showing a limited recent history. Some conversations or previews may be unavailable in this window.",
+    "historyWindowEmpty": "No visible conversations in this window.",
     "noConversations": "No conversations yet",
     "pageDescription": "Interact with Corgtex and your workspace data.",
     "pageTitle": "Agent Chat",
@@ -669,7 +689,25 @@
     "titleBackToConversations": "Back to conversations",
     "titleClickToRename": "Click to rename",
     "titleExpandChat": "Expand chat",
-    "titleRemoveAttachment": "Remove attachment"
+    "titleRemoveAttachment": "Remove attachment",
+    "brainExport": {
+      "open": "Save to Brain",
+      "explanation": "Share this answer with your company, subject to its original source permissions. Your private conversation stays private.",
+      "title": "Brain title",
+      "transcript": "Transcript metadata to include",
+      "none": "None — answer only",
+      "partial": "Selected turns",
+      "full": "Full conversation",
+      "chooseTurns": "Choose turns to include",
+      "fullUnavailable": "Full transcripts are available for conversations with up to {limit} turns. Choose selected turns instead.",
+      "selectionLimit": "Choose up to {limit} turns ({count} selected).",
+      "includesPrompts": "The selected transcript includes both your prompts and the assistant’s answers.",
+      "confirm": "Confirm and save",
+      "saving": "Saving…",
+      "saved": "Saved",
+      "success": "Saved to Brain and queued for absorption.",
+      "failed": "The answer could not be saved. Reload the conversation and try again."
+    }
   },
   "circles": {
     "addMemberWithPlusHint": "Use the + button to add members to roles in this circle.",
@@ -837,6 +875,10 @@
     "trigger": "Feedback"
   },
   "workItems": {
+    "adviceCountWindow": "this window",
+    "adviceWindowLimited": "Only requests in this window are shown and counted. Other requests may exist.",
+    "olderAdviceRequests": "Older requests",
+    "newestAdviceRequests": "Newest requests",
     "allCircles": "All circles",
     "allAssignees": "All assignees",
     "allPeople": "All people",
@@ -1000,6 +1042,8 @@
     "attentionProposals": "Proposals",
     "attentionStripLabel": "Workspace attention",
     "attentionTensions": "Tensions",
+    "limitedSnapshot": "Limited snapshot. Counts marked + may be higher. Open a section to see more.",
+    "snapshotEmpty": "No items in this snapshot. Open a section to see more.",
     "attentionTileAria": "{label}: {personal} for you, {total} total open",
     "attentionTileTotalAria": "{label}: {total} total open",
     "attentionTotalOpen": "Total open",
@@ -1095,6 +1139,11 @@
     "emptyUnread": "No unread notifications.",
     "eyebrow": "System",
     "markAllRead": "Mark all read",
+    "markAllContinue": "Continue marking read",
+    "markAllPending": "Marking read…",
+    "markAllPartial": "This pass is not finished. Continue to older notifications.",
+    "markAllComplete": "Finished this pass. Newly arriving notifications may remain unread.",
+    "markAllError": "Could not finish this batch. Try again.",
     "markRead": "Mark read",
     "next": "Next",
     "openRelated": "Open related item",
@@ -1105,7 +1154,11 @@
     "tabUnread": "Unread ({count})",
     "title": "Notifications",
     "unread": "Unread",
-    "unreadSummary": "{count, plural, =0 {No unread notifications} =1 {# unread notification} other {# unread notifications}}"
+    "unreadSummary": "{count, plural, =0 {No unread notifications} =1 {# unread notification} other {# unread notifications}}",
+    "latest": "Back to latest",
+    "continueHistory": "No visible notifications here. Continue to older notifications.",
+    "unreadSummaryMore": "At least {count} unread notifications",
+    "unreadSummaryUnknown": "Unread count is not available yet."
   },
   "error": {
     "defaultMessage": "An unexpected error occurred.",
@@ -1114,6 +1167,16 @@
     "tryAgain": "Try again"
   },
   "goals": {
+    "myWindowLimited": "These are the readable owned goals in this window. More goals may be outside it.",
+    "recognitionWindowLimited": "These are the readable recognitions in this window. More recognition history may be outside it.",
+    "recognitionWindowNext": "Next recognition window",
+    "recognitionWindowStart": "First recognition window",
+    "recognitionWindowEmpty": "No readable recognitions in this window.",
+
+    "windowLimited": "This goal window also supplies parent choices. Other goals may be outside it; goals with a parent outside this window appear at the top level.",
+    "windowNext": "Next goal window",
+    "windowStart": "First goal window",
+    "windowEmpty": "No readable goals in this window.",
     "contributesTo": "contributes to:",
     "addKeyResultTitle": "Add key result",
     "editKeyResultTitle": "Edit key result",
@@ -1223,6 +1286,12 @@
     "related": "Related work"
   },
   "agreements": {
+    "windowCounts": "Counts describe the displayed window. Older policies may be available.",
+    "selectedCircle": "Selected circle",
+    "noPoliciesInWindow": "No visible policies in this window. Continue to older policies.",
+    "olderPolicies": "Older policies",
+    "latestPolicies": "Back to latest policies",
+
     "accepted": "Accepted {date}",
     "constitutionMeta": "v{version} · {date}",
     "constitutionOrigins": "Sources by Constitution point",
@@ -1253,6 +1322,12 @@
     "workingAgreementSource": "Source"
   },
   "governance": {
+    "historyLimited": "Showing one window of constitution history. Older versions may be available.",
+    "historyUnavailable": "Constitution history is unavailable. Try again.",
+    "historyOlder": "Older versions",
+    "historyLatest": "Latest versions",
+    "historyEmpty": "No readable constitution versions in this window.",
+    "historyCount": "Versions in this window ({count})",
     "approvalPoliciesDesc": "Configure how decisions are made for proposals.",
     "btnRecalculate": "Recalculate Score",
     "btnSynthesize": "Synthesize Constitution",
@@ -1966,6 +2041,13 @@
     "updatedAt": "Updated {date}"
   },
   "built": {
+    "historyLimited": "Showing one window of build artifacts. Older artifacts may be available. Counts and empty sections apply only to this window.",
+    "historyUnavailable": "Build history is unavailable. Try again.",
+    "historyOlder": "Older artifacts",
+    "historyLatest": "Latest artifacts",
+    "historyEmpty": "No readable artifacts in this window",
+    "historyEmptySection": "No readable artifacts in this section of the current window.",
+    "historyCount": "{count} artifacts in this window",
     "artifact": "Artifact",
     "artifactCount": "{count, plural, =0 {No build artifacts} one {# build artifact} other {# build artifacts}}",
     "asset": "Asset",
@@ -2652,6 +2734,7 @@
     "usageSummary": "Usage {inTokens} in · {outTokens} out · {latency} ms · {cost}"
   },
   "proposals": {
+    "relationWindowLimited": "Related items shown are a limited sample; more may exist.",
     "aboutCreated": "Created:",
     "aboutRelated": "Related:",
     "aboutSummary": "Summary:",

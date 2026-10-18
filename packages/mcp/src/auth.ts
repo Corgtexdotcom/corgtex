@@ -1,5 +1,5 @@
 import type { AppActor, McpOrigin } from "@corgtex/shared";
-import { env } from "@corgtex/shared";
+import { env, mcpScopesHash, recordMcpRequiredScope } from "@corgtex/shared";
 import { resolveAgentActorFromBearer, describeScope, requireWorkspaceMembership, resolveMcpOAuthAccessToken, requireTrialMcpAccess } from "@corgtex/domain";
 import type { McpOAuthProviderKey } from "@corgtex/domain";
 import { AppError, requireWorkspaceMcpActivation } from "@corgtex/domain";
@@ -106,6 +106,7 @@ export async function authenticateMcpRequest(
       scopes: agentActor.scopes,
       ...(agentActor.credentialId && agentActor.credentialVersion ? { mcpOrigin: {
         kind: "agent" as const, id: agentActor.credentialId, workspaceId, credentialVersion: agentActor.credentialVersion,
+        scopeHash: mcpScopesHash(agentActor.scopes ?? []), requiredScopes: [],
         ...(options.workspaceId ? { canonical: true as const } : {}),
       } } : {}),
     };
@@ -128,7 +129,8 @@ export async function authenticateMcpRequest(
       clientId: oauthSession.clientId,
       clientName: oauthSession.clientName,
       providerKey: oauthSession.providerKey,
-      mcpOrigin: { kind: "oauth", id: oauthSession.connectionId, workspaceId: oauthSession.workspaceId },
+      mcpOrigin: { kind: "oauth", id: oauthSession.connectionId, workspaceId: oauthSession.workspaceId,
+        scopeHash: mcpScopesHash(oauthSession.scopes), grantEpoch: oauthSession.grantEpoch, requiredScopes: [] },
     };
   }
 
@@ -140,6 +142,7 @@ export async function authenticateMcpRequest(
  * Bootstrap agents (AGENT_API_KEY) bypass scope checks.
  */
 export function requireScope(ctx: McpSessionContext, scope: string): void {
+  recordMcpRequiredScope(scope);
   if ((ctx.authKind === "oauth" || (ctx.actor.kind === "agent" && ctx.actor.authProvider === "credential"))
     && !ctx.scopes?.includes(scope)) {
     const purpose = describeScope(scope);

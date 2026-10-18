@@ -20,7 +20,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const actor = await resolveRequestActor(request);
     await requireWorkspaceMembership({ actor, workspaceId });
     const archiveFilter = request.nextUrl.searchParams.get("archiveFilter") as ArchiveFilter | null;
-    const roles = await listRoles(workspaceId, { archiveFilter: archiveFilter ?? undefined });
+    const roles = await listRoles(actor, workspaceId, { archiveFilter: archiveFilter ?? undefined });
     return NextResponse.json({ roles });
   } catch (error) {
     console.error("[RolesAPI GET]", error);

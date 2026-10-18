@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const {
+  captureDirectMemberTranscriptInput,
+  requireWorkspaceMembership,
   classifyUploadedTextForMeeting,
   intakeMeetingTranscript,
   ingestFile,
@@ -8,6 +10,8 @@ const {
   resolveRequestActor,
   handleRouteError,
 } = vi.hoisted(() => ({
+  captureDirectMemberTranscriptInput: vi.fn(async (_actor: unknown, _params: { workspaceId: string; submission: Record<string, unknown> }) => ({ inputId: "native-input" })),
+  requireWorkspaceMembership: vi.fn(),
   classifyUploadedTextForMeeting: vi.fn(),
   intakeMeetingTranscript: vi.fn(),
   ingestFile: vi.fn(),
@@ -29,6 +33,8 @@ class MockAppError extends Error {
 
 vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
+  captureDirectMemberTranscriptInput,
+  requireWorkspaceMembership,
   classifyUploadedTextForMeeting,
   intakeMeetingTranscript,
 }));
@@ -51,6 +57,20 @@ afterEach(() => {
 });
 
 describe("POST /api/workspaces/[workspaceId]/chat/attachments", () => {
+  it("checks membership before reading or extracting a submitted file", async () => {
+    resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "outsider" } });
+    requireWorkspaceMembership.mockRejectedValueOnce(new MockAppError(403, "FORBIDDEN", "Not a member"));
+    handleRouteError.mockReturnValueOnce(new Response("denied", { status: 403 }));
+    const { POST } = await import("./route");
+    const request = { formData: vi.fn() };
+    const response = await POST(request as never, { params: Promise.resolve({ workspaceId: "ws-1" }) });
+    expect(response.status).toBe(403);
+    expect(request.formData).not.toHaveBeenCalled();
+    expect(extractTextFromFileBuffer).not.toHaveBeenCalled();
+    expect(captureDirectMemberTranscriptInput).not.toHaveBeenCalled();
+    expect(intakeMeetingTranscript).not.toHaveBeenCalled();
+  });
+
   it("routes likely meeting transcripts into Meetings", async () => {
     resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
     extractTextFromFileBuffer.mockResolvedValue({ textContent: "Jan: Milan owns onboarding.", supported: true });
@@ -90,10 +110,15 @@ describe("POST /api/workspaces/[workspaceId]/chat/attachments", () => {
       expect.objectContaining({
         workspaceId: "ws-1",
         transcript: "Jan: Milan owns onboarding.",
+        rawFileBase64: Buffer.from("hello").toString("base64"),
+        rawFileMimeType: "text/plain",
+        nativeReceipt: { inputId: "native-input" },
         userMessage: "April 30 2026 weekly transcript",
         recordedAt: new Date("2026-04-30T16:00:00.000Z"),
       }),
     );
+    const captured = captureDirectMemberTranscriptInput.mock.calls[0];
+    expect(captured[1].submission).toEqual(Object.fromEntries(Object.entries(intakeMeetingTranscript.mock.calls[0][1]).filter(([key]) => key !== "nativeReceipt")));
     expect(ingestFile).not.toHaveBeenCalled();
   });
 

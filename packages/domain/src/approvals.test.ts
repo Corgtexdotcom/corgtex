@@ -11,15 +11,19 @@ import {
 const prismaMock = vi.hoisted(() => {
   const mock: any = {
     approvalDecision: {
+      findMany: vi.fn().mockResolvedValue([]),
       upsert: vi.fn(),
     },
     approvalFlow: {
+      create: vi.fn(),
       findMany: vi.fn(),
       findFirst: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
       updateMany: vi.fn(),
     },
+    user: { findMany: vi.fn() },
+    objection: { findMany: vi.fn().mockResolvedValue([]) },
     auditLog: {
       create: vi.fn(),
     },
@@ -30,6 +34,7 @@ const prismaMock = vi.hoisted(() => {
       upsert: vi.fn(),
     },
     proposal: {
+      findFirst: vi.fn().mockResolvedValue({ id: "proposal-finalize", workspaceId: "ws-1" }),
       findMany: vi.fn(),
       update: vi.fn(),
     },
@@ -55,6 +60,40 @@ vi.mock("./events", () => ({
   appendEvents: appendEventsMock,
 }));
 
+const lineage = vi.hoisted(() => ({
+  readable: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.map((row: { id: string }) => row.id))),
+  capture: vi.fn().mockResolvedValue([]),
+  snapshot: vi.fn().mockResolvedValue([]),
+  roots: vi.fn().mockResolvedValue([]),
+  record: vi.fn(),
+  invalidate: vi.fn(),
+  advance: vi.fn(),
+}));
+vi.mock("./source-lineage", () => ({
+  readableArtifactIds: lineage.readable,
+  captureArtifactPermissionEpochs: vi.fn().mockResolvedValue({version: 1, entries: []}),
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  captureReadableWorkItemInputs: async (actor: unknown, workspaceId: string, kind: string, rows: Array<{id: string}>) => ({
+    ids: await lineage.readable(actor, workspaceId, kind, rows), roots: [], heads: new Map(),
+  }),
+  mergeLineageInputRoot: (_prior: unknown, root: unknown) => root,
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _workspaceId: string, _roots: unknown,
+    remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => { await remote(); return finish(prismaMock); },
+  captureArtifactInputProof: lineage.capture,
+  captureArtifactInputSnapshotProof: lineage.snapshot,
+  currentArtifactInputRoots: lineage.roots,
+  recordArtifactInputLineage: lineage.record,
+  invalidateArtifactInputLineage: lineage.invalidate,
+  advanceHumanArtifactInputLineage: lineage.advance,
+  lineageContentFingerprint: vi.fn().mockReturnValue("a".repeat(64)),
+  preserveUnknownArtifactInputSnapshot: vi.fn(),
+}));
+
+vi.mock("./source-permission-epochs", () => ({
+  capturePermissionEpochs: vi.fn().mockResolvedValue({version: 1, entries: []}),
+  isArtifactPermissionEpochProofCurrent: vi.fn().mockResolvedValue(true),
+}));
+
 beforeEach(() => {
   vi.clearAllMocks();
   requireWorkspaceMembershipMock.mockResolvedValue({
@@ -65,13 +104,23 @@ beforeEach(() => {
     isActive: true,
   });
   prismaMock.member.findMany.mockResolvedValue([{ id: "member-1" }]);
+  prismaMock.$queryRaw.mockResolvedValue([]);
+  prismaMock.user.findMany.mockImplementation(async () => {
+    const members = await prismaMock.member.findMany.mock.results[0]?.value ?? [];
+    const flows = await prismaMock.approvalFlow.findMany.mock.results[0]?.value ?? [];
+    const users = new Map(members.filter((member: any) => member.user).map((member: any) =>
+      [member.user.id, {id: member.user.id, displayName: member.user.displayName, email: member.user.email}]));
+    for (const flow of flows) for (const objection of flow.objections ?? []) if (objection.user) users.set(objection.userId,
+      {id: objection.userId, displayName: objection.user.displayName, email: objection.user.email});
+    return [...users.values()];
+  });
   prismaMock.approvalDecision.upsert.mockResolvedValue({});
   prismaMock.approvalFlow.update.mockResolvedValue({});
   prismaMock.auditLog.create.mockResolvedValue({});
   prismaMock.approvalFlow.findMany.mockResolvedValue([]);
   prismaMock.approvalFlow.findFirst.mockResolvedValue(null);
   prismaMock.approvalFlow.updateMany.mockResolvedValue({ count: 1 });
-  prismaMock.proposal.findMany.mockResolvedValue([]);
+  prismaMock.proposal.findMany.mockImplementation(async ({ where }: any) => (where?.id?.in ?? []).map((id: string) => ({ id, workspaceId: "ws-1", title: "Proposal", authorUserId: "author" })));
   prismaMock.proposal.update.mockResolvedValue({ id: "p-1" });
   prismaMock.policyCorpus.upsert.mockResolvedValue({});
   prismaMock.$executeRaw.mockResolvedValue(1);
@@ -210,6 +259,7 @@ describe("listActionableApprovalFlows", () => {
         status: "ACTIVE",
         createdAt: new Date("2026-05-26T12:00:00.000Z"),
         decisions: [],
+        objections: [],
       },
       {
         id: "flow-archived-proposal",
@@ -219,6 +269,7 @@ describe("listActionableApprovalFlows", () => {
         status: "ACTIVE",
         createdAt: new Date("2026-05-26T11:00:00.000Z"),
         decisions: [],
+        objections: [],
       },
       {
         id: "flow-private-proposal",
@@ -228,6 +279,7 @@ describe("listActionableApprovalFlows", () => {
         status: "ACTIVE",
         createdAt: new Date("2026-05-26T10:00:00.000Z"),
         decisions: [],
+        objections: [],
       },
       {
         id: "flow-missing-proposal",
@@ -237,6 +289,7 @@ describe("listActionableApprovalFlows", () => {
         status: "ACTIVE",
         createdAt: new Date("2026-05-26T07:00:00.000Z"),
         decisions: [],
+        objections: [],
       },
     ]);
     prismaMock.proposal.findMany.mockResolvedValue([
@@ -260,9 +313,9 @@ describe("listProposalDecisionStates", () => {
       id: "reviewer-1", workspaceId: "ws-1", userId: "u-1", role: "MEMBER", isActive: true,
     });
     prismaMock.member.findMany.mockResolvedValue([
-      { id: "author-member", userId: "author", user: { displayName: "Author", email: "author@example.com" } },
-      { id: "reviewer-1", userId: "u-1", user: { displayName: "Reviewer One", email: "one@example.com" } },
-      { id: "reviewer-2", userId: "u-2", user: { displayName: "Reviewer Two", email: "two@example.com" } },
+      { id: "author-member", userId: "author", user: { id: "author", displayName: "Author", email: "author@example.com" } },
+      { id: "reviewer-1", userId: "u-1", user: { id: "u-1", displayName: "Reviewer One", email: "one@example.com" } },
+      { id: "reviewer-2", userId: "u-2", user: { id: "u-2", displayName: "Reviewer Two", email: "two@example.com" } },
     ]);
     prismaMock.proposal.findMany.mockResolvedValue([{ id: "p-1", authorUserId: "author" }]);
     prismaMock.approvalFlow.findMany.mockResolvedValue([{
@@ -594,4 +647,112 @@ describe("finalizeExpiredApprovalFlows", () => {
     expect(corpusLockOrder).toBeLessThan(prismaMock.proposal.update.mock.invocationCallOrder[0]);
     expect(corpusLockOrder).toBeLessThan(prismaMock.policyCorpus.upsert.mock.invocationCallOrder[0]);
   });
+});
+
+
+describe("approval lineage boundaries", () => {
+  const actor = { kind: "user", user: { id: "u-1" } } as any;
+  const current = { id: "flow-safe", workspaceId: "ws-1", subjectType: "PROPOSAL", subjectId: "p-1",
+    status: "ACTIVE", mode: "CONSENT", quorumPercent: 0, minApproverCount: 1,
+    closesAt: new Date("2030-01-01"), decisions: [], objections: [] };
+
+  it("rejects an unknown or revoked flow before saving a decision or calculating a reply", async () => {
+    prismaMock.approvalFlow.findUnique.mockResolvedValueOnce(current);
+    lineage.readable.mockImplementationOnce(async () => new Set());
+    await expect(recordApprovalDecision(actor, { workspaceId: "ws-1", flowId: current.id, choice: "AGREE" }))
+      .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    expect(prismaMock.approvalDecision.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.approvalFlow.update).not.toHaveBeenCalled();
+  });
+
+  it("saves the human decision proof before the complete driver proof is used for the generated flow outcome", async () => {
+    const subjectRoot = { kind: "ArtifactInputSnapshot", id: "subject-snapshot", fingerprint: "a".repeat(64) };
+    const storedDecision = { id: "decision-1", flowId: current.id, memberId: "member-1", choice: "AGREE", rationale: "Safe to try", createdAt: new Date(), updatedAt: new Date() };
+    const member = { id: "member-1", workspaceId: "ws-1", userId: "u-1", isActive: true, memberType: "HUMAN", role: "MEMBER", joinedAt: new Date(), user: { id: "u-1", displayName: "Reviewer", email: "reviewer@example.com" } };
+    prismaMock.member.findMany.mockResolvedValue([member]);
+    prismaMock.approvalFlow.findUnique.mockResolvedValueOnce(current).mockResolvedValueOnce({ ...current, decisions: [storedDecision] });
+    prismaMock.approvalDecision.upsert.mockResolvedValueOnce(storedDecision);
+    lineage.snapshot.mockResolvedValueOnce([subjectRoot]);
+    const decisionRoot = { kind: "ApprovalDecision", id: storedDecision.id, fingerprint: "b".repeat(64) };
+    lineage.capture.mockResolvedValueOnce([decisionRoot]);
+    await recordApprovalDecision(actor, { workspaceId: "ws-1", flowId: current.id, choice: "AGREE", rationale: "Safe to try" });
+    expect(lineage.record).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      tx: prismaMock, actor, artifact: { kind: "ApprovalDecision", id: storedDecision.id }, content: storedDecision,
+      inheritedRoots: [subjectRoot], origin: "DERIVED",
+    }));
+    expect(lineage.capture).toHaveBeenCalledWith(actor, "ws-1", [
+      { kind: "Member", id: member.id, snapshot: member },
+      { kind: "ApprovalDecision", id: storedDecision.id, snapshot: storedDecision },
+    ], prismaMock);
+    expect(lineage.record).toHaveBeenNthCalledWith(2, expect.objectContaining({ artifact: { kind: "ApprovalFlow", id: current.id }, inheritedRoots: [decisionRoot] }));
+    expect(lineage.record.mock.invocationCallOrder[0]).toBeLessThan(lineage.capture.mock.invocationCallOrder[0]);
+  });
+
+  it("replaces prior outcome drivers with current choices and preserves the previous human choice as history", async () => {
+    const oldDecision = { id: "changed-decision", flowId: current.id, memberId: "member-1", choice: "AGREE", rationale: "First rationale" };
+    const newDecision = { ...oldDecision, choice: "ABSTAIN", rationale: "Changed rationale" };
+    const configRoot = { kind: "ApprovalPolicy", id: "config-policy", fingerprint: "a".repeat(64) };
+    const oldDecisionRoot = { kind: "ApprovalDecision", id: oldDecision.id, fingerprint: "b".repeat(64) };
+    const newDecisionRoot = { kind: "ApprovalDecision", id: newDecision.id, fingerprint: "c".repeat(64) };
+    lineage.roots.mockResolvedValueOnce([configRoot, oldDecisionRoot]);
+    lineage.capture.mockResolvedValueOnce([newDecisionRoot]);
+    prismaMock.approvalFlow.findUnique.mockResolvedValueOnce({ ...current, decisions: [oldDecision] }).mockResolvedValueOnce({ ...current, decisions: [newDecision] });
+    prismaMock.approvalDecision.upsert.mockResolvedValueOnce(newDecision);
+    await recordApprovalDecision(actor, { workspaceId: "ws-1", flowId: current.id, choice: "ABSTAIN", rationale: "Changed rationale" });
+    expect(lineage.snapshot).toHaveBeenCalledWith(actor, "ws-1", expect.objectContaining({ kind: "ApprovalDecision", id: oldDecision.id, fingerprint: expect.any(String) }), prismaMock);
+    expect(lineage.snapshot.mock.invocationCallOrder.at(-1)).toBeLessThan(prismaMock.approvalDecision.upsert.mock.invocationCallOrder[0]);
+    expect(lineage.record).toHaveBeenLastCalledWith(expect.objectContaining({ artifact: { kind: "ApprovalFlow", id: current.id }, inheritedRoots: [configRoot, newDecisionRoot] }));
+  });
+
+  it("omits an entire decision state when a current child proof is restricted", async () => {
+    prismaMock.proposal.findMany.mockResolvedValueOnce([{ id: "p-1", authorUserId: "author" }]);
+    prismaMock.approvalFlow.findMany.mockResolvedValueOnce([{ ...current, decisions: [{ id: "private-decision", memberId: "member-1", choice: "AGREE", rationale: "Hidden rationale" }] }]);
+    lineage.readable.mockImplementation(async (_actor, _workspace, kind, rows) => new Set(kind === "ApprovalDecision" ? [] : rows.map((row: { id: string }) => row.id)));
+    try {
+      const result = await listProposalDecisionStates(actor, { workspaceId: "ws-1", proposalIds: ["p-1"] });
+      expect(result.size).toBe(0);
+      expect(JSON.stringify([...result])).not.toContain("Hidden rationale");
+    } finally {
+      lineage.readable.mockImplementation(async (_actor, _workspace, _kind, rows) => new Set(rows.map((row: { id: string }) => row.id)));
+    }
+  });
+
+  it("skips unknown expiry flows with the explicit workspace-scoped actor", async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ id: "flow-unknown" }]);
+    prismaMock.approvalFlow.findUnique.mockResolvedValueOnce({ ...current, id: "flow-unknown", subjectType: "ACTION" });
+    lineage.readable.mockImplementationOnce(async () => new Set());
+    await expect(finalizeExpiredApprovalFlows()).resolves.toBe(0);
+    expect(lineage.readable).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"] }), "ws-1", "ApprovalFlow", expect.any(Array), prismaMock);
+    expect(prismaMock.approvalFlow.update).not.toHaveBeenCalled();
+  });
+
+  it("does not manufacture a proof when a flow producer provides no actor", async () => {
+    const { ensureApprovalFlow } = await import("./approvals");
+    prismaMock.approvalFlow.findUnique.mockResolvedValueOnce(null);
+    const stored = { ...current, id: "flow-created" };
+    prismaMock.approvalFlow.create.mockResolvedValueOnce(stored);
+    await ensureApprovalFlow(prismaMock, { workspaceId: "ws-1", subjectType: "PROPOSAL", subjectId: "p-1", policy: { id: "policy-1", mode: "CONSENT", quorumPercent: 0, minApproverCount: 1 } as any });
+    expect(lineage.invalidate).toHaveBeenCalledWith({ tx: prismaMock, workspaceId: "ws-1", artifact: { kind: "ApprovalFlow", id: stored.id }, content: stored });
+    expect(lineage.record).not.toHaveBeenCalled();
+  });
+});
+
+
+it("preserves unknown approval child bodies as history without creating a readable receipt", async () => {
+  const { preserveApprovalFlowHistory } = await import("./approvals");
+  const { preserveUnknownArtifactInputSnapshot } = await import("./source-lineage");
+  const { AppError } = await import("./errors");
+  const actor = { kind: "user", user: { id: "u-1" } } as any;
+  const flow = { id: "history-flow", workspaceId: "ws-1", subjectType: "PROPOSAL", subjectId: "p-1", status: "ACTIVE" };
+  const decision = { id: "history-decision", flowId: flow.id, choice: "AGREE", rationale: "Original human rationale", memberId: "member-1" };
+  const objection = { id: "history-objection", flowId: flow.id, userId: "u-1", bodyMd: "Original objection body", resolvedAt: null };
+  prismaMock.approvalDecision.findMany.mockResolvedValueOnce([decision]);
+  prismaMock.objection.findMany.mockResolvedValueOnce([objection]);
+  lineage.snapshot.mockRejectedValueOnce(new AppError(409, "UNKNOWN_LINEAGE", "Legacy flow"))
+    .mockRejectedValueOnce(new AppError(409, "UNKNOWN_LINEAGE", "Legacy decision"))
+    .mockRejectedValueOnce(new AppError(409, "SOURCE_RESTRICTED", "Legacy objection"));
+  await preserveApprovalFlowHistory(prismaMock, actor, "ws-1", flow as any);
+  expect(preserveUnknownArtifactInputSnapshot).toHaveBeenCalledWith(prismaMock, "ws-1", { kind: "ApprovalDecision", id: decision.id }, decision);
+  expect(preserveUnknownArtifactInputSnapshot).toHaveBeenCalledWith(prismaMock, "ws-1", { kind: "Objection", id: objection.id }, objection);
+  expect(lineage.record).not.toHaveBeenCalled();
 });

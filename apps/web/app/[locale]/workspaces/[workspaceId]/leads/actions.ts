@@ -379,7 +379,7 @@ export async function approveQualificationAction(formData: FormData) {
 
   await approveQualification(actor, { workspaceId, qualificationId });
   
-  sendSchedulingLinkEmail(qualificationId).catch(err => {
+  sendSchedulingLinkEmail(actor, { workspaceId, qualificationId }).catch(err => {
     console.error("Failed to send scheduling email:", err);
   });
   

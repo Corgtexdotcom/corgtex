@@ -91,6 +91,7 @@ const { prismaMock, state } = vi.hoisted(() => {
   }
 
   const tx = {
+    $queryRaw: vi.fn(async () => []),
     $executeRaw: vi.fn(async () => 1),
     member: {
       findUnique: vi.fn(async ({ where }: any) => store.members.get(where.id) ?? null),
@@ -238,6 +239,12 @@ const { prismaMock, state } = vi.hoisted(() => {
       ))),
     },
     notification: {
+      findUnique: vi.fn(async ({ where }: any) => store.notifications.find((row) => row.dedupeKey === where.dedupeKey) ?? null),
+      create: vi.fn(async ({ data }: any) => {
+        const notification = { id: `notification-${store.notifications.length + 1}`, ...data };
+        store.notifications.push(notification);
+        return notification;
+      }),
       createMany: vi.fn(async ({ data }: any) => {
         store.notifications.push(...data);
         return { count: data.length };
@@ -277,6 +284,26 @@ vi.mock("./auth", () => ({
   actorUserIdForWorkspace: vi.fn(async (actor: AppActor) => actor.kind === "user" ? actor.user.id : "agent-user"),
 }));
 
+const producerMocks = vi.hoisted(() => ({
+  prepare: vi.fn(), finish: vi.fn(), readable: vi.fn(),
+}));
+vi.mock("./producer-lineage", () => ({
+  prepareProducerLineage: producerMocks.prepare,
+  finishProducerLineage: producerMocks.finish,
+}));
+vi.mock("./source-lineage", () => ({ readableArtifactIds: producerMocks.readable,
+  captureArtifactInputProof: vi.fn(async (_actor, _workspace, inputs) => inputs.map((input: { kind: string; id: string }) => ({ ...input, fingerprint: "a".repeat(64) }))),
+}));
+
+vi.mock("./digest-lineage", () => ({ DigestReadRelease: class {
+  constructor(private actor: unknown, private workspaceId: string) {}
+  async capture(kind: string, records: Array<{ id: string }>) {
+    const ids = await producerMocks.readable(this.actor, this.workspaceId, kind, records);
+    return { records: records.filter(row => ids.has(row.id)), roots: [] };
+  }
+  async finish<T>(value: T) { return value; }
+} }));
+
 describe("deliberation", () => {
   const workspaceId = "ws-1";
   const proposalId = "proposal-1";
@@ -288,6 +315,9 @@ describe("deliberation", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    producerMocks.prepare.mockResolvedValue({ mode: "HUMAN_ORIGINAL", inputs: [], roots: [] });
+    producerMocks.finish.mockResolvedValue(undefined);
+    producerMocks.readable.mockImplementation(async (_actor, _workspaceId, _kind, records) => new Set(records.map((row: { id: string }) => row.id)));
     state.users.clear();
     state.members.clear();
     state.proposals.clear();
@@ -343,7 +373,7 @@ describe("deliberation", () => {
     });
     expect(list).toHaveLength(1);
     expect(list[0].id).toBe(entry.id);
-    expect(list[0].author.displayName).toBe("Member");
+    expect(list[0].author!.displayName).toBe("Member");
     expect(list[0].parentVersion).toBe(1);
   });
 
@@ -777,7 +807,7 @@ describe("deliberation", () => {
     expect(entriesByParent.get(proposalId)?.map((entry) => entry.id)).toEqual([firstEntry.id, laterFirstEntry.id]);
     expect(entriesByParent.get("proposal-2")?.map((entry) => entry.id)).toEqual([secondEntry.id]);
     expect(entriesByParent.get("missing-parent")).toEqual([]);
-    expect(entriesByParent.get(proposalId)?.[0].author.displayName).toBe("Member");
+    expect(entriesByParent.get(proposalId)?.[0].author!.displayName).toBe("Member");
   });
 
   it("returns an empty parent map for empty parent ids", async () => {
@@ -1198,4 +1228,54 @@ describe("deliberation", () => {
 
     expect(state.entries).toHaveLength(0);
   });
+  it("records the complete producer receipt with the created entry in its transaction", async () => {
+    const roots = [{ kind: "BrainSource" as const, id: "source-1", fingerprint: "a".repeat(64) }];
+    const entry = await postDeliberationEntry(memberActor, {
+      workspaceId, parentType: "PROPOSAL", parentId: proposalId, entryType: "REACTION",
+      bodyMd: "Derived observation", lineageRoots: roots,
+    });
+    expect(producerMocks.prepare).toHaveBeenCalledWith(expect.objectContaining({
+      actor: memberActor, workspaceId, capture: expect.objectContaining({ lineageRoots: roots }),
+    }));
+    expect(producerMocks.finish).toHaveBeenCalledWith(expect.objectContaining({
+      tx: producerMocks.prepare.mock.calls[0][0].tx,
+      artifact: { kind: "DeliberationEntry", id: entry.id }, content: entry,
+    }));
+  });
+
+  it("carries the previous entry into edit and resolution receipts", async () => {
+    const entry = await postDeliberationEntry(memberActor, {
+      workspaceId, parentType: "PROPOSAL", parentId: proposalId, entryType: "REACTION", bodyMd: "First",
+    });
+    await updateDeliberationEntry(memberActor, { workspaceId, entryId: entry.id, bodyMd: "Edited" });
+    expect(producerMocks.prepare).toHaveBeenLastCalledWith(expect.objectContaining({
+      artifact: { kind: "DeliberationEntry", id: entry.id }, before: expect.objectContaining({ bodyMd: "First" }),
+    }));
+    await resolveDeliberationEntry(memberActor, { workspaceId, entryId: entry.id, resolvedNote: "Resolved" });
+    expect(producerMocks.prepare).toHaveBeenLastCalledWith(expect.objectContaining({
+      before: expect.objectContaining({ bodyMd: "Edited", resolvedNote: null }),
+    }));
+    expect(producerMocks.finish).toHaveBeenLastCalledWith(expect.objectContaining({
+      content: expect.objectContaining({ resolvedNote: "Resolved" }),
+    }));
+  });
+
+  it("withholds unproven entries from both list surfaces", async () => {
+    await postDeliberationEntry(memberActor, {
+      workspaceId, parentType: "PROPOSAL", parentId: proposalId, entryType: "REACTION", bodyMd: "Restricted",
+    });
+    producerMocks.readable.mockResolvedValue(new Set());
+    expect(await listDeliberationEntries(memberActor, { workspaceId, parentType: "PROPOSAL", parentId: proposalId })).toEqual([]);
+    const grouped = await listDeliberationEntriesForParents(memberActor, { workspaceId, parentType: "PROPOSAL", parentIds: [proposalId] });
+    expect(grouped.get(proposalId)).toEqual([]);
+  });
+
+  it("does not copy generated or unknown entry text into unreceipted notifications", async () => {
+    producerMocks.prepare.mockResolvedValue({ mode: "UNKNOWN" });
+    await postDeliberationEntry(memberActor, { workspaceId, parentType: "PROPOSAL", parentId: proposalId,
+      entryType: "REACTION", bodyMd: "@Other restricted copied facts" });
+    expect(state.notifications).toEqual([]);
+    expect(producerMocks.finish).toHaveBeenCalledWith(expect.objectContaining({ receipt: { mode: "UNKNOWN" } }));
+  });
+
 });

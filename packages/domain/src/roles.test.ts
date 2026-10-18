@@ -1,5 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
+import { captureArtifactInputProof, readableArtifactIds } from "./source-lineage";
+import { AppError } from "./errors";
+
+vi.mock("./source-lineage", () => ({
+  captureArtifactInputProof: vi.fn().mockResolvedValue([]),
+  readableArtifactIds: vi.fn().mockResolvedValue(new Set()),
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({ value: await read(), heads: new Map() }),
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _workspaceId: string, _roots: unknown,
+    before: () => Promise<void>, release: (tx: typeof prismaMock) => Promise<unknown>) => { await before(); return release(prismaMock); },
+}));
+
+vi.mock("./producer-lineage", () => ({
+  prepareProducerLineage: vi.fn().mockResolvedValue({ mode: "HUMAN_ORIGINAL", inputs: [], roots: [] }),
+  finishProducerLineage: vi.fn().mockResolvedValue(undefined),
+}));
 
 const { prismaMock } = vi.hoisted(() => {
   const prisma = {
@@ -41,6 +56,7 @@ const { prismaMock } = vi.hoisted(() => {
       updateMany: vi.fn(),
     },
     roleHolderHistory: {
+      findMany: vi.fn().mockResolvedValue([]),
       create: vi.fn(),
       updateMany: vi.fn(),
     },
@@ -48,11 +64,14 @@ const { prismaMock } = vi.hoisted(() => {
       create: vi.fn(),
     },
     roleOnboardingSession: {
+      findMany: vi.fn().mockResolvedValue([]),
       findFirst: vi.fn(),
       create: vi.fn(),
       updateMany: vi.fn(),
     },
     notification: {
+      create: vi.fn(),
+      findUnique: vi.fn(),
       createMany: vi.fn(),
     },
     notificationPreference: {
@@ -103,9 +122,23 @@ const actor: AppActor = {
   },
 };
 
+// Keep the fixture's per-kind denials while exercising the real release
+// orchestration. PostgreSQL regressions exercise the actual proof backend.
+async function captureFixtureProof(...[actor, workspaceId, inputs]: Parameters<typeof captureArtifactInputProof>) {
+  for (const input of inputs) {
+    if (input.kind === "User") continue;
+    const visible = await readableArtifactIds(actor, workspaceId, input.kind,
+      [input.snapshot as { id: string }]);
+    if (!visible.has(input.id)) throw new AppError(409, "SOURCE_RESTRICTED", "Fixture source denied.");
+  }
+  return [];
+}
+
 describe("roles domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row) => row.id)));
+    vi.mocked(captureArtifactInputProof).mockImplementation(captureFixtureProof);
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
@@ -122,7 +155,7 @@ describe("roles domain", () => {
       conversation: { id: "conversation-1" },
     });
     prismaMock.roleOnboardingSession.updateMany.mockResolvedValue({ count: 1 });
-    prismaMock.notification.createMany.mockResolvedValue({ count: 1 });
+    prismaMock.notification.create.mockImplementation(async ({ data }) => ({ id: "notification-1", ...data }));
     prismaMock.notificationPreference.findMany.mockResolvedValue([]);
     prismaMock.member.findMany.mockResolvedValue([{ userId: "user-1" }]);
     prismaMock.roleAssignment.upsert.mockResolvedValue({ id: "assignment-1" });
@@ -131,10 +164,10 @@ describe("roles domain", () => {
   });
 
   it("listRoles scopes roles by workspace through circles", async () => {
-    prismaMock.role.findMany.mockResolvedValue([{ id: "role-1" }]);
+    prismaMock.role.findMany.mockResolvedValue([{ id: "role-1", circleId: "circle-1", circle: { id: "circle-1", name: "Product" } }]);
 
     const { listRoles } = await import("./roles");
-    await expect(listRoles("workspace-1")).resolves.toEqual([{ id: "role-1" }]);
+    await expect(listRoles(actor, "workspace-1")).resolves.toMatchObject([{ id: "role-1", circleId: "circle-1", circle: { id: "circle-1", name: "Product" } }]);
     expect(prismaMock.role.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: {
         archivedAt: null,
@@ -150,6 +183,7 @@ describe("roles domain", () => {
     prismaMock.role.findFirst.mockResolvedValue({
       id: "role-1",
       name: "Lead",
+      circleId: "circle-1",
       circle: { id: "circle-1", name: "Circle" },
       assignments: [
         {
@@ -614,15 +648,11 @@ describe("roles domain", () => {
         topic: "Onboarding: Lead",
       }),
     }));
-    expect(prismaMock.notification.createMany).toHaveBeenCalledWith({
-      data: [
-        expect.objectContaining({
-          userId: "user-1",
-          entityType: "ConversationSession",
-          entityId: "conversation-1",
-          type: "role-onboarding.assigned",
-        }),
-      ],
+    expect(prismaMock.notification.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        userId: "user-1", entityType: "ConversationSession", entityId: "conversation-1",
+        type: "role-onboarding.assigned",
+      }),
     });
     expect(prismaMock.roleAssignment.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: {
@@ -942,10 +972,10 @@ describe("roles domain", () => {
   });
 
   it("listRoleAssignments returns assignments for workspace roles", async () => {
-    prismaMock.roleAssignment.findMany.mockResolvedValue([{ id: "assignment-1" }]);
+    prismaMock.roleAssignment.findMany.mockResolvedValue([{ id: "assignment-1", roleId: "role-1", role: { id: "role-1", name: "Lead", circleId: "circle-1", circle: { id: "circle-1", name: "Circle" } }, member: { id: "member-1", user: { id: "user-1", email: "member@example.test", displayName: "Member", bio: null } } }]);
 
     const { listRoleAssignments } = await import("./roles");
-    await expect(listRoleAssignments("workspace-1")).resolves.toEqual([{ id: "assignment-1" }]);
+    await expect(listRoleAssignments(actor, "workspace-1")).resolves.toMatchObject([{ id: "assignment-1", role: { id: "role-1", circle: { id: "circle-1" } } }]);
     expect(prismaMock.roleAssignment.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: {
         role: {
@@ -957,6 +987,163 @@ describe("roles domain", () => {
         },
       },
     }));
+  });
+
+  function readerRole(id: string, circleId = "circle-public", sortOrder = 0) {
+    return {
+      id, circleId, name: id, purposeMd: `Purpose for ${id}`, accountabilities: [], artifacts: [],
+      sortOrder, createdAt: new Date("2026-10-01T12:00:00Z"), updatedAt: new Date("2026-10-01T12:00:00Z"),
+      circle: { id: circleId, name: `Circle ${circleId}`, purposeMd: "Circle purpose", sortOrder: 99 },
+    };
+  }
+
+  function readerAssignment(id: string, role = readerRole("role-public")) {
+    return {
+      id, roleId: role.id, memberId: `member-${id}`, assignedAt: new Date("2026-10-01T12:00:00Z"),
+      expiresAt: null, role,
+      member: { id: `member-${id}`, workspaceId: "workspace-1", userId: `user-${id}`, isActive: true,
+        user: { id: `user-${id}`, email: `${id}@example.test`, displayName: id, bio: "Member profile" } },
+    };
+  }
+
+  it("filters restricted and unknown roles before ranking and redacts withheld circle paths", async () => {
+    const hiddenCircleRole = readerRole("role-original", "circle-finance", 0);
+    const publicRole = readerRole("role-public", "circle-public", 1);
+    publicRole.circle.sortOrder = 0;
+    hiddenCircleRole.circle.sortOrder = 1000;
+    prismaMock.role.findMany.mockResolvedValue([
+      readerRole("role-finance"), readerRole("role-legacy"), publicRole, hiddenCircleRole,
+    ]);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, kind, rows) => new Set(rows
+      .filter((row) => kind === "Role" ? !["role-finance", "role-legacy"].includes(row.id) : row.id !== "circle-finance")
+      .map((row) => row.id)));
+
+    const { listRoles } = await import("./roles");
+    const result = await listRoles(actor, "workspace-1");
+
+    expect(result.map((role) => role.id)).toEqual(["role-original", "role-public"]);
+    expect(result[0]).toMatchObject({ circleId: null, circle: null });
+    expect(result[1]?.circle).toEqual({ id: "circle-public", name: "Circle circle-public" });
+    expect(readableArtifactIds).toHaveBeenCalledWith(actor, "workspace-1", "Role", expect.arrayContaining([
+      expect.objectContaining({ id: "role-legacy", purposeMd: "Purpose for role-legacy" }),
+    ]));
+    expect(prismaMock.role.findMany.mock.calls[0]?.[0]).not.toHaveProperty("orderBy");
+  });
+
+  it("withholds detail content when the role proof is unknown or no longer readable", async () => {
+    prismaMock.role.findFirst.mockResolvedValue({ ...readerRole("role-finance"), assignments: [] });
+    vi.mocked(readableArtifactIds).mockResolvedValue(new Set());
+    const { getRole } = await import("./roles");
+    await expect(getRole(actor, { workspaceId: "workspace-1", roleId: "role-finance" }))
+      .rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+  });
+
+  it("redacts detail circle affiliation and filters assignment profiles before filler counts", async () => {
+    const role = readerRole("role-original", "circle-finance");
+    const detailAssignment = (id: string) => {
+      const row = readerAssignment(id, role);
+      return { id: row.id, roleId: row.roleId, memberId: row.memberId, assignedAt: row.assignedAt,
+        expiresAt: row.expiresAt, member: row.member };
+    };
+    prismaMock.role.findFirst.mockResolvedValue({ ...role,
+      assignments: [detailAssignment("revoked"), detailAssignment("expired"), detailAssignment("public")],
+    });
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, kind, rows) => new Set(rows
+      .filter((row) => kind === "Circle" ? false
+        : kind === "RoleAssignment" ? row.id !== "expired"
+          : true)
+      .map((row) => row.id)));
+
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor, _workspaceId, inputs) => {
+      if (inputs.some((input) => input.id === "user-revoked")) throw new AppError(409, "SOURCE_RESTRICTED", "Profile unavailable.");
+      return captureFixtureProof(_actor, _workspaceId, inputs);
+    });
+    const { getRole } = await import("./roles");
+    const result = await getRole(actor, { workspaceId: "workspace-1", roleId: role.id });
+    expect(result).toMatchObject({ id: "role-original", circleId: null, circle: null });
+    expect(result.assignments.map((assignment) => assignment.id)).toEqual(["public"]);
+    expect(readableArtifactIds).toHaveBeenCalledWith(actor, "workspace-1", "Member", expect.arrayContaining([
+      expect.objectContaining({ id: "member-public", user: { id: "user-public", email: "public@example.test", displayName: "public" } }),
+    ]));
+    expect(JSON.stringify(result)).not.toContain("circle-finance");
+  });
+
+  it("filters assignment lists by role, association and member proof and hides circle metadata", async () => {
+    const visible = readerAssignment("public", readerRole("role-original", "circle-finance"));
+    prismaMock.roleAssignment.findMany.mockResolvedValue([
+      readerAssignment("hidden-role", readerRole("role-private")), readerAssignment("inactive-member"), visible,
+    ]);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, kind, rows) => new Set(rows
+      .filter((row) => kind === "Role" ? row.id !== "role-private"
+        : kind === "Circle" ? row.id !== "circle-finance"
+          : kind === "Member" ? row.id !== "member-inactive-member" : true)
+      .map((row) => row.id)));
+    const { listRoleAssignments } = await import("./roles");
+    const result = await listRoleAssignments(actor, "workspace-1");
+    expect(result.map((assignment) => assignment.id)).toEqual(["public"]);
+    expect(result[0]?.role).toEqual({ id: "role-original", name: "role-original", circle: null });
+    expect(result[0]?.member.user).not.toHaveProperty("bio");
+    expect(JSON.stringify(result)).not.toContain("circle-finance");
+  });
+
+  it("preserves the stored circle association when a partial role edit omits it", async () => {
+    prismaMock.role.findUnique.mockResolvedValue({ ...readerRole("role-1", "circle-hidden"),
+      archivedAt: null, circle: { workspaceId: "workspace-1" } });
+    prismaMock.role.update.mockResolvedValue({ ...readerRole("role-1", "circle-hidden"), name: "Edited" });
+    const { updateRole } = await import("./roles");
+    await updateRole(actor, { workspaceId: "workspace-1", roleId: "role-1", name: "Edited" });
+    expect(prismaMock.role.update).toHaveBeenCalledWith(expect.objectContaining({ data: { name: "Edited" } }));
+    expect(prismaMock.circle.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("redacts withheld circle data in role mutation responses without moving the role", async () => {
+    prismaMock.role.findUnique.mockResolvedValue({ ...readerRole("role-1", "circle-hidden"),
+      archivedAt: null, circle: { workspaceId: "workspace-1" } });
+    prismaMock.role.update.mockResolvedValue({ ...readerRole("role-1", "circle-hidden"), name: "Edited" });
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, kind, rows) =>
+      new Set(kind === "Circle" ? [] : rows.map((row) => row.id)));
+    const { updateRole } = await import("./roles");
+    await expect(updateRole(actor, { workspaceId: "workspace-1", roleId: "role-1", name: "Edited" }))
+      .resolves.toMatchObject({ id: "role-1", name: "Edited", circleId: null, circle: null });
+    expect(prismaMock.role.update).toHaveBeenCalledWith(expect.objectContaining({ data: { name: "Edited" } }));
+  });
+
+  it("withholds stale body content from updated and unchanged mutation responses", async () => {
+    const role = { ...readerRole("role-legacy"), archivedAt: null,
+      circle: { ...readerRole("role-legacy").circle, workspaceId: "workspace-1" } };
+    prismaMock.role.findUnique.mockResolvedValue(role);
+    prismaMock.role.update.mockResolvedValue({ ...role, name: "Edited" });
+    vi.mocked(readableArtifactIds).mockResolvedValue(new Set());
+    const { updateRole } = await import("./roles");
+    await expect(updateRole(actor, { workspaceId: "workspace-1", roleId: role.id, name: "Edited" }))
+      .resolves.toEqual({ id: role.id, contentWithheld: true });
+    await expect(updateRole(actor, { workspaceId: "workspace-1", roleId: role.id, name: role.name }))
+      .resolves.toEqual({ id: role.id, contentWithheld: true });
+    expect(prismaMock.role.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("captures partial holder labels against the authoritative User without inventing omitted profile fields", async () => {
+    const assignment = readerAssignment("partial-label");
+    const partialUser = { id: assignment.member.user.id, email: assignment.member.user.email, displayName: assignment.member.user.displayName };
+    const row = { ...assignment, member: { ...assignment.member, user: partialUser } };
+    const { filterReadableRoleAssignments } = await import("./roles");
+    expect(await filterReadableRoleAssignments(actor, "workspace-1", [row])).toEqual([row]);
+    expect(captureArtifactInputProof).toHaveBeenCalledWith(actor, "workspace-1", [
+      { kind: "User", id: partialUser.id, snapshot: partialUser },
+    ], undefined);
+    expect(vi.mocked(captureArtifactInputProof).mock.calls.at(-1)?.[2][0]?.snapshot).not.toHaveProperty("bio");
+    expect(vi.mocked(readableArtifactIds).mock.calls.some((call) => call[2] === "User")).toBe(false);
+  });
+
+  it("withholds only the holder whose observed profile changed or current audience disappeared", async () => {
+    const readable = readerAssignment("current");
+    const changed = readerAssignment("changed");
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor, _workspaceId, inputs) => {
+      if (inputs[0]?.id === changed.member.user.id) throw new AppError(409, "SOURCE_CHANGED", "User changed.");
+      return captureFixtureProof(_actor, _workspaceId, inputs);
+    });
+    const { filterReadableRoleAssignments } = await import("./roles");
+    expect(await filterReadableRoleAssignments(actor, "workspace-1", [changed, readable])).toEqual([readable]);
   });
 
 });

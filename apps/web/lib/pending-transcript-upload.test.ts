@@ -8,11 +8,13 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("@corgtex/shared", () => ({
   getSharedStateBackend: () => mocks.backend,
+  isRedisConfigured: () => true, isSecretEncryptionConfigured: () => true,
   encryptSecret: mocks.encrypt, decryptSecret: mocks.decrypt, getRedisClient: mocks.redis,
   redisKey: (key: string) => `test:${key}`,
   prisma: { pendingTranscriptUpload: { create: mocks.create, findFirst: mocks.findFirst, deleteMany: mocks.deleteMany }, $executeRaw: mocks.cleanup },
 }));
 const payload: PendingTranscriptPayload = {
+  uploadedByUserId: "member-user-a", rawFileBase64: null, rawFileMimeType: null,
   workspaceId: "workspace-a", transcript: "Synthetic transcript", fileName: null,
   title: null, source: null, recordedAt: null, timeZone: null, summaryMd: null,
   ingestionGuidanceMd: null, participantIds: [], participantEmails: [], meetingId: null, createNewMeeting: false,
@@ -80,10 +82,10 @@ describe("pending transcript storage", () => {
 
   it("preserves Redis keys and expiry when Redis is selected", async () => {
     mocks.backend = "redis";
-    const redis = { setEx: vi.fn(), get: vi.fn().mockResolvedValue(JSON.stringify(payload)), del: vi.fn() };
+    const redis = { setEx: vi.fn(), get: vi.fn().mockResolvedValue("encrypted-fixture"), del: vi.fn() };
     mocks.redis.mockResolvedValue(redis);
     const token = await storePendingTranscriptPayload(payload);
-    expect(redis.setEx).toHaveBeenCalledWith(`test:meeting-transcript-upload:workspace-a:${token}`, 1200, JSON.stringify(payload));
+    expect(redis.setEx).toHaveBeenCalledWith(`test:meeting-transcript-upload:workspace-a:${token}`, 1200, "encrypted-fixture");
     expect(await readPendingTranscriptPayload("workspace-a", token!)).toEqual(payload);
     await deletePendingTranscriptPayload("workspace-a", token);
     expect(redis.del).toHaveBeenCalledWith(`test:meeting-transcript-upload:workspace-a:${token}`);

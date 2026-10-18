@@ -7,11 +7,15 @@
     "@corgtex/shared": "0.1.0",
     "@corgtex/storage": "0.1.0",
     "ical.js": "^2.2.1",
+    "p-retry": "^4.6.2",
     "sharp": "^0.35.5",
     "zod": "^4.4.3"
   },
   "exports": {
     ".": "./src/index.ts",
+    "./artifact-input-write-fence": "./src/artifact-input-write-fence.ts",
+    "./sql-ingestion-contract": "./src/sql-ingestion-contract.ts",
+    "./sql-native-driver": "./src/sql-native-driver.ts",
     "./exact-target-inventory": "./src/exact-target-inventory.ts",
     "./modules": "./src/modules/index.ts"
   }

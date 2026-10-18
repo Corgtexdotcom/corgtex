@@ -1,9 +1,10 @@
-import { prisma } from "@corgtex/shared";
+import { withOAuthKnowledgeSyncLease } from "../../../domain/src/oauth-knowledge-sync-lease";
+import { beginOAuthKnowledgeSync, type OAuthKnowledgeSyncClaim } from "../../../domain/src/oauth-provider-native";
+import { invariant } from "../../../domain/src/errors";
+import { prisma, type AppActor } from "@corgtex/shared";
 import { syncDocumentKnowledge, syncKnowledgeForSource } from "@corgtex/knowledge";
 import {
   fetchCalendarEvents,
-  fetchFilteredEmailMessages,
-  fetchSelectedDocuments,
   externalResourceKnowledgeInput,
   materializeCrmCalendarTouchpoints,
   materializeCrmEmailTouchpoints,
@@ -89,11 +90,11 @@ export async function handleMeetingKnowledgeSync(jobId: string, payload: { meeti
 }
 
 
-export async function handleDocumentKnowledgeSync(jobId: string, payload: { documentId?: string }, workspaceId: string) {
+export async function handleDocumentKnowledgeSync(jobId: string, payload: { documentId?: string }, workspaceId: string, lineageActor?: AppActor) {
   if (!payload.documentId) {
     return;
   }
-  return syncDocumentKnowledge({ workspaceId, documentId: payload.documentId, workflowJobId: jobId });
+  return syncDocumentKnowledge({ workspaceId, documentId: payload.documentId, workflowJobId: jobId, ...(lineageActor ? { lineageActor } : {}) });
 }
 
 export async function handleExternalResourceKnowledgeSync(jobId: string, payload: { resourceId?: string }, workspaceId: string) {
@@ -132,51 +133,7 @@ export async function handleExternalContentKnowledgeSync(jobId: string, payload:
 }
 
 
-export async function handleEventKnowledgeSync(jobId: string, payload: { eventId?: string }, workspaceId: string) {
-  if (!payload.eventId) {
-    return;
-  }
-
-  const event = await prisma.event.findUnique({
-    where: { id: payload.eventId },
-    select: {
-      id: true,
-      workspaceId: true,
-      type: true,
-      aggregateType: true,
-      aggregateId: true,
-      payload: true,
-      createdAt: true,
-    },
-  });
-
-  if (!event || event.workspaceId !== workspaceId) {
-    return;
-  }
-
-  const title = `Event: ${event.type}`;
-  const content = [
-    `An event of type '${event.type}' occurred on ${event.createdAt.toISOString()}.`,
-    `Payload details:`,
-    JSON.stringify(event.payload, null, 2),
-  ].join("\n");
-
-  await syncKnowledgeForSource({
-    workspaceId,
-    sourceType: "EVENT",
-    accessDomain: "WORKSPACE",
-    sourceId: event.id,
-    sourceTitle: title,
-    content,
-    metadata: {
-      eventType: event.type,
-      aggregateType: event.aggregateType,
-      aggregateId: event.aggregateId,
-      workflowJobId: jobId,
-    },
-    workflowJobId: jobId,
-  });
-}
+export { handleEventKnowledgeSync } from "./event-knowledge-sync";
 
 
 export async function handleTensionKnowledgeSync(jobId: string, payload: { tensionId?: string }, workspaceId: string) {
@@ -349,7 +306,6 @@ export async function handleSlackMessageKnowledgeSync(jobId: string, payload: { 
     content,
     metadata: {
       installationId: message.installationId,
-      externalTeamName: message.installation.externalTeamName,
       externalChannelId: message.externalChannelId,
       externalMessageId: message.externalMessageId,
       externalUserId: message.externalUserId,
@@ -451,7 +407,8 @@ function stringArray(value: unknown) {
     : [];
 }
 
-export async function handleOAuthDocumentsSync(jobId: string, payload: { connectionId?: string }, workspaceId: string) {
+export async function handleOAuthDocumentsSync(jobId: string, payload: { connectionId?: string }, workspaceId: string, expectedClaim: OAuthKnowledgeSyncClaim) {
+  return withOAuthKnowledgeSyncLease(expectedClaim, async () => {
   if (!payload.connectionId) return;
   const connection = await prisma.oAuthConnection.findUnique({ where: { id: payload.connectionId } });
   if (!connection || connection.status !== "ACTIVE") return;
@@ -462,47 +419,12 @@ export async function handleOAuthDocumentsSync(jobId: string, payload: { connect
   const selectedDocumentIds = stringArray(documentSettings.selectedDriveIds ?? documentSettings.selectedDocumentIds);
   if (selectedDocumentIds.length === 0) return;
 
-  try {
-    const documents = await fetchSelectedDocuments(connection.id, selectedDocumentIds);
-    for (const document of documents) {
-      if (!document.contentText.trim()) continue;
-      const documentSourceKey = document.sourceKey ?? document.id;
-      await syncKnowledgeForSource({
-        workspaceId,
-        sourceType: "DOCUMENT",
-        accessDomain: "WORKSPACE",
-        sourceId: `oauth-doc-${connection.id}-${document.provider.toLowerCase()}-${documentSourceKey}`,
-        sourceTitle: document.name,
-        content: [document.name, document.contentText].filter(Boolean).join("\n\n"),
-        metadata: {
-          connectionId: connection.id,
-          provider: document.provider,
-          providerDocumentId: document.id,
-          mimeType: document.mimeType,
-          webUrl: document.webUrl,
-          modifiedAt: document.modifiedAt?.toISOString() ?? null,
-          workflowJobId: jobId,
-        },
-        workflowJobId: jobId,
-      });
-    }
-    await prisma.oAuthConnection.update({
-      where: { id: connection.id },
-      data: { lastSyncAt: new Date(), lastSyncError: null, status: "ACTIVE" },
-    });
-  } catch (error) {
-    await prisma.oAuthConnection.update({
-      where: { id: connection.id },
-      data: {
-        lastSyncError: error instanceof Error ? error.message : "Document sync failed.",
-        status: "ERROR",
-      },
-    });
-    throw error;
-  }
+  return syncOAuthCanonicalKnowledge(jobId, connection.id, workspaceId, "documents", structuredClone(expectedClaim));
+  });
 }
 
-export async function handleOAuthEmailSync(jobId: string, payload: { connectionId?: string }, workspaceId: string) {
+export async function handleOAuthEmailSync(jobId: string, payload: { connectionId?: string }, workspaceId: string, expectedClaim: OAuthKnowledgeSyncClaim) {
+  return withOAuthKnowledgeSyncLease(expectedClaim, async () => {
   if (!payload.connectionId) return;
   const connection = await prisma.oAuthConnection.findUnique({ where: { id: payload.connectionId } });
   if (!connection || connection.status !== "ACTIVE") return;
@@ -513,48 +435,26 @@ export async function handleOAuthEmailSync(jobId: string, payload: { connectionI
   const filters = stringArray(emailSettings.filters ?? emailSettings.queries);
   if (filters.length === 0) return;
 
+  return syncOAuthCanonicalKnowledge(jobId, connection.id, workspaceId, "email", structuredClone(expectedClaim));
+  });
+}
+
+async function syncOAuthCanonicalKnowledge(jobId: string, connectionId: string, workspaceId: string, kind: "documents" | "email", expectedClaim: OAuthKnowledgeSyncClaim) {
+  const capture = await beginOAuthKnowledgeSync({workspaceId, connectionId, workflowJobId: jobId, kind, expectedClaim});
   try {
-    const messages = await fetchFilteredEmailMessages(connection.id, filters);
-    for (const message of messages) {
-      if (!message.snippet.trim()) continue;
-      await syncKnowledgeForSource({
-        workspaceId,
-        sourceType: "DOCUMENT",
-        accessDomain: "WORKSPACE",
-        sourceId: `oauth-email-${connection.id}-${message.provider.toLowerCase()}-${message.id}`,
-        sourceTitle: `Email: ${message.subject}`,
-        content: [message.subject, message.from ? `From: ${message.from}` : null, message.snippet].filter(Boolean).join("\n\n"),
-        metadata: {
-          connectionId: connection.id,
-          provider: message.provider,
-          providerMessageId: message.id,
-          sourceKind: "email",
-          from: message.from,
-          receivedAt: message.receivedAt?.toISOString() ?? null,
-          webUrl: message.webUrl,
-          filter: message.filter,
-          workflowJobId: jobId,
-        },
-        workflowJobId: jobId,
-      });
+    for (const document of capture.documents) {
+      const count = await syncKnowledgeForSource({workspaceId, sourceType: "DOCUMENT", accessDomain: document.accessDomain,
+        sourceId: document.id, sourceTitle: document.title, content: [document.title, document.textContent].filter(Boolean).join("\n\n"),
+        workflowJobId: jobId, sourceUpdatedAt: document.updatedAt, lineageActor: capture.actor, sourceGuard: capture.assertCurrent, sourceTransactionGuard: capture.sourceTransactionGuard});
+      invariant(count > 0, 409, "SOURCE_CHANGED", "OAuth content could not be safely indexed; sync did not complete.");
     }
-    await materializeCrmEmailTouchpoints({
-      workspaceId,
-      connectionId: connection.id,
-      messages,
-    });
-    await prisma.oAuthConnection.update({
-      where: { id: connection.id },
-      data: { lastSyncAt: new Date(), lastSyncError: null, status: "ACTIVE" },
-    });
+    if (kind === "email") {
+      await capture.assertCurrent();
+      await materializeCrmEmailTouchpoints({workspaceId, connectionId, messages: capture.messages, publication: capture.emailPublication});
+    }
+    await capture.checkpoint();
   } catch (error) {
-    await prisma.oAuthConnection.update({
-      where: { id: connection.id },
-      data: {
-        lastSyncError: error instanceof Error ? error.message : "Email sync failed.",
-        status: "ERROR",
-      },
-    });
+    await capture.recordFailure();
     throw error;
   }
 }

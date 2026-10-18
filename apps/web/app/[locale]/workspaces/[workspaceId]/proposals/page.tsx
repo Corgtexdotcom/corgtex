@@ -1,4 +1,6 @@
-import { listAdviceRequests, listCircles, listDeliberationEntriesForParents, listHumanMembers, listProposalDecisionStates, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
+import { ProposalRelationNotice } from "./ProposalRelationNotice";
+import { AdviceRequestWindowNotice } from "@/lib/components/AdviceRequestWindowNotice";
+import { listAdviceRequestWindow, listCircles, listDeliberationEntriesForParents, listHumanMembers, listProposalDecisionStates, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
 import type { ProposalDecisionState } from "@corgtex/domain";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
@@ -69,13 +71,14 @@ export default async function ProposalsPage({
   const { circleIds, memberIds, sort } = resolveWorkItemFilters(resolvedSearch);
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
-  const [{ items: proposals }, currentWorkspace, circles, members, activeAdviceRequests] = await Promise.all([
+  const [{ items: proposals }, currentWorkspace, circles, members, adviceWindow] = await Promise.all([
     listProposals(actor, workspaceId, { take: 200, circleIds, memberIds, sort }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
-    listCircles(workspaceId),
+    listCircles(actor, workspaceId),
     listHumanMembers(workspaceId),
-    listAdviceRequests(actor, { workspaceId, subjectType: "PROPOSAL", status: "ACTIVE", take: 500 }),
+    listAdviceRequestWindow(actor, { workspaceId, subjectType: "PROPOSAL", status: "ACTIVE", take: 100, cursor: typeof resolvedSearch.adviceCursor === "string" ? resolvedSearch.adviceCursor : undefined }),
   ]);
+  const activeAdviceRequests = adviceWindow.items;
   const decisionStates = await listProposalDecisionStates(actor, {
     workspaceId,
     proposalIds: proposals.map((proposal) => proposal.id),
@@ -346,7 +349,7 @@ export default async function ProposalsPage({
     }
     if (adviceRequestCount > 0) {
       cardBadges.push(
-        <WorkItemAttentionBadge key="advice-request">{t("adviceRequestedCount", { count: adviceRequestCount })}</WorkItemAttentionBadge>,
+        <WorkItemAttentionBadge key="advice-request">{t("adviceRequestedCount", { count: adviceRequestCount })}{(!adviceWindow.complete || Boolean(resolvedSearch.adviceCursor)) && ` (${tWork("adviceCountWindow")})`}</WorkItemAttentionBadge>,
       );
     }
     cardBadges.push(...decisionTags);
@@ -379,8 +382,9 @@ export default async function ProposalsPage({
                 <>v{proposal.version}</>
               )}
             </div>
-            {(proposal.tensions?.length > 0 || proposal.actions?.length > 0) && (
+            {(proposal.tensions?.length > 0 || proposal.actions?.length > 0 || proposal.relationWindow?.complete === false) && (
               <div className="nr-tag-group">
+                <ProposalRelationNotice window={proposal.relationWindow} label={t("relationWindowLimited")} />
                 {proposal.tensions?.map((linkedTension) => (
                   <WorkItemRelationshipTag key={linkedTension.id} href={`/workspaces/${workspaceId}/tensions/${linkedTension.id}`}>
                     {t("tensionTag", { title: linkedTension.title })}
@@ -472,7 +476,8 @@ export default async function ProposalsPage({
             ) : (
               <span>v{proposal.version}</span>
             )}
-            {proposal.tensions?.map((linkedTension) => (
+            <ProposalRelationNotice window={proposal.relationWindow} label={t("relationWindowLimited")} />
+                {proposal.tensions?.map((linkedTension) => (
               <WorkItemRelationshipTag key={linkedTension.id} href={`/workspaces/${workspaceId}/tensions/${linkedTension.id}`}>
                 {t("tensionTag", { title: linkedTension.title })}
               </WorkItemRelationshipTag>
@@ -483,7 +488,7 @@ export default async function ProposalsPage({
               </WorkItemRelationshipTag>
             ))}
             {adviceRequestCount > 0 && (
-              <WorkItemAttentionBadge>{t("adviceRequestedCount", { count: adviceRequestCount })}</WorkItemAttentionBadge>
+              <WorkItemAttentionBadge>{t("adviceRequestedCount", { count: adviceRequestCount })}{(!adviceWindow.complete || Boolean(resolvedSearch.adviceCursor)) && ` (${tWork("adviceCountWindow")})`}</WorkItemAttentionBadge>
             )}
             {decisionTags}
           </div>
@@ -543,6 +548,9 @@ export default async function ProposalsPage({
 
   return (
     <>
+      <div id="advice-requests" />
+      <AdviceRequestWindowNotice page={adviceWindow} path={`/workspaces/${workspaceId}/proposals`} search={resolvedSearch}
+        labels={{ limited: tWork("adviceWindowLimited"), older: tWork("olderAdviceRequests"), newest: tWork("newestAdviceRequests") }} />
       <header className="nr-masthead nr-masthead-left">
         <h1 className="nr-masthead-title">{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">

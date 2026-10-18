@@ -1,18 +1,38 @@
+import { randomUUID } from "node:crypto";
 import { prisma } from "@corgtex/shared";
-import { defaultModelGateway, resolveModel } from "@corgtex/models";
+import { defaultModelGateway, resolveModel, type ModelAttemptGuard, type ModelRequestControls } from "@corgtex/models";
 import { AGENT_REGISTRY } from "@corgtex/domain";
 import {
   createArticle,
-  updateArticle,
+  assertArtifactInputWriteFence,
+  sealArtifactInputActor,
+  prepareArtifactCommitPreflight,
+  withArtifactCommitPreflight,
+  lockArtifactReadAuthorityRows,
   markSourceAbsorbed,
   rebuildBacklinks,
   lockWorkspaceArchiveArtifact,
   brainSourceRecoveryIdentity,
   brainSourceContentFingerprint,
+  readableBrainSourceIds,
+  resolveKnowledgeAccessDomains,
+  scanSourceReadableRecords,
+  captureArtifactInputProof,
+  captureImmutableArtifactInputProof,
+  isArtifactInputProofReadable,
+  isArtifactInputProofPubliclyShareable,
+  isLegacyRecoveryProofWorkspaceShareable,
+  isBrainExportProofWorkspaceShareable,
+  getBrainExportWorkerPurpose,
+  assertBrainExportWorkerCurrent,
+  invariant,
+  type LineageRoot,
 } from "@corgtex/domain";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 import type { AppActor } from "@corgtex/shared";
 import type { BrainArticleAuthority, BrainArticleType, Prisma } from "@prisma/client";
+import { assertLegacyRecoveryProjection, withLegacyRecoveryDerivation } from "../../domain/src/legacy-recovery";
+import { getMcpToolInputRoots } from "../../domain/src/mcp-tool-input-context";
 
 function isDocumentLikeSource(sourceType: string) {
   return sourceType === "DOC" || sourceType === "FILE_UPLOAD";
@@ -28,23 +48,15 @@ function slugify(value: string, fallback: string) {
   return slug || fallback;
 }
 
-function uniqueSlug(base: string, existingSlugs: Set<string>) {
-  if (!existingSlugs.has(base)) return base;
-  for (let index = 2; index < 100; index += 1) {
-    const candidate = `${base}-${index}`;
-    if (!existingSlugs.has(candidate)) return candidate;
-  }
-  return `${base}-${Date.now()}`;
-}
 
 function sourceSkipReason(source: {
   workspaceId: string;
   absorbedAt: Date | null;
   archivedAt: Date | null;
-} | null, workspaceId: string) {
+} | null, workspaceId: string, recoveredAbsorbedAt?: string | null) {
   if (!source || source.workspaceId !== workspaceId) return "not_found";
   if (source.archivedAt) return "archived";
-  if (source.absorbedAt) return "already_absorbed";
+  if (source.absorbedAt && source.absorbedAt.toISOString() !== recoveredAbsorbedAt) return "already_absorbed";
   return null;
 }
 
@@ -57,30 +69,13 @@ function isSourceSkipResult(value: unknown): value is SourceSkipResult {
     && (value as { skipped?: unknown }).skipped === true;
 }
 
-type InitialArticleWritePlan =
-  | {
-    kind: "update";
-    articleId: string;
-    slug: string;
-    bodyMd: string;
-    expectedUpdatedAt: Date;
-    changeSummary: string;
-  }
-  | {
-    kind: "create";
-    slug: string;
-    title: string;
-    type: BrainArticleType;
-    authority: BrainArticleAuthority;
-    bodyMd: string;
-    sourceIds: string[];
-  };
-
-type CascadeArticleWritePlan = {
-  articleId: string;
+type InitialArticleWritePlan = {
   slug: string;
+  title: string;
+  type: BrainArticleType;
+  authority: BrainArticleAuthority;
   bodyMd: string;
-  changeSummary: string;
+  sourceIds: string[];
 };
 
 /**
@@ -89,8 +84,8 @@ type CascadeArticleWritePlan = {
  * Given a BrainSource, this function:
  * 1. Classifies what type of knowledge the source contains
  * 2. Matches against existing articles (by title/slug/alias)
- * 3. Updates existing articles or creates new ones
- * 4. Syncs updated articles to the knowledge pipeline
+ * 3. Creates proposed articles while preserving every existing article
+ * 4. Syncs proposed articles to the knowledge pipeline
  * 5. Rebuilds backlinks
  * 6. Marks the source as absorbed
  */
@@ -100,10 +95,22 @@ export async function absorbSource(params: {
   agentRunId: string;
   model?: string;
   expectedSourceIdentity?: string;
+  /** Current human recovery only; validated against the immutable exact source receipt. */
+  recoveryReceiptId?: string;
+  /** Trusted server principal; never reconstructed from a source's author. */
+  actor?: AppActor;
+  signal?: AbortSignal;
+  authorizeAttempt?: ModelAttemptGuard;
 }) {
-  const source = await prisma.brainSource.findUnique({
+  params = {...params};
+  const agentActor = sealArtifactInputActor(params.actor ?? {
+    kind: "agent", authProvider: "bootstrap", label: "brain-absorb", workspaceIds: [params.workspaceId],
+  });
+  const submissionRoots = getMcpToolInputRoots(agentActor, params.workspaceId);
+  const loadedSource = await prisma.brainSource.findUnique({
     where: { id: params.sourceId },
   });
+  const source = loadedSource ? structuredClone(loadedSource) : null;
 
   function assertRecoveryIdentity(current: typeof source) {
     if (params.expectedSourceIdentity && (!current || brainSourceRecoveryIdentity(current) !== params.expectedSourceIdentity)) {
@@ -116,18 +123,66 @@ export async function absorbSource(params: {
     return { skipped: true, reason: "not_found" };
   }
 
-  const initialSkipReason = sourceSkipReason(source, params.workspaceId);
+  const recovery = params.recoveryReceiptId ? await assertLegacyRecoveryProjection(agentActor,params.workspaceId,
+    params.recoveryReceiptId,"BrainSource",source.id) : null;
+  const recoveredAbsorbedAt = recovery ? typeof recovery.content.absorbedAt === "string" ? recovery.content.absorbedAt : null : undefined;
+  const initialSkipReason = sourceSkipReason(source, params.workspaceId,recoveredAbsorbedAt);
   if (initialSkipReason) {
     return { skipped: true, reason: initialSkipReason };
   }
   const sourceId = source.id;
   const initialSourceIdentity = brainSourceRecoveryIdentity(source);
 
+  let liveRoots: LineageRoot[] = [];
+  let immutableRoots: LineageRoot[] = [];
+  async function assertInputsCurrent(client: Prisma.TransactionClient = prisma) {
+    invariant(await isArtifactInputProofReadable(agentActor, params.workspaceId, liveRoots, client),
+      409, "SOURCE_CHANGED", "Absorption inputs changed before publication.");
+    await assertBrainExportWorkerCurrent(agentActor, params.workspaceId, client);
+    if (params.recoveryReceiptId) await assertLegacyRecoveryProjection(agentActor,params.workspaceId,params.recoveryReceiptId,"BrainSource",sourceId,client);
+    invariant(await (getBrainExportWorkerPurpose(agentActor, params.workspaceId)
+      ? isBrainExportProofWorkspaceShareable(agentActor, params.workspaceId, immutableRoots, client)
+      : isArtifactInputProofPubliclyShareable(agentActor, params.workspaceId, immutableRoots, client)
+        .then(async publicProof => publicProof || await isLegacyRecoveryProofWorkspaceShareable(agentActor,params.workspaceId,immutableRoots,client))),
+      409, "SOURCE_RESTRICTED", "Absorption inputs cannot be published to the workspace.");
+  }
+  const controller = new AbortController();
+  const signal = params.signal ? AbortSignal.any([controller.signal, params.signal]) : controller.signal;
+  const authorizeAttempt: ModelAttemptGuard = async context => {
+    try {
+      signal.throwIfAborted();
+      context.signal.throwIfAborted();
+      await params.authorizeAttempt?.(context);
+      signal.throwIfAborted();
+      context.signal.throwIfAborted();
+      await assertInputsCurrent();
+      signal.throwIfAborted();
+      context.signal.throwIfAborted();
+    } catch (error) {
+      controller.abort(error);
+      throw error;
+    }
+  };
+  async function guardedModel<T>(work: (controls: ModelRequestControls) => Promise<T>): Promise<T> {
+    signal.throwIfAborted();
+    const result = await work({ signal, authorizeAttempt });
+    signal.throwIfAborted();
+    return result;
+  }
+  // Fresh opaque suffixes avoid probing private article names to choose the output slug.
+  function proposedSlug(base: string) {
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 16);
+    return `${slugify(base, "source").slice(0, 54)}-${suffix}`;
+  }
+
   async function currentSkipReason(client: Pick<typeof prisma, "brainSource"> = prisma) {
     const current = await client.brainSource.findUnique({ where: { id: params.sourceId } });
     assertRecoveryIdentity(current);
-    const reason = sourceSkipReason(current, params.workspaceId);
+    const reason = sourceSkipReason(current, params.workspaceId,recoveredAbsorbedAt);
     if (reason) return reason;
+    if (!(await readableBrainSourceIds(agentActor, params.workspaceId, [current!], client as typeof prisma)).has(sourceId)) {
+      return "source_restricted";
+    }
     return brainSourceRecoveryIdentity(current!) === initialSourceIdentity ? null : "source_changed";
   }
 
@@ -136,42 +191,60 @@ export async function absorbSource(params: {
     return reason ? { skipped: true, reason, sourceId } : null;
   }
 
+  async function lockSource(tx: Prisma.TransactionClient) {
+    await assertBrainExportWorkerCurrent(agentActor, params.workspaceId, tx);
+    await lockWorkspaceArchiveArtifact(tx, "BrainSource", sourceId);
+    await tx.$queryRaw`SELECT id FROM "BrainSource" WHERE id = ${sourceId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+  }
+
   async function runSourceWritePhase<T>(operation: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T | SourceSkipResult> {
+    const preflight = await prepareArtifactCommitPreflight(agentActor, params.workspaceId, immutableRoots);
     return prisma.$transaction(async (tx) => {
-      await lockWorkspaceArchiveArtifact(tx, "BrainSource", sourceId);
-      await tx.$queryRaw`SELECT id FROM "BrainSource" WHERE id = ${sourceId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
-      const reason = await currentSkipReason(tx);
-      if (reason) return { skipped: true, reason, sourceId };
-      return operation(tx);
+      await assertArtifactInputWriteFence(tx);
+      await lockArtifactReadAuthorityRows(agentActor, params.workspaceId, tx);
+      return withArtifactCommitPreflight(agentActor, params.workspaceId, tx, immutableRoots, preflight, async () => {
+        const reason = await currentSkipReason(tx);
+        if (reason) return { skipped: true, reason, sourceId };
+        await assertInputsCurrent(tx);
+        const value = await operation(tx);
+        await assertInputsCurrent(tx);
+        await assertArtifactInputWriteFence(tx);
+        return value;
+      }, { beforeSourceEpochs: () => lockSource(tx) });
     }, { maxWait: 5_000, timeout: 120_000 });
   }
 
-  // Build an agent actor for domain service calls
-  const agentActor: AppActor = {
-    kind: "agent",
-    authProvider: "bootstrap",
-    label: "brain-absorb",
-    workspaceIds: [params.workspaceId],
-  };
+  const accessibleDomains = await resolveKnowledgeAccessDomains(agentActor, params.workspaceId);
+  if (!accessibleDomains.includes(source.accessDomain)) {
+    return { skipped: true, reason: "source_restricted", sourceId };
+  }
+  if (!(await readableBrainSourceIds(agentActor, params.workspaceId, [source])).has(sourceId)) {
+    return { skipped: true, reason: "source_restricted", sourceId };
+  }
 
-  // Load the article index for matching
-  const articles = await prisma.brainArticle.findMany({
-    where: { workspaceId: params.workspaceId, archivedAt: null },
-    select: {
-      id: true,
-      slug: true,
-      title: true,
-      type: true,
-      authority: true,
-      bodyMd: true,
-      updatedAt: true,
-      sourceIds: true,
-      archivedAt: true,
-      frontmatterJson: true,
-    },
-  });
-
-  const activeArticles = articles.filter((article) => !article.archivedAt);
+  // Matching and output metadata use only complete, currently readable public revisions.
+  // Private originals and unknown legacy rows never influence model inputs or samples.
+  const activeArticles = await scanSourceReadableRecords({ actor: agentActor, workspaceId: params.workspaceId,
+    kind: "BrainArticle", load: (afterId, take) => prisma.brainArticle.findMany({
+      where: { workspaceId: params.workspaceId, archivedAt: null, variantOfArticleId: null, isPrivate: false,
+        ...(afterId ? {id: {gt: afterId}} : {}) }, orderBy: {id: "asc"}, take,
+    }) });
+  liveRoots = [...submissionRoots, ...await captureArtifactInputProof(agentActor, params.workspaceId, [
+    {kind: "BrainSource", id: sourceId, snapshot: source},
+    ...activeArticles.map(snapshot => ({kind: "BrainArticle" as const, id: snapshot.id, snapshot})),
+  ])];
+  const preparation = await prepareArtifactCommitPreflight(agentActor, params.workspaceId, liveRoots);
+  immutableRoots = await prisma.$transaction(async tx => {
+    await assertArtifactInputWriteFence(tx);
+    await lockArtifactReadAuthorityRows(agentActor, params.workspaceId, tx);
+    return withArtifactCommitPreflight(agentActor, params.workspaceId, tx, liveRoots, preparation, async () => {
+      invariant(await currentSkipReason(tx) === null, 409, "SOURCE_CHANGED", "Absorption source changed before input capture.");
+      const roots = await captureImmutableArtifactInputProof(agentActor, params.workspaceId, liveRoots, tx);
+      await assertArtifactInputWriteFence(tx);
+      return roots;
+    }, { beforeSourceEpochs: () => lockSource(tx) });
+  }, { maxWait: 5_000, timeout: 120_000 });
+  await assertInputsCurrent();
   const articleIndex = activeArticles.map((a) => ({
     slug: a.slug,
     title: a.title,
@@ -184,7 +257,8 @@ export async function absorbSource(params: {
 
   // Step 1: Classify source and match to articles
   const model = params.model ?? resolveModel(AGENT_REGISTRY["brain-absorb"].defaultModelTier);
-  const analysis = await defaultModelGateway.extract({
+  const analysis = await guardedModel(controls => defaultModelGateway.extract({
+    ...controls,
     model,
     workspaceId: params.workspaceId,
     agentRunId: params.agentRunId,
@@ -195,17 +269,12 @@ Source title: ${source.title ?? "untitled"}
 Source channel: ${source.channel ?? "unknown"}
 ${source.ingestionGuidanceMd ? `User ingestion guidance:\n${source.ingestionGuidanceMd}` : "User ingestion guidance: none"}
 
-Existing articles in the wiki:
-${articleIndex.map((a) => `- "${a.title}" (${a.type}, ${a.authority}) [slug: ${a.slug}]${a.aliases.length > 0 ? ` aliases: ${a.aliases.join(", ")}` : ""}`).join("\n")}
-
 Determine:
 1. What type of knowledge this source contains (one of: PRODUCT, ARCHITECTURE, PROCESS, RUNBOOK, DECISION, TEAM, PERSON, CUSTOMER, INCIDENT, PROJECT, INTEGRATION, PATTERN, STRATEGY, CULTURE, GLOSSARY)
-2. Which existing articles should be updated (list their slugs), if any
-3. Whether a new article should be created, and if so, suggest a title and slug
-4. A brief summary of what this source adds to the wiki`,
+2. Suggest a title and slug for the most specific article supported by this source
+3. A brief summary of what this source adds to the wiki. Do not use other wiki articles.`,
     schemaHint: `{
   articleType: string,
-  updateSlugs: string[],
   createNew: { title: string, slug: string } | null,
   summary: string
 }`,
@@ -213,29 +282,32 @@ Determine:
       sourceContent: source.content.slice(0, 4000),
       ingestionGuidanceMd: source.ingestionGuidanceMd,
     }),
-  });
+  }));
 
   const result = analysis.output as {
     articleType?: string;
-    updateSlugs?: string[];
     createNew?: { title: string; slug: string } | null;
     summary?: string;
   };
 
   const articleType = (result.articleType ?? "GLOSSARY") as BrainArticleType;
-  const updateSlugs = Array.isArray(result.updateSlugs) ? result.updateSlugs : [];
   const createNew = result.createNew && typeof result.createNew === "object" ? result.createNew : null;
+  const suggestedSlug = createNew?.slug ? slugify(createNew.slug, "source") : "";
+  const suggestedTitle = createNew?.title?.trim().toLowerCase() ?? "";
+  const updateSlugs = articleIndex
+    .filter((article) => article.slug === suggestedSlug || article.title.trim().toLowerCase() === suggestedTitle
+      || article.aliases.some((alias) => alias.trim().toLowerCase() === suggestedTitle))
+    .map((article) => article.slug);
   const documentLikeSource = isDocumentLikeSource(source.sourceType);
 
   const postAnalysisSkip = await skippedIfSourceInactive();
   if (postAnalysisSkip) return postAnalysisSkip;
+  await assertInputsCurrent();
 
   const initialWritePlans: InitialArticleWritePlan[] = [];
-  const plannedTouchedArticleIds: string[] = [];
-  const cascadeWritePlans: CascadeArticleWritePlan[] = [];
   const skippedNonDraftSlugs: string[] = [];
 
-  // Step 2: Update existing articles
+  // Step 2: Propose a separate revision; automatic actors cannot edit existing drafts.
   for (const slug of updateSlugs) {
     const existing = activeArticles.find((a) => a.slug === slug);
     if (!existing) continue;
@@ -244,7 +316,9 @@ Determine:
       continue;
     }
 
-    const synthesized = await defaultModelGateway.chat({
+    await assertInputsCurrent();
+    const synthesized = await guardedModel(controls => defaultModelGateway.chat({
+      ...controls,
       model,
       workspaceId: params.workspaceId,
       agentRunId: params.agentRunId,
@@ -275,25 +349,23 @@ Rules:
           }),
         },
       ],
-    });
+    }));
 
+    await assertInputsCurrent();
     initialWritePlans.push({
-      kind: "update",
-      articleId: existing.id,
-      slug: existing.slug,
-      bodyMd: synthesized.content,
-      expectedUpdatedAt: existing.updatedAt,
-      changeSummary: `Absorbed ${source.sourceType} source: ${result.summary ?? "new information"}`,
+      slug: proposedSlug(existing.slug), title: existing.title, type: existing.type, authority: "DRAFT",
+      bodyMd: synthesized.content, sourceIds: [...new Set([...existing.sourceIds, source.id])],
     });
-    plannedTouchedArticleIds.push(existing.id);
   }
 
   // Step 3: Create new article if needed
   if (createNew && createNew.title && createNew.slug) {
     // Check it doesn't already exist
-    const existingSlug = articles.find((a) => a.slug === createNew.slug);
-    if (!existingSlug) {
-      const drafted = await defaultModelGateway.chat({
+    const existingSlug = activeArticles.find((a) => a.slug === createNew.slug);
+    if (!existingSlug && updateSlugs.length === 0) {
+      await assertInputsCurrent();
+      const drafted = await guardedModel(controls => defaultModelGateway.chat({
+        ...controls,
         model,
         workspaceId: params.workspaceId,
         agentRunId: params.agentRunId,
@@ -321,11 +393,11 @@ Rules:
             }),
           },
         ],
-      });
+      }));
 
+      await assertInputsCurrent();
       initialWritePlans.push({
-        kind: "create",
-        slug: createNew.slug,
+        slug: proposedSlug(createNew.slug),
         title: createNew.title,
         type: articleType,
         authority: source.tier === 1 || documentLikeSource ? "REFERENCE" : "DRAFT",
@@ -337,10 +409,11 @@ Rules:
 
   if (documentLikeSource && initialWritePlans.length === 0) {
     const fallbackTitle = source.title?.trim() || createNew?.title?.trim() || "Uploaded knowledge source";
-    const existingSlugs = new Set(articles.map((article) => article.slug));
     const baseSlug = slugify(createNew?.slug || fallbackTitle, "uploaded-knowledge-source");
-    const slug = uniqueSlug(baseSlug, existingSlugs);
-    const drafted = await defaultModelGateway.chat({
+    const slug = proposedSlug(baseSlug);
+    await assertInputsCurrent();
+    const drafted = await guardedModel(controls => defaultModelGateway.chat({
+      ...controls,
       model,
       workspaceId: params.workspaceId,
       agentRunId: params.agentRunId,
@@ -363,15 +436,14 @@ Rules:
             title: fallbackTitle,
             sourceContent: source.content.slice(0, 4000),
             ingestionGuidanceMd: source.ingestionGuidanceMd,
-            skippedExistingArticles: skippedNonDraftSlugs,
             summary: result.summary ?? null,
           }),
         },
       ],
-    });
+    }));
 
+    await assertInputsCurrent();
     initialWritePlans.push({
-      kind: "create",
       slug,
       title: fallbackTitle,
       type: articleType,
@@ -386,130 +458,28 @@ Rules:
       skipped: true,
       reason: "non_draft_article",
       sourceId: source.id,
-      skippedSlugs: skippedNonDraftSlugs,
+      skippedSlugs: skippedNonDraftSlugs.filter((slug) => !activeArticles.find((article) => article.slug === slug)?.isPrivate),
       summary: result.summary ?? null,
+      lineageRoots: immutableRoots,
     };
   }
 
-  // --- Cascading updates ---
-  // Check if articles linking to updated articles need changes too
-  const MAX_CASCADE_BREADTH = 5;
-  const cascadedSlugs: string[] = [];
-  const errors: string[] = [];
-
-  if (plannedTouchedArticleIds.length > 0) {
-    // Find articles with inbound backlinks to any touched article
-    const inboundBacklinks = await prisma.brainBacklink.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        toArticleId: { in: plannedTouchedArticleIds },
-      },
-      include: {
-        fromArticle: {
-          select: { id: true, slug: true, title: true, type: true, authority: true, bodyMd: true, archivedAt: true },
-        },
-      },
-    });
-
-    // Deduplicate and exclude already-touched articles. Agents may only edit draft articles.
-    const candidateArticles = new Map<string, typeof inboundBacklinks[0]["fromArticle"]>();
-    for (const bl of inboundBacklinks) {
-      if (
-        !plannedTouchedArticleIds.includes(bl.fromArticle.id) &&
-        bl.fromArticle.authority === "DRAFT" &&
-        !bl.fromArticle.archivedAt &&
-        !candidateArticles.has(bl.fromArticle.id)
-      ) {
-        candidateArticles.set(bl.fromArticle.id, bl.fromArticle);
-      }
-    }
-
-    // Limit cascade breadth
-    const candidates = [...candidateArticles.values()].slice(0, MAX_CASCADE_BREADTH);
-
-    for (const candidate of candidates) {
-      try {
-        // Build a summary of what changed in the touched articles
-        const changedSummaries = plannedTouchedArticleIds
-          .map((id) => {
-            const a = articles.find((x) => x.id === id);
-            return a ? `"${a.title}" was updated` : null;
-          })
-          .filter(Boolean)
-          .join("; ");
-
-        const cascadeCheck = await defaultModelGateway.chat({
-          model,
-          workspaceId: params.workspaceId,
-          agentRunId: params.agentRunId,
-          taskType: "AGENT",
-          messages: [
-            {
-              role: "system",
-              content: `You are checking if a wiki article needs updating after related articles changed.
-
-Changes made: ${changedSummaries}
-Source that triggered changes: ${source.sourceType} — "${source.title ?? "untitled"}"
-
-Review the article below. If it references information that may now be outdated due to the above changes, produce an updated version. If it does NOT need changes, respond with exactly: NO_UPDATE_NEEDED
-
-Rules:
-- Only update if the article contains substantive references to the changed topics (not just see-also links)
-- Maintain the article's existing style and structure
-- Use [[wikilinks]] where appropriate
-- Keep updates minimal — only change what's affected`,
-            },
-            {
-              role: "user",
-              content: `Article: "${candidate.title}" (${candidate.type})\n\n${candidate.bodyMd.slice(0, 3000)}`,
-            },
-          ],
-        });
-
-        if (cascadeCheck.content.trim() !== "NO_UPDATE_NEEDED" && cascadeCheck.content.length > 50) {
-          cascadeWritePlans.push({
-            articleId: candidate.id,
-            slug: candidate.slug,
-            bodyMd: cascadeCheck.content,
-            changeSummary: `Cascading update: ${changedSummaries}`,
-          });
-          plannedTouchedArticleIds.push(candidate.id);
-          cascadedSlugs.push(candidate.slug);
-        }
-      } catch (err) {
-        // Don't fail the whole absorption for cascade failures
-        errors.push(`Cascade check failed for "${candidate.slug}": ${err}`);
-      }
-    }
-  }
-
+  // Proposed revisions leave their referenced originals unchanged, so no downstream
+  // article needs an automatic cascade edit.
   const writeResult = await runSourceWritePhase(async (tx) => {
     const touchedArticleIds: string[] = [];
     let createdArticleSlug: string | null = null;
+    let publicTouchedArticleCount = 0;
 
     for (const plan of initialWritePlans) {
-      if (plan.kind === "update") {
-        const article = await updateArticle(agentActor, {
-          workspaceId: params.workspaceId,
-          slug: plan.slug,
-          bodyMd: plan.bodyMd,
-          expectedUpdatedAt: plan.expectedUpdatedAt,
-          absorbedSource: { sourceId: source.id, sourceFingerprint: brainSourceContentFingerprint(source),
-            agentRunId: params.agentRunId },
-          changeSummary: plan.changeSummary,
-          agentRunId: params.agentRunId,
-          tx,
-        });
-        touchedArticleIds.push(article.id);
-        continue;
-      }
-
-      const article = await createArticle(agentActor, {
+      const create = () => createArticle(agentActor, {
         workspaceId: params.workspaceId,
         slug: plan.slug,
         title: plan.title,
         type: plan.type,
         authority: plan.authority,
+        isPrivate: false,
+        completeInputRoots: immutableRoots,
         bodyMd: plan.bodyMd,
         sourceIds: plan.sourceIds,
         derivation: {
@@ -519,20 +489,11 @@ Rules:
         },
         tx,
       });
+      const article = params.recoveryReceiptId ? await withLegacyRecoveryDerivation({actor:agentActor,workspaceId:params.workspaceId,
+        sourceId:source.id,sourceFingerprint:brainSourceContentFingerprint(source),receiptId:params.recoveryReceiptId,agentRunId:params.agentRunId},tx,create) : await create();
       touchedArticleIds.push(article.id);
-      createdArticleSlug = article.slug;
-    }
-
-    for (const plan of cascadeWritePlans) {
-      const article = await updateArticle(agentActor, {
-        workspaceId: params.workspaceId,
-        slug: plan.slug,
-        bodyMd: plan.bodyMd,
-        changeSummary: plan.changeSummary,
-        agentRunId: params.agentRunId,
-        tx,
-      });
-      touchedArticleIds.push(article.id);
+      if (!article.isPrivate) publicTouchedArticleCount += 1;
+      createdArticleSlug = article.isPrivate ? null : article.slug;
     }
 
     // Step 5: Rebuild backlinks
@@ -541,7 +502,7 @@ Rules:
     // Step 6: Mark source absorbed before releasing the archive lock.
     await markSourceAbsorbed(agentActor, { sourceId: source.id, tx });
 
-    return { touchedArticleIds, createdArticleSlug };
+    return { touchedArticleIds, createdArticleSlug, publicTouchedArticleCount };
   });
   if (isSourceSkipResult(writeResult)) return writeResult;
 
@@ -551,16 +512,19 @@ Rules:
     await syncBrainArticleKnowledge({
       workspaceId: params.workspaceId,
       articleId,
+      lineageActor: agentActor,
     });
   }
 
+  await assertInputsCurrent();
   return {
     absorbed: true,
     sourceId: source.id,
-    updatedSlugs: updateSlugs,
+    updatedSlugs: [],
     createdSlug: writeResult.createdArticleSlug,
-    touchedArticleCount: writeResult.touchedArticleIds.length,
-    skippedSlugs: skippedNonDraftSlugs,
+    touchedArticleCount: writeResult.publicTouchedArticleCount,
+    skippedSlugs: skippedNonDraftSlugs.filter((slug) => !activeArticles.find((article) => article.slug === slug)?.isPrivate),
     summary: result.summary ?? null,
+    lineageRoots: immutableRoots,
   };
 }

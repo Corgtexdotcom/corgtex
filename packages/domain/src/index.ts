@@ -25,8 +25,33 @@ export * from "./brain-derivation";
 export * from "./brain-removal-gate";
 export * from "./brain-source-impact";
 export * from "./brain-source-removal";
+export { getBrainSourceRemovalOutcomeInputReceipt, getBrainSourceRemovalOutcomeInputRoots } from "./brain-source-removal-outcome";
+export { getExternalMcpResponseInputRoots } from "./external-mcp-response-input";
+export { getActionCompletionOutcomeInputReceipt, getActionCompletionOutcomeInputRoots } from "./action-completion";
 export * from "./brain-article-removal";
 export * from "./brain-access";
+export {
+  sealArtifactInputActor, assertDirectArtifactReadOutsideCapture, withArtifactInputReadCapture,
+  withArtifactInputWriteFence, withAdditionalArtifactInputWriteFence, assertArtifactInputWriteFence,
+  mergeLineageInputRoot, brainSourceNeedsLineage, lineageContentFingerprint, isLineageKind,
+  captureArtifactInputSnapshotProof, captureImmutableArtifactInputProof, preserveUnknownArtifactInputSnapshot,
+  captureArtifactInputProof, isArtifactInputProofReadable, assertArtifactInputClosureLocallyAdmissible,
+  rebaseArtifactInputProofToSnapshots, isArtifactInputProofPubliclyShareable, isBrainExportProofWorkspaceShareable, inspectStoredArtifactInputDependencies,
+  captureArtifactPermissionEpochs, recordArtifactInputLineage, copyArtifactInputLineage,
+  advanceHumanArtifactInputLineage, advanceArchivedArtifactEnvelopeLineage, invalidateArtifactInputLineage,
+  hasCurrentArtifactInputLineage, currentArtifactInputRoots, isArtifactArchiveMetadataReadable,
+  readableArtifactIds, readableBrainSourceIds, captureArtifactReadHeadObservation, withArtifactCountReleaseSnapshot,
+} from "./source-lineage";
+export type { ArtifactInputWriteFence, LineageKind, LineageInput, LineageRoot } from "./source-lineage";
+export { prepareArtifactSourceCommit, withArtifactSourceCommit } from "./artifact-source-commit";
+export type { ArtifactSourceCommit, ArtifactSourceCommitOptions } from "./artifact-source-commit";
+export { withArtifactInputSnapshotAllocations } from "./artifact-input-snapshot-allocations";
+export type { ArtifactInputSnapshotAllocation } from "./artifact-input-snapshot-allocations";
+export { prepareArtifactStructuralAuthority } from "./artifact-structural-authority";
+export type { ArtifactStructuralAuthority, ArtifactStructuralAuthorityBinding } from "./artifact-structural-authority";
+export type { SourceCommitOwnerBinding, SourceCommitWriteTarget } from "./source-commit-lock-plan";
+export { prepareArtifactCommitPreflight, withArtifactCommitPreflight, lockArtifactReadAuthorityRows, type ArtifactCommitPreflight } from "./artifact-commit-preflight";
+export * from "./digest-lineage";
 export * from "./brain-source-recovery";
 export * from "./audit-trail";
 export * from "./archive";
@@ -133,6 +158,7 @@ export * from "./meeting-evidence-state";
 export * from "./meeting-transcript-chunks";
 export * from "./meeting-transcript-processing";
 export * from "./meeting-transcript-intake";
+export { captureDirectMemberTranscriptInput, captureCompanyMemberTranscriptInput } from "./native-transcript-input";
 export * from "./meeting-transcript-sources";
 export * from "./meeting-audio-assets";
 export * from "./meeting-recorders";
@@ -151,3 +177,51 @@ export * from "./customer-issue-publication";
 export * from "./exact-target-inventory";
 export * from "./workspace-support-access";
 export * from "./workspace-support-configuration";
+
+export * from "./source-scoped-read";
+export * from "./brain-article-variants";
+
+export * from "./conversation-lineage";
+export * from "./conversation-ingress";
+export * from "./mcp-tool-input";
+export { readConversationToolLinkArchiveOutcome, getConversationOperationOutcomeInputReceipt,
+  getConversationOperationOutcomeInputRoots } from "./conversation-operation-outcome";
+export type { ConversationToolLinkArchiveResult, ConversationToolLinkArchiveRequest } from "./conversation-operation-outcome";
+export * from "./source-lineage-rebuild";
+export * from "./source-lineage-backfill";
+export { claimSqlIngestionAttempt, renewSqlIngestionAttempt, failSqlIngestionAttempt,
+  sqlIngestionConfigurationFingerprint, SQL_INGESTION_LEASE_MS, SQL_INGESTION_RENEW_INTERVAL_MS } from "./sql-ingestion-attempt";
+export { captureSqlIngestionAttempt, disposeSqlIngestionCapture } from "./sql-native-input";
+export type { SqlIngestionAttempt, AuthenticatedSqlRunReceipt, PreparedSqlKnowledgeAttempt,
+  SqlPublicationIdentity, CommittedSqlKnowledgePublication } from "./sql-ingestion-contract";
+
+export { createCheckInGenerationActor, createBudgetAlertActor } from "./internal-source-principal";
+
+export * from "./derived-artifact-variants";
+export * from "./permitted-derivation-inputs";
+export { SOURCE_PERMISSION_POLICY_VERSION, parsePermissionEpochProof,
+  artifactPermissionEpochIdentities, capturePermissionEpochs,
+  isArtifactPermissionEpochProofCurrent, permissionEpochProofHash,
+  mergePermissionEpochProofs } from "./source-permission-epochs";
+export type { PermissionEpochIdentity, PermissionEpochProof } from "./source-permission-epochs";
+
+export * from "./native-transcript-input";
+
+export * from "./conversation-brain-consent";
+
+export { configureInformationCategory, classifyInformationSource } from "./information-category-policy";
+
+export { withBrainExportWorker, getBrainExportWorkerPurpose, assertBrainExportWorkerCurrent } from "./brain-export-worker";
+
+export { withMeetingTranscriptWorker, getMeetingTranscriptWorkerPurpose, isMeetingTranscriptWorkerCurrent,
+  assertMeetingTranscriptWorkerCurrent, isMeetingTranscriptWorkerJob } from "./native-meeting-workflow-principal";
+
+export * from "./workspace-initial-knowledge";
+export { captureManualTranscriptSourceArtifact } from "./manual-transcript-source-input";
+
+export { inspectLegacyRecovery, recoverLegacyArtifact, legacyRecoveryFileBinding, LEGACY_RECOVERY_KINDS, type LegacyRecoveryKind } from "./legacy-recovery";
+
+export { isLegacyRecoveryProofWorkspaceShareable } from "./source-lineage";
+
+export { WorkItemReadRelease } from "./work-item-readable-page";
+export { captureReadableDigestInputs } from "./digest-lineage";

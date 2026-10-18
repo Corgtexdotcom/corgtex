@@ -72,7 +72,7 @@ describe("tenant purge derived selector registry", () => {
     const expectedIndirect = {
       AdviceRequestRecipient: ["member.workspace", "request.workspace"], AgentStep: ["agentRun.workspace"], AgentToolCall: ["agentRun.workspace"], ApprovalDecision: ["flow.workspace", "member.workspace"], BrainArticleVersion: ["article.workspace"],
       BrainDiscussionComment: ["authorMember.workspace", "thread.article.workspace", "thread.authorMember.workspace"], BrainDiscussionThread: ["article.workspace", "authorMember.workspace"], BuildArtifactAsset: ["artifact.workspace"],
-      CircleAgentAssignment: ["agentIdentity.workspace", "circle.workspace", "role.circle.workspace"], ContextMapLayoutItem: ["mapView.workspace", "object.workspace"], ConversationTurn: ["agentRun.workspace", "conversation.workspace"], CrmConversationMessage: ["conversation.workspace"],
+      CircleAgentAssignment: ["agentIdentity.workspace", "circle.workspace", "role.circle.workspace"], ContextMapLayoutItem: ["mapView.workspace", "object.workspace"], ConversationTurn: ["agentRun.workspace", "conversation.workspace", "promptInput.workspace"], CrmConversationMessage: ["conversation.workspace"],
       ExternalDataSyncLog: ["source.workspace"], GoalLink: ["goal.workspace"], GoalUpdate: ["authorMember.workspace", "goal.workspace"], KeyResult: ["goal.workspace"], MemberExpertise: ["expertiseTag.workspace", "member.workspace"], Objection: ["flow.workspace"],
       Role: ["circle.workspace"], RoleAssignment: ["member.workspace", "role.circle.workspace"], TensionUpvote: ["tension.workspace"], WebhookDelivery: ["endpoint.workspace"], WorkspaceToolLinkCircleTag: ["circle.workspace", "toolLink.workspace"],
     };

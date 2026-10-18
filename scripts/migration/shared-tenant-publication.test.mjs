@@ -1,6 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { historicalAuthorityTables } from "./shared-tenant-transfer-contract.ts";
+import { importTenantSnapshot } from "./shared-tenant-import.ts";
+import { describe, expect, it, vi } from "vitest";
+import * as sourceInventory from "./shared-tenant-inventory.mjs";
 import { prepareTenantPublication } from "./shared-tenant-publication.ts";
-import { hashCanonical, hashFrames } from "./shared-tenant-export.ts";
+import { exportTenantSnapshot, hashCanonical, hashFrames } from "./shared-tenant-export.ts";
 
 function table(name, fields, rows, foreignKeys = []) {
   return { name, columns: fields.map(([name, type = "text", nullable = true]) => ({ name, type, nullable })),
@@ -149,6 +152,18 @@ describe("publication scalar policy and source marker validation", () => {
     ["ExternalDataSource", "connectionStringEnc"],
     ["AiWorkspaceConnection", "apiKeyEnc"],
     ["DemoLead", "qualifyToken"],
+    ["CommunicationIngressInput", "signature"],
+    ["CommunicationIngressInput", "encryptedRawBody"],
+    ["CommunicationMessageNativeInput", "encryptedPayloadJson"],
+    ["NativeTranscriptInput", "encryptedPayloadJson"],
+    ["RecorderTranscriptClaim", "nonce"],
+    ["RecorderTranscriptAttempt", "encryptedOriginJson"],
+    ["SqlIngestionSourceClaim", "ownerNonce"],
+    ["SqlNativeRunInput", "encryptedPayload"],
+    ["SqlNativeCapturePart", "ciphertextPart"],
+    ["ExternalProviderFetchInput", "encryptedResponseJson"],
+    ["OAuthProviderFetchInput", "encryptedPayload"],
+    ["ExternalMcpResponseInput", "encryptedResponseJson"],
   ])("requires secret classification for populated %s.%s even when a snapshot was rehashed", (name, field) => {
     const input = appendFixtureTable(fixture(), table(name, [["id"], [field]], [["credential-row", "synthetic-source-secret"]]));
     expect(() => prepareTenantPublication(input, { stagedRows: [], detachReferences: [] })).toThrow(`TRANSFER_SCALAR_FIELD_POLICY_REQUIRED:${name}.${field}:secret`);
@@ -173,5 +188,129 @@ describe("publication scalar policy and source marker validation", () => {
     expect(result.staging.rows[0].rows).toEqual([["marker", "operator_import_inactive", "false"]]);
     expect(result.publicationSnapshot.tables.at(-1).rows).toEqual([["ordinary", "synthetic-feature", "true"]]);
     expect(input.tables.at(-1).rows).toHaveLength(2);
+  });
+});
+
+// Table-level prohibition covers every mode/status, including future transcript
+// modes. No transform or wrapper is allowed to turn archived proof into a grant.
+describe("historical authority stays in private staging", () => {
+  it.each([...historicalAuthorityTables])("stages complete %s rows and rejects incomplete publication/direct import", async (name) => {
+    const input = fixture();
+    appendFixtureTable(input, table(name, [["id", "text", false], ["proof", "jsonb"], ["ciphertext"], ["createdAt"]],
+      [["authority-1", '{"epoch":9007199254740993}', "original:cipher:bytes", "2026-10-14 01:02:03.123456"],
+        ["authority-2", '{"epoch":1}', "second:original", "2026-10-14 01:02:04.123456"]]), { proof: { kind: "content", reason: "Original proof bytes are evidence, never target authority" } });
+    expect(() => prepareTenantPublication(input, policy())).toThrow(`TRANSFER_HISTORICAL_AUTHORITY_MUST_BE_STAGED:${name}`);
+    expect(() => prepareTenantPublication(input, { ...policy(), stagedRows: [...policy().stagedRows, stage(name, "authority-1")] })).toThrow(`TRANSFER_HISTORICAL_AUTHORITY_MUST_BE_STAGED:${name}`);
+    const selection = { table: name, primaryKeys: [["authority-1"], ["authority-2"]], reason: "Preserve complete historical authority privately" };
+    const result = prepareTenantPublication(input, { ...policy(), stagedRows: [...policy().stagedRows, selection] });
+    expect(result.staging.rows.find((entry) => entry.table === name).rows).toEqual(input.tables.find((entry) => entry.name === name).rows);
+    expect(result.publicationSnapshot.tables.find((entry) => entry.name === name).rows).toEqual([]);
+    let queries = 0;
+    await expect(importTenantSnapshot({ query: async () => { queries++; throw new Error("unexpected query"); } }, input,
+      { identityLinks: [], transforms: { [name]: { ciphertext: { kind: "null", reason: "Cannot launder authority" } } } })).rejects.toThrow(`TRANSFER_HISTORICAL_AUTHORITY_MUST_BE_STAGED:${name}`);
+    expect(queries).toBe(0);
+    for (const disposition of ["discard", "rebuild", "operator-control"]) {
+      const invalid = structuredClone(input); invalid.manifest.tables[name].disposition = disposition;
+      expect(() => prepareTenantPublication(rehash(invalid), { ...policy(), stagedRows: [...policy().stagedRows, selection] })).toThrow(`TRANSFER_AUTHORITY_PRESERVATION_REQUIRED:${name}`);
+    }
+  });
+
+  it.each(["DIRECT_MEMBER_UPLOAD", "AUDIO_UPLOAD", "RECORDER", "PROVIDER", "UNKNOWN_FUTURE_MODE"])("stages transcript mode %s without interpreting its ciphertext", (mode) => {
+    const input = fixture();
+    appendFixtureTable(input, table("NativeTranscriptInput", [["id", "text", false], ["mode"], ["encryptedPayloadJson"]], [["native", mode, "exact original"]]),
+      { encryptedPayloadJson: { kind: "secret", reason: "Immutable encrypted original" } });
+    expect(() => prepareTenantPublication(input, policy())).toThrow("TRANSFER_HISTORICAL_AUTHORITY_MUST_BE_STAGED:NativeTranscriptInput");
+    const result = prepareTenantPublication(input, { ...policy(), stagedRows: [...policy().stagedRows, stage("NativeTranscriptInput", "native")] });
+    expect(result.staging.rows.find((entry) => entry.table === "NativeTranscriptInput").rows).toEqual([["native", mode, "exact original"]]);
+  });
+
+  it("detaches only a nullable real reference to staged authority and archives nonnullable dependants", () => {
+    const input = fixture();
+    appendFixtureTable(input, table("CommunicationIngressInput", [["id", "text", false]], [["ingress"]]));
+    appendFixtureTable(input, table("CommunicationInboundEvent", [["id", "text", false], ["ingressInputId"]], [["inbound", "ingress"]], [fk("ingressInputId", "CommunicationIngressInput")]));
+    const requests = { ...policy(), stagedRows: [...policy().stagedRows, stage("CommunicationIngressInput", "ingress")] };
+    expect(() => prepareTenantPublication(input, requests)).toThrow("PUBLICATION_STAGED_REFERENCE_REMAINS:CommunicationInboundEvent");
+    const result = prepareTenantPublication(input, { ...requests, detachReferences: [...requests.detachReferences, detach("CommunicationInboundEvent", "ingressInputId", "inbound")] });
+    expect(result.publicationSnapshot.tables.find((t) => t.name === "CommunicationInboundEvent").rows).toEqual([["inbound", null]]);
+    expect(result.staging.detachedReferences.at(-1).originalValues).toEqual(["ingress"]);
+    input.tables.find((t) => t.name === "CommunicationInboundEvent").columns[1].nullable = false; rehash(input);
+    expect(() => prepareTenantPublication(input, { ...requests, detachReferences: [...requests.detachReferences, detach("CommunicationInboundEvent", "ingressInputId", "inbound")] })).toThrow("PUBLICATION_REFERENCE_DETACH_FORBIDDEN");
+    expect(prepareTenantPublication(input, { ...requests, stagedRows: [...requests.stagedRows, stage("CommunicationInboundEvent", "inbound")] }).staging.rows.at(-1).rows).toEqual([["inbound", "ingress"]]);
+  });
+});
+
+
+describe("native scalar reference and object policies", () => {
+  it.each([
+    ["NativeTranscriptInput", "recorderAttemptId", "reference"],
+    ["RecorderTranscriptPublication", "transcriptManifestId", "reference"],
+    ["SqlNativeRunInput", "attemptId", "reference"],
+    ["SourcePermissionEpoch", "sourceId", "reference"],
+    ...["connectionId", "localUserId", "ownerMemberId", "providerAccountId", "externalId", "sourceKey"]
+      .map((field) => ["OAuthProviderFetchInput", field, "reference"]),
+    ["Event", "aggregateId", "reference"],
+    ["NativeTranscriptInput", "storageKey", "object"],
+    ["FinanceReportUploadInput", "storageKey", "object"],
+  ])("classifies %s.%s as %s without inventing a foreign key", (name, field, kind) => {
+    const input = appendFixtureTable(fixture(), table(name, [["id"], [field]], [["native", "exact-original-value"]]));
+    expect(() => prepareTenantPublication(input, { stagedRows: [stage(name, "native")], detachReferences: [] }))
+      .toThrow(`TRANSFER_SCALAR_FIELD_POLICY_REQUIRED:${name}.${field}:${kind}`);
+    input.manifest.tables[name].fields[field] = { kind: "content", reason: "Content classification cannot authorize a source identity" };
+    expect(() => prepareTenantPublication(rehash(input), { stagedRows: [stage(name, "native")], detachReferences: [] }))
+      .toThrow(`TRANSFER_SCALAR_FIELD_POLICY_REQUIRED:${name}.${field}:${kind}`);
+    input.manifest.tables[name].fields[field] = { kind, reason: "Explicit opaque identity or storage locator" };
+    const result = prepareTenantPublication(rehash(input), { stagedRows: [stage(name, "native")], detachReferences: [] });
+    expect(result.staging.rows[0].rows).toEqual([["native", "exact-original-value"]]);
+    expect(result.publicationSnapshot.tables.at(-1).foreignKeys).toEqual([]);
+  });
+});
+
+
+describe("OAuth provider receipt transfer custody", () => {
+  it.each(["discard", "rebuild", "operator-control"])("rejects populated OAuth export disposition %s before selecting receipt bytes", async (disposition) => {
+    const input = fixture();
+    input.manifest.tables.OAuthProviderFetchInput = { disposition, reason: "Synthetic attempted omission" };
+    const inventory = vi.spyOn(sourceInventory, "inventorySharedTenantSource").mockResolvedValueOnce({
+      schemaSha256: input.schemaSha256,
+      tables: [{ name: "OAuthProviderFetchInput", rows: "1" }],
+      schema: { columns: [{ table: "OAuthProviderFetchInput", name: "id", type: "text", notNull: true }], constraints: [] },
+    });
+    const queries = [];
+    try {
+      await expect(exportTenantSnapshot({ query: async (sql) => { queries.push(sql); return { rows: [] }; } }, input.manifest))
+        .rejects.toThrow("TRANSFER_AUTHORITY_PRESERVATION_REQUIRED:OAuthProviderFetchInput");
+      expect(queries[0]).toBe("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      expect(queries.at(-1)).toBe("ROLLBACK");
+      expect(queries.some((sql) => /SELECT|INSERT|UPDATE|DELETE/.test(sql))).toBe(false);
+    } finally { inventory.mockRestore(); }
+  });
+
+  it("preserves complete OAuth receipt bytes privately and rejects forged unstaged publication or import", async () => {
+    const name = "OAuthProviderFetchInput";
+    const references = ["connectionId", "localUserId", "ownerMemberId", "providerAccountId", "externalId", "sourceKey"];
+    const values = ["oauth-receipt", "ws", "connection", "historical-user", "member", "provider-account", "ExactCaseSensitiveID", "ws:connection:document:ExactCaseSensitiveID",
+      "MICROSOFT", "EMAIL", "(subject:original) AND received:2026-10-17", "original-grant-hash", "original:cipher:bytes", "original-payload-hash",
+      '{"version":1,"entries":[{"sourceId":"historical-source","epoch":9007199254740993}]}', "2026-10-17 01:02:03.123456"];
+    const columns = ["id", "workspaceId", ...references, "provider", "sourceKind", "selection", "grantHash", "encryptedPayload", "payloadHash", "permissionEpochsJson", "createdAt"];
+    const fields = Object.fromEntries(references.map((field) => [field, { kind: "reference", reason: "Original opaque source identity" }]));
+    fields.encryptedPayload = { kind: "secret", reason: "Immutable encrypted provider receipt" };
+    fields.permissionEpochsJson = { kind: "content", reason: "Historical source epochs, never target authority" };
+    const input = appendFixtureTable(fixture(), table(name, columns.map((field) => [field, field === "permissionEpochsJson" ? "jsonb" : "text", false]), [values], [fk("workspaceId", "Workspace")]), fields);
+    const before = structuredClone(input);
+    expect(() => prepareTenantPublication(input, policy())).toThrow(`TRANSFER_HISTORICAL_AUTHORITY_MUST_BE_STAGED:${name}`);
+    const result = prepareTenantPublication(input, { ...policy(), stagedRows: [...policy().stagedRows, stage(name, values[0])] });
+    expect(result.staging.rows.find((entry) => entry.table === name).rows).toEqual([values]);
+    expect(result.publicationSnapshot.tables.find((entry) => entry.name === name).rows).toEqual([]);
+    expect(input).toEqual(before);
+    let queries = 0;
+    const target = { query: async () => { queries++; throw new Error("Unexpected target query"); } };
+    await expect(importTenantSnapshot(target, input, { identityLinks: [] })).rejects.toThrow(`TRANSFER_HISTORICAL_AUTHORITY_MUST_BE_STAGED:${name}`);
+    const forged = structuredClone(result.publicationSnapshot);
+    forged.tables.find((entry) => entry.name === name).rows = [values];
+    forged.dispositions.find((entry) => entry.table === name).selectedRows = "1";
+    rehash(forged);
+    await expect(importTenantSnapshot(target, forged, { identityLinks: [] })).rejects.toThrow(`TRANSFER_HISTORICAL_AUTHORITY_MUST_BE_STAGED:${name}`);
+    expect(() => prepareTenantPublication(forged, { stagedRows: [], detachReferences: [] })).toThrow(`TRANSFER_HISTORICAL_AUTHORITY_MUST_BE_STAGED:${name}`);
+    expect(queries).toBe(0);
   });
 });

@@ -1,10 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const lockCrmLinkClosure = vi.hoisted(() => vi.fn().mockResolvedValue({ activities: [], deals: [], contacts: [], accountIds: [] }));
 const prismaMock = vi.hoisted(() => {
   const mock = {
     $transaction: vi.fn(),
+    $queryRaw: vi.fn(),
     crmAccount: {
+      findUnique: vi.fn(),
       findFirst: vi.fn(),
     },
     crmActivity: {
@@ -14,6 +16,7 @@ const prismaMock = vi.hoisted(() => {
       updateMany: vi.fn(),
     },
     crmContact: {
+      findUnique: vi.fn(),
       findFirst: vi.fn(),
     },
     crmConversation: {
@@ -21,10 +24,13 @@ const prismaMock = vi.hoisted(() => {
       findUnique: vi.fn(),
       update: vi.fn(),
     },
+    crmConversationMessage: {upsert: vi.fn()},
     meeting: {
       findFirst: vi.fn(),
     },
     meetingInsight: {
+      findMany: vi.fn(),
+      updateMany: vi.fn(),
       createMany: vi.fn(),
       findFirst: vi.fn(),
     },
@@ -37,18 +43,62 @@ vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
 }));
 
+// This suite exercises active CRM gathering, never native archive presentation.
+// Isolate the unused presentation import graph rather than supplying fake provider grants.
+const unexpectedDirectPresentation = vi.hoisted(() => vi.fn(() => {
+  throw new Error("CRM information gathering must not enter direct archive presentation.");
+}));
+vi.mock("./crm-direct-original-read", () => ({
+  admitCrmDirectOriginalRows: unexpectedDirectPresentation,
+  assertCrmDirectReadCurrent: unexpectedDirectPresentation,
+  trackCrmDirectOrdinaryRows: unexpectedDirectPresentation,
+}));
+afterEach(() => { expect(unexpectedDirectPresentation).not.toHaveBeenCalled(); });
+
+vi.mock("./auth", () => ({ requireWorkspaceMembership: vi.fn(async () => ({ id: "member-1", role: "ADMIN" })) }));
+vi.mock("./meeting-intelligence-context", () => ({ meetingTranscriptInputProjection: (row: Record<string, unknown>) => Object.fromEntries(
+  ["id", "workspaceId", "title", "source", "transcript", "recordedAt", "participantEmails"].map((field) => [field, row[field]])) }));
+vi.mock("./source-lineage", () => ({
+  readableArtifactIds: vi.fn(async (_actor: unknown, _ws: string, _kind: string, rows: Array<{ id: string }>) => new Set(rows.map((row) => row.id))),
+  captureArtifactInputProof: vi.fn(async (_actor: unknown, _ws: string, inputs: Array<{ kind: string; id: string }>) => inputs.map((input) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) }))),
+  isArtifactInputProofReadable: vi.fn(async () => true),
+  lineageContentFingerprint: vi.fn((kind: string, row: unknown) => JSON.stringify({ kind, row })),
+  recordArtifactInputLineage: vi.fn(),
+  assertArtifactInputWriteFence: vi.fn(async () => {}),
+}));
+
+const emailClaimCurrent = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock("./oauth-provider-native", () => ({getOAuthEmailSyncPublication: (_token: unknown, workspaceId: string, connectionId: string, messages: Array<{id: string}>) => ({
+  workspaceId, connectionId, sourceTransactionGuard: (operation: () => Promise<unknown>) => operation(), actor: {kind: "user", user: {id: "owner"}}, assertCurrent: emailClaimCurrent,
+  messages: messages.map(message => ({message, roots: [{kind: "Document", id: `document-${message.id}`, fingerprint: "a".repeat(64)}]})),
+})}));
+vi.mock("./artifact-commit-preflight", () => ({prepareArtifactCommitPreflight: vi.fn(async () => ({})),
+  withArtifactCommitPreflight: vi.fn(async (_actor: unknown, _workspaceId: string, _tx: unknown, _roots: unknown, _token: unknown, work: () => Promise<unknown>) => work()),
+}));
+
+const meetingActor = { kind: "agent" as const, authProvider: "bootstrap" as const, label: "synthetic-crm", workspaceIds: ["workspace-1"] };
 vi.mock("./crm-archive-guards", () => ({ lockCrmLinkClosure }));
 import {
   createCrmMeetingReviewInsights,
   materializeCrmCalendarTouchpoints,
-  materializeCrmEmailTouchpoints,
+  materializeCrmEmailTouchpoints as materializeProvenCrmEmailTouchpoints,
   safeCrmEmailFilters,
 } from "./crm-information-gathering";
+
+// Provider capture is isolated in this pre-existing CRM projection suite; real native
+// capability, account replay, claim and transactional proofs are covered by OAuth PG tests.
+const materializeCrmEmailTouchpoints = (params: Omit<Parameters<typeof materializeProvenCrmEmailTouchpoints>[0], "publication">) =>
+  materializeProvenCrmEmailTouchpoints({...params, publication: {} as Parameters<typeof materializeProvenCrmEmailTouchpoints>[0]["publication"]});
 
 describe("crm information gathering", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     prismaMock.$transaction.mockImplementation((fn: any) => fn(prismaMock));
+    prismaMock.crmContact.findUnique.mockImplementation(async ({where}) => ({id: where.id, workspaceId: "workspace-1",
+      accountId: where.id === "z-contact" ? "z-account" : where.id === "a-contact" ? "a-account" : "account-1",
+      email: where.id === "z-contact" ? "z@example.test" : where.id === "a-contact" ? "a@example.test" : "buyer@example.test"}));
+    prismaMock.crmAccount.findUnique.mockImplementation(async ({where}) => ({id: where.id, workspaceId: "workspace-1"}));
+    prismaMock.crmConversationMessage.upsert.mockImplementation(async ({create}) => create);
     prismaMock.crmContact.findFirst.mockResolvedValue(null);
     prismaMock.crmAccount.findFirst.mockResolvedValue(null);
     prismaMock.crmActivity.findUnique.mockResolvedValue(null);
@@ -59,6 +109,7 @@ describe("crm information gathering", () => {
     prismaMock.crmConversation.create.mockResolvedValue({ id: "conversation-1" });
     prismaMock.crmConversation.update.mockResolvedValue({ id: "conversation-1" });
     prismaMock.meeting.findFirst.mockResolvedValue(null);
+    prismaMock.meetingInsight.findMany.mockResolvedValue([]);
     prismaMock.meetingInsight.createMany.mockResolvedValue({ count: 1 });
     prismaMock.meetingInsight.findFirst.mockResolvedValue({
       id: "insight-1",
@@ -160,6 +211,11 @@ describe("crm information gathering", () => {
     expect(result.activitiesUpdated).toBe(0);
   });
   it("matches calendar events by existing business-domain accounts", async () => {
+    prismaMock.crmContact.findUnique.mockImplementation(async ({where}) => ({id: where.id, workspaceId: "workspace-1",
+      accountId: where.id === "z-contact" ? "z-account" : where.id === "a-contact" ? "a-account" : "account-1",
+      email: where.id === "z-contact" ? "z@example.test" : where.id === "a-contact" ? "a@example.test" : "buyer@example.test"}));
+    prismaMock.crmAccount.findUnique.mockImplementation(async ({where}) => ({id: where.id, workspaceId: "workspace-1"}));
+    prismaMock.crmConversationMessage.upsert.mockImplementation(async ({create}) => create);
     prismaMock.crmContact.findFirst.mockResolvedValue(null);
     prismaMock.crmAccount.findFirst.mockResolvedValue({ id: "account-1", name: "Example", domain: "example.test" });
 
@@ -275,7 +331,7 @@ describe("crm information gathering", () => {
       account: { id: "account-1", name: "Example", domain: "example.test" },
     });
 
-    await createCrmMeetingReviewInsights({ workspaceId: "workspace-1", meetingId: "meeting-1" });
+    await createCrmMeetingReviewInsights(meetingActor, { workspaceId: "workspace-1", meetingId: "meeting-1" });
 
     expect(prismaMock.meetingInsight.createMany).toHaveBeenCalledWith(expect.objectContaining({
       data: [expect.objectContaining({
@@ -296,4 +352,90 @@ describe("crm information gathering", () => {
       skipDuplicates: true,
     }));
   });
+  it("captures every admitted CRM match and meeting input in each created suggestion", async () => {
+    const { captureArtifactInputProof, recordArtifactInputLineage } = await import("./source-lineage");
+    prismaMock.meeting.findFirst.mockResolvedValue({ id: "meeting-1", workspaceId: "workspace-1", title: "Pilot",
+      transcript: "Pilot follow up", summaryMd: "Pricing", participantEmails: ["buyer@example.test"], recordedAt: new Date() });
+    prismaMock.crmContact.findFirst.mockResolvedValue({ id: "contact-full", workspaceId: "workspace-1", email: "buyer@example.test", name: "Buyer",
+      company: "Example", account: { id: "account-full", workspaceId: "workspace-1", name: "Example", domain: "example.test" } });
+    await createCrmMeetingReviewInsights(meetingActor, { workspaceId: "workspace-1", meetingId: "meeting-1" });
+    expect(captureArtifactInputProof).toHaveBeenCalledWith(meetingActor, "workspace-1", [expect.objectContaining({ kind: "CrmContact", id: "contact-full",
+      snapshot: expect.objectContaining({ name: "Buyer", email: "buyer@example.test" }) })], prismaMock);
+    expect(recordArtifactInputLineage).toHaveBeenCalledTimes(3);
+    for (const [params] of vi.mocked(recordArtifactInputLineage).mock.calls) {
+      expect(params.inputs).toEqual(expect.arrayContaining([{ kind: "Meeting", id: "meeting-1" }, { kind: "CrmContact", id: "contact-full" }, { kind: "CrmAccount", id: "account-full" }]));
+      expect(params.inheritedRoots).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "Meeting", id: "meeting-1" }),
+        expect.objectContaining({ kind: "CrmContact", id: "contact-full" }), expect.objectContaining({ kind: "CrmAccount", id: "account-full" })]));
+      expect(params.transitiveOnlyKinds).toEqual(["Meeting"]);
+    }
+  });
+
+  it("does not use unknown summaries or restricted CRM match bodies", async () => {
+    const { readableArtifactIds, captureArtifactInputProof } = await import("./source-lineage");
+    prismaMock.meeting.findFirst.mockResolvedValue({ id: "meeting-1", workspaceId: "workspace-1", title: "Public meeting",
+      transcript: "Hello buyer@example.test", summaryMd: "Secret pricing pilot follow up", participantEmails: ["buyer@example.test"], recordedAt: new Date() });
+    prismaMock.crmContact.findFirst.mockResolvedValue({ id: "restricted-contact", name: "Finance secret", email: "buyer@example.test",
+      company: "Finance secret company", account: { id: "restricted-account", name: "Finance secret account" } });
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: "restricted-account", name: "Finance secret account" });
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _ws, kind, rows) => new Set(kind === "MeetingTranscript" ? rows.map((row) => row.id) : []));
+    await createCrmMeetingReviewInsights(meetingActor, { workspaceId: "workspace-1", meetingId: "meeting-1" });
+    const writes = prismaMock.meetingInsight.createMany.mock.calls.flatMap(([params]) => params.data);
+    expect(writes).toHaveLength(1); expect(writes[0].type).toBe("CRM_CONTACT");
+    expect(JSON.stringify(writes)).not.toContain("secret");
+    expect(captureArtifactInputProof).toHaveBeenCalledWith(meetingActor, "workspace-1", [expect.objectContaining({ kind: "MeetingTranscript",
+      snapshot: expect.not.objectContaining({ summaryMd: expect.anything() }) })]);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _ws, _kind, rows) => new Set(rows.map((row) => row.id)));
+  });
+
+  it("rejects a stale meeting revision before creating CRM suggestions", async () => {
+    const before = { id: "meeting-1", workspaceId: "workspace-1", title: "Original", transcript: "Hello buyer@example.test",
+      summaryMd: "Original", participantEmails: ["buyer@example.test"], recordedAt: new Date() };
+    prismaMock.meeting.findFirst.mockResolvedValueOnce(before).mockResolvedValueOnce({ ...before, summaryMd: "Changed" });
+    await expect(createCrmMeetingReviewInsights(meetingActor, { workspaceId: "workspace-1", meetingId: "meeting-1" }))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(prismaMock.meetingInsight.createMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps replay idempotent and preserves earlier generations through source changes and restoration", async () => {
+    const { captureArtifactInputProof, recordArtifactInputLineage, readableArtifactIds } = await import("./source-lineage");
+    const stored: any[] = []; const receipts = new Map<string, string>();
+    const meeting = { id: "meeting-1", workspaceId: "workspace-1", title: "Original", transcript: "Hello buyer@example.test",
+      summaryMd: "First summary", participantEmails: ["buyer@example.test"], recordedAt: new Date() };
+    prismaMock.meeting.findFirst.mockImplementation(async () => ({ ...meeting }));
+    prismaMock.meetingInsight.findFirst.mockImplementation(async ({ where }) => [...stored].reverse().find((row) =>
+      where.dedupeKey ? row.dedupeKey === where.dedupeKey : where.OR?.some((clause: any) => typeof clause.dedupeKey === "string"
+        ? row.dedupeKey === clause.dedupeKey : row.dedupeKey.startsWith(clause.dedupeKey.startsWith))) ?? null);
+    prismaMock.meetingInsight.findMany.mockImplementation(async ({ where }) => [...stored].reverse().filter((row) =>
+      where.OR.some((clause: any) => typeof clause.dedupeKey === "string" ? row.dedupeKey === clause.dedupeKey : row.dedupeKey.startsWith(clause.dedupeKey.startsWith))));
+    prismaMock.meetingInsight.createMany.mockImplementation(async ({ data }) => {
+      if (stored.some((row) => row.dedupeKey === data[0].dedupeKey)) return { count: 0 };
+      stored.push({ id: `generated-${stored.length + 1}`, reviewedAt: null, supersededAt: null, ...data[0] }); return { count: 1 };
+    });
+    prismaMock.meetingInsight.updateMany.mockImplementation(async ({ where, data }) => {
+      const outdated = stored.filter((row) => row.status === "SUGGESTED" && !row.supersededAt && !where.dedupeKey.notIn.includes(row.dedupeKey));
+      outdated.forEach((row) => Object.assign(row, data)); return { count: outdated.length };
+    });
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor, _ws, inputs) => inputs.map((input) => ({ kind: input.kind,
+      id: input.id, fingerprint: JSON.stringify(input.snapshot) })));
+    vi.mocked(recordArtifactInputLineage).mockImplementation(async ({ content, artifact }) => { receipts.set(artifact.id, JSON.stringify(content)); return {} as any; });
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _ws, kind, rows) => new Set(rows.filter((row) =>
+      kind !== "MeetingInsight" || receipts.get(row.id) === JSON.stringify(row)).map((row) => row.id)));
+    const params = { workspaceId: "workspace-1", meetingId: "meeting-1" };
+    expect(await createCrmMeetingReviewInsights(meetingActor, params)).toHaveLength(1);
+    expect(await createCrmMeetingReviewInsights(meetingActor, params)).toHaveLength(0);
+    const originalBody = stored[0].bodyMd;
+    meeting.summaryMd = "Changed summary";
+    expect(await createCrmMeetingReviewInsights(meetingActor, params)).toHaveLength(1);
+    expect(stored[0].supersededAt).toBeInstanceOf(Date); expect(stored[0].bodyMd).toBe(originalBody);
+    meeting.summaryMd = "First summary";
+    expect(await createCrmMeetingReviewInsights(meetingActor, params)).toHaveLength(1);
+    expect(stored[2].dedupeKey.split(":").slice(0, 2)).toEqual(stored[0].dedupeKey.split(":").slice(0, 2));
+    expect(stored[2].dedupeKey).not.toBe(stored[0].dedupeKey);
+    expect(await createCrmMeetingReviewInsights(meetingActor, params)).toHaveLength(0);
+    expect(stored).toHaveLength(3); expect(stored[0].bodyMd).toBe(originalBody);
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor, _ws, inputs) => inputs.map((input) => ({ kind: input.kind, id: input.id, fingerprint: "a".repeat(64) })));
+    vi.mocked(recordArtifactInputLineage).mockReset();
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _ws, _kind, rows) => new Set(rows.map((row) => row.id)));
+  });
+
 });

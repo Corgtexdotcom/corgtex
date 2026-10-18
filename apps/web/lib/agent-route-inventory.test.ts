@@ -3,10 +3,12 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
+import type { AppActor } from "@corgtex/shared";
+import { MCP_TOOL_CAPABILITIES } from "../../../packages/domain/src/mcp-tool-capabilities";
 
 vi.mock("@corgtex/domain", async () => import("../../../packages/domain/src/agent-operation-capabilities"));
 
-import { AGENT_REST_ROUTE_CAPABILITIES } from "./agent-route-capabilities";
+import { AGENT_REST_ROUTE_CAPABILITIES, getAgentRouteCapability, requireAgentRouteCapability } from "./agent-route-capabilities";
 
 const webRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const appRoot = join(webRoot, "app");
@@ -127,6 +129,33 @@ describe("agent REST route authorization inventory fence", () => {
     const declared = Object.entries(AGENT_REST_ROUTE_CAPABILITIES).flatMap(([template, methods]) =>
       Object.keys(methods).map(method => `${method} ${template}`)).sort();
     expect(authenticatedRouteInventory()).toEqual(declared);
+  });
+
+  it("declares CRM archive GET with the canonical relationships read grant", () => {
+    const pathname = "/api/workspaces/workspace-1/leads/archive";
+    const request = {method: "GET", nextUrl: {pathname}};
+    const credential = (scopes: string[]): AppActor => ({kind: "agent", authProvider: "credential", label: "synthetic-crm-presentation", workspaceIds: ["workspace-1"], scopes});
+    expect(getAgentRouteCapability("GET", pathname)).toEqual({operation: "list_relationship_accounts", feature: "RELATIONSHIPS"});
+    expect(MCP_TOOL_CAPABILITIES.list_relationship_accounts.scopes).toEqual(["relationships:read"]);
+    expect(() => requireAgentRouteCapability(credential(["relationships:read"]), request)).not.toThrow();
+    for (const scopes of [[], ["relationships:write"], ["actions:read"]]) {
+      expect(() => requireAgentRouteCapability(credential(scopes), request, {deferToolLinkScope: true})).toThrow();
+    }
+    for (const method of ["POST", "PATCH", "DELETE"]) {
+      expect(() => requireAgentRouteCapability(credential(["relationships:read", "relationships:write"]), {...request, method})).toThrow();
+    }
+  });
+
+  it("keeps category administration and explicit Brain consent unavailable to credential agents", () => {
+    const actor: AppActor = { kind: "agent", authProvider: "credential", label: "synthetic-agent", workspaceIds: ["workspace-1"], scopes: ["conversations:write", "brain:write"] };
+    for (const [method, pathname] of [
+      ["PATCH", "/api/workspaces/workspace-1/information-categories"],
+      ["POST", "/api/workspaces/workspace-1/information-categories"],
+      ["POST", "/api/workspaces/workspace-1/conversations/conversation-1/brain"],
+    ]) {
+      expect(getAgentRouteCapability(method, pathname)).toEqual({ operation: null });
+      expect(() => requireAgentRouteCapability(actor, { method, nextUrl: { pathname } })).toThrow();
+    }
   });
 
   it("discovers aliased actor imports, wrapper exports, and reexported HTTP methods using syntax", () => {
