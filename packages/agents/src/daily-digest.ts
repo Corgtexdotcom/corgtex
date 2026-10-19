@@ -2044,7 +2044,14 @@ Rules:
       });
       const recipientDigest = withNewspaperAdviceRequests(
         recipientBriefing === sharedBriefing ? emailDigest : workspaceBriefingToNewspaperDigest({ briefingJson: recipientBriefing }),
-        personalItems.map((item) => item.text),
+        personalItems.map((item) => ({
+          text: item.text,
+          href: item.href,
+          deadline: item.dueAt ? {
+            label: item.kind === "ADVICE" ? "Deadline" as const : "Due" as const,
+            value: formatDigestDate(item.dueAt)!,
+          } : null,
+        })),
       );
       const subject = `${storedBriefing.title} - Your Personal Briefing`;
 
