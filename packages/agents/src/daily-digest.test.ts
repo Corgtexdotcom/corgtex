@@ -1276,8 +1276,8 @@ describe("runDailyDigest", () => {
     prismaMock.action.findMany.mockImplementation(async (query: any) => {
       if (!query.where?.assigneeMemberId) return [];
       return [
-        { id: "action-a", title: "Review the customer plan", bodyMd: null, status: "IN_PROGRESS", assigneeMemberId: "member-a", dueAt: new Date("2026-05-01T12:00:00.000Z"), priority: 2, updatedAt: new Date("2026-04-30T09:00:00.000Z") },
-        { id: "action-b", title: "Confirm another team task", bodyMd: null, status: "OPEN", assigneeMemberId: "member-b", dueAt: null, priority: 1, updatedAt: new Date("2026-04-30T09:00:00.000Z") },
+        { id: "action-a", title: "Review the customer plan " + "long synthetic title ".repeat(8), bodyMd: "Synthetic action detail ".repeat(30), status: "IN_PROGRESS", assigneeMemberId: "member-a", dueAt: new Date("2026-05-01T12:00:00.000Z"), priority: 2, updatedAt: new Date("2026-04-30T09:00:00.000Z") },
+        { id: "action-b", title: "Confirm another team task " + "other synthetic title ".repeat(8), bodyMd: "Other action detail ".repeat(30), status: "OPEN", assigneeMemberId: "member-b", dueAt: new Date("2026-05-02T00:00:00.000Z"), priority: 1, updatedAt: new Date("2026-04-30T09:00:00.000Z") },
       ];
     });
 
@@ -1287,6 +1287,12 @@ describe("runDailyDigest", () => {
     const htmlByRecipient = new Map(sendEmailMock.mock.calls.map(([request]) => [request.to, request.html]));
     expect(htmlByRecipient.get("a@example.com")).toContain("Review the customer plan");
     expect(htmlByRecipient.get("a@example.com")).toContain("In progress");
+    expect(htmlByRecipient.get("a@example.com")).toContain("Due: 2026-05-01");
+    expect(htmlByRecipient.get("a@example.com")).toContain('href="https://app.example.com/workspaces/workspace-1/actions/action-a"');
+    expect(htmlByRecipient.get("a@example.com")).not.toContain("2026-05-02");
+    expect(htmlByRecipient.get("b@example.com")).toContain("Due: 2026-05-02");
+    expect(htmlByRecipient.get("b@example.com")).toContain('href="https://app.example.com/workspaces/workspace-1/actions/action-b"');
+    expect(htmlByRecipient.get("b@example.com")).not.toContain("2026-05-01");
     expect(htmlByRecipient.get("a@example.com")).not.toContain("Confirm another team task");
     expect(htmlByRecipient.get("b@example.com")).toContain("Confirm another team task");
     expect(htmlByRecipient.get("b@example.com")).not.toContain("Review the customer plan");
@@ -1436,7 +1442,7 @@ describe("runDailyDigest", () => {
         id: "request-selected",
         audienceType: "MEMBERS",
         targetCircleId: null,
-        messageMd: "Please advise on the pricing decision.",
+        messageMd: "Please advise on the synthetic decision. " + "Long request prose ".repeat(30),
         deadlineAt: new Date("2026-05-03T12:00:00.000Z"),
         reminderAt: null,
         preferredChannel: "IN_APP",
@@ -1445,6 +1451,20 @@ describe("runDailyDigest", () => {
         targetCircle: null,
         recipients: [{ memberId: "member-a" }],
         process: { subjectType: "PROPOSAL", subjectId: "proposal-1" },
+      },
+      {
+        id: "request-other-recipient",
+        audienceType: "MEMBERS",
+        targetCircleId: null,
+        messageMd: "Other synthetic request prose ".repeat(30),
+        deadlineAt: new Date("2026-05-04T12:00:00.000Z"),
+        reminderAt: null,
+        preferredChannel: "IN_APP",
+        createdAt: new Date("2026-04-30T08:00:00.000Z"),
+        requestedBy: { email: "requester@example.com", displayName: "Requester" },
+        targetCircle: null,
+        recipients: [{ memberId: "member-b" }],
+        process: { subjectType: "PROPOSAL", subjectId: "proposal-other" },
       },
       {
         id: "request-circle",
@@ -1475,7 +1495,10 @@ describe("runDailyDigest", () => {
         process: { subjectType: "ACTION", subjectId: "action-1" },
       },
     ]);
-    prismaMock.proposal.findMany.mockResolvedValue([{ id: "proposal-1", title: "Approve pricing" }]);
+    prismaMock.proposal.findMany.mockResolvedValue([
+      { id: "proposal-1", title: "Approve pricing " + "long synthetic subject ".repeat(60) },
+      { id: "proposal-other", title: "Other recipient review " + "other synthetic subject ".repeat(8) },
+    ]);
     prismaMock.tension.findMany.mockResolvedValue([{ id: "tension-1", title: "Clarify support ownership" }]);
     prismaMock.action.findMany.mockResolvedValue([{ id: "action-1", title: "Prepare launch checklist" }]);
     extractMock.mockImplementation(async ({ instruction, input }: { instruction: string; input?: string }) => {
@@ -1515,6 +1538,17 @@ describe("runDailyDigest", () => {
     expect(memberAHtml).toContain("Advice request: Proposal - Approve pricing");
     expect(memberAHtml).toContain("Input request: Tension - Clarify support ownership");
     expect(memberAHtml).toContain("Deadline: 2026-05-03");
+    expect(memberAHtml).toContain('href="https://app.example.com/workspaces/workspace-1/proposals/proposal-1"');
+    expect(memberAHtml).not.toContain("Other recipient review");
+    expect(memberAHtml).not.toContain("2026-05-04");
+    expect(memberAHtml).not.toContain("/proposals/proposal-other");
+    expect(memberBHtml).toContain("Other recipient review");
+    expect(memberBHtml).toContain("Deadline: 2026-05-04");
+    expect(memberBHtml).toContain('href="https://app.example.com/workspaces/workspace-1/proposals/proposal-other"');
+    expect(memberBHtml).not.toContain("2026-05-03");
+    expect(memberBHtml).not.toContain("/proposals/proposal-1");
+    expect(memberAHtml).toContain("Shipped a useful update");
+    expect(memberBHtml).toContain("Shipped a useful update");
     expect(memberAHtml).toContain("Audience: Support circle");
     expect(memberAHtml).not.toContain("Requests Awaiting Your Input");
     expect(memberAHtml).not.toContain("Prepare launch checklist");
