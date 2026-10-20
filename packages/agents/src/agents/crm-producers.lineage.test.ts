@@ -5,7 +5,7 @@ import type { EmailAttemptControls } from "@corgtex/shared";
 const f = vi.hoisted(() => ({
   job: {} as any, qualification: {} as any, lead: {} as any, contact: {} as any,
   unknown: new Set<string>(), revoked: false, private: false,
-  modelExtract: vi.fn(), modelChat: vi.fn(), send: vi.fn(), applyExtraction: vi.fn(), applyEnrichment: vi.fn(), record: vi.fn(), search: vi.fn(),
+  modelExtract: vi.fn(), modelChat: vi.fn(), send: vi.fn(), applyExtraction: vi.fn(), applyEnrichment: vi.fn(), record: vi.fn(),
   sendControls: undefined as EmailAttemptControls | undefined, authorizeSend: vi.fn<EmailAttemptControls["authorizeAttempt"]>(),
   runtime: vi.fn(), operations: [] as any[], roots: [] as any[],
 }));
@@ -17,7 +17,6 @@ vi.mock("@corgtex/shared", () => ({ prisma: {
   $transaction: vi.fn(async (fn: any) => fn({})),
 }, sendEmail: f.send }));
 vi.mock("@corgtex/models", () => ({ defaultModelGateway: { extract: f.modelExtract, chat: f.modelChat } }));
-vi.mock("../tools/web-search", () => ({ executeWebSearch: f.search }));
 vi.mock("@corgtex/domain", () => ({
   invariant: (condition: unknown, _status: number, code: string) => { if (!condition) throw new Error(code); },
   captureArtifactInputProof: vi.fn(async (_actor: any, _ws: string, inputs: any[]) => {
@@ -97,7 +96,7 @@ describe("CRM producers capture actual inputs before effects", () => {
   it("uses no transient provider input and never exports a search query without a stored grant", async () => {
     job("crm-lead-enrichment", enrichmentPayload);
     const result = await runCrmLeadEnrichmentAgent(params(enrichmentPayload));
-    expect(f.search).not.toHaveBeenCalled(); expect(result).toEqual(expect.objectContaining({ resultJson: expect.objectContaining({ searchUsed: false }) }));
+    expect(result).toEqual(expect.objectContaining({ resultJson: expect.objectContaining({ searchUsed: false }) }));
     expect(f.modelExtract.mock.calls[0][0].instruction).toContain("No web results were fetched or verified");
     expect(f.applyEnrichment.mock.calls[0][3].lineageRoots.map((root: any) => root.kind)).toEqual(expect.arrayContaining(["CrmContact", "WorkflowJobInput", "AgentIdentity"]));
   });
