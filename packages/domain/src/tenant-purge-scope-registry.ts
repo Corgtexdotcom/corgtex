@@ -12,16 +12,16 @@ export const TENANT_PURGE_GLOBAL_STATE_MODELS = ["SharedRateLimit", "SharedCache
 export const TENANT_PURGE_MODEL_DISPOSITIONS = {
   TARGET: ["Workspace", "CustomerAccount", "CustomerDeployment", "ProcurementTrial"],
   CASCADE: [
-    "Action", "ActionChecklistItem", "ActionCreationSource", "AdviceProcess", "AdviceRequest", "AdviceRequestRecipient", "AgentCredential", "AgentIdentity", "AgentMemory", "AgentRun", "AgentStep", "AgentToolCall",
-    "AiUsageLedgerEntry", "AiWorkspaceConnection", "AppInstallation", "AppSession", "AppSurfaceAssignment", "ApprovalDecision", "ApprovalFlow", "ApprovalPolicy", "AuditLog",
+    "RecorderTranscriptBinding", "RecorderTranscriptClaim", "RecorderTranscriptAttempt", "RecorderTranscriptPublication", "NativeTranscriptInput", "NativeTranscriptPublication", "TranscriptTransportArchive", "CommunicationIngressInput", "CommunicationMessageNativeInput", "SourcePermissionEpoch", "GenericDerivedArtifactVariant", "DerivedArtifactRebuildState", "Action", "ActionChecklistItem", "ActionCreationSource", "AdviceProcess", "AdviceRequest", "AdviceRequestRecipient", "AgentCredential", "AgentIdentity", "AgentFeedbackInput", "AgentRequestInput", "AgentMemory", "AgentRun", "AgentStep", "AgentToolCall",
+    "AiUsageLedgerEntry", "AiWorkspaceConnection", "AppInstallation", "AppSession", "AppSurfaceAssignment", "ApprovalDecision", "ApprovalFlow", "ApprovalPolicy", "ArtifactInputLineage", "ArtifactInputSnapshot", "AuditLog",
     "BrainArticle", "BrainArticleVersion", "BrainBacklink", "BrainDiscussionComment", "BrainDiscussionThread", "BrainSource", "BuildArtifact", "BuildArtifactAsset",
     "CatalogFavorite", "CatalogItem", "CatalogRequest", "CatalogSettings", "CheckIn", "Circle", "CircleAgentAssignment", "CommunicationChannel", "CommunicationContextSummary",
     "CommunicationEntityLink", "CommunicationExternalUser", "CommunicationInstallation", "CommunicationMessage", "Constitution", "ConstitutionSourceReference", "ContextGraphEvidenceRef",
-    "ContextGraphObject", "ContextGraphProposedDiff", "ContextGraphRelationship", "ContextMapLayoutItem", "ContextMapView", "ConversationPendingOperation", "ConversationSession", "ConversationTurn",
+    "ContextGraphObject", "ContextGraphProposedDiff", "ContextGraphRelationship", "ContextMapLayoutItem", "ContextMapView", "ConversationPendingOperation", "ConversationPromptInput", "ConversationIngressInput", "McpToolInput", "ConversationOperationOutcome", "ConversationSession", "ConversationTurn",
     "CrmAccount", "CrmActivity", "CrmCommunicationSuggestion", "CrmContact", "CrmConversation", "CrmConversationMessage", "CrmDeal", "CrmDealStageTransition", "CrmProspectWorkspace",
-    "CrmQualification", "CustomerDeploymentAccess", "CustomerReleaseTarget", "DecisionRecord", "DeliberationEntry", "DemoLead", "Document", "ExecutionRequest", "ExecutionResult", "ExpertiseTag",
-    "ExternalContentSource", "ExternalContentSyncLog", "ExternalDataSource", "ExternalDataSyncLog", "ExternalMcpConnection", "FinanceClient", "FinanceConsultant", "FinanceContributionEntry",
-    "FinanceExpense", "FinanceImportApplication", "FinanceImportBatch", "FinanceImportProfile", "FinanceProject", "FinanceReport", "FinanceTimeEntry", "Goal", "GoalLink", "GoalUpdate",
+    "CrmQualification", "CrmQualificationFormInput", "CustomerDeploymentAccess", "CustomerReleaseTarget", "DecisionRecord", "DeliberationEntry", "DemoLead", "Document", "ExecutionRequest", "ExecutionResult", "ExpertiseTag",
+    "ExternalContentSource", "ExternalContentSyncLog", "ExternalProviderFetchInput", "OAuthProviderFetchInput", "ExternalMcpResponseInput", "ExternalDataSource", "ExternalDataSyncLog", "SqlIngestionSourceClaim", "SqlIngestionAttempt", "SqlNativeRunInput", "SqlNativeCapturePart", "SqlKnowledgePublication", "SqlKnowledgeStagedChunk", "InformationCategoryPolicy", "ExternalMcpConnection", "FinanceClient", "FinanceConsultant", "FinanceContributionEntry",
+    "FinanceExpense", "FinanceImportApplication", "FinanceImportBatch", "FinanceReportUploadInput", "FinanceReportFactRevision", "FinanceImportProfile", "FinanceProject", "FinanceReport", "FinanceTimeEntry", "Goal", "GoalLink", "GoalUpdate",
     "GovernanceScore", "ImpactFootprint", "InboundWebhook", "KeyResult", "KnowledgeChunk", "McpOAuthAccessToken", "McpOAuthAuthorizationCode", "Meeting", "MeetingAudioAsset",
     "MeetingFollowUpReview", "MeetingInsight", "MeetingRecorderSmokeRun", "MeetingRecording", "MeetingSeries", "MeetingTranscriptImportBatch", "MeetingTranscriptProcessingProgress",
     "MeetingTranscriptSourceConnection", "MeetingTranscriptSourceRecord", "Member", "MemberEmailAlias", "MemberExpertise", "MemberInviteRequest", "ModelUsage", "ModelUsageBudget",
@@ -48,8 +48,8 @@ export const TENANT_PURGE_MODEL_DISPOSITIONS = {
 export const TENANT_PURGE_TARGET_MODELS = ["Workspace", "CustomerDeployment", "CustomerAccount", "ProcurementTrial"] as const;
 export type TenantPurgeTargetModel = typeof TENANT_PURGE_TARGET_MODELS[number];
 export const PRISMA_REFERENTIAL_ACTIONS = ["Cascade", "SetNull", "Restrict", "NoAction", "SetDefault"] as const;
-export type PrismaReferentialAction = typeof PRISMA_REFERENTIAL_ACTIONS[number];
-export type ReferentialActionSource = "EXPLICIT" | "POSTGRESQL_DEFAULT";
+type PrismaReferentialAction = typeof PRISMA_REFERENTIAL_ACTIONS[number];
+type ReferentialActionSource = "EXPLICIT" | "POSTGRESQL_DEFAULT";
 
 export interface TenantPurgeDirectRelation {
   model: Prisma.ModelName;
@@ -67,7 +67,11 @@ export interface TenantPurgeDirectRelation {
 }
 
 const DIRECT_RELATION_DSL = `
-WorkspaceFeatureFlag|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceClient|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceConsultant|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceProject|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
+RecorderTranscriptBinding|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;RecorderTranscriptClaim|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;RecorderTranscriptAttempt|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;RecorderTranscriptPublication|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;
+SqlNativeRunInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;SqlNativeCapturePart|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;SqlKnowledgePublication|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;InformationCategoryPolicy|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;
+SqlIngestionSourceClaim|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;SqlIngestionAttempt|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;
+NativeTranscriptInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;NativeTranscriptPublication|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;TranscriptTransportArchive|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;CommunicationIngressInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;CommunicationMessageNativeInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;SourcePermissionEpoch|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;GenericDerivedArtifactVariant|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;DerivedArtifactRebuildState|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;
+ExternalProviderFetchInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;OAuthProviderFetchInput|workspace|Workspace||workspaceId|id|0|0|Cascade|NoAction;ExternalMcpResponseInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceReportUploadInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceReportFactRevision|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;CrmQualificationFormInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ConversationOperationOutcome|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;McpToolInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ConversationIngressInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;AgentRequestInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;AgentFeedbackInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ConversationPromptInput|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;WorkspaceFeatureFlag|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ArtifactInputLineage|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ArtifactInputSnapshot|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceClient|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceConsultant|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceProject|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 FinanceTimeEntry|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceExpense|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceContributionEntry|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceReport|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 FinanceImportBatch|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceImportApplication|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;FinanceImportProfile|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;WorkspaceModuleGrant|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 WorkspaceModuleAccessRequest|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;WorkspaceIntegrationBinding|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;CommunicationInstallation|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;CommunicationExternalUser|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
@@ -129,7 +133,7 @@ export function decodeDirectRelations(dsl: string, sourceBits: string): TenantPu
 }
 
 // Each row has delete/update source bits: 1 is explicit, 0 is the verified PostgreSQL default.
-const DIRECT_RELATION_SOURCE_BITS = `${"10".repeat(154)}${"11".repeat(3)}1010101010`;
+const DIRECT_RELATION_SOURCE_BITS = `${"10".repeat(19)}11${"10".repeat(166)}${"11".repeat(3)}1010101010`;
 export const TENANT_PURGE_DIRECT_RELATIONS = decodeDirectRelations(DIRECT_RELATION_DSL, DIRECT_RELATION_SOURCE_BITS);
 
 function stripPrismaComments(schema: string) {

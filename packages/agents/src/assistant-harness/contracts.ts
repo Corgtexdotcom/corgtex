@@ -117,13 +117,32 @@ export class AssistantHarnessError extends Error {
   }
 }
 
+/** Capture admitted identity and port selection, never the mutable live policy behind ports. */
+export function snapshotRuntime(runtime: AssistantRuntime): AssistantRuntime {
+  return Object.freeze({
+    signal: runtime.signal,
+    authorize: runtime.authorize.bind(runtime),
+    reserveDispatch: runtime.reserveDispatch.bind(runtime),
+    scope: Object.freeze({ ...runtime.scope, job: Object.freeze({ ...runtime.scope.job }) }),
+    actor: Object.freeze({ ...runtime.actor, user: Object.freeze({ ...runtime.actor.user }) }),
+    delivery: runtime.delivery ? Object.freeze({
+      deliver: runtime.delivery.deliver.bind(runtime.delivery),
+      audience: Object.freeze({ ...runtime.delivery.audience }),
+    }) : undefined,
+  });
+}
+
+export function snapshotSources(sources: readonly SourceReference[]): readonly SourceReference[] {
+  return Object.freeze(sources.map(source => Object.freeze({ ...source })));
+}
+
 export function checkCancellation(runtime: AssistantRuntime) {
   if (runtime.signal.aborted) throw new AssistantHarnessError("CANCELLED");
 }
 
 export async function authorize(runtime: AssistantRuntime, operation: AssistantOperation, sources: readonly SourceReference[]) {
   checkCancellation(runtime);
-  try { await runtime.authorize(operation, sources); } catch (error) {
+  try { await runtime.authorize(operation, snapshotSources(sources)); } catch (error) {
     if (error instanceof AssistantHarnessError) throw error;
     throw new AssistantHarnessError("SCOPE");
   }

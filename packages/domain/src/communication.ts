@@ -1,6 +1,7 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { AbortError as SlackAttemptAbortError } from "p-retry";
+import { createHmac } from "node:crypto";
 import { WebClient } from "@slack/web-api";
-import { Prisma, type CommunicationInstallation, type CommunicationProvider } from "@prisma/client";
+import { Prisma, type CommunicationInstallation, type CommunicationMessage, type CommunicationProvider } from "@prisma/client";
 import {
   decryptSecret,
   encryptSecret,
@@ -8,14 +9,21 @@ import {
   prisma,
   randomOpaqueToken,
   toInputJson,
-  beginAuthorizationContext,
 } from "@corgtex/shared";
 import type { AppActor, HumanActor } from "@corgtex/shared";
+import { captureSlackSignedIngress, assertSlackSignedIngress, communicationCanonicalJson, communicationNativeHash,
+  type SlackSignedIngress } from "./communication-native-ingress";
+import { captureSlackNativeMessageFetch, communicationInstallationGrantHash, isCommunicationIngressInputCurrent,
+  withSlackNativeCommitReceipt, slackNativeMessageProjection, type SlackNativeFetchReceipt } from "./communication-native-authority";
+import { artifactPermissionEpochIdentities, capturePermissionEpochs } from "./source-permission-epochs";
 import { requireWorkspaceMembership } from "./auth";
+import { loadReadableDigestQuery, DigestReadRelease, isDigestInputProofShared } from "./digest-lineage";
 import { createAction, publishAction } from "./actions";
 import { ingestSource } from "./brain";
+import { captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, recordArtifactInputLineage, preserveUnknownArtifactInputSnapshot, type LineageRoot } from "./source-lineage";
 import { AppError, invariant } from "./errors";
 import {
+  assertMeetingReviewPublicPublication,
   buildSlackMeetingActionReviewEditView,
   confirmSlackMeetingActionReviewProposal,
   dismissSlackMeetingActionReviewProposal,
@@ -45,6 +53,7 @@ export type SlackAgentJobPayload = {
   messageTs?: string | null;
   messageText?: string | null;
   sourceMessageId?: string | null;
+  requestInputId?: string | null;
   inboundEventId?: string | null;
   responseUrlEnc?: string | null;
 };
@@ -265,49 +274,9 @@ export function readSlackOAuthState(state: string) {
   }
 }
 
+export { captureSlackSignedIngress } from "./communication-native-ingress";
 export function verifySlackRequest(rawBody: string, headers: Headers | Record<string, string | string[] | undefined>, workspaceId?: string) {
-  const binding = getSlackWorkspaceBinding(workspaceId);
-  invariant(binding?.signingSecret, 503, "SLACK_NOT_CONFIGURED", "Slack request verification is not configured for this workspace.");
-
-  const readHeader = (name: string) => {
-    if (headers instanceof Headers) {
-      return headers.get(name) ?? headers.get(name.toLowerCase()) ?? "";
-    }
-    const value = headers[name] ?? headers[name.toLowerCase()];
-    return Array.isArray(value) ? value[0] ?? "" : value ?? "";
-  };
-
-  const timestamp = readHeader("x-slack-request-timestamp");
-  const signature = readHeader("x-slack-signature");
-  const timestampSeconds = Number.parseInt(timestamp, 10);
-  invariant(Number.isFinite(timestampSeconds), 401, "INVALID_SLACK_SIGNATURE", "Missing Slack request timestamp.");
-  invariant(Math.abs(Date.now() / 1000 - timestampSeconds) <= 300, 401, "INVALID_SLACK_SIGNATURE", "Slack request timestamp is outside the allowed window.");
-
-  const base = `v0:${timestamp}:${rawBody}`;
-  const expected = `v0=${createHmac("sha256", binding.signingSecret).update(base).digest("hex")}`;
-  const expectedBuffer = Buffer.from(expected);
-  const actualBuffer = Buffer.from(signature);
-  invariant(actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer), 401, "INVALID_SLACK_SIGNATURE", "Slack request signature is invalid.");
-  if (binding.source === "workspace") {
-    let payload: unknown;
-    try {
-      if (rawBody.trimStart().startsWith("{")) payload = JSON.parse(rawBody);
-      else {
-        const form = new URLSearchParams(rawBody);
-        payload = form.has("payload") ? JSON.parse(form.get("payload")!) : Object.fromEntries(form);
-      }
-    } catch {
-      throw new AppError(400, "INVALID_SLACK_PAYLOAD", "Invalid Slack request payload.");
-    }
-    invariant(isRecord(payload), 400, "INVALID_SLACK_PAYLOAD", "Invalid Slack request payload.");
-    // Slack's signed URL verification envelope contains no team or app identity.
-    if (payload.type !== "url_verification") {
-      const teamId = asString(payload.team_id) || (isRecord(payload.team) ? asString(payload.team.id) : "");
-      invariant(teamId === binding.teamId && asString(payload.api_app_id) === binding.appId,
-        403, "SLACK_TENANT_MISMATCH", "Slack request does not match this workspace configuration.");
-    }
-  }
-  beginAuthorizationContext();
+  captureSlackSignedIngress(rawBody, headers, workspaceId);
   return true;
 }
 
@@ -325,7 +294,7 @@ export async function verifySlackWorkspaceInstallation(workspaceId: string, payl
 export async function listCommunicationInstallations(actor: AppActor, workspaceId: string) {
   await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: ["ADMIN"] });
 
-  return prisma.communicationInstallation.findMany({
+  const installations = await prisma.communicationInstallation.findMany({
     where: { workspaceId },
     orderBy: { createdAt: "desc" },
     select: {
@@ -342,9 +311,41 @@ export async function listCommunicationInstallations(actor: AppActor, workspaceI
       disconnectedAt: true,
       lastEventAt: true,
       lastError: true,
-      _count: { select: { channels: true, externalUsers: true, messages: true } },
+      _count: { select: { channels: true, externalUsers: true } },
     },
   });
+  const unavailable = () => installations.map(installation => ({...installation,
+    _count: {...installation._count, messages: null as number | null},
+    messageCount: {count: null as number | null, complete: false, available: false},
+  }));
+  try {
+    const counts = new Map<string, number>();
+    const release = new DigestReadRelease(actor, workspaceId);
+    // Enumerate the bounded corpus once: live keyset pages can mix insert snapshots.
+    const candidates = await prisma.communicationMessage.findMany({
+      where: { workspaceId }, orderBy: {id: "asc"}, take: 200,
+    });
+    const complete = candidates.length < 200;
+    for (let offset = 0; offset < candidates.length; offset += 100) {
+      for (const message of (await release.capture("CommunicationMessage", candidates.slice(offset, offset + 100))).records) {
+        counts.set(message.installationId, (counts.get(message.installationId) ?? 0) + 1);
+      }
+    }
+    return await release.finish(installations.map(installation => ({...installation,
+      _count: {...installation._count, messages: complete ? counts.get(installation.id) ?? 0 : null},
+      messageCount: {count: counts.get(installation.id) ?? 0, complete, available: true},
+    })), async tx => {
+      await requireWorkspaceMembership({actor, workspaceId, allowedRoles: ["ADMIN"], tx});
+    });
+  } catch (error) {
+    if (!(error instanceof AppError) || !["SOURCE_CHANGED", "SOURCE_RESTRICTED", "UNKNOWN_LINEAGE"].includes(error.code)) throw error;
+    // A withdrawn count is not evidence that the installation disappeared.
+    // Release no stale count, and independently recheck current administrator authority.
+    return new DigestReadRelease(actor, workspaceId).finish(unavailable(), async tx => {
+      await requireWorkspaceMembership({actor, workspaceId, allowedRoles: ["ADMIN"], tx});
+    });
+  }
+
 }
 
 export async function disconnectCommunicationInstallation(actor: AppActor, installationId: string) {
@@ -621,70 +622,58 @@ async function slackInstallationByTeam(teamId: string) {
   return installation;
 }
 
-export async function ingestCommunicationEvent(provider: CommunicationProvider, rawEvent: Record<string, unknown>) {
-  if (provider !== "SLACK") {
-    throw new Error(`Unsupported communication provider: ${provider}`);
-  }
-
+export async function ingestCommunicationEvent(provider: CommunicationProvider, rawEvent: Record<string, unknown>, signedIngress?: SlackSignedIngress) {
+  invariant(provider === "SLACK", 400, "UNSUPPORTED_PROVIDER", "Native communication verification is available for Slack only.");
+  // Exact immutable signed bytes, rather than a caller-provided authentication flag.
+  assertSlackSignedIngress(signedIngress, rawEvent, signedIngress?.workspaceId ?? undefined);
+  rawEvent = signedIngress.payload as Record<string, unknown>;
   const teamId = asString(rawEvent.team_id) || (isRecord(rawEvent.team) ? asString(rawEvent.team.id) : "");
   const event = isRecord(rawEvent.event) ? rawEvent.event : rawEvent;
   const eventType = asString(event.type) || asString(rawEvent.type) || "unknown";
   const externalEventId = asString(rawEvent.event_id) || asString(event.event_ts) || null;
-  const dedupeKey = externalEventId
-    ? `SLACK:${teamId}:${externalEventId}`
-    : `SLACK:${teamId}:${createHmac("sha256", "slack-event").update(JSON.stringify(rawEvent)).digest("hex")}`;
-
-  const existing = await prisma.communicationInboundEvent.findUnique({
-    where: { dedupeKey },
-  });
-  if (existing) {
-    return { inboundEventId: existing.id, duplicate: true };
-  }
-
+  const dedupeKey = `SLACK:${teamId}:${externalEventId ?? signedIngress.bodyHash}`;
   const installation = teamId ? await slackInstallationByTeam(teamId) : null;
-  const activeInstallation = installation?.status === "ACTIVE" ? installation : null;
-  const ignoredReason = installation ? INACTIVE_SLACK_INSTALLATION_ERROR : "No Corgtex Slack installation matched this event.";
-  const inbound = await prisma.communicationInboundEvent.create({
-    data: {
-      provider: "SLACK",
-      installationId: installation?.id ?? null,
-      workspaceId: installation?.workspaceId ?? null,
-      externalEventId,
-      eventType,
-      dedupeKey,
-      payload: toInputJson(rawEvent),
-      status: activeInstallation ? "PENDING" : "IGNORED",
-      error: activeInstallation ? null : ignoredReason,
-    },
+  invariant(installation?.status === "ACTIVE" && installation.appId && installation.appId === asString(rawEvent.api_app_id),
+    403, "SLACK_TENANT_MISMATCH", "An exact active Slack app installation is required.");
+  assertSlackSignedIngress(signedIngress, rawEvent, installation.workspaceId);
+  return prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT "id" FROM "CommunicationInstallation" WHERE "id" = ${installation.id} FOR SHARE`;
+    const current = await tx.communicationInstallation.findUnique({ where: { id: installation.id } });
+    invariant(current && communicationInstallationGrantHash(current) === communicationInstallationGrantHash(installation),
+      409, "SOURCE_CHANGED", "Slack installation changed before accepting the signed request.");
+    assertSlackSignedIngress(signedIngress, rawEvent, installation.workspaceId);
+    const existing = await tx.communicationInboundEvent.findUnique({ where: { dedupeKey } });
+    if (existing) {
+      // A historic raw dedupe row cannot be silently promoted into authenticated native ingress.
+      invariant(existing.ingressInputId, 409, "UNKNOWN_LINEAGE", "The prior Slack event has no authenticated original receipt.");
+      return { inboundEventId: existing.id, duplicate: true };
+    }
+    const permissionEpochsJson = await capturePermissionEpochs(tx, installation.workspaceId,
+      artifactPermissionEpochIdentities("CommunicationIngressInput", { workspaceId: installation.workspaceId,
+        installationId: installation.id, externalChannelId: asString(event.channel) || undefined }));
+    const ingress = await tx.communicationIngressInput.create({ data: {
+      workspaceId: installation.workspaceId, installationId: installation.id, provider: "SLACK",
+      externalWorkspaceId: teamId, appId: installation.appId, ingressKind: "EVENT", externalEventId,
+      requestTimestamp: signedIngress.requestTimestamp, signature: signedIngress.signature,
+      signingBindingHash: signedIngress.signingBindingHash, installationGrantHash: communicationInstallationGrantHash(installation),
+      encryptedRawBody: encryptSecret(signedIngress.rawBody), bodyHash: signedIngress.bodyHash,
+      permissionEpochsJson: toInputJson(permissionEpochsJson), epochProofVersion: 1,
+      expiresRawAt: rawRetentionDate(rawRetentionDays(installation.settings)), receivedAt: new Date(signedIngress.receivedAtMs),
+    } });
+    const inbound = await tx.communicationInboundEvent.create({ data: { provider: "SLACK", installationId: installation.id,
+      workspaceId: installation.workspaceId, ingressInputId: ingress.id, externalEventId, eventType, dedupeKey,
+      payload: toInputJson(rawEvent), status: "PENDING" } });
+    await tx.communicationInstallation.update({ where: { id: installation.id }, data: { lastEventAt: new Date(), lastError: null } });
+    await tx.workflowJob.upsert({ where: { dedupeKey: `${inbound.id}:communication-slack-event` }, update: {},
+      create: { workspaceId: installation.workspaceId, type: "communication.slack.event",
+        payload: { inboundEventId: inbound.id }, dedupeKey: `${inbound.id}:communication-slack-event` } });
+    return { inboundEventId: inbound.id, duplicate: false };
   });
-
-  if (!activeInstallation) {
-    return { inboundEventId: inbound.id, duplicate: false, ignored: true };
-  }
-
-  await prisma.$transaction(async (tx) => {
-    await tx.communicationInstallation.update({
-      where: { id: activeInstallation.id },
-      data: { lastEventAt: new Date(), lastError: null },
-    });
-    await tx.workflowJob.upsert({
-      where: { dedupeKey: `${inbound.id}:communication-slack-event` },
-      update: {},
-      create: {
-        workspaceId: activeInstallation.workspaceId,
-        type: "communication.slack.event",
-        payload: { inboundEventId: inbound.id },
-        dedupeKey: `${inbound.id}:communication-slack-event`,
-      },
-    });
-  });
-
-  return { inboundEventId: inbound.id, duplicate: false };
 }
 
 async function resolveHumanActorForSlackUser(installation: Pick<CommunicationInstallation, "id" | "workspaceId" | "provider" | "status" | "botTokenEnc">, externalUserId: string): Promise<HumanActor | null> {
   const installationId = installation.id;
-  if (installation.provider !== "SLACK" || installation.status !== "ACTIVE") return null;
+  if (!externalUserId.trim() || installation.provider !== "SLACK" || installation.status !== "ACTIVE") return null;
   const authorizedActor = async (user: HumanActor["user"]): Promise<HumanActor | null> => {
     const actor: HumanActor = { kind: "user", user };
     try {
@@ -699,6 +688,7 @@ async function resolveHumanActorForSlackUser(installation: Pick<CommunicationIns
     where: { installationId_externalUserId: { installationId, externalUserId } },
   });
 
+  if (mapped?.isBot || mapped?.isDeleted) return null;
   if (mapped?.userId) {
     const user = await prisma.user.findUnique({
       where: { id: mapped.userId },
@@ -756,6 +746,7 @@ async function resolveHumanActorForSlackUser(installation: Pick<CommunicationIns
       },
     });
 
+    if (profile.user?.is_bot || profile.user?.deleted) return null;
     return user ? await authorizedActor(user) : null;
   } catch {
     return null;
@@ -1007,6 +998,63 @@ async function enqueueSlackMessageContextJobs(params: {
   }
 }
 
+/** Atomically install a canonical native body and its complete authenticated-fetch receipt. */
+async function persistNativeSlackMessage(actor: AppActor, receipt: SlackNativeFetchReceipt, expiresRawAt: Date, ingressInputId: string | null = null) {
+  const target = receipt.target;
+  return prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT "id" FROM "CommunicationInstallation" WHERE "id" = ${target.installationId} FOR SHARE`;
+    await tx.$queryRaw`SELECT "id" FROM "CommunicationChannel" WHERE "installationId" = ${target.installationId} AND "externalChannelId" = ${target.channelId} FOR SHARE`;
+    await tx.$queryRaw`SELECT "id" FROM "CommunicationMessage" WHERE "installationId" = ${target.installationId} AND "externalChannelId" = ${target.channelId} AND "externalMessageId" = ${target.messageTs} FOR UPDATE`;
+    const installation = await tx.communicationInstallation.findUnique({ where: { id: target.installationId } });
+    invariant(installation && communicationInstallationGrantHash(installation) === receipt.installationGrantHash,
+      409, "SOURCE_CHANGED", "Slack authority changed before native persistence.");
+    const existing = await tx.communicationMessage.findFirst({ where: { workspaceId: target.workspaceId, installationId: target.installationId,
+      externalChannelId: target.channelId, externalMessageId: target.messageTs } });
+    invariant(!existing || (!existing.isBot && !existing.isHidden && !existing.isDeleted && !existing.textRedactedAt
+      && (!existing.expiresRawAt || existing.expiresRawAt.getTime() > Date.now())),
+    409, "SOURCE_CHANGED", "A retired Slack message cannot be revived by a refetch.");
+    // Preserve exact unproven history without allowing it to influence the regenerated body.
+    if (existing) await preserveUnknownArtifactInputSnapshot(tx, target.workspaceId, { kind: "CommunicationMessage", id: existing.id }, existing);
+    const projected = receipt.projected;
+    const values = { externalUserId: String(projected.user), threadExternalId: typeof projected.thread_ts === "string" ? projected.thread_ts : null,
+      text: String(projected.text), raw: toInputJson(projected), messageTs: slackTimestampToDate(target.messageTs),
+      receivedAt: slackTimestampToDate(target.messageTs)!,
+      expiresRawAt: existing?.expiresRawAt && existing.expiresRawAt < expiresRawAt ? existing.expiresRawAt : expiresRawAt,
+      permalink: null, isBot: false, isHidden: false, isDeleted: false, textRedactedAt: null };
+    invariant(values.expiresRawAt.getTime() > Date.now(), 409, "SOURCE_RESTRICTED", "The Slack original retention period expired.");
+    const unchanged = existing && existing.externalUserId === values.externalUserId && existing.threadExternalId === values.threadExternalId
+      && existing.text === values.text && communicationCanonicalJson(existing.raw) === communicationCanonicalJson(values.raw)
+      && existing.receivedAt.getTime() === values.receivedAt.getTime()
+      && existing.messageTs?.getTime() === values.messageTs?.getTime() && existing.expiresRawAt?.getTime() === values.expiresRawAt.getTime()
+      && existing.permalink === null;
+    const message = unchanged ? existing : await tx.communicationMessage.upsert({ where: { installationId_externalChannelId_externalMessageId: {
+      installationId: target.installationId, externalChannelId: target.channelId, externalMessageId: target.messageTs } }, update: values,
+      create: { ...values, workspaceId: target.workspaceId, installationId: target.installationId, provider: "SLACK",
+        externalChannelId: target.channelId, externalMessageId: target.messageTs } });
+    // Message INSERT/UPDATE permission triggers have run before the epoch vector is captured.
+    const permissionEpochsJson = await capturePermissionEpochs(tx, target.workspaceId,
+      artifactPermissionEpochIdentities("CommunicationMessage", message));
+    const input = await tx.communicationMessageNativeInput.create({ data: { workspaceId: target.workspaceId,
+      installationId: target.installationId, communicationMessageId: message.id, provider: "SLACK",
+      externalWorkspaceId: installation.externalWorkspaceId, appId: installation.appId, providerPrincipalId: receipt.providerPrincipalId,
+      externalChannelId: target.channelId, externalMessageId: target.messageTs, externalUserId: message.externalUserId,
+      threadExternalId: message.threadExternalId, mode: "AUTHENTICATED_FETCH", ingressInputId,
+      requestJson: toInputJson({...receipt.request,messageContentFingerprint:lineageContentFingerprint("CommunicationMessage",message)}), encryptedPayloadJson: encryptSecret(communicationCanonicalJson(receipt.payload)),
+      projectedContentJson: toInputJson(projected), projectionHash: communicationNativeHash(communicationCanonicalJson(projected)),
+      installationGrantHash: receipt.installationGrantHash, channelGrantHash: receipt.channelGrantHash,
+      permissionEpochsJson: toInputJson(permissionEpochsJson), epochProofVersion: 1, expiresRawAt: values.expiresRawAt,
+      fetchedAt: new Date(receipt.capturedAtMs) } });
+    await withSlackNativeCommitReceipt(actor, target.workspaceId, input.id, tx, receipt, async () => {
+      await recordArtifactInputLineage({ tx, actor, workspaceId: target.workspaceId, artifact: { kind: "CommunicationMessage", id: message.id },
+        content: message, origin: "DERIVED", inputs: [{ kind: "CommunicationMessageNativeInput", id: input.id }] });
+    });
+    return message;
+  });
+}
+function slackNativeWorkerActor(workspaceId: string): AppActor {
+  return { kind: "agent", authProvider: "bootstrap", label: "slack-native-public-ingestion", workspaceIds: [workspaceId] };
+}
+
 async function ingestSlackMessage(installation: { id: string; workspaceId: string; provider: CommunicationProvider; settings?: Prisma.JsonValue | null }, event: Record<string, unknown>) {
   const normalized = normalizeSlackMessageEvent(event);
   const externalChannelId = normalized.externalChannelId;
@@ -1118,43 +1166,11 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
 
   const text = normalized.text;
   const expiresRawAt = rawRetentionDate(rawRetentionDays(installation.settings));
-  const message = await prisma.communicationMessage.upsert({
-    where: {
-      installationId_externalChannelId_externalMessageId: {
-        installationId: installation.id,
-        externalChannelId,
-        externalMessageId: ts,
-      },
-    },
-    update: {
-      externalUserId: normalized.externalUserId,
-      threadExternalId: normalized.threadTs,
-      text: text || null,
-      raw: toInputJson(normalized.source),
-      messageTs: slackTimestampToDate(ts),
-      expiresRawAt,
-      isBot: normalized.isBot,
-      isHidden: normalized.hidden,
-      isDeleted: false,
-      textRedactedAt: null,
-    },
-    create: {
-      installationId: installation.id,
-      workspaceId: installation.workspaceId,
-      provider: "SLACK",
-      externalMessageId: ts,
-      externalChannelId,
-      externalUserId: normalized.externalUserId,
-      threadExternalId: normalized.threadTs,
-      text: text || null,
-      raw: toInputJson(normalized.source),
-      messageTs: slackTimestampToDate(ts),
-      expiresRawAt,
-      isBot: normalized.isBot,
-      isHidden: normalized.hidden,
-      isDeleted: false,
-    },
-  });
+  const receipt = await captureSlackNativeMessageFetch({ workspaceId: installation.workspaceId, installationId: installation.id,
+    channelId: externalChannelId, messageTs: ts, threadTs: normalized.threadTs });
+  invariant(receipt.projected.text === text && receipt.projected.user === normalized.externalUserId,
+    409, "SOURCE_CHANGED", "The signed Slack event no longer matches the current original message.");
+  const message = await persistNativeSlackMessage(slackNativeWorkerActor(installation.workspaceId), receipt, expiresRawAt);
 
   if (text && slackFollowupStopIntent(text)) {
     await suppressSlackThreadFollowups({
@@ -1197,53 +1213,14 @@ async function persistSlackSourceMessage(installation: {
 }) {
   if (!params.channelId || !params.messageTs) return null;
 
-  await ensureSlackChannel(installation, {
-    channel: params.channelId,
-  });
-
-  const expiresRawAt = rawRetentionDate(rawRetentionDays(installation.settings));
-  const message = await prisma.communicationMessage.upsert({
-    where: {
-      installationId_externalChannelId_externalMessageId: {
-        installationId: installation.id,
-        externalChannelId: params.channelId,
-        externalMessageId: params.messageTs,
-      },
-    },
-    update: {
-      externalUserId: params.externalUserId || null,
-      threadExternalId: params.threadTs || null,
-      text: params.text || null,
-      raw: toInputJson(params.raw ?? {}),
-      messageTs: slackTimestampToDate(params.messageTs),
-      expiresRawAt,
-      isBot: false,
-      isHidden: false,
-      isDeleted: false,
-      textRedactedAt: null,
-    },
-    create: {
-      installationId: installation.id,
-      workspaceId: installation.workspaceId,
-      provider: "SLACK",
-      externalMessageId: params.messageTs,
-      externalChannelId: params.channelId,
-      externalUserId: params.externalUserId || null,
-      threadExternalId: params.threadTs || null,
-      text: params.text || null,
-      raw: toInputJson(params.raw ?? {}),
-      messageTs: slackTimestampToDate(params.messageTs),
-      expiresRawAt,
-      isBot: false,
-      isHidden: false,
-      isDeleted: false,
-    },
-    select: { id: true, externalChannelId: true, externalMessageId: true, threadExternalId: true, messageTs: true, updatedAt: true },
-  });
-
-  if (params.text?.trim()) {
-    await enqueueSlackMessageContextJobs({ installation, message });
-  }
+  await ensureSlackChannel(installation, { channel: params.channelId });
+  const receipt = await captureSlackNativeMessageFetch({ workspaceId: installation.workspaceId, installationId: installation.id,
+    channelId: params.channelId, messageTs: params.messageTs, threadTs: params.threadTs });
+  invariant(receipt.projected.text === (params.text ?? "") && receipt.projected.user === params.externalUserId,
+    409, "SOURCE_CHANGED", "The authenticated Slack event changed before capture.");
+  const message = await persistNativeSlackMessage(slackNativeWorkerActor(installation.workspaceId), receipt,
+    rawRetentionDate(rawRetentionDays(installation.settings)));
+  if (params.text?.trim()) await enqueueSlackMessageContextJobs({ installation, message });
 
   return { id: message.id };
 }
@@ -1283,43 +1260,14 @@ async function upsertSlackArchiveMessage(params: {
     return false;
   }
 
-  const message = await prisma.communicationMessage.upsert({
-    where: {
-      installationId_externalChannelId_externalMessageId: {
-        installationId: params.installation.id,
-        externalChannelId: params.channelId,
-        externalMessageId: ts,
-      },
-    },
-    update: {
-      externalUserId: asString(params.message.user) || null,
-      threadExternalId: asString(params.message.thread_ts) || null,
-      text: asString(params.message.text) || null,
-      raw: toInputJson(params.message),
-      messageTs: slackTimestampToDate(ts),
-      expiresRawAt: params.expiresRawAt,
-      isBot: false,
-      isHidden: false,
-      isDeleted: false,
-      textRedactedAt: null,
-    },
-    create: {
-      installationId: params.installation.id,
-      workspaceId: params.installation.workspaceId,
-      provider: "SLACK",
-      externalMessageId: ts,
-      externalChannelId: params.channelId,
-      externalUserId: asString(params.message.user) || null,
-      threadExternalId: asString(params.message.thread_ts) || null,
-      text: asString(params.message.text) || null,
-      raw: toInputJson(params.message),
-      messageTs: slackTimestampToDate(ts),
-      expiresRawAt: params.expiresRawAt,
-      isBot: false,
-      isHidden: false,
-      isDeleted: false,
-    },
-  });
+  try { slackNativeMessageProjection(params.message, {workspaceId:params.installation.workspaceId,installationId:params.installation.id,
+    channelId:params.channelId,messageTs:ts,threadTs:asString(params.message.thread_ts)||null}); }
+  catch { return false; }
+  const receipt = await captureSlackNativeMessageFetch({ workspaceId: params.installation.workspaceId, installationId: params.installation.id,
+    channelId: params.channelId, messageTs: ts, threadTs: asString(params.message.thread_ts) || null });
+  invariant(receipt.projected.text === asString(params.message.text) && receipt.projected.user === asString(params.message.user),
+    409, "SOURCE_CHANGED", "The Slack archive source changed before persistence.");
+  const message = await persistNativeSlackMessage(slackNativeWorkerActor(params.installation.workspaceId), receipt, params.expiresRawAt);
 
   if (asString(params.message.text)) {
     await enqueueSlackMessageContextJobs({
@@ -1384,6 +1332,7 @@ export async function syncSlackPublicArchiveForWorkspace(workspaceId: string, op
   retentionDays?: number;
   maxMessagesPerChannel?: number;
 } = {}): Promise<SlackPublicArchiveSyncSummary> {
+  options = structuredClone(options);
   const installation = await prisma.communicationInstallation.findFirst({
     where: {
       workspaceId,
@@ -1510,17 +1459,11 @@ export async function syncSlackPublicArchiveForWorkspace(workspaceId: string, op
     cursor = response.response_metadata?.next_cursor || undefined;
   } while (cursor);
 
-  const settings = isRecord(installation.settings) ? installation.settings : {};
+  // Permission-bearing settings are configured before capture. A post-sync settings
+  // mutation would revoke every receipt captured by this same archive pass.
   await prisma.communicationInstallation.update({
     where: { id: installation.id },
     data: {
-      settings: {
-        ...settings,
-        broadPublicIngestion: true,
-        autoJoinPublicChannels,
-        rawRetentionDays: retentionDays,
-        lastPublicArchiveSyncAt: new Date().toISOString(),
-      },
       lastError: summary.channelsWithReadErrors > 0
         ? `Public archive sync had ${summary.channelsWithReadErrors} channel read errors.`
         : null,
@@ -1531,6 +1474,7 @@ export async function syncSlackPublicArchiveForWorkspace(workspaceId: string, op
 }
 
 function slackAgentDedupeKey(payload: SlackAgentJobPayload) {
+  if (payload.requestInputId?.startsWith("slack-request:")) return `${payload.requestInputId}:communication-slack-agent`;
   if (payload.inboundEventId) return `${payload.inboundEventId}:communication-slack-agent`;
   if (payload.sourceMessageId) return `${payload.sourceMessageId}:communication-slack-agent:${payload.source}`;
   const channel = payload.channelId ?? "no-channel";
@@ -1546,6 +1490,7 @@ export async function enqueueSlackAgentJob(payload: SlackAgentJobPayload) {
     messageTs: payload.messageTs ?? null,
     messageText: payload.messageText ?? null,
     sourceMessageId: payload.sourceMessageId ?? null,
+    requestInputId: payload.requestInputId ?? null,
     inboundEventId: payload.inboundEventId ?? null,
     responseUrlEnc: payload.responseUrlEnc ?? null,
   });
@@ -1628,6 +1573,15 @@ export async function processSlackInboundEvent(inboundEventId: string) {
   });
   if (!inbound || inbound.provider !== "SLACK" || !inbound.installation) return;
 
+  const workerActor: AppActor = { kind: "agent", authProvider: "bootstrap", label: "slack-native-ingress", workspaceIds: [inbound.installation.workspaceId] };
+  const ingress = inbound.ingressInputId ? await prisma.communicationIngressInput.findFirst({ where: {
+    id: inbound.ingressInputId, workspaceId: inbound.installation.workspaceId, installationId: inbound.installation.id } }) : null;
+  if (!ingress || !await isCommunicationIngressInputCurrent(workerActor, inbound.installation.workspaceId, ingress)
+    || communicationCanonicalJson(inbound.payload) !== communicationCanonicalJson(JSON.parse(decryptSecret(ingress.encryptedRawBody)))) {
+    await prisma.communicationInboundEvent.update({ where: { id: inbound.id }, data: {
+      status: "IGNORED", processedAt: new Date(), error: "Authenticated Slack ingress is unavailable." } });
+    return;
+  }
   const payload = inbound.payload as Record<string, unknown>;
   const event = isRecord(payload.event) ? payload.event : payload;
   const isDisconnectEvent = event.type === "app_uninstalled" || event.type === "tokens_revoked";
@@ -1742,7 +1696,7 @@ export async function processSlackInboundEvent(inboundEventId: string) {
       data: { status: "PROCESSED", processedAt: new Date(), error: null },
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown Slack event processing error.";
+    const message = "Slack event processing failed.";
     await prisma.communicationInboundEvent.update({
       where: { id: inbound.id },
       data: { status: "FAILED", error: message },
@@ -1757,6 +1711,7 @@ export async function processSlackInboundEvent(inboundEventId: string) {
 
 export async function createWorkItemFromCommunicationSource(actor: AppActor, params: {
   workspaceId: string;
+  lineageRoots?: LineageRoot[];
   provider: CommunicationProvider;
   installationId: string;
   kind: CommunicationWorkItemKind;
@@ -1770,6 +1725,10 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
   open?: boolean;
   claimKey?: string | null;
 }) {
+  if (params.lineageRoots) {
+    invariant(params.lineageRoots.length > 0 && await isArtifactInputProofReadable(actor, params.workspaceId, params.lineageRoots),
+      409, "SOURCE_CHANGED", "Communication inputs changed before persistence.");
+  }
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Title is required.");
   const claimKey = params.claimKey?.trim() || null;
@@ -1789,6 +1748,7 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
       const action = await prisma.$transaction(async (tx) => {
         const created = await createAction(actor, {
           workspaceId: params.workspaceId,
+          lineageRoots: params.lineageRoots,
           title,
           bodyMd,
           assigneeMemberId: params.assigneeMemberId ?? null,
@@ -1844,6 +1804,7 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
   if (params.kind === "ACTION") {
     const action = await createAction(actor, {
       workspaceId: params.workspaceId,
+      lineageRoots: params.lineageRoots,
       title,
       bodyMd,
       assigneeMemberId: params.assigneeMemberId ?? null,
@@ -1860,6 +1821,7 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
   } else if (params.kind === "TENSION") {
     const tension = await createTension(actor, {
       workspaceId: params.workspaceId,
+      lineageRoots: params.lineageRoots,
       title,
       bodyMd,
       raisedByMemberId: params.raisedByMemberId ?? null,
@@ -1870,13 +1832,14 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
     }
     result = { entityType: "Tension", entityId: tension.id };
   } else if (params.kind === "PROPOSAL") {
-    const proposal = await createProposal(actor, { workspaceId: params.workspaceId, title, summary: title, bodyMd, isPrivate: true });
+    const proposal = await createProposal(actor, { workspaceId: params.workspaceId, lineageRoots: params.lineageRoots, title, summary: title, bodyMd, isPrivate: true });
     if (params.open) {
       await submitProposal(actor, { workspaceId: params.workspaceId, proposalId: proposal.id });
     }
     result = { entityType: "Proposal", entityId: proposal.id };
   } else {
     const source = await ingestSource(actor, {
+      lineageRoots: params.lineageRoots,
       workspaceId: params.workspaceId,
       sourceType: "SLACK",
       tier: 2,
@@ -1918,6 +1881,8 @@ async function commandInstallation(payload: URLSearchParams | Record<string, unk
   const teamId = payload instanceof URLSearchParams ? payload.get("team_id") ?? "" : asString(teamRecord?.id) || asString(payload.team_id);
   const installation = teamId ? await slackInstallationByTeam(teamId) : null;
   invariant(installation && installation.status === "ACTIVE", 404, "SLACK_NOT_CONNECTED", "This Slack workspace is not connected to Corgtex.");
+  const appId = payload instanceof URLSearchParams ? payload.get("api_app_id") : asString(payload.api_app_id);
+  invariant(installation.appId && appId === installation.appId,403,"SLACK_TENANT_MISMATCH","The signed Slack command app binding is unavailable.");
   return installation;
 }
 
@@ -1962,8 +1927,10 @@ function publishActionBlocks(entityType: string, entityId: string) {
   }];
 }
 
-export async function handleSlackCommand(payload: URLSearchParams) {
+export async function handleSlackCommand(payload: URLSearchParams, signedIngress?: SlackSignedIngress) {
+  payload = new URLSearchParams(payload);
   const installation = await commandInstallation(payload);
+  assertSlackSignedIngress(signedIngress, Object.fromEntries(payload), installation.workspaceId);
   const externalUserId = payload.get("user_id") ?? "";
   const actor = await resolveHumanActorForSlackUser(installation, externalUserId);
   if (!actor) return slackAccountLinkResponse(installation.workspaceId);
@@ -1994,8 +1961,12 @@ export async function handleSlackCommand(payload: URLSearchParams) {
   const kind = command === "action" ? "ACTION" : command === "tension" ? "TENSION" : command === "proposal" ? "PROPOSAL" : null;
   if (!kind && rawText) {
     const responseUrl = payload.get("response_url") ?? "";
+    const requestInputId = await mintSlackAgentRequest(actor, { workspaceId: installation.workspaceId, installationId: installation.id,
+      externalUserId, channelId: payload.get("channel_id") || "", prompt: rawText,
+      source: "slash_command", triggerId: payload.get("trigger_id") || undefined });
     await enqueueSlackAgentJob({
       source: "slash_command",
+      requestInputId,
       installationId: installation.id,
       workspaceId: installation.workspaceId,
       actorUserId: actor.user.id,
@@ -2030,8 +2001,10 @@ export async function handleSlackCommand(payload: URLSearchParams) {
       : publishActionBlocks(item.entityType, item.entityId));
 }
 
-export async function handleSlackInteraction(payload: Record<string, unknown>) {
+export async function handleSlackInteraction(payload: Record<string, unknown>, signedIngress?: SlackSignedIngress) {
+  payload = structuredClone(payload);
   const installation = await commandInstallation(payload);
+  assertSlackSignedIngress(signedIngress, payload, installation.workspaceId);
   const externalUserId = isRecord(payload.user) ? asString(payload.user.id) : "";
   const actor = await resolveHumanActorForSlackUser(installation, externalUserId);
   if (!actor) return slackAccountLinkResponse(installation.workspaceId);
@@ -2042,24 +2015,25 @@ export async function handleSlackInteraction(payload: Record<string, unknown>) {
     const messageTs = asString(message.ts);
     const messageText = asString(message.text);
     const threadTs = asString(message.thread_ts) || messageTs;
-    const sourceMessage = channel && messageTs
-      ? await persistSlackSourceMessage(installation, {
-        channelId: channel,
-        messageTs,
-        threadTs,
-        externalUserId: asString(message.user) || null,
-        text: messageText,
-        raw: { messageAction: true, message },
-      })
-      : null;
+    invariant(channel && messageTs, 409, "UNKNOWN_LINEAGE", "The selected Slack message is unavailable.");
+    const records = await fetchAndPersistReadableSlackThreadMessages(actor, {
+      workspaceId: installation.workspaceId, installationId: installation.id, channelId: channel, threadTs, limit: 200,
+    });
+    const sourceMessage = records.find(record => record.externalMessageId === messageTs
+      && record.externalUserId === asString(message.user) && record.text === messageText);
+    invariant(sourceMessage, 409, "SOURCE_CHANGED", "The selected Slack message changed before capture.");
+    const requestInputId = await mintSlackAgentRequest(actor, { workspaceId: installation.workspaceId, installationId: installation.id,
+      externalUserId, channelId: channel, prompt: "Act on the selected Slack message.", source: "message_shortcut",
+      triggerId: asString(payload.trigger_id) || undefined, sourceMessageId: sourceMessage.id });
     const responseUrl = asString(payload.response_url);
     await enqueueSlackAgentJob({
       source: "message_shortcut",
+      requestInputId,
       installationId: installation.id,
       workspaceId: installation.workspaceId,
       actorUserId: actor.user.id,
       externalUserId,
-      prompt: messageText ? `Act on this Slack message:\n${messageText}` : "Capture this Slack message in Corgtex.",
+      prompt: "Act on the selected Slack message.",
       channelId: channel || null,
       threadTs,
       messageTs,
@@ -2080,10 +2054,15 @@ export async function handleSlackInteraction(payload: Record<string, unknown>) {
         privateMetadata: asString(view.private_metadata),
         values,
       });
+      const publication = await meetingReviewSlackAttempt(actor, {
+        workspaceId: installation.workspaceId, installationId: installation.id,
+        channelId: result.channelId, lineageRoots: result.lineageRoots,
+      });
       await updateSlackMessage(installation.id, {
         channel: result.channelId,
         ts: result.messageTs,
-      }, result.blocks, result.text);
+      }, result.blocks, result.text, publication);
+      publication.assertActive();
       return {};
     }
 
@@ -2093,37 +2072,12 @@ export async function handleSlackInteraction(payload: Record<string, unknown>) {
     const bodyMd = asString(values.body?.value?.value);
     const metadataChannel = asString(metadata.channel);
     const metadataMessageTs = asString(metadata.messageTs);
-    const expiresRawAt = rawRetentionDate(rawRetentionDays(installation.settings));
     const sourceMessage = metadataChannel && metadataMessageTs
-      ? await prisma.communicationMessage.upsert({
-        where: {
-          installationId_externalChannelId_externalMessageId: {
-            installationId: installation.id,
-            externalChannelId: metadataChannel,
-            externalMessageId: metadataMessageTs,
-          },
-        },
-        update: {
-          externalUserId: asString(metadata.externalUserId) || externalUserId || null,
-          text: asString(metadata.messageText) || null,
-          messageTs: slackTimestampToDate(metadataMessageTs),
-          expiresRawAt,
-        },
-        create: {
-          installationId: installation.id,
-          workspaceId: installation.workspaceId,
-          provider: "SLACK",
-          externalChannelId: metadataChannel,
-          externalMessageId: metadataMessageTs,
-          externalUserId: asString(metadata.externalUserId) || externalUserId || null,
-          text: asString(metadata.messageText) || null,
-          messageTs: slackTimestampToDate(metadataMessageTs),
-          expiresRawAt,
-          raw: toInputJson({ explicitCapture: true }),
-        },
-        select: { id: true },
-      })
+      ? (await fetchAndPersistReadableSlackThreadMessages(actor, { workspaceId: installation.workspaceId,
+        installationId: installation.id, channelId: metadataChannel, threadTs: metadataMessageTs }))
+        .find(message => message.externalMessageId === metadataMessageTs) ?? null
       : null;
+    invariant(!metadataMessageTs || sourceMessage, 409, "SOURCE_CHANGED", "The actual Slack source message is unavailable.");
 
     await createWorkItemFromCommunicationSource(actor, {
       workspaceId: installation.workspaceId,
@@ -2171,10 +2125,15 @@ export async function handleSlackInteraction(payload: Record<string, unknown>) {
             reviewId,
             insightId,
           });
+        const publication = await meetingReviewSlackAttempt(actor, {
+          workspaceId: installation.workspaceId, installationId: installation.id,
+          channelId: result.channelId, lineageRoots: result.lineageRoots,
+        });
         await updateSlackMessage(installation.id, {
           channel: result.channelId,
           ts: result.messageTs,
-        }, result.blocks, result.text);
+        }, result.blocks, result.text, publication);
+        publication.assertActive();
         return { response_type: "ephemeral", text: result.responseText };
       } catch (error) {
         if (error instanceof AppError) {
@@ -2198,18 +2157,68 @@ export async function handleSlackInteraction(payload: Record<string, unknown>) {
   return {};
 }
 
+export type SlackAttemptControls = Readonly<{
+  signal: AbortSignal;
+  authorizeAttempt: (context: Readonly<{ signal: AbortSignal }>) => Promise<void>;
+}>;
+
+async function meetingReviewSlackAttempt(actor: AppActor, params: {
+  workspaceId: string; installationId: string; channelId: string; lineageRoots: LineageRoot[];
+}) {
+  const originalRoots = structuredClone(await assertMeetingReviewPublicPublication(actor, params));
+  const controller = new AbortController();
+  const assertOriginal = async () => {
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+    invariant(originalRoots.length > 0 && await isArtifactInputProofReadable(actor, params.workspaceId, originalRoots),
+      409, "SOURCE_CHANGED", "The original meeting review inputs changed before Slack delivery.");
+  };
+  const authorizeAttempt: SlackAttemptControls["authorizeAttempt"] = async ({ signal }) => {
+    try {
+      controller.signal.throwIfAborted(); signal.throwIfAborted();
+      await assertOriginal();
+      const installation = await prisma.communicationInstallation.findFirst({ where: {
+        id: params.installationId, workspaceId: params.workspaceId, provider: "SLACK", status: "ACTIVE", disconnectedAt: null,
+      } });
+      invariant(installation, 403, "SOURCE_RESTRICTED", "The Slack installation is no longer active.");
+      await assertMeetingReviewPublicPublication(actor, { ...params, lineageRoots: originalRoots });
+      // Destination-policy checks may await Slack. Never replace the originally
+      // admitted source/destination receipt with the newly checked channel proof.
+      await assertOriginal();
+      signal.throwIfAborted(); controller.signal.throwIfAborted();
+    } catch (error) { controller.abort(error); throw error; }
+  };
+  return { signal: controller.signal, authorizeAttempt, assertActive: () => controller.signal.throwIfAborted() };
+}
+
+function guardedSlackClient(token: string, controls?: SlackAttemptControls) {
+  if (!controls) return slackClient(token);
+  // The SDK interceptor runs after credential acquisition and for every actual
+  // HTTP retry. A denied authority aborts its retry engine, not just one request.
+  return new WebClient(token, { requestInterceptor: async config => {
+    try {
+      controls.signal.throwIfAborted();
+      await controls.authorizeAttempt({ signal: controls.signal });
+      controls.signal.throwIfAborted();
+      config.signal = controls.signal;
+      return config;
+    } catch (error) {
+      throw new SlackAttemptAbortError(error instanceof Error ? error : new Error("Slack attempt denied."));
+    }
+  } });
+}
+
 export async function sendSlackMessage(installationId: string, target: {
   channel: string;
   threadTs?: string;
   text?: string;
-}, blocks: unknown[], tokenOverride?: string) {
+}, blocks: unknown[], tokenOverride?: string, controls?: SlackAttemptControls) {
   const installation = await prisma.communicationInstallation.findUnique({
     where: { id: installationId },
   });
   invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
   const token = tokenOverride ?? encryptedBotToken(installation);
 
-  return slackClient(token).chat.postMessage({
+  return guardedSlackClient(token, controls).chat.postMessage({
     channel: target.channel,
     thread_ts: target.threadTs,
     text: target.text ?? "Corgtex update",
@@ -2240,13 +2249,13 @@ export async function slackSourceLink(installationId: string, channelId: string,
 export async function updateSlackMessage(installationId: string, target: {
   channel: string;
   ts: string;
-}, blocks: unknown[], text = "Corgtex update") {
+}, blocks: unknown[], text = "Corgtex update", controls?: SlackAttemptControls) {
   const installation = await prisma.communicationInstallation.findUnique({
     where: { id: installationId },
   });
   invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
 
-  return slackClient(encryptedBotToken(installation)).chat.update({
+  return guardedSlackClient(encryptedBotToken(installation), controls).chat.update({
     channel: target.channel,
     ts: target.ts,
     text,
@@ -2256,12 +2265,17 @@ export async function updateSlackMessage(installationId: string, target: {
 
 export async function syncSlackMeetingActionReviewAfterWebApply(actor: AppActor, params: { workspaceId: string; insightId: string }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  const refreshed = await refreshSlackMeetingActionReviewAfterWebApply(params);
+  const refreshed = await refreshSlackMeetingActionReviewAfterWebApply(actor, params);
   if (!refreshed) return;
+  const publication = await meetingReviewSlackAttempt(actor, {
+    workspaceId: params.workspaceId, installationId: refreshed.installationId,
+    channelId: refreshed.update.channelId, lineageRoots: refreshed.update.lineageRoots,
+  });
   await updateSlackMessage(refreshed.installationId, {
     channel: refreshed.update.channelId,
     ts: refreshed.update.messageTs,
-  }, refreshed.update.blocks, refreshed.update.text);
+  }, refreshed.update.blocks, refreshed.update.text, publication);
+  publication.assertActive();
 }
 
 async function openSlackModal(installationId: string, triggerId: string, view: unknown) {
@@ -2276,7 +2290,8 @@ async function openSlackModal(installationId: string, triggerId: string, view: u
   });
 }
 
-export async function validateSlackPostTarget(installationId: string, rawChannelId: string): Promise<SlackPostTargetValidation> {
+export async function validateSlackPostTarget(installationId: string, rawChannelId: string,
+  options?: { requirePublic?: boolean }): Promise<SlackPostTargetValidation> {
   const channelId = normalizeSlackChannelId(rawChannelId);
   if (!channelId) {
     return {
@@ -2302,6 +2317,13 @@ export async function validateSlackPostTarget(installationId: string, rawChannel
         ok: false,
         code: "SLACK_CHANNEL_NOT_FOUND",
         message: "Slack channel not found. Use a channel ID like C0123456789.",
+      };
+    }
+    if (options?.requirePublic && channel.is_private !== false) {
+      return {
+        ok: false,
+        code: "SLACK_CHANNEL_NOT_PUBLIC",
+        message: "Choose an active public Slack channel for this publication.",
       };
     }
     if (Boolean(channel.is_archived)) {
@@ -2350,23 +2372,32 @@ export async function validateSlackPostTarget(installationId: string, rawChannel
 export async function sendSlackEphemeralMessage(installationId: string, target: {
   channel: string;
   user: string;
-}, blocks: unknown[], text = "Corgtex update") {
+}, blocks: unknown[], text = "Corgtex update", controls?: SlackAttemptControls) {
   const installation = await prisma.communicationInstallation.findUnique({
     where: { id: installationId },
   });
   invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
 
-  return slackClient(encryptedBotToken(installation)).chat.postEphemeral({
+  const result = await guardedSlackClient(encryptedBotToken(installation), controls).chat.postEphemeral({
     channel: target.channel,
     user: target.user,
     text,
     blocks: blocks as any,
   });
+  controls?.signal.throwIfAborted();
+  return result;
 }
 
-async function postSlackResponseUrl(responseUrlEnc: string, delivery: SlackAgentDelivery) {
-  const response = await fetch(decryptSecret(responseUrlEnc), {
+async function postSlackResponseUrl(responseUrlEnc: string, delivery: SlackAgentDelivery, controls?: SlackAttemptControls) {
+  const responseUrl = decryptSecret(responseUrlEnc);
+  if (controls) {
+    controls.signal.throwIfAborted();
+    await controls.authorizeAttempt({ signal: controls.signal });
+    controls.signal.throwIfAborted();
+  }
+  const response = await fetch(responseUrl, {
     method: "POST",
+    ...(controls ? { signal: controls.signal } : {}),
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       response_type: "ephemeral",
@@ -2375,12 +2406,13 @@ async function postSlackResponseUrl(responseUrlEnc: string, delivery: SlackAgent
       blocks: delivery.blocks,
     }),
   });
+  controls?.signal.throwIfAborted();
   invariant(response.ok, 502, "SLACK_RESPONSE_FAILED", "Slack response URL rejected the agent reply.");
 }
 
-export async function deliverSlackAgentResponse(payload: SlackAgentJobPayload, delivery: SlackAgentDelivery) {
+export async function deliverSlackAgentResponse(payload: SlackAgentJobPayload, delivery: SlackAgentDelivery, controls?: SlackAttemptControls) {
   if (payload.responseUrlEnc) {
-    await postSlackResponseUrl(payload.responseUrlEnc, delivery);
+    await postSlackResponseUrl(payload.responseUrlEnc, delivery, controls);
     return;
   }
 
@@ -2391,7 +2423,8 @@ export async function deliverSlackAgentResponse(payload: SlackAgentJobPayload, d
     }, delivery.blocks ?? [{
       type: "section",
       text: { type: "mrkdwn", text: delivery.text },
-    }]);
+    }], undefined, controls);
+    controls?.signal.throwIfAborted();
     return;
   }
 
@@ -2402,35 +2435,187 @@ export async function deliverSlackAgentResponse(payload: SlackAgentJobPayload, d
     }, delivery.blocks ?? [{
       type: "section",
       text: { type: "mrkdwn", text: delivery.text },
-    }], delivery.text);
+    }], delivery.text, controls);
+    controls?.signal.throwIfAborted();
   }
+}
+
+type SlackScopeParams = {
+  workspaceId: string; installationId: string; channelId: string; externalUserId?: string;
+};
+
+async function readableSlackScope(actor: AppActor, params: SlackScopeParams,
+  db: Prisma.TransactionClient = prisma) {
+  invariant(actor.kind === "user", 403, "FORBIDDEN", "Slack thread reads require the mapped human requester.");
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const installation = await db.communicationInstallation.findFirst({ where: {
+    id: params.installationId, workspaceId: params.workspaceId, provider: "SLACK", status: "ACTIVE", disconnectedAt: null,
+  } });
+  const channel = await db.communicationChannel.findFirst({ where: {
+    installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK",
+    externalChannelId: params.channelId, kind: "PUBLIC", isIngestEnabled: true, isArchived: false,
+  } });
+  const member = await db.member.findFirst({ where: { workspaceId: params.workspaceId, userId: actor.user.id, isActive: true },
+    include: { user: { select: { id: true, email: true, displayName: true } } } });
+  invariant(installation && channel && member, 409, "SOURCE_RESTRICTED", "The Slack connection, public channel or requester membership is unavailable.");
+  const mapping = await db.communicationExternalUser.findFirst({ where: {
+    installationId: installation.id, workspaceId: params.workspaceId, provider: "SLACK", userId: actor.user.id,
+    ...(params.externalUserId ? { externalUserId: params.externalUserId } : {}),
+    isBot: false, isDeleted: false, OR: [{ memberId: member.id }, { memberId: null }],
+  } });
+  invariant(mapping, 409, "SOURCE_RESTRICTED", "The Slack requester mapping is unavailable.");
+  const roots = await captureArtifactInputProof(actor, params.workspaceId, [
+    { kind: "CommunicationChannel", id: channel.id, snapshot: channel },
+    { kind: "CommunicationExternalUser", id: mapping.id, snapshot: mapping },
+    { kind: "Member", id: member.id, snapshot: member },
+    { kind: "User", id: member.user.id, snapshot: member.user },
+  ], db);
+  return { installation, channel, member, mapping, roots };
+}
+
+async function lockSlackScope(tx: Prisma.TransactionClient, scope: Awaited<ReturnType<typeof readableSlackScope>>) {
+  await tx.$queryRaw`SELECT "id" FROM "CommunicationInstallation" WHERE "id" = ${scope.installation.id} FOR SHARE`;
+  await tx.$queryRaw`SELECT "id" FROM "CommunicationChannel" WHERE "id" = ${scope.channel.id} FOR SHARE`;
+  await tx.$queryRaw`SELECT "id" FROM "Member" WHERE "id" = ${scope.member.id} FOR SHARE`;
+  await tx.$queryRaw`SELECT "id" FROM "CommunicationExternalUser" WHERE "id" = ${scope.mapping.id} FOR SHARE`;
+}
+
+async function mintSlackAgentRequest(actor: HumanActor, params: SlackScopeParams & {
+  prompt: string; source: "slash_command" | "message_shortcut"; triggerId?: string; sourceMessageId?: string;
+}) {
+  const scope = await readableSlackScope(actor, params);
+  return prisma.$transaction(async tx => {
+    await lockSlackScope(tx, scope);
+    await readableSlackScope(actor, params, tx);
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, scope.roots, tx),
+      409, "SOURCE_CHANGED", "Slack request permissions changed before capture.");
+    const data = { workspaceId: params.workspaceId, userId: actor.user.id, agentKey: "slack-agent", prompt: params.prompt };
+    const id = params.triggerId?.trim() ? `slack-request:${createHmac("sha256", "slack-agent-request-v1").update(JSON.stringify([
+      params.workspaceId, params.installationId, actor.user.id, params.externalUserId, params.channelId,
+      params.source, params.sourceMessageId ?? null, params.triggerId.trim(),
+    ])).digest("hex")}` : null;
+    const input = id
+      ? await tx.agentRequestInput.upsert({ where: { id }, update: {}, create: { id, ...data } })
+      : await tx.agentRequestInput.create({ data });
+    invariant(input.workspaceId === params.workspaceId && input.userId === actor.user.id && input.agentKey === "slack-agent"
+      && input.prompt === params.prompt && (!id || input.id === id), 409, "SOURCE_CHANGED", "The original authored Slack request changed.");
+    await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "AgentRequestInput", id: input.id, snapshot: input }], tx);
+    return input.id;
+  });
+}
+
+/** Read current public provider content into native rows before any model consumes it. */
+export async function fetchAndPersistReadableSlackThreadMessages(actor: AppActor, params: {
+  workspaceId: string; installationId: string; channelId: string; threadTs: string; limit?: number;
+}): Promise<CommunicationMessage[]> {
+  params = structuredClone(params);
+  invariant(/^\d+\.\d+$/.test(params.threadTs), 400, "INVALID_INPUT", "A Slack thread timestamp is required.");
+  const limit = Math.min(200, Math.max(1, Math.floor(params.limit ?? 80)));
+  invariant(Number.isFinite(limit), 400, "INVALID_INPUT", "Slack thread limit is invalid.");
+  const scope = await readableSlackScope(actor, params);
+  const checkDestination = async () => {
+    const current = await prisma.communicationInstallation.findFirst({ where: {id:params.installationId,workspaceId:params.workspaceId,
+      provider:"SLACK",status:"ACTIVE",disconnectedAt:null} });
+    invariant(current && communicationInstallationGrantHash(current) === communicationInstallationGrantHash(scope.installation),
+      409,"SOURCE_CHANGED","Slack installation changed before collecting the thread.");
+    let response: Awaited<ReturnType<WebClient["conversations"]["info"]>>;
+    try {
+      const client = slackClient(encryptedBotToken(scope.installation));
+      const identity = await client.auth.test();
+      invariant(identity.ok === true && identity.team_id === scope.installation.externalWorkspaceId && identity.user_id === scope.installation.botUserId,
+        409,"SOURCE_RESTRICTED","The Slack thread provider principal changed.");
+      response = await client.conversations.info({ channel: params.channelId });
+    }
+    catch { throw new AppError(409, "SOURCE_RESTRICTED", "The public Slack thread destination could not be verified."); }
+    const remote = isRecord(response.channel) ? response.channel : null;
+    invariant(remote && asString(remote.id) === params.channelId, 409, "SOURCE_RESTRICTED", "The original Slack thread destination changed.");
+    if (remote.is_private === true || remote.is_archived === true) {
+      await prisma.communicationChannel.updateMany({ where: { id: scope.channel.id, workspaceId: params.workspaceId },
+        data: { ...(remote.is_private === true ? { kind: "PRIVATE" } : {}), ...(remote.is_archived === true ? { isArchived: true } : {}) } });
+    }
+    invariant(response.ok === true && remote.is_private === false && remote.is_archived === false && remote.is_member === true,
+      409, "SOURCE_RESTRICTED", "The Slack thread destination is no longer public and available.");
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, scope.roots),
+      409, "SOURCE_CHANGED", "Slack thread permissions changed during the provider read.");
+  };
+  const messages: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  let scanned = 0;
+  while (messages.length < limit) {
+    await checkDestination();
+    const take = Math.min(200, 5_000 - scanned);
+    invariant(take > 0, 503, "INPUT_SCAN_LIMIT", "The Slack thread needs a bounded source rebuild before collection can complete.");
+    let response: Awaited<ReturnType<WebClient["conversations"]["replies"]>>;
+    try {
+      response = await slackClient(encryptedBotToken(scope.installation)).conversations.replies({
+        channel: params.channelId, ts: params.threadTs, limit: take, ...(cursor ? { cursor } : {}),
+      });
+    } catch {
+      throw new AppError(502, "SLACK_THREAD_READ_FAILED", "The Slack thread could not be read.");
+    }
+    invariant(response.ok === true && Array.isArray(response.messages) && response.messages.length <= take,
+      502, "SLACK_THREAD_READ_FAILED", "The Slack thread response is unavailable.");
+    await checkDestination();
+    scanned += response.messages.length;
+    const candidates: Record<string, unknown>[] = [];
+    for (const message of response.messages) {
+      if (isRecord(message) && !shouldSkipSlackArchiveMessage(message)
+        && asString(message.user) !== scope.installation.botUserId && asString(message.text).trim()) {
+        if ((Array.isArray(message.files) && message.files.length) || (Array.isArray(message.attachments) && message.attachments.length)) continue;
+        candidates.push(message);
+      }
+    }
+    for (const message of candidates) {
+      const ts = asString(message.ts), thread = asString(message.thread_ts) || ts;
+      invariant(/^\d+\.\d+$/.test(ts) && thread === params.threadTs && asString(message.user)
+        && (!asString(message.channel) || asString(message.channel) === params.channelId),
+      409, "SOURCE_CHANGED", "Slack returned a message outside the requested thread.");
+    }
+    const currentFlags = candidates.length ? await prisma.communicationMessage.findMany({ where: {
+      workspaceId: params.workspaceId, installationId: params.installationId, externalChannelId: params.channelId,
+      externalMessageId: { in: candidates.map(message => asString(message.ts)) },
+    }, select: { externalMessageId: true, isBot: true, isHidden: true, isDeleted: true, textRedactedAt: true, expiresRawAt: true } }) : [];
+    const blocked = new Set(currentFlags.filter(row => row.isBot || row.isHidden || row.isDeleted || row.textRedactedAt || (row.expiresRawAt && row.expiresRawAt.getTime() <= Date.now())).map(row => row.externalMessageId));
+    for (const message of candidates) {
+      const ts = asString(message.ts);
+      if (seen.has(ts) || blocked.has(ts)) continue;
+      seen.add(ts); messages.push(message);
+      if (messages.length === limit) break;
+    }
+    if (messages.length === limit || !response.has_more) break;
+    const next = response.response_metadata?.next_cursor;
+    invariant(next && next !== cursor && response.messages.length > 0, 409, "SOURCE_CHANGED", "The Slack thread read could not continue safely.");
+    cursor = next;
+  }
+  const stored: CommunicationMessage[] = [];
+  for (const message of [...messages].sort((left, right) => asString(left.ts).localeCompare(asString(right.ts)))) {
+    const receipt = await captureSlackNativeMessageFetch({ workspaceId: params.workspaceId, installationId: params.installationId,
+      channelId: params.channelId, messageTs: asString(message.ts), threadTs: params.threadTs });
+    invariant(receipt.projected.text === message.text && receipt.projected.user === message.user,
+      409, "SOURCE_CHANGED", "The Slack thread changed before native input persistence.");
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, scope.roots),
+      409, "SOURCE_CHANGED", "Slack requester permissions changed before persistence.");
+    stored.push(await persistNativeSlackMessage(actor, receipt, rawRetentionDate(rawRetentionDays(scope.installation.settings))));
+  }
+  const messageRoots = await captureArtifactInputProof(actor, params.workspaceId, stored.map(record => ({ kind: "CommunicationMessage", id: record.id, snapshot: record })));
+  invariant(await isArtifactInputProofReadable(actor, params.workspaceId, [...scope.roots, ...messageRoots]),
+    409, "SOURCE_CHANGED", "Slack thread inputs changed before return.");
+  return stored;
 }
 
 export async function fetchSlackThreadMessages(installationId: string, params: {
   channelId: string;
   threadTs: string;
   limit?: number;
-}) {
-  const installation = await prisma.communicationInstallation.findUnique({
-    where: { id: installationId },
-  });
+}, actor?: AppActor) {
+  if (!actor) return [];
+  const installation = await prisma.communicationInstallation.findUnique({ where: { id: installationId } });
   invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
-
-  try {
-    const response = await slackClient(encryptedBotToken(installation)).conversations.replies({
-      channel: params.channelId,
-      ts: params.threadTs,
-      limit: params.limit ?? 20,
-    });
-    return (response.messages ?? []).map((message) => ({
-      user: asString(message.user),
-      text: asString(message.text),
-      ts: asString(message.ts),
-      threadTs: asString(message.thread_ts),
-    })).filter((message) => message.text.length > 0);
-  } catch {
-    return [];
-  }
+  const messages = await fetchAndPersistReadableSlackThreadMessages(actor, { workspaceId: installation.workspaceId,
+    installationId, channelId: params.channelId, threadTs: params.threadTs, limit: params.limit ?? 20 });
+  return messages.map(message => ({ user: message.externalUserId ?? "", text: message.text ?? "",
+    ts: message.externalMessageId, threadTs: message.threadExternalId ?? "" })).filter(message => message.text.length > 0);
 }
 
 // A nudge claim can outlive its worker. Reconcile it from the complete Slack
@@ -2540,18 +2725,45 @@ export async function purgeExpiredCommunicationMessages(workspaceId?: string) {
   return result;
 }
 
-export async function listSlackMessagesForDigest(workspaceId: string, since: Date, until?: Date) {
-  return prisma.communicationMessage.findMany({
+export async function listSlackMessagesForDigest(actor: AppActor, workspaceId: string,
+  since: Date, until?: Date, audience?: AppActor[]) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const channels = await prisma.communicationChannel.findMany({
     where: {
-      workspaceId,
-      provider: "SLACK",
-      receivedAt: until ? { gte: since, lte: until } : { gte: since },
-      text: { not: null },
-      isBot: false,
-      isHidden: false,
-      isDeleted: false,
+      workspaceId, provider: "SLACK", kind: "PUBLIC", isIngestEnabled: true, isArchived: false,
+      installation: { workspaceId, provider: "SLACK", status: "ACTIVE", disconnectedAt: null },
     },
-    orderBy: { receivedAt: "asc" },
-    take: 500,
+    select: { installationId: true, externalChannelId: true },
   });
+  if (channels.length === 0) return [];
+  const messages = await loadReadableDigestQuery<CommunicationMessage>({
+    actor, audience, workspaceId, kind: "CommunicationMessage", limit: 500, keyset: true,
+    loadBatch: ({ take, after }) => prisma.communicationMessage.findMany({
+      where: {
+        workspaceId,
+        provider: "SLACK",
+        installation: { workspaceId, status: "ACTIVE", disconnectedAt: null },
+        OR: channels.map((channel) => ({ installationId: channel.installationId, externalChannelId: channel.externalChannelId })),
+        receivedAt: until ? { gte: since, lte: until } : { gte: since },
+        text: { not: null },
+        textRedactedAt: null,
+        isBot: false,
+        isHidden: false,
+        isDeleted: false,
+        ...(after ? { AND: [{ OR: [
+          { receivedAt: { gt: after.receivedAt } },
+          { receivedAt: after.receivedAt, id: { gt: after.id } },
+        ] }] } : {}),
+      },
+      orderBy: [{ receivedAt: "asc" }, { id: "asc" }],
+      take,
+    }),
+  });
+  if (messages.length) {
+    const roots = await captureArtifactInputProof(actor,workspaceId,messages.map(message=>({kind:"CommunicationMessage",id:message.id,snapshot:message})));
+    invariant(await isArtifactInputProofReadable(actor,workspaceId,roots)
+      && (!audience || await isDigestInputProofShared(audience,workspaceId,roots)),
+    409,"SOURCE_CHANGED","Slack input permissions changed before return.");
+  }
+  return messages;
 }

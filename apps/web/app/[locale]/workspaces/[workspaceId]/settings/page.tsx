@@ -85,7 +85,7 @@ export default async function SettingsPage({
   }
   if (tab === "members") {
     try {
-      members = await listMembersEnriched(workspaceId, { includeInactive: true });
+      members = await listMembersEnriched(actor, workspaceId, { includeInactive: true });
       invitePolicy = await getMemberInvitePolicy(workspaceId);
       if (isAdmin) {
         inviteRequests = await listMemberInviteRequests(actor, { workspaceId, status: "PENDING" });

@@ -1,13 +1,15 @@
 import {
   buildAgentAuthoritySummaries,
   getModelUsageBudget,
+  requireWorkspaceMembership,
   getModelUsageSummary,
   listAgentConfigs,
   listAgentCredentials,
   listAgentIdentities,
+  listAgentRuns,
+  getAgentRunOperationalCounts,
   type AgentAuthoritySummary,
 } from "@corgtex/domain";
-import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AgentRegistryToggle } from "./AgentRegistryToggle";
 import { updateAgentGovernancePolicyAction } from "./actions";
@@ -60,7 +62,15 @@ function AgentAuthorityRow({
   agent,
   workspaceId,
   format,
+  canReadFinancials,
+  usageComplete,
+  hasUsage,
+  windowLabel,
 }: {
+  canReadFinancials: boolean;
+  usageComplete: boolean;
+  hasUsage: boolean;
+  windowLabel: string;
   agent: AgentAuthoritySummary;
   workspaceId: string;
   format: Awaited<ReturnType<typeof getFormatter>>;
@@ -108,9 +118,9 @@ function AgentAuthorityRow({
 
         <div className="stack" style={{ gap: 4 }}>
           <strong style={{ fontSize: "0.72rem", textTransform: "uppercase", color: "var(--muted)" }}>Limits</strong>
-          <span style={{ fontSize: "0.85rem" }}>{formatCents(agent.limits.maxSpendPerRunCents)} per run</span>
+          {canReadFinancials && <span style={{ fontSize: "0.85rem" }}>{formatCents(agent.limits.maxSpendPerRunCents)} per run</span>}
           <span className="nr-item-meta" style={{ fontSize: "0.76rem" }}>
-            {formatCount(agent.limits.maxRunsPerDay, "runs/day")} / workspace {agent.limits.workspaceBudgetConfigured ? formatUsd(agent.limits.workspaceMonthlyCostCapUsd) : "No cap"}
+            {formatCount(agent.limits.maxRunsPerDay, "runs/day")}{canReadFinancials && <> / workspace {agent.limits.workspaceBudgetConfigured ? formatUsd(agent.limits.workspaceMonthlyCostCapUsd) : "No cap"}</>}
           </span>
         </div>
 
@@ -118,7 +128,7 @@ function AgentAuthorityRow({
           <strong style={{ fontSize: "0.72rem", textTransform: "uppercase", color: "var(--muted)" }}>Approval & activity</strong>
           <span style={{ fontSize: "0.85rem" }}>{policyLabel(agent)}</span>
           <span className="nr-item-meta" style={{ fontSize: "0.76rem" }}>
-            {agent.approval.pendingApprovalCount} pending / {agent.recentActivity.runCount30d} runs / {formatUsd(agent.recentActivity.spend30dUsd, 4)}
+            {agent.approval.pendingApprovalCount} pending / {agent.recentActivity.runCount30d} runs{canReadFinancials && <> / {!usageComplete && !hasUsage ? "…" : formatUsd(agent.recentActivity.spend30dUsd, 4)}{!usageComplete && ` (${windowLabel})`}</>}
           </span>
         </div>
 
@@ -188,7 +198,8 @@ export async function AgentRegistryTab({
   workspaceId: string;
   actor: AppActor;
 }) {
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const membership = await requireWorkspaceMembership({actor, workspaceId});
+  const canReadFinancials = actor.kind === "user" && membership?.role === "ADMIN";
   const [
     identities,
     usageSummary,
@@ -196,48 +207,17 @@ export async function AgentRegistryTab({
     credentials,
     budget,
     recentRuns,
-    pendingApprovalRuns,
     runCounts,
     t,
     format,
   ] = await Promise.all([
     listAgentIdentities(actor, workspaceId),
-    getModelUsageSummary(actor, workspaceId, { periodDays: 30 }),
+    canReadFinancials ? getModelUsageSummary(actor, workspaceId, { periodDays: 30 }) : null,
     listAgentConfigs(actor, workspaceId),
     listAgentCredentials(actor, workspaceId),
-    getModelUsageBudget(actor, workspaceId),
-    prisma.agentRun.findMany({
-      where: { workspaceId },
-      orderBy: { createdAt: "desc" },
-      take: 100,
-      select: {
-        id: true,
-        agentKey: true,
-        status: true,
-        goal: true,
-        approvalRequired: true,
-        createdAt: true,
-        startedAt: true,
-      },
-    }),
-    prisma.agentRun.findMany({
-      where: { workspaceId, status: "WAITING_APPROVAL" },
-      orderBy: { createdAt: "desc" },
-      select: {
-        id: true,
-        agentKey: true,
-        status: true,
-        goal: true,
-        approvalRequired: true,
-        createdAt: true,
-        startedAt: true,
-      },
-    }),
-    prisma.agentRun.groupBy({
-      by: ["agentKey"],
-      where: { workspaceId, createdAt: { gte: thirtyDaysAgo } },
-      _count: { _all: true },
-    }),
+    canReadFinancials ? getModelUsageBudget(actor, workspaceId) : null,
+    listAgentRuns(actor, workspaceId, { take: 100 }),
+    getAgentRunOperationalCounts(actor, workspaceId),
     getTranslations("agents"),
     getFormatter(),
   ]);
@@ -247,10 +227,9 @@ export async function AgentRegistryTab({
     configs,
     credentials,
     recentRuns,
-    pendingApprovalRuns,
-    usageByAgent: usageSummary.byAgent,
-    runCountsByAgent: (runCounts as Array<{ agentKey: string; _count: { _all: number } }>)
-      .map((row) => ({ agentKey: row.agentKey, count: row._count._all })),
+    pendingApprovalCountsByAgent: runCounts.pendingApprovalCountsByAgent,
+    usageByAgent: usageSummary?.byAgent ?? [],
+    runCountsByAgent: runCounts.runCountsByAgent,
     workspaceBudget: budget
       ? {
         monthlyCostCapUsd: String(budget.monthlyCostCapUsd),
@@ -268,6 +247,7 @@ export async function AgentRegistryTab({
         </p>
       </div>
 
+      {canReadFinancials && usageSummary && !usageSummary.readWindow.complete && <p role="status" className="nr-item-meta">{t("usageWindowNotice")}</p>}
       <div className="stack" style={{ gap: 12 }}>
         {authoritySummaries.map((agent) => (
           <AgentAuthorityRow
@@ -275,6 +255,10 @@ export async function AgentRegistryTab({
             agent={agent}
             workspaceId={workspaceId}
             format={format}
+            canReadFinancials={canReadFinancials}
+            usageComplete={usageSummary?.readWindow.complete ?? true}
+            hasUsage={usageSummary?.byAgent.some(row => row.agentKey === agent.agentKey) ?? false}
+            windowLabel={t("usageWindowLabel")}
           />
         ))}
         {authoritySummaries.length === 0 && (

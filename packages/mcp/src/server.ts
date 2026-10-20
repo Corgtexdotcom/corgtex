@@ -12,10 +12,19 @@
  * packages/domain/src/agent-auth.ts — the drift-fence test in scopes.test.ts
  * will fail otherwise.
  */
+import "@corgtex/connectors-sql/native-driver";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
+  withMcpToolInput,
+  DigestReadRelease,
+  WorkItemReadRelease,
+  captureReadableDigestInputs,
+  loadReadableArtifactSample,
+  createConversation,
   listProposals,
+  getProposal,
+  readableArtifactIds,
   archiveWorkspaceArtifact,
   createProposal,
   updateProposal,
@@ -171,9 +180,10 @@ import {
   isDuplicateGuardMatchError,
 } from "@corgtex/domain";
 import type { AgentScope } from "@corgtex/domain";
-import { searchIndexedKnowledge } from "@corgtex/knowledge";
+import { fetchReadableKnowledgeChunk, searchIndexedKnowledge } from "@corgtex/knowledge";
 import { processConversationTurn } from "@corgtex/agents";
-import { prisma, env, toInputJson } from "@corgtex/shared";
+import { prisma, env, toInputJson, withMcpRequiredScopes, getMcpOrigin, runWithMcpOrigin } from "@corgtex/shared";
+import type { AppActor } from "@corgtex/shared";
 import type { McpSessionContext } from "./auth";
 import { requireScope } from "./auth";
 
@@ -405,30 +415,38 @@ function memberDisplayName(member: any) {
 }
 
 const memberUserInclude = {
-  user: {
-    select: {
-      displayName: true,
-      email: true,
-    },
-  },
-};
+  user: { select: { displayName: true, email: true } },
+} as const;
 
-async function loadActionWorkItemResponse(workspaceId: string, actionId: string, fallback: any) {
+async function readableWorkItemResponseMembers<T extends { id: string; userId: string;
+  user: { displayName: string | null; email: string } }>(actor: AppActor, workspaceId: string,
+  release: WorkItemReadRelease, members: T[]) {
+  const captured = await release.observeRead(() => captureReadableDigestInputs({
+    actor, workspaceId, kind: "Member", records: members,
+    additionalInputs: member => [{ kind: "User", id: member.userId, snapshot: { ...member.user, id: member.userId } }],
+  }));
+  release.add(captured.roots);
+  return new Set(captured.records.map(member => member.id));
+}
+
+async function loadActionWorkItemResponse(actor: AppActor, workspaceId: string, actionId: string, release: WorkItemReadRelease) {
   const action = await prisma.action.findFirst({
     where: { id: actionId, workspaceId },
-    include: {
-      assigneeMember: { include: memberUserInclude },
-    },
-  }) ?? fallback;
-  if (!action?.id) return action;
-  const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "ACTION", [action.id]);
+    include: { assigneeMember: { include: memberUserInclude } },
+  });
+  if (!action || !(await release.admit("Action", [action])).length) return { id: actionId, contentWithheld: true as const };
+  const members = await readableWorkItemResponseMembers(actor, workspaceId, release, action.assigneeMember ? [action.assigneeMember] : []);
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", [action.id],
+    requests => release.observe("AdviceRequest", requests));
   return {
     ...action,
+    assigneeMemberId: action.assigneeMember && members.has(action.assigneeMember.id) ? action.assigneeMemberId : null,
+    assigneeMember: action.assigneeMember && members.has(action.assigneeMember.id) ? action.assigneeMember : null,
     ...requestCountSummaries.get(action.id),
   };
 }
 
-async function loadTensionWorkItemResponse(workspaceId: string, tensionId: string, fallback: any) {
+async function loadTensionWorkItemResponse(actor: AppActor, workspaceId: string, tensionId: string, release: WorkItemReadRelease) {
   const tension = await prisma.tension.findFirst({
     where: { id: tensionId, workspaceId },
     include: {
@@ -436,29 +454,35 @@ async function loadTensionWorkItemResponse(workspaceId: string, tensionId: strin
       raisedByMember: { include: memberUserInclude },
       upvotes: true,
     },
-  }) ?? fallback;
-  if (!tension?.id) return tension;
-  const requestCountSummaries = await loadAdviceRequestCountSummaries(workspaceId, "TENSION", [tension.id]);
+  });
+  if (!tension || !(await release.admit("Tension", [tension])).length) return { id: tensionId, contentWithheld: true as const };
+  const members = await readableWorkItemResponseMembers(actor, workspaceId, release,
+    [tension.assigneeMember, tension.raisedByMember].filter(member => member !== null));
+  const votes = await release.observeRead(() => captureReadableDigestInputs({
+    actor, workspaceId, kind: "TensionUpvote", records: tension.upvotes,
+    additionalInputs: vote => [{ kind: "User", id: vote.userId }],
+  }));
+  release.add(votes.roots);
+  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", [tension.id],
+    requests => release.observe("AdviceRequest", requests));
   return {
     ...tension,
+    assigneeMemberId: tension.assigneeMember && members.has(tension.assigneeMember.id) ? tension.assigneeMemberId : null,
+    assigneeMember: tension.assigneeMember && members.has(tension.assigneeMember.id) ? tension.assigneeMember : null,
+    raisedByMemberId: tension.raisedByMember && members.has(tension.raisedByMember.id) ? tension.raisedByMemberId : null,
+    raisedByMember: tension.raisedByMember && members.has(tension.raisedByMember.id) ? tension.raisedByMember : null,
+    upvotes: votes.records,
     ...requestCountSummaries.get(tension.id),
   };
 }
 
-async function loadProposalWorkItemResponse(workspaceId: string, proposalId: string, fallback: any) {
-  return await prisma.proposal.findFirst({
-    where: { id: proposalId, workspaceId },
-    include: {
-      ownerMember: { include: memberUserInclude },
-      adviceProcess: {
-        include: {
-          requests: {
-            select: { status: true },
-          },
-        },
-      },
-    },
-  }) ?? fallback;
+async function loadProposalWorkItemResponse(actor: AppActor, workspaceId: string, proposalId: string) {
+  try {
+    return await getProposal(actor, { workspaceId, proposalId });
+  } catch (error) {
+    if (error instanceof AppError && error.status === 404) return null;
+    throw error;
+  }
 }
 
 function structuredJsonResult(value: Record<string, unknown>) {
@@ -729,7 +753,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
             confidence: null,
             inputSummary: summarizeForExecutionAudit(input),
             resultSummary: error ? null : summarizeForExecutionAudit(result),
-            error: error instanceof Error ? error.message : error ? String(error) : null,
+            error: error ? "Tool execution failed." : null,
           },
         });
       });
@@ -738,22 +762,54 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       // must not fail because audit storage had a transient problem.
     }
   };
+  const withLiveMcpScopes = <T,>(scopes: readonly string[], work: () => PromiseLike<T>) => {
+    if (!sessionCtx.mcpOrigin && (sessionCtx.authKind === "oauth"
+      || (actor.kind === "agent" && actor.authProvider === "credential"))) {
+      throw new Error("MCP_AUTHORIZATION_REVOKED");
+    }
+    return withMcpRequiredScopes(prisma, sessionCtx.mcpOrigin, scopes, work);
+  };
+  // These four write responses retain their original source proofs through
+  // permalink and audit awaits. The receipt is private, never serialized.
+  const workItemReleases = new WeakMap<object, WorkItemReadRelease>();
+  const workItemResponse = (release: WorkItemReadRelease, value: unknown) => {
+    const result = jsonResult(value);
+    workItemReleases.set(result, release);
+    return result;
+  };
   const tool = (name: string, description: string, inputSchema: Record<string, unknown>, handler: unknown) => {
     if (!hasToolCapability(name)) throw new AppError(403, "AGENT_OPERATION_UNDECLARED", "This operation is unavailable to agent credentials.");
     const guardedHandler = typeof handler === "function"
       ? async (...args: unknown[]) => {
-        requireToolCapability(name);
+        let preparedWorkItem: object | undefined;
+        let responseOrigin: ReturnType<typeof getMcpOrigin>;
         try {
-          const result = await handler(...args);
-          if (isVersionConflictResult(result)) {
-            await auditToolExecution(name, args[0], null, new Error("VERSION_CONFLICT"));
-          } else {
-            await auditToolExecution(name, args[0], result);
-          }
-          return result;
-        } catch (error) {
-          await auditToolExecution(name, args[0], null, error);
-          throw error;
+          const result = await withLiveMcpScopes(TOOL_CAPABILITIES[name].scopes, async () => {
+            requireToolCapability(name);
+            try {
+              const capability = TOOL_CAPABILITIES[name];
+              const writesContent = name !== "chat" && (capability.destructive || capability.scopes.some(scope => /:(write|propose|approve)$/.test(scope)));
+              const result = writesContent ? await withMcpToolInput(actor, { workspaceId, toolName: name,
+                args: args[0] ?? {}, requiredScopes: capability.scopes }, submitted => handler(submitted, ...args.slice(1))) : await handler(...args);
+              if (result && typeof result === "object" && workItemReleases.has(result)) preparedWorkItem = result;
+              if (isVersionConflictResult(result)) {
+                await auditToolExecution(name, args[0], null, new Error("VERSION_CONFLICT"));
+              } else {
+                await auditToolExecution(name, args[0], result);
+              }
+              responseOrigin = getMcpOrigin();
+              return name === "archive_tool_link" || name === "complete_action" ? jsonResult(result) : result;
+            } catch (error) {
+              await auditToolExecution(name, args[0], null, error);
+              throw error;
+            }
+          });
+          const release = result && typeof result === "object" ? workItemReleases.get(result) : undefined;
+          // The live-scope wrapper itself awaits its post-call origin check.
+          // Replay the original proofs after that read, in the same origin context.
+          return release ? await runWithMcpOrigin(responseOrigin, () => release.finish(result)) : result;
+        } finally {
+          if (preparedWorkItem) workItemReleases.delete(preparedWorkItem);
         }
       }
       : handler;
@@ -786,11 +842,15 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ message }: { message: string }) => {
       requireScope(sessionCtx, "conversations:write");
+      const session = actor.kind === "user" ? await prisma.conversationSession.findFirst({
+        where: { workspaceId, userId: actor.user.id, agentKey: "mcp-assistant", status: "ACTIVE" }, select: { id: true }, orderBy: { createdAt: "asc" },
+      }) ?? await createConversation(actor, { workspaceId, agentKey: "mcp-assistant" }) : null;
       const result = await processConversationTurn({
         workspaceId,
-        sessionId: `mcp-${workspaceId}-${sessionActorId}`,
+        sessionId: session?.id ?? "",
+        requestSource: "MCP",
         userId: actor.kind === "user" ? actor.user.id : "",
-        agentKey: "assistant",
+        agentKey: "mcp-assistant",
         userMessage: message,
         actor,
         operationScopes: actor.kind === "agent" && actor.authProvider === "bootstrap"
@@ -811,6 +871,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ query, limit }: { query: string; limit?: number }) => {
       requireScope(sessionCtx, "brain:read");
       const results = await searchIndexedKnowledge({
+        actor,
         workspaceId,
         query,
         limit: limit ?? 5,
@@ -829,6 +890,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ query, limit }: { query: string; limit?: number }) => {
       requireScope(sessionCtx, "brain:read");
       const results = await searchIndexedKnowledge({
+        actor,
         workspaceId,
         query,
         limit: limit ?? 5,
@@ -857,19 +919,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ id }: { id: string }) => {
       requireScope(sessionCtx, "brain:read");
-      const chunk = await prisma.knowledgeChunk.findFirst({
-        where: { id, workspaceId },
-        select: {
-          id: true,
-          sourceType: true,
-          sourceId: true,
-          sourceTitle: true,
-          chunkIndex: true,
-          content: true,
-          metadata: true,
-          createdAt: true,
-        },
-      });
+      const chunk = await fetchReadableKnowledgeChunk(actor, workspaceId, id);
       if (!chunk) {
         return structuredJsonResult({ error: "Not found", id });
       }
@@ -899,26 +949,39 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ objectType, status, take }: { objectType?: string; status?: string; take?: number }) => {
       requireToolCapability("query_context_graph");
-      const limit = Math.min(Math.max(take ?? 50, 1), 100);
-      const objects = await prisma.contextGraphObject.findMany({
-        where: {
-          workspaceId,
-          ...(objectType ? { objectType } : {}),
-          ...(status ? { status } : { status: { not: "archived" } }),
-        },
-        orderBy: [{ objectType: "asc" }, { updatedAt: "desc" }],
-        take: limit,
-      });
-      const relationships = await prisma.contextGraphRelationship.findMany({
-        where: {
-          workspaceId,
-          sourceObjectId: { in: objects.map((object) => object.id) },
-          targetObjectId: { in: objects.map((object) => object.id) },
-          status: { not: "archived" },
-        },
-        take: limit * 2,
-      });
-      return structuredJsonResult({ objects, relationships, webUrl: webUrl(workspaceId, "/maps") });
+      const limit = Math.trunc(Math.min(Math.max(take ?? 50, 1), 100));
+      const release = new DigestReadRelease(actor, workspaceId);
+      const objects = (await loadReadableArtifactSample({
+        actor, workspaceId, kind: "ContextGraphObject", limit, release,
+        loadBatch: (after, take) => prisma.contextGraphObject.findMany({
+          where: { AND: [{
+            workspaceId,
+            ...(objectType ? { objectType } : {}),
+            ...(status ? { status } : { status: { not: "archived" } }),
+          }, ...(after ? [{ OR: [
+            { objectType: { gt: after.objectType } },
+            { objectType: after.objectType, updatedAt: { lt: after.updatedAt } },
+            { objectType: after.objectType, updatedAt: after.updatedAt, id: { gt: after.id } },
+          ] }] : [])] },
+          orderBy: [{ objectType: "asc" }, { updatedAt: "desc" }, { id: "asc" }],
+          take,
+        }),
+      })).records;
+      const relationships = objects.length ? (await loadReadableArtifactSample({
+        actor, workspaceId, kind: "ContextGraphRelationship", limit: limit * 2, release,
+        loadBatch: (after, take) => prisma.contextGraphRelationship.findMany({
+          where: {
+            workspaceId,
+            sourceObjectId: { in: objects.map(object => object.id) },
+            targetObjectId: { in: objects.map(object => object.id) },
+            status: { not: "archived" },
+            ...(after ? { id: { gt: after.id } } : {}),
+          },
+          orderBy: { id: "asc" },
+          take,
+        }),
+      })).records : [];
+      return structuredJsonResult(await release.finish({ objects, relationships, webUrl: webUrl(workspaceId, "/maps") }));
     },
   );
 
@@ -955,15 +1018,26 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       if (Boolean(objectId) === Boolean(relationshipId)) {
         throw new Error("Provide exactly one of objectId or relationshipId.");
       }
-      const evidenceRefs = await prisma.contextGraphEvidenceRef.findMany({
-        where: {
-          workspaceId,
-          ...(objectId ? { objectId } : { relationshipId }),
-        },
-        orderBy: { createdAt: "desc" },
-        take: Math.min(Math.max(take ?? 20, 1), 50),
+      const ownerKind = objectId ? "ContextGraphObject" : "ContextGraphRelationship";
+      const owner = objectId
+        ? await prisma.contextGraphObject.findFirst({ where: { id: objectId, workspaceId } })
+        : await prisma.contextGraphRelationship.findFirst({ where: { id: relationshipId, workspaceId } });
+      const release = new DigestReadRelease(actor, workspaceId);
+      const ownerProof = owner ? await release.capture(ownerKind, [owner]) : null;
+      if (!ownerProof?.records.length) return structuredJsonResult(await release.finish({ evidenceRefs: [] }));
+      const selected = await loadReadableArtifactSample({
+        actor, workspaceId, kind: "ContextGraphEvidenceRef", release,
+        limit: Math.min(Math.max(Math.trunc(take ?? 20), 1), 50),
+        loadBatch: (after, pageSize) => prisma.contextGraphEvidenceRef.findMany({
+          where: {
+            workspaceId, knowledgeChunkId: null,
+            ...(objectId ? { objectId } : { relationshipId }),
+            ...(after ? { OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] } : {}),
+          },
+          orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: pageSize,
+        }),
       });
-      return structuredJsonResult({ evidenceRefs });
+      return structuredJsonResult(await release.finish({ evidenceRefs: selected.records }));
     },
   );
 
@@ -1190,6 +1264,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       if (includeCorgtex !== false) {
         requireScope(sessionCtx, "brain:read");
         const results = await searchIndexedKnowledge({
+          actor,
           workspaceId,
           query,
           limit: safeLimit,
@@ -1320,14 +1395,22 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     {},
     async () => {
       requireScope(sessionCtx, "workspace:read");
+      // Optional counts must not reveal categories outside this connection's scopes.
+      const scopedCount = (scope: string, read: () => Promise<number>) => {
+        if ((sessionCtx.authKind === "oauth" || (actor.kind === "agent" && actor.authProvider === "credential"))
+          && (!sessionCtx.scopes?.includes(scope)
+            || (actor.kind === "agent" && !actor.scopes?.includes(scope)))) return Promise.resolve(0);
+        requireScope(sessionCtx, scope);
+        return read();
+      };
       const [workspace, proposalCount, actionCount, tensionCount, memberCount] = await Promise.all([
         prisma.workspace.findUnique({
           where: { id: workspaceId },
           select: { id: true, slug: true, name: true, description: true, createdAt: true },
         }),
-        prisma.proposal.count({ where: { workspaceId } }),
-        prisma.action.count({ where: { workspaceId } }),
-        prisma.tension.count({ where: { workspaceId } }),
+        scopedCount("proposals:read", () => listProposals(actor, workspaceId, { take: 0 }).then(result => result.total)),
+        scopedCount("actions:read", () => listActions(actor, workspaceId, { take: 0 }).then(result => result.total)),
+        scopedCount("tensions:read", () => listTensions(actor, workspaceId, { take: 0 }).then(result => result.total)),
         prisma.member.count({ where: { workspaceId, isActive: true } }),
       ]);
       return jsonResult({
@@ -1388,7 +1471,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         listActions(actor, workspaceId, { take: 100 }),
         listProposals(actor, workspaceId, { take: 50 }),
         listTensions(actor, workspaceId, { take: 50 }),
-        listMeetings(workspaceId),
+        listMeetings(actor, workspaceId),
       ]);
 
       const recentActions = actions.items
@@ -2133,8 +2216,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ toolLinkId, reason }: { toolLinkId: string; reason?: string | null }) => {
       requireToolCapability("archive_tool_link");
-      await archiveWorkspaceToolLink(actor, { workspaceId, toolLinkId, reason });
-      return jsonResult({ id: toolLinkId, archived: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
+      return archiveWorkspaceToolLink(actor, { workspaceId, toolLinkId, reason });
     },
   );
 
@@ -2438,6 +2520,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           responsibleMemberId: item.responsibleMemberId,
           responsibleMemberName: item.responsibleMemberName,
           responsiblePerson: item.responsiblePerson,
+          relationWindow: item.relationWindow,
           adviceRequestCount: item.adviceRequestCount,
           activeAdviceRequestCount: item.activeAdviceRequestCount,
           inputRequestCount: item.inputRequestCount,
@@ -2457,20 +2540,9 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ proposalId }: { proposalId: string }) => {
       requireScope(sessionCtx, "proposals:read");
-      const proposal = await prisma.proposal.findFirst({
-        where: { id: proposalId, workspaceId },
-        include: {
-          author: { select: { displayName: true, email: true } },
-          ownerMember: { include: { user: { select: { displayName: true, email: true } } } },
-          circle: { select: { id: true, name: true } },
-          adviceProcess: {
-            include: {
-              requests: {
-                select: { status: true },
-              },
-            },
-          },
-        },
+      const proposal = await getProposal(actor, { workspaceId, proposalId }).catch((error: unknown) => {
+        if (error instanceof AppError && error.status === 404) return null;
+        throw error;
       });
       if (!proposal) return jsonResult({ error: "Not found" });
       const item = normalizeProposalWorkItem(proposal);
@@ -2584,7 +2656,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           authorMemberId: params.authorMemberId,
           duplicateGuard: duplicateGuardOptionsFromParams(params),
         });
-        const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, proposal.id, proposal);
+        const proposalForResponse = await loadProposalWorkItemResponse(actor, workspaceId, proposal.id);
+        if (!proposalForResponse) return jsonResult({ id: proposal.id, status: "WITHHELD" });
         const permanent = await permanentUrl(workspaceId, "Proposal", proposal.id);
         const item = normalizeProposalWorkItem(proposalForResponse);
         return jsonResult({
@@ -2649,7 +2722,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         }
         throw error;
       }
-      const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, updated.id, updated);
+      const proposalForResponse = await loadProposalWorkItemResponse(actor, workspaceId, updated.id);
+      if (!proposalForResponse) return jsonResult({ id: updated.id, status: "WITHHELD" });
       const item = normalizeProposalWorkItem(proposalForResponse);
       return jsonResult({
         id: item.id,
@@ -2854,10 +2928,12 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           duplicateGuard: duplicateGuardOptionsFromParams(params),
           source: params.idempotencyKey === undefined ? undefined : actionRequestSource("MCP_REQUEST", sessionActorId, params.idempotencyKey),
         });
-        const actionForResponse = await loadActionWorkItemResponse(workspaceId, action.id, action);
+        const release = new WorkItemReadRelease(actor, workspaceId);
+        const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, action.id, release);
+        if ("contentWithheld" in actionForResponse) return workItemResponse(release, actionForResponse);
         const permanent = await permanentUrl(workspaceId, "Action", action.id);
         const item = normalizeActionWorkItem(actionForResponse);
-        return jsonResult({
+        return workItemResponse(release, {
           id: item.id,
           status: item.status,
           priority: item.priority,
@@ -2934,9 +3010,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         }
         throw error;
       }
-      const actionForResponse = await loadActionWorkItemResponse(workspaceId, updated.id, updated);
+      const release = new WorkItemReadRelease(actor, workspaceId);
+      const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, updated.id, release);
+      if ("contentWithheld" in actionForResponse) return workItemResponse(release, actionForResponse);
       const item = normalizeActionWorkItem(actionForResponse);
-      return jsonResult({
+      return workItemResponse(release, {
         id: item.id,
         status: item.status,
         priority: item.priority,
@@ -2960,7 +3038,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "complete_action",
-    "Mark an action as COMPLETED with a required completion note. Convenience wrapper around update_action.",
+    "Mark an action as COMPLETED with a required completion note. Returns only the committed completion status.",
     {
       actionId: z.string(),
       completedVia: z.string().describe("Required note explaining how the action was completed"),
@@ -2968,12 +3046,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ actionId, completedVia }: { actionId: string; completedVia: string }) => {
       requireScope(sessionCtx, "actions:write");
       const updated = await completeAction(actor, { workspaceId, actionId, completedVia });
-      return jsonResult({
-        id: updated.id,
-        status: updated.status,
-        version: updated.version,
-        webUrl: webUrl(workspaceId, `/actions/${updated.id}`),
-      });
+      return updated;
     },
   );
 
@@ -3082,10 +3155,12 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           authorMemberId: params.authorMemberId,
           duplicateGuard: duplicateGuardOptionsFromParams(params),
         });
-        const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, tension.id, tension);
+        const release = new WorkItemReadRelease(actor, workspaceId);
+        const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, tension.id, release);
+        if ("contentWithheld" in tensionForResponse) return workItemResponse(release, tensionForResponse);
         const permanent = await permanentUrl(workspaceId, "Tension", tension.id);
         const item = normalizeTensionWorkItem(tensionForResponse);
-        return jsonResult({
+        return workItemResponse(release, {
           id: item.id,
           status: item.status,
           priority: item.priority,
@@ -3166,9 +3241,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         }
         throw error;
       }
-      const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, updated.id, updated);
+      const release = new WorkItemReadRelease(actor, workspaceId);
+      const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, updated.id, release);
+      if ("contentWithheld" in tensionForResponse) return workItemResponse(release, tensionForResponse);
       const item = normalizeTensionWorkItem(tensionForResponse);
-      return jsonResult({
+      return workItemResponse(release, {
         id: item.id,
         status: item.status,
         priority: item.priority,
@@ -3577,7 +3654,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async ({ includeInactive }: { includeInactive?: boolean }) => {
       requireScope(sessionCtx, "members:read");
       const members = includeInactive
-        ? await listMembersEnriched(workspaceId, { includeInactive: true })
+        ? await listMembersEnriched(actor, workspaceId, { includeInactive: true })
         : await listMembers(workspaceId);
       const simplified = members.map((m) => ({
         id: m.id,
@@ -3875,7 +3952,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ archiveFilter }: { archiveFilter?: typeof ARCHIVE_FILTER[number] }) => {
       requireScope(sessionCtx, "meetings:read");
-      const meetings = await listMeetings(workspaceId, { archiveFilter });
+      const meetings = await listMeetings(actor, workspaceId, { archiveFilter });
       const simplified = meetings.map((m) => ({
         id: m.id,
         title: m.title,
@@ -3897,7 +3974,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ meetingId }: { meetingId: string }) => {
       requireScope(sessionCtx, "meetings:read");
-      const meeting = await getMeeting(workspaceId, meetingId);
+      const meeting = await getMeeting(actor, workspaceId, meetingId);
       if (!meeting) return jsonResult({ error: "Not found" });
       return jsonResult({
         ...meeting,
@@ -4462,6 +4539,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         workspaceId,
         slug: params.slug,
         bodyMd: params.bodyMd,
+        copied: true,
         targetType: params.targetType ?? "ARTICLE",
         targetRef: params.targetRef ?? null,
       });
@@ -4482,8 +4560,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ threadId, bodyMd }: { threadId: string; bodyMd: string }) => {
       requireScope(sessionCtx, "brain:write");
-      const comment = await addDiscussionComment(actor, { workspaceId, threadId, bodyMd });
-      return jsonResult({ id: comment.id, threadId: comment.threadId });
+      const comment = await addDiscussionComment(actor, { workspaceId, threadId, bodyMd, copied: true });
+      return jsonResult({ id: comment.id, threadId: comment.threadId, ...("contentWithheld" in comment ? { contentWithheld: true } : {}) });
     },
   );
 
@@ -4510,7 +4588,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     {},
     async () => {
       requireScope(sessionCtx, "circles:read");
-      const circles = await listCircles(workspaceId);
+      const circles = await listCircles(actor, workspaceId);
       const simplified = circles.map((c) => ({
         id: c.id,
         name: c.name,
@@ -4534,7 +4612,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     {},
     async () => {
       requireScope(sessionCtx, "governance:read");
-      const constitution = await getCurrentConstitution(workspaceId);
+      const constitution = await getCurrentConstitution(actor, workspaceId);
       return jsonResult({
         bodyMd: constitution?.bodyMd ?? null,
         version: constitution?.version ?? null,
@@ -4555,7 +4633,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         title: p.title,
         bodyMd: p.bodyMd,
         acceptedAt: p.acceptedAt,
-        proposal: p.proposal ? { id: p.proposal.id, title: p.proposal.title } : null,
+        proposal: p.proposal ? { id: p.proposal.id, title: p.proposal?.title ?? p.title } : null,
         circle: p.circle ? { id: p.circle.id, name: p.circle.name } : null,
       }));
       return jsonResult(simplified);
@@ -4601,7 +4679,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       take: z.number().optional(),
       skip: z.number().optional(),
       includeRestored: z.boolean().optional(),
-      includePurged: z.boolean().optional(),
+      includePurged: z.boolean().optional().describe("Retained for compatibility; purged source identities remain withheld by current source permissions."),
     },
     async (params: {
       entityType?: string;
@@ -4660,9 +4738,9 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     "constitution",
     "corgtex://workspace/constitution",
     { description: "The current version of the workspace constitution", mimeType: "text/markdown" },
-    async () => {
+    async () => withLiveMcpScopes(["governance:read"], async () => {
       requireScope(sessionCtx, "governance:read");
-      const constitution = await getCurrentConstitution(workspaceId);
+      const constitution = await getCurrentConstitution(actor, workspaceId);
       return {
         contents: [{
           uri: "corgtex://workspace/constitution",
@@ -4670,14 +4748,14 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           text: constitution?.bodyMd ?? "No constitution has been generated yet.",
         }],
       };
-    },
+    }),
   );
 
   server.resource(
     "policies",
     "corgtex://workspace/policies",
     { description: "Active policy corpus for the workspace", mimeType: "application/json" },
-    async () => {
+    async () => withLiveMcpScopes(["governance:read"], async () => {
       requireScope(sessionCtx, "governance:read");
       const policies = await listPolicyCorpus(actor, workspaceId);
       const simplified = policies.map((p) => ({
@@ -4685,7 +4763,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         title: p.title,
         bodyMd: p.bodyMd,
         acceptedAt: p.acceptedAt,
-        proposal: p.proposal ? { id: p.proposal.id, title: p.proposal.title } : null,
+        proposal: p.proposal ? { id: p.proposal.id, title: p.proposal?.title ?? p.title } : null,
         circle: p.circle ? { id: p.circle.id, name: p.circle.name } : null,
       }));
       return {
@@ -4695,14 +4773,14 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           text: JSON.stringify(simplified, null, 2),
         }],
       };
-    },
+    }),
   );
 
   server.resource(
     "context-map",
     "corgtex://map/process/current",
     { description: "Current living process context map for the workspace", mimeType: "application/json" },
-    async () => {
+    async () => withLiveMcpScopes(["context-graph:read"], async () => {
       requireScope(sessionCtx, "context-graph:read");
       const data = await getContextMapData(actor, { workspaceId });
       return {
@@ -4712,7 +4790,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           text: JSON.stringify(data, null, 2),
         }],
       };
-    },
+    }),
   );
 
   return server;

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { createArticle, updateArticle } from "./brain";
+import { captureArtifactInputProof, recordArtifactInputLineage } from "./source-lineage";
 import { brainSourceContentFingerprint } from "./brain-derivation";
 
 describe("Brain article derivation provenance", () => {
@@ -17,10 +18,13 @@ describe("Brain article derivation provenance", () => {
     } });
     const agent: AppActor = { kind: "agent", authProvider: "bootstrap", label: "brain-absorb", workspaceIds: [workspace.id] };
     const editor: AppActor = { kind: "user", user: { id: user.id, email: user.email, displayName: "Editor" } };
+    await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: editor, workspaceId: workspace.id,
+      artifact: { kind: "BrainSource", id: source.id }, content: source, origin: "HUMAN_ORIGINAL", inputs: [] }));
     const fingerprint = brainSourceContentFingerprint(source);
+    const sourceRoots = await captureArtifactInputProof(agent, workspace.id, [{ kind: "BrainSource", id: source.id }]);
 
     const generated = await createArticle(agent, {
-      workspaceId: workspace.id, title: "Generated notes", type: "PROJECT", bodyMd: "Generated body",
+      workspaceId: workspace.id, isPrivate: false, completeInputRoots: sourceRoots, title: "Generated notes", type: "PROJECT", bodyMd: "Generated body",
       sourceIds: [source.id], derivation: { sourceId: source.id, sourceFingerprint: fingerprint, agentRunId: "synthetic-run" },
     });
     const authored = await createArticle(editor, {
@@ -35,13 +39,19 @@ describe("Brain article derivation provenance", () => {
     const secondSource = await prisma.brainSource.create({ data: {
       workspaceId: workspace.id, sourceType: "DOC", tier: 1, title: "Second notes", content: "Second source facts",
     } });
-    const authoredUpdate = await updateArticle(agent, { workspaceId: workspace.id, slug: authored.slug,
+    await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: editor, workspaceId: workspace.id,
+      artifact: { kind: "BrainSource", id: secondSource.id }, content: secondSource, origin: "HUMAN_ORIGINAL", inputs: [] }));
+    await expect(updateArticle(agent, { workspaceId: workspace.id, slug: authored.slug,
       bodyMd: "Human notes with second source facts", absorbedSource: {
         sourceId: secondSource.id, sourceFingerprint: brainSourceContentFingerprint(secondSource), agentRunId: "second-run",
       },
-    });
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect((await prisma.brainArticle.findUniqueOrThrow({ where: { id: authored.id } })).bodyMd).toBe("Human body");
+    const authoredUpdate = await updateArticle(editor, { workspaceId: workspace.id, slug: authored.slug,
+      bodyMd: "Human notes with second source facts", sourceIds: [source.id, secondSource.id] });
     expect(authoredUpdate.sourceIds).toEqual([source.id, secondSource.id]);
     expect(authoredUpdate.derivationJson).toBeNull();
+    expect((await prisma.brainArticleVersion.findFirstOrThrow({ where: { articleId: authored.id } })).bodyMd).toBe("Human body");
 
     await updateArticle(editor, { workspaceId: workspace.id, slug: generated.slug, bodyMd: "Human revision" });
     const revised = await prisma.brainArticle.findUniqueOrThrow({ where: { id: generated.id }, include: { versions: true } });
@@ -51,7 +61,7 @@ describe("Brain article derivation provenance", () => {
 
     await prisma.brainSource.update({ where: { id: source.id }, data: { content: "Replaced source content" } });
     await expect(createArticle(agent, {
-      workspaceId: workspace.id, title: "Stale generation", type: "PROJECT", bodyMd: "Old source body",
+      workspaceId: workspace.id, isPrivate: false, completeInputRoots: sourceRoots, title: "Stale generation", type: "PROJECT", bodyMd: "Old source body",
       sourceIds: [source.id], derivation: { sourceId: source.id, sourceFingerprint: fingerprint, agentRunId: "synthetic-run" },
     })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
     expect(await prisma.brainArticle.count({ where: { workspaceId: workspace.id } })).toBe(2);

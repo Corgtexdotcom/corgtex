@@ -182,10 +182,14 @@ export function KnowledgeFileUploader({
     setUploadItems((current) => current.filter((item) => item.id !== id));
   }
 
-  async function uploadItems(overrides: Record<string, { resolution: DuplicateUploadResolution; targetEntityId: string }> = {}) {
+  async function uploadItems(
+    overrides: Record<string, { resolution: DuplicateUploadResolution; targetEntityId: string }> = {},
+    targetItemId?: string,
+  ) {
     if (isUploadingRef.current) return;
 
     const uploadableIds = itemsRef.current
+      .filter((item) => targetItemId === undefined || item.id === targetItemId)
       .filter((item) => item.status !== "done" && (!item.duplicate || overrides[item.id]))
       .map((item) => item.id);
     if (uploadableIds.length === 0) return;
@@ -275,7 +279,7 @@ export function KnowledgeFileUploader({
     const item = itemsRef.current.find((current) => current.id === itemId);
     const targetEntityId = item?.duplicate?.candidate.entityId;
     if (!targetEntityId) return;
-    void uploadItems({ [itemId]: { resolution, targetEntityId } });
+    void uploadItems({ [itemId]: { resolution, targetEntityId } }, itemId);
   }
 
   const hasPendingUploads = items.some((item) => item.status !== "done");

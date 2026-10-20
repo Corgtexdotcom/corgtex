@@ -65,8 +65,37 @@ export async function GET() {
         get: {
           operationId: "getWorkspaceInfo",
           summary: "Get workspace overview",
+          description: "Artifact counts examine at most 200 records per family. Global counts are numeric only for a complete initial window; otherwise they are null. Follow each family's nextCursor independently. Window counts must not be mistaken for global totals.",
           security: [{ oauth2: ["read"] }],
-          responses: okResponse,
+          parameters: ["proposalCursor", "actionCursor", "tensionCursor"].map(name => ({
+            name, in: "query", required: false, schema: { type: "string", minLength: 1, maxLength: 256 },
+            description: "The corresponding countWindows family's nextCursor from the preceding response.",
+          })),
+          responses: {
+            "200": {
+              description: "Workspace overview with bounded permission-aware count windows",
+              content: { "application/json": { schema: {
+                type: "object",
+                properties: {
+                  counts: { type: "object", properties: {
+                    proposals: { type: ["integer", "null"], minimum: 0 },
+                    actions: { type: ["integer", "null"], minimum: 0 },
+                    tensions: { type: ["integer", "null"], minimum: 0 },
+                    members: { type: "integer", minimum: 0 },
+                  } },
+                  countWindows: { type: "object", properties: Object.fromEntries(
+                    ["proposals", "actions", "tensions"].map(name => [name, {
+                      type: "object", required: ["count", "complete", "nextCursor", "scope"], properties: {
+                        count: { type: "integer", minimum: 0, maximum: 200 },
+                        complete: { type: "boolean" }, nextCursor: { type: ["string", "null"] },
+                        scope: { type: "string", enum: ["WINDOW"] },
+                      },
+                    }]),
+                  ) },
+                },
+              } } },
+            },
+          },
         },
       },
       "/chat": {

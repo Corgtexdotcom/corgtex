@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   workspace: vi.fn(),
   archive: vi.fn(),
   audit: vi.fn(),
+  auditPage: vi.fn(),
   summaries: vi.fn(),
   details: vi.fn(),
   feature: vi.fn(),
@@ -70,8 +71,8 @@ vi.mock("@corgtex/domain", () => {
   const result = (items: unknown[]) => async () => ({ items, total: items.length });
   return {
     requireWorkspaceMembership: mocks.membership,
-    listArchivedWorkspaceArtifacts: mocks.archive,
-    listAuditLogs: mocks.audit,
+    listArchivedWorkspaceArtifactsPage: mocks.archive,
+    listAuditLogsPage: mocks.auditPage,
     listNewspaperDeliverySummaries: mocks.summaries,
     listNewspaperDeliveryDetails: mocks.details,
     listCrmAccounts: result([account]), listContacts: result([contact]),
@@ -120,7 +121,8 @@ beforeEach(() => {
     id: "synthetic-audit", action: "action.created", entityType: "Action",
     entityId: "synthetic-action", createdAt: new Date("2026-01-01T12:00:00Z"), meta: null,
   }]);
-  mocks.summaries.mockResolvedValue([]);
+  mocks.auditPage.mockImplementation(async (...args: unknown[]) => ({ items: await mocks.audit(...args), nextCursor: null, scanLimited: false }));
+  mocks.summaries.mockResolvedValue({items: [], complete: true, deliveriesComplete: true, linksComplete: true, scope: "WINDOW"});
   mocks.details.mockResolvedValue([]);
   mocks.feature.mockResolvedValue(undefined);
 });
@@ -133,6 +135,15 @@ const renderAccountDetail = async (view = "overview") =>
     params: Promise.resolve({ ...(await params()), accountId: "synthetic-account" }),
     searchParams: Promise.resolve({ view }),
   }));
+
+it("offers continuation for an empty limited audit window and preserves filters", async () => {
+  mocks.auditPage.mockResolvedValue({ items: [], nextCursor: "older-cursor", scanLimited: true });
+  const html = await renderAudit({ auditCursor: "start", entityType: "Action", entityId: "selected" });
+  expect(html).toContain(messages.audit.scanLimited);
+  expect(html).not.toContain(messages.audit.noAuditEntries);
+  expect(html).toContain('href="?tab=audit&amp;entityType=Action&amp;entityId=selected&amp;auditCursor=older-cursor"');
+  expect(mocks.auditPage).toHaveBeenCalledWith(expect.anything(), "synthetic-demo", expect.objectContaining({ cursor: "start", entityType: "Action", entityId: "selected" }));
+});
 
 describe("Account detail read-only demo", () => {
   it.each(accountDetailViews)("keeps %s readable without mutations", async (view) => {
@@ -185,12 +196,12 @@ describe("Audit Trail member access", () => {
 
   it("loads the archive only on the administrator archive tab", async () => {
     mocks.membership.mockResolvedValue({ role: "ADMIN", isActive: true });
-    mocks.archive.mockResolvedValue([]);
+    mocks.archive.mockResolvedValue({ items: [], complete: true, nextCursor: null });
     expect(await renderAudit()).toContain("?tab=archive");
     expect(mocks.archive).not.toHaveBeenCalled();
     await renderAudit({ tab: "archive", archiveEntityType: "Action" });
     expect(mocks.archive).toHaveBeenCalledWith(expect.anything(), {
-      workspaceId: "synthetic-demo", entityType: "Action", take: 100,
+      workspaceId: "synthetic-demo", entityType: "Action", cursor: undefined, take: 100,
     });
   });
 
@@ -295,6 +306,10 @@ it.runIf(process.env.DEMO_UI_PROOF === "1")("captures bounded synthetic browser 
     pages.set("account:" + view, await renderAccountDetail(view));
   }
   pages.set("audit", await renderAudit());
+  mocks.auditPage.mockResolvedValue({ items: [], nextCursor: "older-cursor", scanLimited: true });
+  pages.set("audit:limited", await renderAudit({ auditCursor: "start", entityType: "Action", entityId: "synthetic-action" }));
+  mocks.auditPage.mockResolvedValue({ items: await mocks.audit(), nextCursor: null, scanLimited: false });
+  pages.set("audit:continued", await renderAudit({ auditCursor: "older-cursor", entityType: "Action", entityId: "synthetic-action" }));
   const { default: postcss } = await import("postcss");
   const { default: tailwindcss } = await import("tailwindcss");
   const { default: tailwindConfig } = await import("../../../../tailwind.config");
@@ -307,7 +322,7 @@ it.runIf(process.env.DEMO_UI_PROOF === "1")("captures bounded synthetic browser 
     const section = url.pathname.split("/leads/")[1];
     const key = section === "accounts/synthetic-account"
       ? "account:" + (url.searchParams.get("view") ?? "overview")
-      : url.pathname.endsWith("/audit") ? "audit" : section ?? url.searchParams.get("view") ?? "dashboard";
+      : url.pathname.endsWith("/audit") ? (url.searchParams.get("auditCursor") === "start" ? "audit:limited" : url.searchParams.get("auditCursor") === "older-cursor" ? "audit:continued" : "audit") : section ?? url.searchParams.get("view") ?? "dashboard";
     if (request.method !== "GET" || !pages.has(key)) {
       response.writeHead(404).end();
       return;
@@ -348,6 +363,16 @@ it.runIf(process.env.DEMO_UI_PROOF === "1")("captures bounded synthetic browser 
       expect(await page.getByRole("heading", { name: messages.audit.pageTitle, exact: true }).count()).toBe(1);
       expect(await page.locator('a[href*="tab=archive"], form').count()).toBe(0);
       await page.screenshot({ path: new URL("audit-" + viewport.width + ".png", output).pathname, fullPage: true });
+      await page.goto(base + "/workspaces/synthetic-demo/audit?auditCursor=start&entityType=Action&entityId=synthetic-action");
+      expect(await page.getByText(messages.audit.scanLimited, { exact: true }).count()).toBe(1);
+      expect(await page.getByText(messages.audit.noAuditEntries, { exact: true }).count()).toBe(0);
+      await page.screenshot({ path: new URL("audit-limited-" + viewport.width + ".png", output).pathname, fullPage: true });
+      await page.getByRole("link", { name: messages.audit.nextWindow, exact: true }).click();
+      expect(new URL(page.url()).searchParams.get("auditCursor")).toBe("older-cursor");
+      expect(new URL(page.url()).searchParams.get("entityId")).toBe("synthetic-action");
+      expect(await page.locator(".nr-item").count()).toBeGreaterThan(0);
+      expect(await page.getByRole("link", { name: messages.audit.nextWindow, exact: true }).count()).toBe(0);
+      await page.screenshot({ path: new URL("audit-continued-" + viewport.width + ".png", output).pathname, fullPage: true });
       await page.getByRole("link", { name: "Relationships", exact: true }).click();
       await page.getByRole("link", { name: messages.leads.openDetail, exact: true }).first().click();
       expect(new URL(page.url()).pathname).toBe("/workspaces/synthetic-demo/leads/accounts/synthetic-account");
@@ -372,3 +397,66 @@ it.runIf(process.env.DEMO_UI_PROOF === "1")("captures bounded synthetic browser 
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
+
+it("qualifies incomplete newspaper counts and hidden-only windows", async () => {
+  mocks.summaries.mockResolvedValue({items: [], complete: false, deliveriesComplete: false, linksComplete: true, scope: "WINDOW"});
+  const html = await renderAudit({tab: "newspapers"});
+  expect(html).toContain(messages.audit.newspaperWindowLimited);
+  expect(html).toContain(messages.audit.noNewspaperDeliveriesInWindow);
+  expect(html).not.toContain(messages.audit.noNewspaperDeliveries);
+});
+
+it.runIf(process.env.NEWSPAPER_WINDOW_BROWSER_QA === "1")("shows qualified newspaper windows in the actual Audit markup on desktop and mobile", async () => {
+  const {createServer} = await import("node:http");
+  const {readFile, mkdir} = await import("node:fs/promises");
+  const {chromium} = await import("playwright");
+  const output = new URL("../../../../../../.artifacts/source-20e45-newspaper-window/", import.meta.url);
+  await mkdir(output, {recursive: true});
+  const views = new Map<string, string>();
+  for (const mode of ["partial", "hidden", "exact"]) {
+    mocks.summaries.mockResolvedValue({complete: mode === "exact", deliveriesComplete: mode === "exact", linksComplete: mode === "exact", scope: "WINDOW",
+      items: mode === "hidden" ? [] : [{runKey: "synthetic", subject: "Synthetic weekly newspaper", kind: "MEMBER_NEWSPAPER", cadence: "WEEKLY",
+        createdAt: new Date("2026-10-17T12:00:00Z"), firstSentAt: new Date("2026-10-17T12:00:00Z"), lastSentAt: new Date("2026-10-17T12:00:00Z"),
+        sentCount: 150, failedCount: 3, skippedCount: 2, recipientCount: 155, trackedLinkCount: 200, clickedLinkCount: 25, totalClickCount: 30}]});
+    views.set(mode, await renderAudit({tab: "newspapers"}));
+  }
+  const styleRoot = new URL("../../../globals.css", import.meta.url);
+  const globals = await readFile(styleRoot, "utf8");
+  const imported = await Promise.all([...globals.matchAll(/@import "([^"]+)";/g)].map(match => readFile(new URL(match[1], styleRoot), "utf8")));
+  let index = 0;
+  const {default: postcss} = await import("postcss");
+  const {default: tailwindcss} = await import("tailwindcss");
+  const {default: config} = await import("../../../../tailwind.config");
+  const {css} = await postcss([tailwindcss({...config, content: [{raw: [...views.values()].join("\n"), extension: "html"}]})])
+    .process(globals.replace(/@import "[^"]+";/g, () => imported[index++]), {from: styleRoot.pathname});
+  const server = createServer((request, response) => {
+    const mode = new URL(request.url ?? "/", "http://localhost").searchParams.get("mode") ?? "partial";
+    response.setHeader("Content-Type", "text/html; charset=utf-8");
+    response.end(`<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}:root{--font-inter:Arial;--font-document:Georgia;--font-playfair:Georgia}</style></head><body><main style="max-width:1200px;margin:auto;padding:24px">${views.get(mode)}</main></body></html>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address(); if (!address || typeof address === "string") throw new Error("Missing synthetic server");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const browser = await chromium.launch({headless: true});
+  try {
+    const page = await browser.newPage();
+    await page.route("**/*", route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({width, height: 900});
+      for (const mode of ["partial", "hidden", "exact"]) {
+        await page.goto(`${origin}?mode=${mode}`);
+        expect(await page.getByRole("heading", {name: messages.audit.sectionNewspapers, exact: true}).isVisible()).toBe(true);
+        if (mode !== "exact") expect(await page.getByText(messages.audit.newspaperWindowLimited, {exact: true}).isVisible()).toBe(true);
+        if (mode === "hidden") {
+          expect(await page.getByText(messages.audit.noNewspaperDeliveriesInWindow, {exact: true}).isVisible()).toBe(true);
+          expect(await page.getByText(messages.audit.noNewspaperDeliveries, {exact: true}).count()).toBe(0);
+        } else if (mode === "partial") {
+          expect(await page.getByText("In this window: 150 sent, 3 failed, 2 skipped across 155 recipients.", {exact: true}).isVisible()).toBe(true);
+          expect(await page.getByText("In this link window: 30 clicks across 25 of 200 tracked links.", {exact: true}).isVisible()).toBe(true);
+          expect(await page.getByText("First sent in window:", {exact: false}).isVisible()).toBe(true);
+        } else expect(await page.getByText(messages.audit.newspaperWindowLimited, {exact: true}).count()).toBe(0);
+        await page.screenshot({path: new URL(`newspaper-${mode}-${width}.png`, output).pathname, fullPage: true});
+      }
+    }
+  } finally { await browser.close(); await new Promise<void>(resolve => server.close(() => resolve())); }
+}, 60_000);

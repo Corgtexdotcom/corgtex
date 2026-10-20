@@ -2,6 +2,9 @@ import { prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import type { NewspaperCadence, WorkspaceBriefingPeriod, WorkspaceBriefingStatus } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
+import { captureArtifactInputProof, invalidateArtifactInputLineage, recordArtifactInputLineage,
+  type LineageKind, type LineageRoot } from "./source-lineage";
+import { captureReadableDigestInputs, loadReadableDigestQuery, mergeArtifactInputProofs } from "./digest-lineage";
 import {
   type NewspaperEmailSectionId,
   type NormalizedNewspaperDigest,
@@ -54,6 +57,8 @@ export type WorkspaceBriefingCandidate = {
   actionabilityScore: number;
   evidenceScore: number;
   sourceRefs: WorkspaceBriefingSourceRef[];
+  /** Complete input receipt, independent of the selected display references. */
+  lineageRoots?: LineageRoot[];
 };
 
 export type WorkspaceBriefingItem = {
@@ -1618,12 +1623,18 @@ export async function collectWorkspaceBriefingCandidates(params: {
   workspaceId: string;
   since: Date;
   actor?: AppActor;
+  audience?: AppActor[];
   now?: Date;
   until?: Date;
 }): Promise<WorkspaceBriefingCandidate[]> {
   if (params.actor) {
     await requireWorkspaceMembership({ actor: params.actor, workspaceId: params.workspaceId });
   }
+  const actor = params.actor ?? { kind: "agent", authProvider: "bootstrap", label: "workspace-briefing",
+    workspaceIds: [params.workspaceId] } as AppActor;
+  const query = <T extends { id: string }>(kind: LineageKind, limit: number,
+    loadBatch: (page: { take: number; skip: number }) => Promise<T[]>) =>
+    loadReadableDigestQuery({ actor, audience: params.audience, workspaceId: params.workspaceId, kind, limit, loadBatch });
 
   const cutoff = params.until ?? params.now ?? new Date();
   const windowRange = { gte: params.since, lte: cutoff };
@@ -1654,7 +1665,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
     activeAdviceRequests,
     completedAdviceRequests,
   ] = await Promise.all([
-    prisma.meeting.findMany({
+    query("Meeting", 20, (page) => prisma.meeting.findMany({
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
@@ -1667,8 +1678,8 @@ export async function collectWorkspaceBriefingCandidates(params: {
           { aiProcessedAt: windowRange },
         ],
       },
-      orderBy: { recordedAt: "desc" },
-      take: 20,
+      orderBy: [{ recordedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: {
         id: true,
         title: true,
@@ -1680,8 +1691,8 @@ export async function collectWorkspaceBriefingCandidates(params: {
         aiProcessedAt: true,
         decisionsJson: true,
       },
-    }),
-    prisma.proposal.findMany({
+    })),
+    query("Proposal", 30, (page) => prisma.proposal.findMany({
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
@@ -1696,11 +1707,11 @@ export async function collectWorkspaceBriefingCandidates(params: {
           { decidedAt: windowRange },
         ],
       },
-      orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
-      take: 30,
+      orderBy: [{ priority: "desc" }, { updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: { id: true, title: true, summary: true, status: true, priority: true, decisionMd: true, createdAt: true, updatedAt: true, decidedAt: true },
-    }),
-    prisma.tension.findMany({
+    })),
+    query("Tension", 30, (page) => prisma.tension.findMany({
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
@@ -1715,11 +1726,11 @@ export async function collectWorkspaceBriefingCandidates(params: {
           { publishedAt: windowRange },
         ],
       },
-      orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
-      take: 30,
+      orderBy: [{ priority: "desc" }, { updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: { id: true, title: true, bodyMd: true, status: true, priority: true, urgency: true, importance: true, createdAt: true, updatedAt: true, resolvedAt: true },
-    }),
-    prisma.action.findMany({
+    })),
+    query("Action", 40, (page) => prisma.action.findMany({
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
@@ -1733,11 +1744,11 @@ export async function collectWorkspaceBriefingCandidates(params: {
           { publishedAt: windowRange },
         ],
       },
-      orderBy: [{ dueAt: "asc" }, { priority: "desc" }, { updatedAt: "desc" }],
-      take: 40,
+      orderBy: [{ dueAt: "asc" }, { priority: "desc" }, { updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: { id: true, title: true, bodyMd: true, status: true, priority: true, dueAt: true, createdAt: true, updatedAt: true },
-    }),
-    prisma.goal.findMany({
+    })),
+    query("Goal", 20, (page) => prisma.goal.findMany({
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
@@ -1746,17 +1757,17 @@ export async function collectWorkspaceBriefingCandidates(params: {
         updatedAt: beforeCutoff,
         status: { notIn: ["DRAFT", "ABANDONED"] },
       },
-      orderBy: [{ level: "asc" }, { sortOrder: "asc" }, { updatedAt: "desc" }],
-      take: 20,
+      orderBy: [{ level: "asc" }, { sortOrder: "asc" }, { updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: { id: true, title: true, descriptionMd: true, status: true, progressPercent: true, targetDate: true, updatedAt: true, level: true },
-    }),
-    prisma.recognition.findMany({
+    })),
+    query("Recognition", 10, (page) => prisma.recognition.findMany({
       where: { workspaceId: params.workspaceId, visibility: "WORKSPACE", createdAt: windowRange },
-      orderBy: { createdAt: "desc" },
-      take: 10,
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: { id: true, title: true, storyMd: true, createdAt: true },
-    }),
-    prisma.brainArticle.findMany({
+    })),
+    query("BrainArticle", 25, (page) => prisma.brainArticle.findMany({
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
@@ -1771,11 +1782,11 @@ export async function collectWorkspaceBriefingCandidates(params: {
           { lastVerifiedAt: windowRange },
         ],
       },
-      orderBy: { updatedAt: "desc" },
-      take: 25,
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: { id: true, slug: true, title: true, type: true, authority: true, bodyMd: true, createdAt: true, updatedAt: true, publishedAt: true },
-    }),
-    prisma.document.findMany({
+    })),
+    query("Document", 20, (page) => prisma.document.findMany({
       where: {
         workspaceId: params.workspaceId,
         accessDomain: "WORKSPACE",
@@ -1787,21 +1798,21 @@ export async function collectWorkspaceBriefingCandidates(params: {
           { updatedAt: windowRange },
         ],
       },
-      orderBy: { updatedAt: "desc" },
-      take: 20,
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: { id: true, title: true, source: true, textContent: true, createdAt: true, updatedAt: true },
-    }),
-    prisma.communicationContextSummary.findMany({
+    })),
+    query("CommunicationContextSummary", 20, (page) => prisma.communicationContextSummary.findMany({
       where: {
         workspaceId: params.workspaceId,
         summaryDate: windowRange,
         updatedAt: beforeCutoff,
       },
-      orderBy: { summaryDate: "desc" },
-      take: 20,
+      orderBy: [{ summaryDate: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: { id: true, title: true, summaryMd: true, summaryDate: true, updatedAt: true },
-    }),
-    prisma.buildArtifact.findMany({
+    })),
+    query("BuildArtifact", 20, (page) => prisma.buildArtifact.findMany({
       where: {
         workspaceId: params.workspaceId,
         updatedAt: beforeCutoff,
@@ -1813,11 +1824,11 @@ export async function collectWorkspaceBriefingCandidates(params: {
           { closedAt: windowRange },
         ],
       },
-      orderBy: { updatedAt: "desc" },
-      take: 20,
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: { id: true, title: true, summaryMd: true, status: true, pullRequestUrl: true, updatedAt: true, mergedAt: true, closedAt: true },
-    }),
-    prisma.adviceRequest.findMany({
+    })),
+    query("AdviceRequest", 30, (page) => prisma.adviceRequest.findMany({
       where: {
         workspaceId: params.workspaceId,
         audienceType: "WORKSPACE",
@@ -1825,11 +1836,11 @@ export async function collectWorkspaceBriefingCandidates(params: {
         createdAt: beforeCutoff,
         updatedAt: beforeCutoff,
       },
-      orderBy: [{ deadlineAt: "asc" }, { updatedAt: "desc" }],
-      take: 30,
+      orderBy: [{ deadlineAt: "asc" }, { updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: adviceRequestSelect,
-    }),
-    prisma.adviceRequest.findMany({
+    })),
+    query("AdviceRequest", 10, (page) => prisma.adviceRequest.findMany({
       where: {
         workspaceId: params.workspaceId,
         audienceType: "WORKSPACE",
@@ -1841,15 +1852,15 @@ export async function collectWorkspaceBriefingCandidates(params: {
           { updatedAt: windowRange },
         ],
       },
-      orderBy: [{ completedAt: "desc" }, { updatedAt: "desc" }],
-      take: 10,
+      orderBy: [{ completedAt: "desc" }, { updatedAt: "desc" }, { id: "desc" }],
+      take: page.take, skip: page.skip,
       select: adviceRequestSelect,
-    }),
+    })),
   ]);
 
   const adviceRequests = [...activeAdviceRequests, ...completedAdviceRequests];
 
-  return [
+  const entries = [
     ...meetings.map((meeting) => candidate({
       workspaceId: params.workspaceId,
       sourceType: "MEETING" as const,
@@ -2010,6 +2021,34 @@ export async function collectWorkspaceBriefingCandidates(params: {
     entry.occurredAt.getTime() <= cutoff.getTime()
     && entry.updatedAt.getTime() <= cutoff.getTime()
   ));
+  const groups: Array<{ kind: LineageKind; sourceType: WorkspaceBriefingSourceType; records: Array<{ id: string }> }> = [
+    { kind: "Meeting", sourceType: "MEETING", records: meetings },
+    { kind: "Proposal", sourceType: "PROPOSAL", records: proposals },
+    { kind: "Tension", sourceType: "TENSION", records: tensions },
+    { kind: "Action", sourceType: "ACTION", records: actions },
+    { kind: "Goal", sourceType: "GOAL", records: goals },
+    { kind: "Recognition", sourceType: "RECOGNITION", records: recognitions },
+    { kind: "BrainArticle", sourceType: "BRAIN_ARTICLE", records: articles },
+    { kind: "Document", sourceType: "DOCUMENT", records: documents },
+    { kind: "CommunicationContextSummary", sourceType: "COMMUNICATION", records: communicationSummaries },
+    { kind: "BuildArtifact", sourceType: "BUILD_ARTIFACT", records: buildArtifacts },
+    { kind: "AdviceRequest", sourceType: "ADVICE_REQUEST", records: adviceRequests },
+  ];
+  const captured = await Promise.all(groups.map(async (group) => ({ sourceType: group.sourceType,
+    ...await captureReadableDigestInputs({ actor, audience: params.audience, workspaceId: params.workspaceId, kind: group.kind, records: group.records,
+      additionalInputs: group.kind === "AdviceRequest" ? (record) => {
+        const request = record as typeof adviceRequests[number];
+        const kind = request.process.subjectType === "PROPOSAL" ? "Proposal"
+          : request.process.subjectType === "ACTION" ? "Action" : request.process.subjectType === "TENSION" ? "Tension" : null;
+        return kind ? [{ kind, id: request.process.subjectId }] : [];
+      } : undefined,
+    }),
+  })));
+  const proofs = new Map(captured.flatMap((group) => [...group.proofs].map(([id, roots]) => [`${group.sourceType}:${id}`, roots] as const)));
+  return entries.flatMap((entry) => {
+    const lineageRoots = proofs.get(`${entry.sourceType}:${entry.sourceId}`);
+    return lineageRoots ? [{ ...entry, lineageRoots }] : [];
+  });
 }
 
 export async function upsertWorkspaceBriefing(params: {
@@ -2024,87 +2063,82 @@ export async function upsertWorkspaceBriefing(params: {
   briefing: NormalizedWorkspaceBriefing;
   bodyMd?: string;
   sourceCounts?: unknown;
+  actor?: AppActor;
+  lineageRoots?: LineageRoot[];
 }) {
   const bodyMd = params.bodyMd ?? renderWorkspaceBriefingMarkdown(params.briefing);
   const sourceRefs = params.briefing.sourceRefs.length > 0
     ? params.briefing.sourceRefs
     : uniqueSourceRefs(params.briefing.items);
 
-  return prisma.workspaceBriefing.upsert({
-    where: {
-      workspaceId_period_dateKey: {
+  const actor = params.actor ?? { kind: "agent", authProvider: "bootstrap", label: "workspace-briefing",
+    workspaceIds: [params.workspaceId] } as AppActor;
+  return prisma.$transaction(async (tx) => {
+    const briefing = await tx.workspaceBriefing.upsert({
+      where: {
+        workspaceId_period_dateKey: {
+          workspaceId: params.workspaceId,
+          period: params.period,
+          dateKey: params.dateKey,
+        },
+      },
+      create: {
         workspaceId: params.workspaceId,
+        workflowJobId: params.workflowJobId ?? null,
         period: params.period,
         dateKey: params.dateKey,
+        runKey: params.runKey,
+        title: params.title,
+        status: params.status ?? "GENERATED",
+        modelUsed: params.modelUsed ?? null,
+        introMd: params.briefing.introMd,
+        bodyMd,
+        briefingJson: toInputJson(params.briefing),
+        sourceRefsJson: toInputJson(sourceRefs),
+        sourceCounts: toInputJson(params.sourceCounts ?? params.briefing.sourceCounts),
+        generatedAt: new Date(params.briefing.generatedAt),
       },
-    },
-    create: {
-      workspaceId: params.workspaceId,
-      workflowJobId: params.workflowJobId ?? null,
-      period: params.period,
-      dateKey: params.dateKey,
-      runKey: params.runKey,
-      title: params.title,
-      status: params.status ?? "GENERATED",
-      modelUsed: params.modelUsed ?? null,
-      introMd: params.briefing.introMd,
-      bodyMd,
-      briefingJson: toInputJson(params.briefing),
-      sourceRefsJson: toInputJson(sourceRefs),
-      sourceCounts: toInputJson(params.sourceCounts ?? params.briefing.sourceCounts),
-      generatedAt: new Date(params.briefing.generatedAt),
-    },
-    update: {
-      workflowJobId: params.workflowJobId ?? null,
-      runKey: params.runKey,
-      title: params.title,
-      status: params.status ?? "GENERATED",
-      modelUsed: params.modelUsed ?? null,
-      introMd: params.briefing.introMd,
-      bodyMd,
-      briefingJson: toInputJson(params.briefing),
-      sourceRefsJson: toInputJson(sourceRefs),
-      sourceCounts: toInputJson(params.sourceCounts ?? params.briefing.sourceCounts),
-      generatedAt: new Date(params.briefing.generatedAt),
-    },
+      update: {
+        workflowJobId: params.workflowJobId ?? null,
+        runKey: params.runKey,
+        title: params.title,
+        status: params.status ?? "GENERATED",
+        modelUsed: params.modelUsed ?? null,
+        introMd: params.briefing.introMd,
+        bodyMd,
+        briefingJson: toInputJson(params.briefing),
+        sourceRefsJson: toInputJson(sourceRefs),
+        sourceCounts: toInputJson(params.sourceCounts ?? params.briefing.sourceCounts),
+        generatedAt: new Date(params.briefing.generatedAt),
+      },
+    });
+    if (params.lineageRoots?.length) await recordArtifactInputLineage({
+      tx, actor, workspaceId: params.workspaceId, artifact: { kind: "WorkspaceBriefing", id: briefing.id },
+      content: briefing, origin: "DERIVED", inputs: [], inheritedRoots: params.lineageRoots,
+    });
+    else await invalidateArtifactInputLineage({ tx, workspaceId: params.workspaceId,
+      artifact: { kind: "WorkspaceBriefing", id: briefing.id }, content: briefing });
+    return briefing;
   });
 }
 
 export async function getLatestWorkspaceBriefing(params: {
   workspaceId: string;
   period?: WorkspaceBriefingPeriod;
-  actor?: AppActor;
+  actor: AppActor;
 }) {
-  if (params.actor) {
-    await requireWorkspaceMembership({ actor: params.actor, workspaceId: params.workspaceId });
-  }
+  await requireWorkspaceMembership({ actor: params.actor, workspaceId: params.workspaceId });
 
-  return prisma.workspaceBriefing.findFirst({
+  const candidates = await loadReadableDigestQuery({ actor: params.actor, workspaceId: params.workspaceId, kind: "WorkspaceBriefing", limit: 1,
+    loadBatch: (page) => prisma.workspaceBriefing.findMany({
     where: {
       workspaceId: params.workspaceId,
       status: "GENERATED",
       ...(params.period ? { period: params.period } : {}),
     },
-    orderBy: { generatedAt: "desc" },
-    select: {
-      id: true,
-      workflowJobId: true,
-      period: true,
-      dateKey: true,
-      runKey: true,
-      title: true,
-      status: true,
-      modelUsed: true,
-      introMd: true,
-      bodyMd: true,
-      briefingJson: true,
-      sourceRefsJson: true,
-      sourceCounts: true,
-      generatedAt: true,
-      createdAt: true,
-      updatedAt: true,
-    },
-  });
+    orderBy: [{ generatedAt: "desc" }, { id: "desc" }], take: page.take, skip: page.skip,
+  }) });
+  return candidates[0] ?? null;
 }
 
 export async function generateWorkspaceBriefing(params: {
@@ -2127,6 +2161,8 @@ export async function generateWorkspaceBriefing(params: {
     now: date,
     until: date,
   });
+  const actor: AppActor = { kind: "agent", authProvider: "bootstrap", label: "workspace-briefing", workspaceIds: [params.workspaceId] };
+  const workspaceRoots = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Workspace", id: params.workspaceId }]);
   const briefing = buildWorkspaceBriefingFromCandidates({
     workspaceId: params.workspaceId,
     period: params.period,
@@ -2146,5 +2182,7 @@ export async function generateWorkspaceBriefing(params: {
     title,
     modelUsed: params.model ?? null,
     briefing,
+    actor,
+    lineageRoots: mergeArtifactInputProofs(workspaceRoots, ...candidates.map((candidate) => candidate.lineageRoots ?? [])),
   });
 }

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyContextGraphProposedDiff,
   buildSelectedRegionContext,
@@ -11,17 +11,29 @@ import {
   getContextMapData,
   importContextGraphMap,
   listContextMapViews,
+  listContextGraphProposedDiffs,
+  attachContextGraphEvidence,
+  upsertContextGraphRelationship,
   markStaleContextGraphFacts,
   reviewContextGraphProposedDiff,
   updateContextGraphProposedDiff,
   upsertContextGraphObject,
   updateContextMapLayout,
+  retireContextGraphFacts,
+  syncContextGraphForMeeting,
 } from "./context-graph";
 import { prisma } from "@corgtex/shared";
 
-const { prismaMock, appendEventsMock, recordAuditMock, requireWorkspaceMembershipMock } = vi.hoisted(() => {
+const { requestGraphVariantMock, graphVariantsMock, revalidateGraphVariantsMock, mcpRootsMock, captureProofMock, immutableProofMock, advanceLineageMock, preserveUnknownMock, proofReadableMock, prismaMock, appendEventsMock, recordAuditMock, requireWorkspaceMembershipMock, readableArtifactIdsMock, currentArtifactInputRootsMock, recordArtifactInputLineageMock, resolveKnowledgeAccessDomainsMock } = vi.hoisted(() => {
   const prismaMock = {
+    informationCategoryPolicy: { findUnique: vi.fn(async () => null) },
+    $queryRaw: vi.fn().mockResolvedValue([]),
+    $executeRaw: vi.fn().mockResolvedValue(0),
     $transaction: vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback(prismaMock)),
+    artifactInputLineage: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() },
+    artifactInputSnapshot: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() },
+    genericDerivedArtifactVariant: { findFirst: vi.fn().mockResolvedValue(null) },
+    brainSource: { findFirst: vi.fn() },
     contextGraphObject: {
       create: vi.fn(),
       update: vi.fn(),
@@ -60,21 +72,70 @@ const { prismaMock, appendEventsMock, recordAuditMock, requireWorkspaceMembershi
       findMany: vi.fn(),
       upsert: vi.fn(),
     },
+    workspace: { findFirst: vi.fn() },
+    meeting: { findFirst: vi.fn() },
+    meetingInsight: { findFirst: vi.fn() },
     knowledgeChunk: {
       findMany: vi.fn(),
     },
   };
   return {
+    requestGraphVariantMock: vi.fn(), graphVariantsMock: vi.fn(), revalidateGraphVariantsMock: vi.fn(),
+    mcpRootsMock: vi.fn(), captureProofMock: vi.fn(), immutableProofMock: vi.fn(), advanceLineageMock: vi.fn(), preserveUnknownMock: vi.fn(), proofReadableMock: vi.fn(),
     prismaMock,
     appendEventsMock: vi.fn(),
     recordAuditMock: vi.fn(),
     requireWorkspaceMembershipMock: vi.fn(),
+    readableArtifactIdsMock: vi.fn(),
+    currentArtifactInputRootsMock: vi.fn(),
+    recordArtifactInputLineageMock: vi.fn(),
+    resolveKnowledgeAccessDomainsMock: vi.fn(),
   };
 });
+
+vi.mock("./derived-artifact-variants", () => ({
+  GRAPH_SOURCE_VARIANT_JOB_TYPE: "agent.graph-source-variant",
+  captureGraphReviewApproval: vi.fn(async () => null), requestGraphSourceVariant: requestGraphVariantMock, getReadableGraphSourceVariants: graphVariantsMock, revalidateGraphSourceVariants: revalidateGraphVariantsMock }));
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
 }));
+
+vi.mock("./mcp-tool-input-context", () => ({ getMcpToolInputRoots: mcpRootsMock }));
+
+vi.mock("./digest-lineage", async importOriginal => {
+  const actual = await importOriginal<typeof import("./digest-lineage")>();
+  return {...actual, DigestReadRelease: class extends actual.DigestReadRelease {
+    override async capture<T extends {id: string}>(kind: import("./source-lineage").LineageKind, records: T[]) {
+      const ids = await readableArtifactIdsMock(this.actor, this.workspaceId, kind, records);
+      return super.capture(kind, records.filter(row => ids.has(row.id)));
+    }
+  }};
+});
+
+vi.mock("./source-lineage", async importOriginal => {
+  const actual = await importOriginal<typeof import("./source-lineage")>();
+  return {
+  currentArtifactInputRootsBatch: vi.fn(async (_db, _ws, _kind, records: Array<{id: string}>) => new Map(records.map(row => [row.id, []]))),
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  mergeLineageInputRoot: (before: unknown, root: unknown) => before ?? root,
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, roots: unknown[], _remote: unknown, finish: (tx: unknown) => Promise<unknown>) => {
+    if (!await proofReadableMock(_actor, _ws, roots)) throw Object.assign(new Error("Graph changed"), {code: "SOURCE_CHANGED"});
+    return finish(prismaMock);
+  },
+  captureArtifactInputProof: captureProofMock, captureImmutableArtifactInputProof: immutableProofMock,
+  advanceHumanArtifactInputLineage: advanceLineageMock, preserveUnknownArtifactInputSnapshot: preserveUnknownMock, isArtifactInputProofReadable: proofReadableMock,
+  readableArtifactIds: readableArtifactIdsMock,
+  currentArtifactInputRoots: currentArtifactInputRootsMock,
+  recordArtifactInputLineage: recordArtifactInputLineageMock,
+  invalidateArtifactInputLineage: vi.fn(),
+  inspectStoredArtifactInputDependencies: actual.inspectStoredArtifactInputDependencies,
+  lineageContentFingerprint: vi.fn((kind, row) => kind === "ArtifactInputSnapshot"
+    ? actual.lineageContentFingerprint(kind, row) : "a".repeat(64)),
+  };
+});
+
+vi.mock("./brain-access", () => ({ resolveKnowledgeAccessDomains: resolveKnowledgeAccessDomainsMock }));
 
 vi.mock("./auth", () => ({
   actorUserIdForWorkspace: vi.fn().mockResolvedValue("user-1"),
@@ -95,8 +156,35 @@ describe("context graph domain", () => {
     user: { id: "user-1", email: "user@example.com", displayName: "User" },
   } as any;
 
+  afterEach(() => { vi.useRealTimers(); });
+
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.$queryRaw.mockImplementation(async (query: { sql?: string; values?: unknown[] }) => {
+      if (query.sql?.includes('DISTINCT ON') && query.sql.includes('"ArtifactInputLineage"')) {
+        const [workspaceId, artifactType, ...ids] = query.values ?? [];
+        const rows = await prismaMock.artifactInputLineage.findMany({where: {workspaceId, artifactType, artifactId: {in: ids}}, orderBy: {revision: "desc"}});
+        const latest = new Map<string, (typeof rows)[number]>();
+        for (const row of rows) if (!latest.has(row.artifactId) || latest.get(row.artifactId)!.revision < row.revision) latest.set(row.artifactId, row);
+        return [...latest.values()];
+      }
+      if (!query.sql?.includes('"SourcePermissionEpoch"')) return [];
+      const values = query.values ?? [];
+      return Array.from({ length: (values.length - 1) / 2 }, (_, index) => ({
+        sourceKind: values[index * 2 + 1], sourceId: values[index * 2 + 2], epoch: 0n,
+      }));
+    });
+    requestGraphVariantMock.mockReset().mockResolvedValue({ status: "UNAVAILABLE", reason: "REBUILD_INPUTS_UNPROVEN" });
+    graphVariantsMock.mockReset().mockResolvedValue([]);
+    revalidateGraphVariantsMock.mockReset().mockResolvedValue(true);
+    prismaMock.contextMapView.findMany.mockReset().mockResolvedValue([]);
+    mcpRootsMock.mockReturnValue([]);
+    captureProofMock.mockImplementation(async (_actor: unknown, _ws: string, inputs: any[]) => inputs.map(({ kind, id }) => ({ kind, id, fingerprint: "a".repeat(64) })));
+    immutableProofMock.mockImplementation(async (_actor: unknown, _ws: string, roots: any[]) => roots);
+    advanceLineageMock.mockResolvedValue(true); preserveUnknownMock.mockResolvedValue({}); proofReadableMock.mockResolvedValue(true);
+    readableArtifactIdsMock.mockImplementation(async (_actor: unknown, _workspaceId: string, _kind: string, records: Array<{ id: string }>) => new Set(records.map((row) => row.id)));
+    currentArtifactInputRootsMock.mockResolvedValue([]);
+    recordArtifactInputLineageMock.mockResolvedValue({ id: "manifest-1" });
     requireWorkspaceMembershipMock.mockResolvedValue({
       id: "member-1",
       workspaceId: "ws-1",
@@ -104,13 +192,14 @@ describe("context graph domain", () => {
       role: "ADMIN",
       isActive: true,
     });
-    prismaMock.contextGraphObject.findFirst.mockResolvedValue({ id: "object-existing" });
+    prismaMock.contextGraphObject.findFirst.mockReset().mockResolvedValue({ id: "object-existing", workspaceId: "ws-1" });
     prismaMock.contextGraphObject.findMany.mockResolvedValue([]);
-    prismaMock.contextGraphObject.update.mockResolvedValue({ id: "object-existing" });
-    prismaMock.contextGraphRelationship.findFirst.mockResolvedValue({ id: "relationship-existing" });
+    prismaMock.contextGraphObject.update.mockResolvedValue({ id: "object-existing", workspaceId: "ws-1" });
+    prismaMock.contextGraphRelationship.findFirst.mockReset().mockResolvedValue({ id: "relationship-existing", workspaceId: "ws-1" });
     prismaMock.contextGraphRelationship.findMany.mockResolvedValue([]);
-    prismaMock.contextGraphRelationship.update.mockResolvedValue({ id: "relationship-existing" });
+    prismaMock.contextGraphRelationship.update.mockResolvedValue({ id: "relationship-existing", workspaceId: "ws-1" });
     prismaMock.contextGraphEvidenceRef.findFirst.mockResolvedValue(null);
+    prismaMock.contextGraphEvidenceRef.findMany.mockReset().mockResolvedValue([]);
     prismaMock.contextGraphEvidenceRef.create.mockResolvedValue({ id: "evidence-1" });
     prismaMock.contextGraphProposedDiff.update.mockResolvedValue({ id: "diff-1", status: "applied" });
     prismaMock.contextMapView.findFirst.mockResolvedValue({
@@ -310,9 +399,9 @@ describe("context graph domain", () => {
       .mockResolvedValueOnce({ id: "process-1", objectType: "Process", title: "CR North America critical path", status: "approved" })
       .mockResolvedValueOnce({ id: "step-1", objectType: "ProcessStep", title: "Decision to proceed", status: "approved" });
     prismaMock.contextGraphObject.findFirst
-      .mockResolvedValueOnce({ id: "process-1" })
-      .mockResolvedValueOnce({ id: "step-1" })
-      .mockResolvedValueOnce({ id: "step-1" });
+      .mockResolvedValueOnce({ id: "process-1", workspaceId: "ws-1" })
+      .mockResolvedValueOnce({ id: "step-1", workspaceId: "ws-1" })
+      .mockResolvedValueOnce({ id: "step-1", workspaceId: "ws-1" });
     prismaMock.contextGraphRelationship.upsert.mockResolvedValueOnce({
       id: "relationship-1",
       relationshipType: "part_of",
@@ -500,8 +589,9 @@ describe("context graph domain", () => {
 
     expect(context.objects.map((object) => object.id).sort()).toEqual(["process-1", "team-1"]);
     expect(context.relationships).toHaveLength(1);
-    expect(context.evidenceRefs).toHaveLength(1);
-    expect(context.knowledgeChunks).toHaveLength(1);
+    expect(context.evidenceRefs).toHaveLength(0);
+    expect(context.knowledgeChunks).toHaveLength(0);
+    expect(prismaMock.knowledgeChunk.findMany).not.toHaveBeenCalled();
     expect(context.permissions.canApprove).toBe(true);
   });
 
@@ -705,7 +795,7 @@ describe("context graph domain", () => {
             expect.objectContaining({ targetObjectId: "task-1", relationshipType: "blocks" }),
           ]),
           evidenceRefs: expect.arrayContaining([
-            expect.objectContaining({ sourceType: "REGION_CONTEXT", sourceId: "map-1:task-1" }),
+            expect.objectContaining({ sourceType: "ContextGraphObject", sourceId: "task-1", metadata: expect.objectContaining({ regionContextId: "map-1:task-1" }) }),
           ]),
         }),
       }),
@@ -1230,7 +1320,7 @@ describe("context graph domain", () => {
       expect.objectContaining({ targetObjectId: "task-2", relationshipType: "supports" }),
     ]));
     expect(diffJson.evidenceRefs).toEqual(expect.arrayContaining([
-      expect.objectContaining({ sourceType: "REGION_CONTEXT", sourceId: "map-1:task-1,task-2" }),
+      expect.objectContaining({ sourceType: "ContextGraphObject", sourceId: "task-1", metadata: expect.objectContaining({ regionContextId: "map-1:task-1,task-2" }) }),
     ]));
   });
 
@@ -1316,8 +1406,10 @@ describe("context graph domain", () => {
   });
 
   it("marks aged approved facts stale without touching fresh or non-approved facts", async () => {
-    prismaMock.contextGraphObject.updateMany.mockResolvedValueOnce({ count: 3 });
-    prismaMock.contextGraphRelationship.updateMany.mockResolvedValueOnce({ count: 2 });
+    prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([1, 2, 3].map(id => ({ id: `o-${id}`, status: "approved" })));
+    prismaMock.contextGraphRelationship.findMany.mockResolvedValueOnce([1, 2].map(id => ({ id: `r-${id}`, status: "approved" })));
+    prismaMock.contextGraphObject.findFirst.mockImplementation(async ({where}) => ({id: where.id, status: "approved"}));
+    prismaMock.contextGraphRelationship.findFirst.mockImplementation(async ({where}) => ({id: where.id, status: "approved"}));
 
     const now = new Date("2026-06-09T00:00:00.000Z");
     const result = await markStaleContextGraphFacts(actor, {
@@ -1335,14 +1427,11 @@ describe("context graph domain", () => {
         { lastVerifiedAt: null, updatedAt: { lt: cutoff } },
       ],
     };
-    expect(prismaMock.contextGraphObject.updateMany).toHaveBeenCalledWith({
-      where: expectedWhere,
-      data: { status: "stale" },
-    });
-    expect(prismaMock.contextGraphRelationship.updateMany).toHaveBeenCalledWith({
-      where: expectedWhere,
-      data: { status: "stale" },
-    });
+    expect(prismaMock.contextGraphObject.findMany).toHaveBeenCalledWith({ where: expectedWhere, orderBy: {id: "asc"}, take: 100 });
+    expect(prismaMock.contextGraphObject.update).toHaveBeenCalledTimes(3);
+    expect(prismaMock.contextGraphRelationship.findMany).toHaveBeenCalledWith({ where: expectedWhere, orderBy: {id: "asc"}, take: 100 });
+    expect(prismaMock.contextGraphRelationship.update).toHaveBeenCalledTimes(2);
+    expect(advanceLineageMock).toHaveBeenCalledTimes(5);
     expect(result).toEqual({ staleObjects: 3, staleRelationships: 2, cutoff });
   });
 
@@ -1554,6 +1643,7 @@ describe("context graph domain", () => {
 
   it("copies source layout into a personal map view", async () => {
     prismaMock.contextMapLayoutItem.findMany.mockResolvedValueOnce([{
+      id: "source-layout", mapViewId: "map-1",
       objectId: "process-1",
       x: 100,
       y: 200,
@@ -1583,6 +1673,14 @@ describe("context graph domain", () => {
         y: 200,
       }),
     }));
+    expect(captureProofMock).toHaveBeenCalledWith(actor, "ws-1", [expect.objectContaining({
+      kind: "ContextMapLayoutItem", id: "source-layout", snapshot: expect.objectContaining({ x: 100, y: 200, visualState: { expanded: true } }),
+    })]);
+    expect(recordArtifactInputLineageMock).toHaveBeenCalledWith(expect.objectContaining({
+      artifact: { kind: "ContextMapLayoutItem", id: "layout-copy-1" },
+      inheritedRoots: expect.arrayContaining([expect.objectContaining({ kind: "ContextMapLayoutItem", id: "source-layout" })]),
+    }));
+
   });
 
   it("rejects personal map copies with objects outside the workspace", async () => {
@@ -1980,4 +2078,589 @@ describe("context graph domain", () => {
     expect(prismaMock.contextMapLayoutItem.upsert).not.toHaveBeenCalled();
     expect(prismaMock.contextGraphProposedDiff.update).not.toHaveBeenCalled();
   });
+  it("filters lineage within bounded map windows before counts, evidence, edges and layouts", async () => {
+    const evidence = [{ id: "public-evidence", objectId: "public", knowledgeChunkId: null },
+      { id: "finance-evidence", objectId: "public", quote: "Confidential payroll", knowledgeChunkId: null }];
+    const objectRows = [
+      ...Array.from({ length: 100 }, (_, index) => ({ id: `unknown-${index}`, title: "Hidden", evidenceRefs: [] })),
+      { id: "public", title: "Public process", evidenceRefs: evidence },
+      { id: "public-2", title: "Public team", evidenceRefs: [] },
+      { id: "finance", title: "Finance", evidenceRefs: [] },
+    ];
+    prismaMock.contextGraphObject.findMany.mockImplementation(async ({where, take}) => {
+      const afterId = where.AND[1]?.OR[2].id.lt;
+      const offset = afterId ? objectRows.findIndex(row => row.id === afterId) + 1 : 0;
+      return objectRows.slice(offset, offset + take);
+    });
+    prismaMock.contextGraphEvidenceRef.findMany.mockImplementation(async ({where}) => where.objectId === "public" ? evidence : []);
+    prismaMock.contextGraphRelationship.findMany.mockResolvedValue([
+      { id: "public-edge", sourceObjectId: "public", targetObjectId: "public-2", evidenceRefs: [] },
+      { id: "orphan-edge", sourceObjectId: "public", targetObjectId: "finance", evidenceRefs: [] },
+      { id: "finance-edge", sourceObjectId: "public", targetObjectId: "public-2", evidenceRefs: [] },
+    ]);
+    prismaMock.contextGraphProposedDiff.findMany.mockResolvedValue([{ id: "finance-diff" }, { id: "public-diff" }]);
+    prismaMock.contextMapLayoutItem.findMany.mockResolvedValue([{ id: "finance-layout", objectId: "finance", visualState: { title: "Payroll" } }, { id: "public-layout", objectId: "public" }]);
+    prismaMock.contextMapView.findMany.mockResolvedValue([]);
+    readableArtifactIdsMock.mockImplementation(async (_actor: unknown, workspaceId: string, _kind: string, rows: Array<{ id: string }>) => {
+      expect(workspaceId).toBe("ws-1");
+      return new Set(rows.filter((row) => row.id.startsWith("public") || row.id === "orphan-edge" || row.id === "map-1").map((row) => row.id));
+    });
+
+    const map = await getContextMapData(actor, { workspaceId: "ws-1", mapViewId: "map-1" });
+
+    expect(map.objects.map((row) => row.id)).toEqual(["public", "public-2"]);
+    expect(map.objects[0].evidenceRefs.map((row) => row.id)).toEqual(["public-evidence"]);
+    expect(map.relationships.map((row) => row.id)).toEqual(["public-edge"]);
+    expect(map.layoutItems).toEqual([{ id: "public-layout", objectId: "public" }]);
+    expect(map.proposedDiffs.map((row) => row.id)).toEqual(["public-diff"]);
+    expect(prismaMock.contextGraphObject.findMany.mock.calls[0][0]).toMatchObject({take: 100});
+    expect(prismaMock.contextGraphProposedDiff.findMany.mock.calls[0][0]).toMatchObject({take: 20});
+    expect(JSON.stringify(map)).not.toContain("Payroll");
+    expect(JSON.stringify(map)).not.toContain("Finance");
+  });
+
+  it("shares one denied-evidence candidate budget across all displayed parents", async () => {
+    const now = new Date("2026-01-01Z");
+    const rows = Array.from({length: 200}, (_, i) => ({id: `public-${i}`, objectType: "Task", updatedAt: now}));
+    prismaMock.contextGraphObject.findMany.mockImplementation(async ({where, take}) => {
+      const afterId = where.AND[1]?.OR[2].id.lt;
+      const offset = afterId ? rows.findIndex(row => row.id === afterId) + 1 : 0;
+      return rows.slice(offset, offset + take);
+    });
+    prismaMock.contextGraphEvidenceRef.findMany.mockImplementation(async ({where, take}) => {
+      const evidence = Array.from({length: 20}, (_, i) => ({id: `${where.objectId}-${i}`, objectId: where.objectId, createdAt: now, quote: "WITHHELD"}));
+      const afterId = where.OR?.[1]?.id.lt;
+      const offset = afterId ? evidence.findIndex(row => row.id === afterId) + 1 : 0;
+      return evidence.slice(offset, offset + take);
+    });
+    readableArtifactIdsMock.mockImplementation(async (_actor: unknown, _workspaceId: string, kind: string, records: Array<{id: string}>) =>
+      new Set(kind === "ContextGraphEvidenceRef" ? [] : records.map(row => row.id)));
+    const map = await getContextMapData(actor, {workspaceId: "ws-1", mapViewId: "map-1"});
+    expect(map.objects).toHaveLength(200);
+    expect(map.objects.every(row => row.evidenceRefs.length === 0)).toBe(true);
+    expect(map.readWindow).toMatchObject({scope: "WINDOW", complete: false, evidenceComplete: false});
+    const queries = prismaMock.contextGraphEvidenceRef.findMany.mock.calls;
+    expect(queries.reduce((sum: number, [args]: any[]) => sum + args.take, 0)).toBe(2500);
+    expect(queries.every(([args]: any[]) => args.take <= 5)).toBe(true);
+    const perParent = new Map<string, number>();
+    for (const [args] of queries) perParent.set(args.where.objectId, (perParent.get(args.where.objectId) ?? 0) + args.take);
+    expect([...perParent.values()].every(count => count <= 20)).toBe(true);
+    expect(JSON.stringify(map)).not.toContain("WITHHELD");
+  });
+
+  it("withholds imported map names and queries without complete lineage", async () => {
+    const { listContextMapViews } = await import("./context-graph");
+    prismaMock.contextMapView.findMany.mockResolvedValueOnce([{
+      id: "unproven-map", workspaceId: "ws-1", name: "Payroll plan",
+      viewType: "process", query: { note: "Confidential payroll" }, createdByUserId: null,
+    }]);
+    readableArtifactIdsMock.mockResolvedValue(new Set());
+
+    const views = await listContextMapViews(actor, "ws-1");
+    expect(views).toEqual([]);
+  });
+
+  it("rejects an unknown selected object before traversal or evidence queries", async () => {
+    prismaMock.contextGraphObject.findMany.mockResolvedValue([{ id: "unknown", status: "approved", title: "Secret" }]);
+    readableArtifactIdsMock.mockResolvedValue(new Set());
+
+    await expect(buildSelectedRegionContext(actor, { workspaceId: "ws-1", objectIds: ["unknown"] }))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(prismaMock.contextGraphRelationship.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.contextGraphEvidenceRef.findMany).not.toHaveBeenCalled();
+  });
+
+  it("prunes hidden neighbors and evidence before region ranking and counts", async () => {
+    prismaMock.contextGraphObject.findMany
+      .mockResolvedValueOnce([{ id: "public", status: "approved", objectType: "Process", title: "Public" }])
+      .mockResolvedValueOnce([{ id: "finance", status: "approved", objectType: "Risk", title: "Payroll" }]);
+    prismaMock.contextGraphRelationship.findMany.mockResolvedValue([
+      { id: "public-orphan", sourceObjectId: "public", targetObjectId: "finance", relationshipType: "blocks", status: "approved" },
+      { id: "finance-edge", sourceObjectId: "public", targetObjectId: "secret", relationshipType: "blocks", status: "approved" },
+    ]);
+    prismaMock.contextGraphEvidenceRef.findMany.mockResolvedValue([
+      { id: "finance-evidence", objectId: "public", quote: "Payroll", knowledgeChunkId: null },
+      { id: "public-orphan-evidence", relationshipId: "public-orphan", quote: "Payroll", knowledgeChunkId: null },
+    ]);
+    readableArtifactIdsMock.mockImplementation(async (_actor: unknown, _workspaceId: string, _kind: string, rows: Array<{ id: string }>) =>
+      new Set(rows.filter((row) => row.id.startsWith("public")).map((row) => row.id)));
+    const region = await buildSelectedRegionContext(actor, { workspaceId: "ws-1", objectIds: ["public"], depth: 1 });
+
+    expect(region.objects.map((row) => row.id)).toEqual(["public"]);
+    expect(region.relationships).toEqual([]);
+    expect(region.evidenceRefs).toEqual([]);
+    expect(region.directNeighbors).toEqual([]);
+    expect(region.rankedFacts[0].evidenceCount).toBe(0);
+    expect(prismaMock.contextGraphObject.findMany.mock.calls[1][0].where.id.in).toEqual(["finance"]);
+    expect(JSON.stringify(region)).not.toContain("Payroll");
+  });
+
+  it("filters proposed diffs before applying the requested list limit", async () => {
+    prismaMock.contextGraphProposedDiff.findMany.mockResolvedValue([{ id: "unknown" }, { id: "finance" }, { id: "public" }]);
+    readableArtifactIdsMock.mockResolvedValue(new Set(["public"]));
+    await expect(listContextGraphProposedDiffs(actor, { workspaceId: "ws-1", take: 1 })).resolves.toEqual([{ id: "public" }]);
+    expect(prismaMock.contextGraphProposedDiff.findMany.mock.calls[0][0]).not.toHaveProperty("take");
+  });
+
+  it("captures complete explicit object inputs and their prompt snapshots atomically", async () => {
+    prismaMock.contextGraphObject.create.mockResolvedValue({ id: "derived", title: "Derived" });
+    const roots = [{ kind: "BrainSource" as const, id: "finance-source", fingerprint: "a".repeat(64) }];
+    await upsertContextGraphObject(actor, { workspaceId: "ws-1", objectType: "Process", title: "Derived",
+      lineageInputs: [{ kind: "BrainSource", id: "finance-source" }], lineageRoots: roots });
+    expect(recordArtifactInputLineageMock).toHaveBeenCalledWith(expect.objectContaining({
+      tx: prismaMock, artifact: { kind: "ContextGraphObject", id: "derived" }, origin: "DERIVED",
+      inputs: [], inheritedRoots: expect.arrayContaining(roots),
+    }));
+  });
+
+  it("replaces stale roots on complete relationship upserts and captures both endpoints", async () => {
+    prismaMock.contextGraphRelationship.findFirst.mockResolvedValue({ id: "existing", workspaceId: "ws-1", relationshipType: "supports" });
+    prismaMock.contextGraphRelationship.upsert.mockResolvedValue({ id: "existing", workspaceId: "ws-1", relationshipType: "supports" });
+    await upsertContextGraphRelationship(actor, { workspaceId: "ws-1", sourceObjectId: "left", targetObjectId: "right",
+      relationshipType: "supports", lineageInputs: [{ kind: "BrainSource", id: "new-source" }] });
+    expect(recordArtifactInputLineageMock).toHaveBeenCalledWith(expect.objectContaining({ inputs: [], inheritedRoots: expect.arrayContaining([
+      expect.objectContaining({ kind: "BrainSource", id: "new-source" }), expect.objectContaining({ kind: "ContextGraphObject", id: "left" }), expect.objectContaining({ kind: "ContextGraphObject", id: "right" })]),
+    }));
+  });
+
+  it("does not certify unsupported evidence sources or chunk-backed evidence", async () => {
+    await attachContextGraphEvidence(actor, { workspaceId: "ws-1", objectId: "public", sourceType: "SELECTED_REGION",
+      sourceId: "map-1:public", lineageInputs: [{ kind: "ContextGraphObject", id: "public" }] });
+    await attachContextGraphEvidence(actor, { workspaceId: "ws-1", objectId: "public", sourceType: "BrainSource",
+      sourceId: "source-1", knowledgeChunkId: "chunk-1", lineageInputs: [{ kind: "BrainSource", id: "source-1" }] });
+    expect(recordArtifactInputLineageMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses to apply unknown diffs before any graph writes", async () => {
+    prismaMock.contextGraphProposedDiff.findFirst.mockResolvedValue({ id: "unknown", workspaceId: "ws-1", status: "pending",
+      diffJson: { objects: [{ objectType: "Risk", title: "Secret" }] } });
+    readableArtifactIdsMock.mockResolvedValue(new Set());
+    await expect(applyContextGraphProposedDiff(actor, { workspaceId: "ws-1", proposedDiffId: "unknown" }))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(prismaMock.contextGraphObject.create).not.toHaveBeenCalled();
+    expect(prismaMock.contextGraphProposedDiff.update).not.toHaveBeenCalled();
+  });
+
+  it("applies an update using real lineage validation before mutating its own input", async () => {
+    const lineage = await vi.importActual<typeof import("./source-lineage")>("./source-lineage");
+    const manifests: any[] = [];
+    const snapshots: any[] = [];
+    let clock = 0;
+    const nextTime = () => new Date(1760000000000 + ++clock * 1000);
+    let object: any = { createdAt: nextTime(), updatedAt: nextTime(), id: "public-object", workspaceId: "ws-1", objectType: "Process", title: "Original", summary: null,
+      properties: {}, status: "approved", sourceEntityType: null, sourceEntityId: null };
+    let proposedDiff: any;
+    prismaMock.artifactInputSnapshot.create.mockImplementation(async ({ data }: any) => {
+      const snapshot = { id: `snapshot-${snapshots.length + 1}`, ...data };
+      snapshots.push(snapshot);
+      return snapshot;
+    });
+    prismaMock.artifactInputSnapshot.findFirst.mockImplementation(async ({ where }: any) =>
+      snapshots.find((snapshot) => snapshot.id === where.id && snapshot.workspaceId === where.workspaceId) ?? null);
+    prismaMock.artifactInputSnapshot.findMany.mockImplementation(async ({ where }: any) =>
+      snapshots.filter(snapshot => snapshot.workspaceId === where.workspaceId && where.id.in.includes(snapshot.id)));
+    resolveKnowledgeAccessDomainsMock.mockResolvedValue(["PUBLIC"]);
+    prismaMock.artifactInputLineage.findFirst.mockImplementation(async ({ where }: any) =>
+      [...manifests].reverse().find((row) => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType && row.artifactId === where.artifactId) ?? null);
+    prismaMock.artifactInputLineage.findMany.mockImplementation(async ({ where, orderBy, take }: any) => {
+      const matched = manifests.filter((row) => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType
+        && (typeof where.artifactId === "string" ? row.artifactId === where.artifactId : where.artifactId.in.includes(row.artifactId))
+        && (where.id === undefined || row.id === where.id)
+        && (where.contentHash === undefined || row.contentHash === where.contentHash)
+        && (where.origin === undefined || row.origin === where.origin));
+      if (orderBy?.revision === "desc") matched.sort((a, b) => b.revision - a.revision);
+      return take === undefined ? matched : matched.slice(0, take);
+    });
+    prismaMock.artifactInputLineage.create.mockImplementation(async ({ data }: any) => {
+      const manifest = { id: `manifest-${manifests.length + 1}`, ...data };
+      manifests.push(manifest); return manifest;
+    });
+    prismaMock.contextGraphObject.findFirst.mockImplementation(async ({ where }: any) => where.id === object.id && where.workspaceId === object.workspaceId ? object : null);
+    prismaMock.contextGraphObject.update.mockImplementation(async ({ data }: any) => { object = { ...object, ...data, updatedAt: nextTime() }; return object; });
+    prismaMock.contextGraphProposedDiff.create.mockImplementation(async ({ data }: any) => { proposedDiff = { id: "real-diff", createdAt: nextTime(), updatedAt: nextTime(), ...data }; return proposedDiff; });
+    prismaMock.contextGraphProposedDiff.findFirst.mockImplementation(async ({ where }: any) =>
+      proposedDiff?.id === where.id && proposedDiff.workspaceId === where.workspaceId ? proposedDiff : null);
+    prismaMock.contextGraphProposedDiff.update.mockImplementation(async ({ data }: any) => { proposedDiff = { ...proposedDiff, ...data, updatedAt: nextTime() }; return proposedDiff; });
+    captureProofMock.mockImplementation(lineage.captureArtifactInputProof);
+    immutableProofMock.mockImplementation(lineage.captureImmutableArtifactInputProof);
+    advanceLineageMock.mockImplementation(lineage.advanceHumanArtifactInputLineage);
+    proofReadableMock.mockImplementation(lineage.isArtifactInputProofReadable);
+    recordArtifactInputLineageMock.mockImplementation(lineage.recordArtifactInputLineage);
+    currentArtifactInputRootsMock.mockImplementation(lineage.currentArtifactInputRoots);
+    readableArtifactIdsMock.mockImplementation(lineage.readableArtifactIds);
+    await lineage.recordArtifactInputLineage({ tx: prismaMock as any, actor, workspaceId: "ws-1",
+      artifact: { kind: "ContextGraphObject", id: object.id }, content: object, origin: "HUMAN_ORIGINAL", inputs: [] });
+
+    await createContextGraphProposedDiff(actor, { workspaceId: "ws-1", lineageInputs: [],
+      diff: { objectUpdates: [{ id: object.id, title: "Updated" }] } });
+    await reviewContextGraphProposedDiff(actor, { workspaceId: "ws-1", proposedDiffId: proposedDiff.id, status: "approved" });
+    expect(await lineage.readableArtifactIds(actor, "ws-1", "ContextGraphProposedDiff", [proposedDiff], prismaMock as any)).toEqual(new Set([proposedDiff.id]));
+    await applyContextGraphProposedDiff(actor, { workspaceId: "ws-1", proposedDiffId: proposedDiff.id });
+
+    expect(object.title).toBe("Updated");
+    expect(proposedDiff.status).toBe("applied");
+    expect(await lineage.readableArtifactIds(actor, "ws-1", "ContextGraphProposedDiff", [proposedDiff], prismaMock as any)).toEqual(new Set([proposedDiff.id]));
+    expect(await lineage.readableArtifactIds(actor, "ws-1", "ContextGraphObject", [object], prismaMock as any)).toEqual(new Set([object.id]));
+    expect(manifests.at(-1).contentHash).toBe(lineage.lineageContentFingerprint("ContextGraphProposedDiff", proposedDiff));
+    expect(manifests.at(-1).rootsJson).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "ArtifactInputSnapshot" }),
+    ]));
+    expect(snapshots).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceKind: "ContextGraphObject", sourceId: object.id, contentJson: expect.objectContaining({ title: "Original" }) }),
+    ]));
+    expect(prismaMock.$queryRaw).toHaveBeenCalled();
+  });
+
+  it("uses real lineage checks to withhold multi-source graph content after finance revocation or source edits", async () => {
+    const lineage = await vi.importActual<typeof import("./source-lineage")>("./source-lineage");
+    const manifests: any[] = [];
+    const sources: any[] = [
+      { id: "public-source", workspaceId: "ws-1", informationCategory: "GENERAL", accessDomain: "PUBLIC", content: "Public context", archivedAt: null },
+      { id: "finance-source", workspaceId: "ws-1", informationCategory: "GENERAL", accessDomain: "FINANCE", content: "Finance context", archivedAt: null },
+    ];
+    resolveKnowledgeAccessDomainsMock.mockResolvedValue(["PUBLIC", "FINANCE"]);
+    prismaMock.brainSource.findFirst.mockImplementation(async ({ where }: any) => sources.find((row) => row.id === where.id && row.workspaceId === where.workspaceId) ?? null);
+    prismaMock.artifactInputLineage.findFirst.mockImplementation(async ({ where }: any) =>
+      [...manifests].reverse().find((row) => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType && row.artifactId === where.artifactId) ?? null);
+    prismaMock.artifactInputLineage.findMany.mockImplementation(async ({ where }: any) =>
+      [...manifests].reverse().filter((row) => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType && where.artifactId.in.includes(row.artifactId)));
+    prismaMock.artifactInputLineage.create.mockImplementation(async ({ data }: any) => { manifests.push(data); return data; });
+    const object = { id: "mixed", workspaceId: "ws-1", title: "Synthesized", objectType: "Process", status: "approved" };
+    prismaMock.contextGraphObject.findFirst.mockImplementation(async ({ where }: any) => where.id === object.id ? object : null);
+    for (const source of sources) await lineage.recordArtifactInputLineage({ tx: prismaMock as any, actor, workspaceId: "ws-1",
+      artifact: { kind: "BrainSource", id: source.id }, content: source, origin: "HUMAN_ORIGINAL", inputs: [] });
+    await lineage.recordArtifactInputLineage({ tx: prismaMock as any, actor, workspaceId: "ws-1",
+      artifact: { kind: "ContextGraphObject", id: object.id }, content: object, origin: "DERIVED",
+      inputs: [{ kind: "BrainSource", id: "public-source" }, { kind: "BrainSource", id: "finance-source" }] });
+    const read = () => lineage.readableArtifactIds(actor, "ws-1", "ContextGraphObject", [object], prismaMock as any);
+    expect(await read()).toEqual(new Set(["mixed"]));
+    resolveKnowledgeAccessDomainsMock.mockImplementation(async (reader: any) => reader.user?.id === actor.user.id ? ["PUBLIC", "FINANCE"] : ["PUBLIC"]);
+    expect(await lineage.readableArtifactIds({ ...actor, user: { ...actor.user, id: "user-2" } }, "ws-1", "ContextGraphObject", [object], prismaMock as any)).toEqual(new Set());
+
+    resolveKnowledgeAccessDomainsMock.mockResolvedValue(["PUBLIC"]);
+    expect(await read()).toEqual(new Set());
+    resolveKnowledgeAccessDomainsMock.mockResolvedValue(["PUBLIC", "FINANCE"]);
+    sources[1].content = "Revised finance context";
+    expect(await read()).toEqual(new Set());
+    sources[1].content = "Finance context";
+    sources[1].archivedAt = new Date();
+    expect(await read()).toEqual(new Set());
+    expect(await lineage.readableArtifactIds(actor, "ws-2", "ContextGraphObject", [object], prismaMock as any)).toEqual(new Set());
+  });
+
+  it("rejects cross-workspace dedupe collisions before graph writes", async () => {
+    prismaMock.contextGraphObject.findFirst.mockResolvedValue({ id: "foreign", workspaceId: "ws-2" });
+    await expect(upsertContextGraphObject(actor, { workspaceId: "ws-1", objectType: "Process", title: "New", dedupeKey: "global-key" }))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(prismaMock.contextGraphObject.upsert).not.toHaveBeenCalled();
+    prismaMock.contextGraphObject.findFirst.mockResolvedValue({ id: "endpoint", workspaceId: "ws-1" });
+    prismaMock.contextGraphRelationship.findFirst.mockResolvedValue({ id: "foreign-edge", workspaceId: "ws-2" });
+    await expect(upsertContextGraphRelationship(actor, { workspaceId: "ws-1", sourceObjectId: "left", targetObjectId: "right",
+      relationshipType: "supports", dedupeKey: "global-key" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(prismaMock.contextGraphRelationship.upsert).not.toHaveBeenCalled();
+  });
+
+  it("invalidates a real original manifest on an uncaptured identical-content replay", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01"));
+    const actual = await vi.importActual<typeof import("./source-lineage")>("./source-lineage");
+    const mocked = await import("./source-lineage");
+    const manifests: any[] = [];
+    let object: any = null;
+    resolveKnowledgeAccessDomainsMock.mockResolvedValue(["PUBLIC"]);
+    prismaMock.artifactInputLineage.findFirst.mockImplementation(async ({ where }: any) =>
+      [...manifests].reverse().find((row) => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType && row.artifactId === where.artifactId) ?? null);
+    prismaMock.artifactInputLineage.findMany.mockImplementation(async ({ where }: any) =>
+      [...manifests].reverse().filter((row) => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType && where.artifactId.in.includes(row.artifactId)));
+    prismaMock.artifactInputLineage.create.mockImplementation(async ({ data }: any) => { manifests.push(data); return data; });
+    prismaMock.contextGraphObject.findFirst.mockImplementation(async () => object);
+    prismaMock.contextGraphObject.upsert.mockImplementation(async ({ create, update }: any) => {
+      object = object ? { ...object, ...update } : { id: "replay-object", ...create };
+      return object;
+    });
+    recordArtifactInputLineageMock.mockImplementation(actual.recordArtifactInputLineage);
+    currentArtifactInputRootsMock.mockImplementation(actual.currentArtifactInputRoots);
+    vi.mocked(mocked.invalidateArtifactInputLineage).mockImplementation(actual.invalidateArtifactInputLineage);
+    const input = { workspaceId: "ws-1", objectType: "Process", title: "Original", dedupeKey: "manual-original" };
+    await upsertContextGraphObject(actor, { ...input, humanOriginal: true });
+    const contentHash = actual.lineageContentFingerprint("ContextGraphObject", object);
+    expect(await actual.readableArtifactIds(actor, "ws-1", "ContextGraphObject", [object], prismaMock as any)).toEqual(new Set([object.id]));
+
+    await upsertContextGraphObject(actor, input);
+
+    expect(actual.lineageContentFingerprint("ContextGraphObject", object)).toBe(contentHash);
+    expect(manifests.at(-1).origin).toBe("UNKNOWN");
+    expect(await actual.readableArtifactIds(actor, "ws-1", "ContextGraphObject", [object], prismaMock as any)).toEqual(new Set());
+  });
+
+  it("retains direct graph snapshots so a pending diff is withheld after graph-only changes", async () => {
+    const actual = await vi.importActual<typeof import("./source-lineage")>("./source-lineage");
+    const manifests: any[] = [];
+    let object: any = { id: "original-object", workspaceId: "ws-1", objectType: "Process", title: "Original", status: "approved" };
+    let proposedDiff: any;
+    resolveKnowledgeAccessDomainsMock.mockResolvedValue(["PUBLIC"]);
+    prismaMock.artifactInputLineage.findFirst.mockImplementation(async ({ where }: any) =>
+      [...manifests].reverse().find((row) => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType && row.artifactId === where.artifactId) ?? null);
+    prismaMock.artifactInputLineage.findMany.mockImplementation(async ({ where }: any) =>
+      [...manifests].reverse().filter((row) => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType && where.artifactId.in.includes(row.artifactId)));
+    prismaMock.artifactInputLineage.create.mockImplementation(async ({ data }: any) => { manifests.push(data); return data; });
+    prismaMock.contextGraphObject.findFirst.mockImplementation(async ({ where }: any) => where.id === object.id && where.workspaceId === object.workspaceId ? object : null);
+    prismaMock.contextGraphProposedDiff.create.mockImplementation(async ({ data }: any) => { proposedDiff = { id: "pending-snapshot", ...data }; return proposedDiff; });
+    prismaMock.contextGraphProposedDiff.findFirst.mockImplementation(async ({ where }: any) => where.id === proposedDiff?.id ? proposedDiff : null);
+    recordArtifactInputLineageMock.mockImplementation(actual.recordArtifactInputLineage);
+    currentArtifactInputRootsMock.mockImplementation(actual.currentArtifactInputRoots);
+    await actual.recordArtifactInputLineage({ tx: prismaMock as any, actor, workspaceId: "ws-1",
+      artifact: { kind: "ContextGraphObject", id: object.id }, content: object, origin: "HUMAN_ORIGINAL", inputs: [] });
+    await createContextGraphProposedDiff(actor, { workspaceId: "ws-1", lineageInputs: [],
+      diff: { objectUpdates: [{ id: object.id, title: "Proposed title" }] } });
+    expect(manifests.at(-1).rootsJson).toEqual([{ kind: "ContextGraphObject", id: object.id,
+      fingerprint: actual.lineageContentFingerprint("ContextGraphObject", object) }]);
+    expect(await actual.readableArtifactIds(actor, "ws-1", "ContextGraphProposedDiff", [proposedDiff], prismaMock as any))
+      .toEqual(new Set([proposedDiff.id]));
+    object = { ...object, title: "Separately edited title" };
+    expect(await actual.readableArtifactIds(actor, "ws-1", "ContextGraphProposedDiff", [proposedDiff], prismaMock as any))
+      .toEqual(new Set());
+  });
+
+  it("rejects unreceipted graph ranking and DTO changes even when timestamps stay identical", async () => {
+    const lineage = await vi.importActual<typeof import("./source-lineage")>("./source-lineage");
+    const manifests: any[] = [];
+    prismaMock.artifactInputLineage.findFirst.mockImplementation(async ({ where }: any) =>
+      [...manifests].reverse().find(row => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType && row.artifactId === where.artifactId) ?? null);
+    prismaMock.artifactInputLineage.findMany.mockImplementation(async ({ where }: any) =>
+      [...manifests].reverse().filter(row => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType && where.artifactId.in.includes(row.artifactId)));
+    prismaMock.artifactInputLineage.create.mockImplementation(async ({ data }: any) => { manifests.push(data); return data; });
+    resolveKnowledgeAccessDomainsMock.mockResolvedValue(["PUBLIC"]);
+    const layout = { mapViewId: "map", objectId: "object", x: 1, y: 2, width: 3, height: 4, updatedAt: new Date("2026-01-01") };
+    for (const field of ["x", "y", "width", "height"]) expect(lineage.lineageContentFingerprint("ContextMapLayoutItem", { ...layout, [field]: 99 }))
+      .not.toBe(lineage.lineageContentFingerprint("ContextMapLayoutItem", layout));
+    const cases = [
+      ["ContextGraphObject", prismaMock.contextGraphObject, { status: "disputed", confidence: 0.9, validFrom: new Date(), supersededByObjectId: "other" }],
+      ["ContextGraphRelationship", prismaMock.contextGraphRelationship, { status: "disputed", confidence: 0.9, validTo: new Date(), supersededByRelationshipId: "other" }],
+      ["ContextGraphEvidenceRef", prismaMock.contextGraphEvidenceRef, { relevanceScore: 0.99 }],
+      ["ContextGraphProposedDiff", prismaMock.contextGraphProposedDiff, { status: "applied", reviewedByUserId: "reviewer", appliedAt: new Date() }],
+      ["ContextMapView", prismaMock.contextMapView, { layoutVersion: 2, createdByUserId: "other" }],
+    ] as const;
+    for (const [kind, delegate, changes] of cases) {
+      const original: any = { id: `row-${kind}`, workspaceId: "ws-1", status: "approved", createdByUserId: null,
+        createdAt: new Date("2026-01-01"), updatedAt: new Date("2026-01-01") };
+      let current = original;
+      delegate.findFirst.mockImplementation(async ({ where }: any) => where.id === current.id && where.workspaceId === current.workspaceId ? current : null);
+      await lineage.recordArtifactInputLineage({ tx: prismaMock as any, actor, workspaceId: "ws-1", artifact: { kind, id: original.id }, content: original, origin: "HUMAN_ORIGINAL", inputs: [] });
+      expect(await lineage.readableArtifactIds(actor, "ws-1", kind, [current], prismaMock as any)).toEqual(new Set([original.id]));
+      for (const [key, value] of Object.entries(changes)) {
+        current = { ...original, [key]: value };
+        expect(await lineage.readableArtifactIds(actor, "ws-1", kind, [current], prismaMock as any), `${kind}.${key}`).toEqual(new Set());
+      }
+      expect(await lineage.readableArtifactIds(actor, "ws-2", kind, [original], prismaMock as any)).toEqual(new Set());
+    }
+  });
+
+  it("does not retire unknown or currently restricted facts", async () => {
+    prismaMock.contextGraphObject.findMany.mockResolvedValue([{ id: "unknown", workspaceId: "ws-1", title: "Private" }]);
+    prismaMock.contextGraphRelationship.findMany.mockResolvedValue([{ id: "restricted", workspaceId: "ws-1" }]);
+    readableArtifactIdsMock.mockResolvedValue(new Set());
+    await retireContextGraphFacts(actor, { workspaceId: "ws-1", objectWhere: { workspaceId: "ws-other" }, relationshipWhere: {} });
+    expect(prismaMock.contextGraphObject.update).not.toHaveBeenCalled();
+    expect(prismaMock.contextGraphRelationship.update).not.toHaveBeenCalled();
+    expect(prismaMock.contextGraphObject.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { AND: [
+      { workspaceId: "ws-other" }, { workspaceId: "ws-1", status: { not: "archived" } },
+    ] } }));
+  });
+
+  it("requires the full meeting manifest and each admitted insight before copying", async () => {
+    prismaMock.meeting.findFirst.mockResolvedValue({ id: "meeting", workspaceId: "ws-1", title: "Meeting", recordedAt: new Date(), insights: [
+      { id: "safe-insight", type: "DECISION", status: "SUGGESTED", title: "Safe", bodyMd: "Safe decision", confidence: 0.8 },
+      { id: "hidden-insight", type: "DECISION", status: "SUGGESTED", title: "Payroll", bodyMd: "Restricted", confidence: 0.9 },
+    ] });
+    prismaMock.contextGraphObject.findFirst.mockImplementation(async ({ where }: any) => where.id ? { id: where.id, workspaceId: "ws-1" } : null);
+    prismaMock.contextGraphObject.upsert.mockImplementation(async ({ create }: any) => ({ id: create.sourceEntityId, ...create }));
+    prismaMock.contextGraphRelationship.findFirst.mockResolvedValue(null);
+    prismaMock.contextGraphRelationship.upsert.mockImplementation(async ({ create }: any) => ({ id: "edge", ...create }));
+    readableArtifactIdsMock.mockImplementation(async (_actor: unknown, _ws: string, _kind: string, rows: any[]) => new Set(rows.filter(row => row.id !== "hidden-insight").map(row => row.id)));
+    await syncContextGraphForMeeting(actor, { workspaceId: "ws-1", meetingId: "meeting" });
+    expect(JSON.stringify(prismaMock.contextGraphObject.upsert.mock.calls)).not.toContain("Payroll");
+    expect(captureProofMock).toHaveBeenCalledWith(actor, "ws-1", [expect.objectContaining({ kind: "MeetingInsight", id: "safe-insight", snapshot: expect.objectContaining({ bodyMd: "Safe decision" }) })], prismaMock);
+    prismaMock.contextGraphObject.upsert.mockClear();
+    readableArtifactIdsMock.mockResolvedValue(new Set());
+    await expect(syncContextGraphForMeeting(actor, { workspaceId: "ws-1", meetingId: "meeting" })).resolves.toBeNull();
+    expect(prismaMock.contextGraphObject.upsert).not.toHaveBeenCalled();
+  });
+
+  it("withholds a graph context whose inputs change before release", async () => {
+    prismaMock.contextGraphObject.findMany.mockResolvedValue([{ id: "selected", status: "approved", title: "Safe", objectType: "Task" }]);
+    prismaMock.contextGraphEvidenceRef.findMany.mockResolvedValue([]);
+    proofReadableMock.mockResolvedValue(false);
+    await expect(buildSelectedRegionContext(actor, { workspaceId: "ws-1", objectIds: ["selected"], depth: 0 })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+  });
+
+  it("mints fresh default maps from the actual Workspace proof and never certifies an unknown matching map", async () => {
+    const lineage = await vi.importActual<typeof import("./source-lineage")>("./source-lineage");
+    const maps: any[] = [];
+    const snapshots: any[] = [];
+    const manifests: any[] = [];
+    const now = new Date("2026-01-01");
+    const workspace = { id: "ws-1", name: "Synthetic", slug: "synthetic", description: null, plan: "TEAM", createdAt: now, updatedAt: now };
+    prismaMock.workspace.findFirst.mockImplementation(async ({ where }: any) => where.id === workspace.id ? workspace : null);
+    prismaMock.contextMapView.findFirst.mockImplementation(async ({ where }: any) => maps.find(row => row.workspaceId === where.workspaceId && (where.id ? row.id === where.id : row.viewType === where.viewType)) ?? null);
+    prismaMock.contextMapView.findMany.mockImplementation(async () => maps);
+    prismaMock.contextMapView.create.mockImplementation(async ({ data }: any) => { const row = { id: `map-${maps.length}`, layoutVersion: 1, createdAt: now, updatedAt: now, ...data }; maps.push(row); return row; });
+    prismaMock.artifactInputLineage.findFirst.mockImplementation(async ({ where }: any) => [...manifests].reverse().find(row => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType && row.artifactId === where.artifactId) ?? null);
+    prismaMock.artifactInputLineage.findMany.mockImplementation(async ({ where }: any) => [...manifests].reverse().filter(row => row.workspaceId === where.workspaceId && row.artifactType === where.artifactType && where.artifactId.in.includes(row.artifactId)));
+    prismaMock.artifactInputLineage.create.mockImplementation(async ({ data }: any) => { manifests.push(data); return data; });
+    prismaMock.artifactInputSnapshot.create.mockImplementation(async ({ data }: any) => { const row = { id: `snapshot-${snapshots.length}`, ...data }; snapshots.push(row); return row; });
+    prismaMock.artifactInputSnapshot.findFirst.mockImplementation(async ({ where }: any) => snapshots.find(row => row.id === where.id && row.workspaceId === where.workspaceId) ?? null);
+    prismaMock.artifactInputSnapshot.findMany.mockImplementation(async ({ where }: any) =>
+      snapshots.filter(row => row.workspaceId === where.workspaceId && where.id.in.includes(row.id)));
+    resolveKnowledgeAccessDomainsMock.mockResolvedValue(["PUBLIC"]);
+    captureProofMock.mockImplementation(lineage.captureArtifactInputProof);
+    immutableProofMock.mockImplementation(lineage.captureImmutableArtifactInputProof);
+    recordArtifactInputLineageMock.mockImplementation(lineage.recordArtifactInputLineage);
+    currentArtifactInputRootsMock.mockImplementation(lineage.currentArtifactInputRoots);
+    readableArtifactIdsMock.mockImplementation(lineage.readableArtifactIds);
+    const defaults = await listContextMapViews(actor, "ws-1");
+    expect(defaults).toHaveLength(3);
+    expect(manifests.every(row => row.origin === "DERIVED")).toBe(true);
+    expect(snapshots.every(row => row.sourceKind === "Workspace" && row.origin === "HUMAN_ORIGINAL")).toBe(true);
+    const unknown = maps[0];
+    manifests.splice(0, manifests.length, ...manifests.filter(row => row.artifactId !== unknown.id));
+    const after = await listContextMapViews(actor, "ws-1");
+    expect(after.map(row => row.id)).not.toContain(unknown.id);
+    expect(maps).toHaveLength(3);
+    expect(prismaMock.contextMapView.update).not.toHaveBeenCalled();
+    expect(manifests.some(row => row.artifactId === unknown.id)).toBe(false);
+  });
+
+  it("uses the authenticated native MCP submission receipt without a caller-supplied lineage flag", async () => {
+    const roots = [{ kind: "McpToolInput", id: "native-request", fingerprint: "a".repeat(64) }];
+    mcpRootsMock.mockReturnValue(roots);
+    prismaMock.contextGraphObject.create.mockResolvedValue({ id: "fresh", workspaceId: "ws-1", title: "Submitted" });
+    await upsertContextGraphObject(actor, { workspaceId: "ws-1", objectType: "Task", title: "Submitted" });
+    expect(recordArtifactInputLineageMock).toHaveBeenCalledWith(expect.objectContaining({
+      artifact: { kind: "ContextGraphObject", id: "fresh" }, origin: "DERIVED", inputs: [], inheritedRoots: expect.arrayContaining(roots),
+    }));
+    expect(immutableProofMock).toHaveBeenCalledWith(actor, "ws-1", expect.arrayContaining(roots), prismaMock);
+  });
+
+  it("bounds automatic map requests before the display window and forwards identities with only the proven scope", async () => {
+    const denied = Array.from({ length: 12 }, (_, i) => ({ id: `denied-${i}`, title: "PRIVATE BODY", objectType: "Task", status: "approved", evidenceRefs: [] }));
+    prismaMock.contextGraphObject.findMany.mockResolvedValue(denied);
+    prismaMock.contextGraphProposedDiff.findMany.mockResolvedValue([]);
+    readableArtifactIdsMock.mockImplementation(async (_actor, _ws, kind, rows) => new Set(kind === "ContextGraphObject" ? [] : rows.map((row: any) => row.id)));
+    prismaMock.artifactInputLineage.findFirst.mockResolvedValue({ id: "derived-manifest", origin: "DERIVED" });
+    const map = await getContextMapData(actor, { workspaceId: "ws-1", mapViewId: "map-1" });
+    expect(map.objects).toEqual([]);
+    expect(requestGraphVariantMock).toHaveBeenCalledTimes(8);
+    expect(requestGraphVariantMock).toHaveBeenNthCalledWith(1, actor, { workspaceId: "ws-1", target: { kind: "ContextGraphObject", id: "denied-0" }, scope: { kind: "view", mapViewId: "map-1" }, mode: "MEMBER_VARIANT" });
+    expect(JSON.stringify(requestGraphVariantMock.mock.calls)).not.toContain("PRIVATE BODY");
+  });
+
+  it("does not turn a credential graph read into a human rebuild request", async () => {
+    const credential = { kind: "agent", agentId: "credential-a", authProvider: "credential", scopes: ["context-graph:read"], workspaceIds: ["ws-1"] } as any;
+    prismaMock.contextGraphProposedDiff.findMany.mockResolvedValue([{ id: "denied-diff", workspaceId: "ws-1", reason: "PRIVATE BODY" }]);
+    readableArtifactIdsMock.mockResolvedValue(new Set());
+    prismaMock.artifactInputLineage.findFirst.mockResolvedValue({ id: "derived-manifest", origin: "DERIVED" });
+    expect(await listContextGraphProposedDiffs(credential, { workspaceId: "ws-1" })).toEqual([]);
+    expect(requestGraphVariantMock).not.toHaveBeenCalled();
+  });
+
+  function freshBundle(prefix = "fresh") {
+    return { id: `${prefix}-bundle`, ownerMemberId: "member-1", createdAt: new Date("2026-10-13T00:00:00Z"), cohortKey: prefix,
+      targets: [{ kind: "ContextGraphObject", id: "private-old-target", fingerprint: "a".repeat(64), manifestId: "private-old-manifest", recipeManifestId: "private-old-manifest" }],
+      scope: { kind: "view", mapViewId: "map-1" },
+      roots: [{ kind: "GenericDerivedArtifactVariant", id: `${prefix}-bundle`, fingerprint: "b".repeat(64) }],
+      bundle: { version: 1,
+        objects: [{ id: `${prefix}-task`, objectType: "Task", title: "Permitted task", summary: "Fresh remainder", properties: {}, confidence: 0.7, status: "proposed" },
+          { id: `${prefix}-risk`, objectType: "Risk", title: "Permitted blocker", summary: null, properties: {}, confidence: 0.8, status: "proposed" }],
+        relationships: [{ id: `${prefix}-edge`, sourceObjectId: `${prefix}-risk`, targetObjectId: `${prefix}-task`, relationshipType: "blocks", properties: {}, confidence: 0.8, status: "proposed" }],
+        evidenceRefs: [{ id: `${prefix}-evidence`, objectId: `${prefix}-task`, relationshipId: null, sourceType: "Document", sourceId: "permitted-document", quote: "Permitted source quote", relevanceScore: 0.9, metadata: {} }],
+        proposedDiff: { id: `${prefix}-diff`, status: "pending", reason: "Fresh independent remainder", diffJson: { objects: [] } },
+      },
+    };
+  }
+
+  it("uses one coherent fresh bundle for map counts, region traversal, evidence and rank context", async () => {
+    const variant = freshBundle();
+    graphVariantsMock.mockResolvedValue([variant]);
+    prismaMock.contextGraphObject.findMany.mockResolvedValue([]);
+    prismaMock.contextGraphRelationship.findMany.mockResolvedValue([]);
+    prismaMock.contextGraphEvidenceRef.findMany.mockResolvedValue([]);
+    prismaMock.contextGraphProposedDiff.findMany.mockResolvedValue([]);
+    prismaMock.contextMapLayoutItem.findMany.mockResolvedValue([{ id: "old-layout", objectId: "private-old-target" }]);
+    const map = await getContextMapData(actor, { workspaceId: "ws-1", mapViewId: "map-1" });
+    expect(map.objects.map(row => row.id)).toEqual(["fresh-task", "fresh-risk"]);
+    expect(map.relationships.map(row => row.id)).toEqual(["fresh-edge"]);
+    expect(map.objects[0].evidenceRefs.map(row => row.id)).toEqual(["fresh-evidence"]);
+    expect(map.layoutItems).toEqual([]);
+    expect(map.proposedDiffs.map(row => row.id)).toEqual(["fresh-diff"]);
+    const context = await buildSelectedRegionContext(actor, { workspaceId: "ws-1", mapViewId: "map-1", objectIds: ["fresh-task"], depth: 2 });
+    expect(context.objects.map(row => row.id).sort()).toEqual(["fresh-risk", "fresh-task"]);
+    expect(context.relationships.map(row => row.id)).toEqual(["fresh-edge"]);
+    expect(context.directNeighbors).toEqual(expect.arrayContaining([expect.objectContaining({ objectId: "fresh-risk", title: "Permitted blocker" })]));
+    expect(context.rankedFacts).toEqual(expect.arrayContaining([expect.objectContaining({ id: "fresh-task", evidenceCount: 1 })]));
+    expect(context.evidenceSnippets.map(row => row.id)).toEqual(["fresh-evidence"]);
+    expect(context.lineageRoots).toEqual(expect.arrayContaining(variant.roots));
+    expect(context.lineageInputs.some(row => row.id.startsWith("fresh-"))).toBe(false);
+    expect(JSON.stringify({ map, context })).not.toContain("private-old");
+    expect(revalidateGraphVariantsMock).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", variantIds: ["fresh-bundle"] });
+  });
+
+  it("does not return a bundle after its current proof or source epoch changes during projection", async () => {
+    graphVariantsMock.mockResolvedValue([freshBundle()]);
+    prismaMock.contextGraphProposedDiff.findMany.mockResolvedValue([]);
+    revalidateGraphVariantsMock.mockResolvedValue(false);
+    await expect(getContextMapData(actor, { workspaceId: "ws-1", mapViewId: "map-1" })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    prismaMock.contextGraphEvidenceRef.findMany.mockResolvedValue([]);
+    await expect(buildSelectedRegionContext(actor, { workspaceId: "ws-1", mapViewId: "map-1", objectIds: ["fresh-task"] })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+  });
+
+  it("keeps owner and workspace variant admission and does not infer grants from fresh child IDs", async () => {
+    graphVariantsMock.mockImplementation(async (viewer, params) => viewer.user.id === actor.user.id && params.workspaceId === "ws-1" ? [freshBundle()] : []);
+    const otherActor = { ...actor, user: { ...actor.user, id: "user-2" } };
+    await expect(buildSelectedRegionContext(otherActor, { workspaceId: "ws-1", objectIds: ["fresh-task"] })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(buildSelectedRegionContext(actor, { workspaceId: "ws-2", objectIds: ["fresh-task"] })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(captureProofMock.mock.calls.flatMap(call => call[2]).some(row => row.id === "fresh-task")).toBe(false);
+  });
+
+  it("omits an incoherent bundle instead of connecting its endpoints to another bundle", async () => {
+    const first = freshBundle("first"), second = freshBundle("second");
+    first.bundle.relationships[0].targetObjectId = "second-task";
+    graphVariantsMock.mockResolvedValue([first, second]);
+    prismaMock.contextGraphProposedDiff.findMany.mockResolvedValue([]);
+    const map = await getContextMapData(actor, { workspaceId: "ws-1", mapViewId: "map-1" });
+    expect(map.objects.map(row => row.id)).toEqual(["second-task", "second-risk"]);
+    expect(map.relationships.map(row => row.id)).toEqual(["second-edge"]);
+    expect(JSON.stringify(map)).not.toContain("first-");
+  });
+
+  it("returns only fresh display proposals and statically rejects native edits to virtual children", async () => {
+    graphVariantsMock.mockResolvedValue([freshBundle()]);
+    prismaMock.contextGraphEvidenceRef.findMany.mockResolvedValue([]);
+    prismaMock.contextGraphProposedDiff.findMany.mockResolvedValue([]);
+    const diffs = await listContextGraphProposedDiffs(actor, { workspaceId: "ws-1", status: ["pending"] });
+    expect(diffs.map(row => row.id)).toEqual(["fresh-diff"]);
+    await expect(createContextMapManualEditProposal(actor, { workspaceId: "ws-1", mapViewId: "map-1",
+      edit: { action: "archive-card", objectId: "fresh-task" } })).rejects.toMatchObject({ code: "GRAPH_VARIANT_REVIEW_REQUIRED" });
+    await expect(createContextMapChangeProposal(actor, { workspaceId: "ws-1", mapViewId: "map-1",
+      selectedObjectIds: ["fresh-task"], instruction: "rename it to New task" })).rejects.toMatchObject({ code: "GRAPH_VARIANT_REVIEW_REQUIRED" });
+    await expect(createMissingRegionFactsProposal(actor, { workspaceId: "ws-1", mapViewId: "map-1", objectIds: ["fresh-task"] })).rejects.toMatchObject({ code: "GRAPH_VARIANT_REVIEW_REQUIRED" });
+    expect(prismaMock.contextGraphProposedDiff.create).not.toHaveBeenCalled();
+  });
+
+  it("does not split a regenerated bundle at the map display window", async () => {
+    graphVariantsMock.mockResolvedValue([freshBundle()]);
+    const canonical = Array.from({ length: 199 }, (_, i) => ({
+      id: `canonical-${String(199 - i).padStart(3, "0")}`, updatedAt: new Date(0), objectType: "Task", title: `Canonical ${i}`, status: "approved",
+    }));
+    prismaMock.contextGraphObject.findMany.mockImplementation(async (query: any) => {
+      const after = query.where.AND[1]?.OR[2]?.id.lt;
+      return canonical.filter(row => !after || row.id < after).slice(0, query.take);
+    });
+    prismaMock.contextGraphProposedDiff.findMany.mockResolvedValue([]);
+    const map = await getContextMapData(actor, { workspaceId: "ws-1", mapViewId: "map-1" });
+    expect(map.objects).toHaveLength(199);
+    expect(map.objects.some(row => row.id.startsWith("fresh-"))).toBe(false);
+    expect(map.relationships).toEqual([]);
+  });
+
 });

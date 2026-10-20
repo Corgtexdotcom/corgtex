@@ -6,13 +6,39 @@ import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from
 import { invariant } from "./errors";
 import { appendEvents } from "./events";
 import { closeRoleLifecycleForAgent, endRoleHolderHistory, startRoleHolderHistory } from "./role-onboarding";
-import { AGENT_REGISTRY } from "./agent-registry";// ---------------------------------------------------------------------------
+import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
+import { readableArtifactIds, invalidateArtifactInputLineage } from "./source-lineage";
+import { DigestReadRelease } from "./digest-lineage";
+import { AGENT_REGISTRY } from "./agent-registry";
+// ---------------------------------------------------------------------------
 // CRUD — AgentIdentity
 // ---------------------------------------------------------------------------
 
+async function readableIdentityRows<T extends { id: string; createdByUserId: string | null; circleAssignments: Array<{
+  id: string; circleId: string; roleId: string | null; circle: { id: string; name: string }; role: { id: string; name: string } | null;
+}> }>(release: DigestReadRelease, rows: T[]) {
+  const identities = (await release.capture("AgentIdentity", rows)).records;
+  const assignments = identities.flatMap((row) => row.circleAssignments);
+  const [safeAssignments, circles, roles, authors] = await Promise.all([
+    release.capture("CircleAgentAssignment", assignments),
+    release.capture("Circle", assignments.map((row) => row.circle)),
+    release.capture("Role", assignments.flatMap((row) => row.role ? [row.role] : [])),
+    release.capture("User", identities.flatMap((row) => row.createdByUserId ? [{ id: row.createdByUserId }] : [])),
+  ]);
+  const assignmentIds = new Set(safeAssignments.records.map((row) => row.id)), circleIds = new Set(circles.records.map((row) => row.id));
+  const roleIds = new Set(roles.records.map((row) => row.id)), authorIds = new Set(authors.records.map((row) => row.id));
+  return identities.map((identity) => ({ ...identity,
+    createdByUserId: identity.createdByUserId && authorIds.has(identity.createdByUserId) ? identity.createdByUserId : null,
+    circleAssignments: identity.circleAssignments.filter((row) => assignmentIds.has(row.id) && circleIds.has(row.circleId))
+      .map((row) => ({ ...row, roleId: row.roleId && roleIds.has(row.roleId) ? row.roleId : null,
+        role: row.role && roleIds.has(row.role.id) ? row.role : null })),
+  }));
+}
+
 export async function createAgentIdentity(
   actor: AppActor,
-  params: {
+  params: ProducerLineageParams & {
+    copied?: boolean;
     workspaceId: string;
     agentKey: string;
     memberType?: AgentMemberType;
@@ -31,6 +57,8 @@ export async function createAgentIdentity(
   const createdByUserId = actor.kind === "user" ? actor.user.id : null;
 
   return prisma.$transaction(async (tx) => {
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, copied: params.copied || actor.kind !== "user" });
     const identity = await tx.agentIdentity.create({
       data: {
         workspaceId: params.workspaceId,
@@ -48,6 +76,8 @@ export async function createAgentIdentity(
       },
     });
 
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AgentIdentity", id: identity.id }, content: identity, receipt });
     await appendEvents(tx, [
       {
         workspaceId: params.workspaceId,
@@ -58,13 +88,15 @@ export async function createAgentIdentity(
       },
     ]);
 
-    return identity;
+    return (await readableArtifactIds(actor, params.workspaceId, "AgentIdentity", [identity], tx)).has(identity.id)
+      ? identity : { id: identity.id, contentWithheld: true };
   });
 }
 
 export async function updateAgentIdentity(
   actor: AppActor,
-  params: {
+  params: ProducerLineageParams & {
+    copied?: boolean;
     workspaceId: string;
     agentIdentityId: string;
     displayName?: string;
@@ -86,6 +118,9 @@ export async function updateAgentIdentity(
   invariant(existing, 404, "NOT_FOUND", "Agent identity not found.");
 
   return prisma.$transaction(async (tx) => {
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AgentIdentity", id: existing.id }, before: existing, capture: params,
+      copied: params.copied || actor.kind !== "user" });
     const updated = await tx.agentIdentity.update({
       where: { id: params.agentIdentityId },
       data: {
@@ -101,6 +136,8 @@ export async function updateAgentIdentity(
       },
     });
 
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AgentIdentity", id: updated.id }, content: updated, receipt });
     if (params.isActive === false && existing.isActive) {
       await closeRoleLifecycleForAgent(tx, {
         workspaceId: params.workspaceId,
@@ -119,14 +156,15 @@ export async function updateAgentIdentity(
       },
     ]);
 
-    return updated;
+    return (await readableArtifactIds(actor, params.workspaceId, "AgentIdentity", [updated], tx)).has(updated.id)
+      ? updated : { id: updated.id, contentWithheld: true };
   });
 }
 
 export async function listAgentIdentities(actor: AppActor, workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   await requireWorkspaceMembership({ actor, workspaceId });
 
-  return prisma.agentIdentity.findMany({
+  const identities = await prisma.agentIdentity.findMany({
     where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
     include: {
       circleAssignments: {
@@ -138,6 +176,8 @@ export async function listAgentIdentities(actor: AppActor, workspaceId: string, 
     },
     orderBy: { createdAt: "asc" },
   });
+  const release = new DigestReadRelease(actor, workspaceId);
+  return release.finish(await readableIdentityRows(release, identities));
 }
 
 export async function getAgentIdentity(actor: AppActor, workspaceId: string, agentIdentityId: string) {
@@ -156,7 +196,11 @@ export async function getAgentIdentity(actor: AppActor, workspaceId: string, age
     },
   });
   invariant(identity, 404, "NOT_FOUND", "Agent identity not found.");
-  return identity;
+  const release = new DigestReadRelease(actor, workspaceId);
+  const readable = (await readableIdentityRows(release, [identity]))[0];
+  invariant(readable, 404, "NOT_FOUND", "Agent identity not found.");
+  const authors = identity.createdByUser ? await release.capture("User", [identity.createdByUser]) : null;
+  return release.finish({ ...readable, createdByUser: authors?.records.length ? identity.createdByUser : null });
 }
 
 export async function deactivateAgentIdentity(
@@ -231,6 +275,7 @@ export async function getOrCreateExternalAgentIdentity(
       },
     });
 
+    await invalidateArtifactInputLineage({ tx, workspaceId, artifact: { kind: "AgentIdentity", id: identity.id }, content: identity });
     await appendEvents(tx, [
       {
         workspaceId,
@@ -409,7 +454,8 @@ export async function removeAgentFromCircle(
 
 export async function updateAgentBehavior(
   actor: AppActor,
-  params: {
+  params: ProducerLineageParams & {
+    copied?: boolean;
     workspaceId: string;
     agentIdentityId: string;
     behaviorMd: string;
@@ -422,9 +468,15 @@ export async function updateAgentBehavior(
   });
   invariant(existing, 404, "NOT_FOUND", "Agent identity not found.");
 
-  return prisma.agentIdentity.update({
-    where: { id: params.agentIdentityId },
-    data: { behaviorMd: params.behaviorMd },
+  return prisma.$transaction(async (tx) => {
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AgentIdentity", id: existing.id }, before: existing, capture: params,
+      copied: params.copied || actor.kind !== "user" });
+    const updated = await tx.agentIdentity.update({ where: { id: existing.id }, data: { behaviorMd: params.behaviorMd } });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AgentIdentity", id: updated.id }, content: updated, receipt });
+    return (await readableArtifactIds(actor, params.workspaceId, "AgentIdentity", [updated], tx)).has(updated.id)
+      ? updated : { id: updated.id, contentWithheld: true };
   });
 }
 
@@ -433,38 +485,49 @@ export async function getWorkspaceAgentBehavior(actor: AppActor, workspaceId: st
 
   const record = await prisma.agentIdentity.findUnique({
     where: { workspaceId_agentKey: { workspaceId, agentKey: "__workspace__" } },
-    select: { behaviorMd: true },
   });
 
-  return record?.behaviorMd ?? null;
+  return record && (await readableArtifactIds(actor, workspaceId, "AgentIdentity", [record])).has(record.id)
+    ? record.behaviorMd : null;
 }
 
 export async function updateWorkspaceAgentBehavior(
   actor: AppActor,
-  params: {
+  params: ProducerLineageParams & {
+    copied?: boolean;
     workspaceId: string;
     behaviorMd: string;
   },
 ) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
 
-  return prisma.agentIdentity.upsert({
-    where: {
-      workspaceId_agentKey: {
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.agentIdentity.findUnique({ where: { workspaceId_agentKey: { workspaceId: params.workspaceId, agentKey: "__workspace__" } } });
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      ...(existing ? { artifact: { kind: "AgentIdentity" as const, id: existing.id }, before: existing } : {}),
+      capture: params, copied: params.copied || actor.kind !== "user" });
+    const updated = await tx.agentIdentity.upsert({
+      where: {
+        workspaceId_agentKey: {
+          workspaceId: params.workspaceId,
+          agentKey: "__workspace__",
+        },
+      },
+      create: {
         workspaceId: params.workspaceId,
         agentKey: "__workspace__",
+        displayName: "Workspace Agent Config",
+        behaviorMd: params.behaviorMd,
+        isActive: false,
       },
-    },
-    create: {
-      workspaceId: params.workspaceId,
-      agentKey: "__workspace__",
-      displayName: "Workspace Agent Config",
-      behaviorMd: params.behaviorMd,
-      isActive: false,
-    },
-    update: {
-      behaviorMd: params.behaviorMd,
-    },
+      update: {
+        behaviorMd: params.behaviorMd,
+      },
+    });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AgentIdentity", id: updated.id }, content: updated, receipt });
+    return (await readableArtifactIds(actor, params.workspaceId, "AgentIdentity", [updated], tx)).has(updated.id)
+      ? updated : { id: updated.id, contentWithheld: true };
   });
 }
 
@@ -489,6 +552,7 @@ export async function seedAgentIdentities(workspaceId: string) {
           },
         });
 
+        await invalidateArtifactInputLineage({ tx, workspaceId, artifact: { kind: "AgentIdentity", id: identity.id }, content: identity });
         await appendEvents(tx, [
           {
             workspaceId,
@@ -521,23 +585,24 @@ export async function resolveAgentIdentityLimits(workspaceId: string, agentKey: 
   return identity ?? null;
 }
 
-export async function resolveAgentBehaviorContext(workspaceId: string, agentKey: string) {
+export async function resolveAgentBehaviorContext(workspaceId: string, agentKey: string, actor?: AppActor) {
+  if (!actor) return null;
+  await requireWorkspaceMembership({ actor, workspaceId });
   const [workspaceBehavior, agentIdentity] = await Promise.all([
     prisma.agentIdentity.findUnique({
       where: { workspaceId_agentKey: { workspaceId, agentKey: "__workspace__" } },
-      select: { behaviorMd: true },
     }),
     prisma.agentIdentity.findUnique({
       where: { workspaceId_agentKey: { workspaceId, agentKey } },
-      select: { behaviorMd: true },
     }),
   ]);
 
   const parts: string[] = [];
-  if (workspaceBehavior?.behaviorMd) {
+  const readableIds = await readableArtifactIds(actor, workspaceId, "AgentIdentity", [workspaceBehavior, agentIdentity].filter((row): row is NonNullable<typeof row> => row !== null));
+  if (workspaceBehavior?.behaviorMd && readableIds.has(workspaceBehavior.id)) {
     parts.push(`## Workspace Agent Policy\n\n${workspaceBehavior.behaviorMd}`);
   }
-  if (agentIdentity?.behaviorMd) {
+  if (agentIdentity?.isActive && agentIdentity.behaviorMd && readableIds.has(agentIdentity.id)) {
     parts.push(`## Agent-Specific Behavior\n\n${agentIdentity.behaviorMd}`);
   }
 

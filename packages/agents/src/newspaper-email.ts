@@ -32,13 +32,27 @@ function asText(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+export type NewspaperRecipientItem = {
+  text: string;
+  href: string;
+  deadline: { label: "Due" | "Deadline"; value: string } | null;
+};
+
+type NewspaperEmailDigest = NormalizedNewspaperDigest & {
+  recipientItems?: Array<NewspaperRecipientItem | null>;
+};
+
 export function withNewspaperAdviceRequests(
   digest: NormalizedNewspaperDigest,
-  items: string[],
-): NormalizedNewspaperDigest {
+  items: Array<string | NewspaperRecipientItem>,
+): NewspaperEmailDigest {
   const normalizedItems = items
-    .map((item) => item.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim().slice(0, 1000))
-    .filter(Boolean);
+    .map((item) => ({
+      text: (typeof item === "string" ? item : item.text)
+        .replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim().slice(0, 1000),
+      recipientItem: typeof item === "string" ? null : item,
+    }))
+    .filter((item) => Boolean(item.text));
 
   if (normalizedItems.length === 0) return digest;
 
@@ -47,12 +61,17 @@ export function withNewspaperAdviceRequests(
   const adviceSection: NewspaperDigestSection = {
     id: "adviceRequests",
     title: "Requests Awaiting Your Input",
-    items: [...normalizedItems, ...(existingAdviceSection?.items ?? [])],
+    items: [...normalizedItems.map((item) => item.text), ...(existingAdviceSection?.items ?? [])],
   };
+  const sections = capNewspaperDigestSections([adviceSection, ...sectionsWithoutAdvice]);
+  const retainedItemCount = sections.find((section) => section.id === "adviceRequests")?.items.length ?? 0;
 
   return {
     ...digest,
-    sections: capNewspaperDigestSections([adviceSection, ...sectionsWithoutAdvice]),
+    sections,
+    // Keep canonical dates and links aligned with the capped recipient section.
+    // Neither is recoverable from prose once the 1,000-character limit is applied.
+    recipientItems: normalizedItems.slice(0, retainedItemCount).map((item) => item.recipientItem),
   };
 }
 
@@ -215,14 +234,17 @@ function renderNarrativeParagraphs(values: Array<string | null | undefined>, wor
   return rendered.join("");
 }
 
-function compactRecipientLine(value: string) {
-  return value
+function compactRecipientLine(value: string, deadline: string | null = null) {
+  const suffix = deadline ? ` ${deadline}` : "";
+  const prose = value
     .split(/\r?\n/)
     .filter((line) => !/^open:\s*/i.test(line.trim()))
+    .filter((line) => !deadline || line.trim() !== deadline)
     .join(" ")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 420);
+    .slice(0, Math.max(0, 420 - suffix.length));
+  return deadline ? `${prose.trimEnd()}${suffix}`.trim() : prose;
 }
 
 function recipientItemHref(value: string, workspaceUrl: string) {
@@ -231,7 +253,7 @@ function recipientItemHref(value: string, workspaceUrl: string) {
 }
 
 function renderRecipientFallbackNote(params: {
-  digest?: NormalizedNewspaperDigest;
+  digest?: NewspaperEmailDigest;
   workspaceUrl: string;
 }) {
   const personalItems = params.digest?.sections
@@ -242,9 +264,15 @@ function renderRecipientFallbackNote(params: {
 
   const itemText = personalItems
     .map((item, index) => {
-      const compact = compactRecipientLine(item);
+      const recipientItem = params.digest?.recipientItems?.[index];
+      const deadline = recipientItem?.deadline
+        ? `${recipientItem.deadline.label}: ${recipientItem.deadline.value}`
+        : null;
+      const compact = compactRecipientLine(item, deadline);
       if (!compact) return null;
-      const href = recipientItemHref(item, params.workspaceUrl);
+      const href = recipientItem
+        ? absoluteEmailHref(recipientItem.href, params.workspaceUrl)
+        : recipientItemHref(item, params.workspaceUrl);
       const prefix = index === 0 ? "For you: " : "Also: ";
       return `${prefix}${renderNarrativeMarkdown(compact, params.workspaceUrl)} <a href="${escapeAttribute(href)}" style="color:#6750a4;text-decoration:underline;">Open it</a>.`;
     })
@@ -347,7 +375,7 @@ export function renderWorkspaceBriefingEmailHtml(params: {
   workspaceName: string;
   recipientName: string | null;
   workspaceUrl: string;
-  digest?: NormalizedNewspaperDigest;
+  digest?: NewspaperEmailDigest;
   personalization?: NewspaperPersonalization;
 }) {
   const recipient = params.recipientName?.trim() || "there";

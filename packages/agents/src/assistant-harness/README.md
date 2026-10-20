@@ -3,7 +3,10 @@
 This is a default-off, production-intended execution library. It does not admit live
 requests, register an outbox handler, connect a checkpoint database, or enable a product
 experience. The existing conversation route is unchanged. No task or artifact is required
-to finish a conversation. Shared Slack/team authority is outside this personal runtime.
+to finish a conversation. Shared Slack/team authority is outside this personal runtime. Personal chats remain private
+until explicitly approved publication of a selected result. Company memory is a separate
+read/publication boundary; the harness does not turn personal conversation history into
+company memory. Internet and personal connector access remain excluded at launch.
 
 `createAssistantHarness` calls the existing `ModelGateway` directly. Gateway routing,
 credentials, quotas and `ModelUsage` remain authoritative. The harness adds no provider
@@ -27,6 +30,22 @@ it must never send their continuations through the legacy loop. Scope, actor, Ab
 ports and callbacks remain outside checkpoints. The runtime exposes no raw SDK Command or
 checkpoint selector to clients. Initial input permits user/assistant messages only.
 
+A runner snapshots its admitted scope, job claim, actor, cancellation signal, delivery
+audience and capability descriptions. Those identity objects are frozen; changing the
+caller-owned objects cannot retarget a running segment. Port methods retain their original
+receivers, including class private fields. Callbacks must bind their own authorization to
+the admitted identity and consult live policy; freezing the harness context cannot freeze
+or repair an adapter's closure or internal state. Use the admitted signal to cancel a run,
+not replacement of the caller's signal property.
+
+One runner rejects overlapping `run()` calls before any app-port access and releases that
+local guard after completion or failure. Distinct runners remain independent. This is not
+a lock across runners, workers or processes: the application must serialize the same job
+and enforce claim/lineage fencing at its authoritative storage boundaries. Cancellation
+can end the SDK invocation before a pending adapter settles. Adapters must cooperate with
+the admitted signal; the harness cannot forcibly stop a noncooperative promise or guarantee
+that rejected `run()` means all external work has terminated.
+
 `AssistantRuntime.authorize` must verify current membership, personal session ownership,
 source permissions, cancellation, budget, support/MCP revocation context where applicable,
 and the job claim. `reserveDispatch` must atomically fence and count each harness gateway
@@ -37,16 +56,23 @@ preventing the gateway invocation; the harness neither refunds it nor writes usa
 Read dispatch also revalidates authority after both reservation and the awaited tool-start
 delivery acknowledgement, immediately before calling the domain read implementation.
 Approval decisions also receive post-await cancellation and authority checks before a
-waiting/resume outcome. Checkpoint counters alone cannot guarantee the invocation bound.
+waiting/resume outcome. Checkpoint counters alone cannot guarantee the invocation bound. A read adapter's terminal
+`AssistantHarnessError` (including cancellation, authority and budget denial) stops the run;
+ordinary read failures remain sanitized tool errors. Failed dispatches consume reservations,
+and retrying a runner does not reset that durable budget.
 
-Gateway invocation is not an individual provider HTTP attempt. The current gateway has
-internal retries and OpenRouter fallback, with no request-level retry-disable option or
-per-attempt authorization hook. It also awaits budget/headers before its first HTTP send.
-This harness therefore cannot claim fresh authority or separate reservations for each
-downstream attempt. Before live enablement, gateway-owned integration must guard each
-actual attempt with current source/claim authority, propagate revocation cancellation and
-define the fallback policy. Gateway remains the sole usage writer; repeated provider work
-may be billed again. There is no exactly-once provider billing claim.
+Gateway invocation is not an individual provider HTTP attempt. Each invocation reserves
+once and supplies a server-created `authorizeAttempt` capability for both chat modes.
+The gateway calls it after awaited preparation before every HTTP send, including retries.
+It rechecks live source/claim authority against the immutable admitted runtime and complete
+saved source vector, observing both admitted cancellation and the gateway deadline signal
+without replacing the admitted signal. Safe CANCELLED/SCOPE/LIMIT denials survive gateway
+sanitization; arbitrary adapter errors remain private. Late authorization cannot permit a
+send after cancellation. Guarded OpenRouter requests disable opaque provider fallbacks;
+gateway routing and usage accounting remain authoritative. Unsent attempts create no usage.
+Denied attempts keep the invocation reservation consumed. Repeated provider work may be
+billed again; there is no exactly-once provider billing claim. All live enablement and
+application integration gates remain required.
 
 Incremental output requires an `AssistantDeliveryPort` bound to the actual authenticated
 personal subscription. The runtime rejects an audience that differs from its workspace,
@@ -59,7 +85,9 @@ claim and cancellation at the transport handoff. It must serialize that handoff 
 revocation under the application's policy. A permission read followed by an unrestricted
 callback is not sufficient. No database/socket atomicity is supplied by this library.
 `DENIED` or an authorization exception stops the runner and closes the gateway generator;
-unknown errors are sanitized. A known transport disconnect returns `DETACHED`, which does
+unknown errors are sanitized. The harness awaits generator closure on its stream exit and
+preserves the primary stop reason if cleanup also throws. Closure of a pending iterator still
+requires the provider/gateway to cooperate with cancellation. A known transport disconnect returns `DETACHED`, which does
 not cancel the admitted turn or redispatch billed work. The port must keep that connection
 detached. Cancellation must be checked by the port immediately before handoff as well as
 by the runner before/after it. Already delivered authorized bytes cannot be retracted.
@@ -96,7 +124,18 @@ Minimum proposed transaction contract for the domain/queue owner:
 The publication interfaces expose semantic views and opaque receipt/approval IDs. They do
 not define a second storage format. A decision is reloaded after interruption and before a
 new effect. Application commit still must check authority and deduplication atomically;
-the graph's read-before-write is not that guarantee.
+the graph's read-before-write is not that guarantee. The runner reauthorizes after each
+awaited effect inspection, approval decision and commit before its next action or checkpoint
+update. If a commit succeeded but later authority fails, a retry must inspect the canonical
+receipt instead of repeating the effect; the existing app-owned idempotency contract remains
+required.
+
+Authorization receives frozen copies of source references. Read evidence and provenance,
+prepared approval references and effect receipts are copied before subsequent awaits, so
+adapter-retained objects cannot change what is later checkpointed. Publication selection and
+reference arguments are frozen before adapter calls. These copies preserve the exact values
+seen by the harness; they do not validate an adapter's provenance or replace atomic source,
+approval and receipt checks.
 
 `handleConversationTurn` and `recoverConversationTurns` are callable integration functions,
 not a registered worker path. Their ports must be supplied by domain admission/receipt and
@@ -110,7 +149,11 @@ ephemeral subscriber. User cancellation is a durable domain decision.
 Unit fixtures exercise the real graph and gateway contract with `MemorySaver` and explicit
 fake app ports. They do not prove PostgreSQL fencing, process-crash durability, automatic
 `runPendingJobs` recovery, or production receipt integration. A new runner in these tests
-is not a fresh process. Run with Node 22.22:
+is not a fresh process. Regression coverage includes mutable caller/adapter context, terminal
+read failures, same-runner overlap and independent runs, effect authorization ordering,
+cooperative stream cancellation, cleanup-error precedence, and budget consumption across
+failed dispatch/retry. Existing approval/lost-acknowledgement/UNKNOWN tests verify the graph's
+use of synthetic idempotent ports, not production exactly-once effects. Run with Node 22.22:
 
 ```
 npx vitest run --project unit packages/agents/src/assistant-harness/gateway-node.test.ts packages/agents/src/assistant-harness/graph.test.ts packages/shared/src/env.test.ts

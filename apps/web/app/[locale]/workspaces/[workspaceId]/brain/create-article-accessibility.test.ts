@@ -26,8 +26,16 @@ vi.mock("@corgtex/domain", () => ({
   listArticles: async () => ({ items: [] }),
   listMeetings: async () => [],
   listDocuments: async () => [],
-  getBrainStatus: async () => ({ totalArticles: 0, unabsorbedSources: 0 }),
   resolveKnowledgeAccessDomains: async () => [],
+  readableArtifactIds: async () => new Set(),
+}));
+
+// This render fixture supplies an empty backend result. The real count helper's
+// admission/release behavior is covered by article-type-counts and PG tests.
+vi.mock("./article-type-counts", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./article-type-counts")>(),
+  listBrainArticleTypeCounts: vi.fn(async () => ({counts:[],complete:true})),
+  listBrainPendingSourceCount: vi.fn(async () => ({count:0,complete:true})),
 }));
 
 vi.mock("@corgtex/knowledge", () => ({
@@ -36,7 +44,7 @@ vi.mock("@corgtex/knowledge", () => ({
 }));
 
 vi.mock("@corgtex/shared", () => ({
-  prisma: { brainArticle: { groupBy: async () => [] } },
+  prisma: { brainArticle: { findMany: async () => [] } },
 }));
 
 vi.mock("../KnowledgeFileUploader", () => ({ KnowledgeFileUploader: () => null }));

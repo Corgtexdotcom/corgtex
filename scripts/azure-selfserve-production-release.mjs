@@ -3,6 +3,8 @@
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 
+import { isSelfserveReleaseHost } from "./release/managed-azure-selfserve-profile.mjs";
+
 import { parseBoolean } from "./release/fleet-release-core.mjs";
 
 const DEFAULTS = {
@@ -30,6 +32,9 @@ const workerRepository = args.workerRepository ?? DEFAULTS.workerRepository;
 const appUrl = normalizeBaseUrl(args.appUrl ?? DEFAULTS.appUrl);
 const sourceDir = args.sourceDir ?? ".";
 const dryRun = Boolean(args.dryRun);
+if (!dryRun && isSelfserveReleaseHost(null, appUrl, { resourceGroup, webAppName, workerAppName })) {
+  throw new Error("Selfserve requires the protected managed Azure EXCLUSIVE workflow; standalone web-first promotion is disabled.");
+}
 const skipBuild = Boolean(args.skipBuild);
 const skipHealthSmoke = Boolean(args.skipHealthSmoke);
 validateRuntimeObservabilityBooleans();

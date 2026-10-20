@@ -7,10 +7,14 @@ const { resolveKnowledgeAccessDomainsMock, searchIndexedKnowledgeMock } = vi.hoi
 
 vi.mock("@corgtex/domain", () => ({
   resolveKnowledgeAccessDomains: resolveKnowledgeAccessDomainsMock,
+  captureConversationInputReceipt: vi.fn(async () => ({})),
+  captureArtifactInputProof: vi.fn(async () => [{ kind: "Workspace", id: "workspace-1", fingerprint: "a".repeat(64) }]),
+  createConversationInputReceiptFromRoots: vi.fn(async () => ({})),
 }));
 
 vi.mock("@corgtex/knowledge", () => ({
   searchIndexedKnowledge: searchIndexedKnowledgeMock,
+  getKnowledgeSearchInputRoots: vi.fn(async () => [{ kind: "Workspace", id: "workspace-1", fingerprint: "a".repeat(64) }]),
 }));
 
 import {
@@ -57,6 +61,7 @@ describe("interactive agent knowledge", () => {
 
     expect(resolveKnowledgeAccessDomainsMock).toHaveBeenCalledWith(actor, "workspace-1");
     expect(searchIndexedKnowledgeMock).toHaveBeenCalledWith({
+      actor,
       workspaceId: "workspace-1",
       catalogItemId: undefined,
       agentCredentialId: undefined,

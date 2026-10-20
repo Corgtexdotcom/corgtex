@@ -1,3 +1,5 @@
+import { WorkItemReadRelease } from "./work-item-readable-page";
+import { randomUUID } from "node:crypto";
 import { prisma } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import {
@@ -11,6 +13,14 @@ import {
   ExecutionResultStatus,
   ExecutionWritebackTargetType,
   Prisma,
+  type Action,
+  type Tension,
+  type Proposal,
+  type Meeting,
+  type BrainArticle,
+  type CrmCommunicationSuggestion,
+  type ExecutionRequest,
+  type ExecutionResult,
 } from "@prisma/client";
 import { createAction } from "./actions";
 import { createArticle } from "./brain";
@@ -27,6 +37,16 @@ import { isKnownScope, type AgentScope } from "./agent-auth";
 import { OPERATIONAL_ARTIFACT_FILTER } from "./operational-artifacts";
 import { privacyFilter } from "./privacy";
 import { formatWorkItemPriority } from "./work-item-priority";
+import { captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifactInputProofPubliclyShareable,
+  captureImmutableArtifactInputProof, isArtifactInputProofReadable, readableArtifactIds, assertArtifactInputWriteFence,
+  sealArtifactInputActor, lineageContentFingerprint, inspectStoredArtifactInputDependencies, type LineageKind, type LineageRoot } from "./source-lineage";
+import { finishProducerLineage, prepareProducerLineage, type ProducerLineageParams } from "./producer-lineage";
+import { createArtifactSampleBudget, captureReadableDigestInputs } from "./digest-lineage";
+import { getMcpToolInputRoots } from "./mcp-tool-input-context";
+import { lockArtifactReadAuthorityRows, prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./artifact-commit-preflight";
+import { prepareArtifactSourceCommit, withArtifactSourceCommit } from "./artifact-source-commit";
+import { withArtifactInputSnapshotAllocations, type ArtifactInputSnapshotAllocation } from "./artifact-input-snapshot-allocations";
+import type { SourceCommitOwnerBinding, SourceCommitWriteTarget } from "./source-commit-lock-plan";
 
 const SECRET_KEY_PATTERN = /(token|secret|password|credential|api[_-]?key|access[_-]?key|refresh|authorization|bearer)/i;
 const SECRET_QUERY_VALUE_PATTERN = /([?&](?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|secret|signature|sig|authorization)=)[^&#\s]+/gi;
@@ -44,11 +64,12 @@ type WritebackTargetSummary = {
   webPath: string;
   context?: JsonRecord;
   crmLinks?: CrmLinks;
+  lineageRoots?: LineageRoot[];
 };
 
 type ExecutionRequestRecord = Awaited<ReturnType<typeof loadExecutionRequest>>;
 
-export type CreateExecutionRequestParams = {
+export type CreateExecutionRequestParams = ProducerLineageParams & {
   workspaceId: string;
   goal: string;
   provider?: string | AiWorkspaceProvider | null;
@@ -62,9 +83,10 @@ export type CreateExecutionRequestParams = {
   writebackTargetId?: string | null;
   writebackTargetLabel?: string | null;
   idempotencyKey?: string | null;
+  copied?: boolean;
 };
 
-export type SubmitExecutionResultParams = {
+export type SubmitExecutionResultParams = ProducerLineageParams & {
   workspaceId: string;
   requestId: string;
   idempotencyKey: string;
@@ -250,10 +272,6 @@ function enumValue<TEnum extends Record<string, string>>(
   return normalized as TEnum[keyof TEnum];
 }
 
-function titleMatches(query: string | null | undefined) {
-  const trimmed = query?.trim();
-  return trimmed ? { contains: trimmed, mode: "insensitive" as const } : undefined;
-}
 
 function crmCommunicationTargetContext(suggestion: {
   id: string;
@@ -347,6 +365,40 @@ const executionRequestInclude = {
   },
 };
 
+const CRM_RECEIPT_KEY = "__crmInputReceipt";
+
+function asRecord(value: unknown): JsonRecord | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : null;
+}
+
+function crmPacketRoots(request: { writebackTargetType: ExecutionWritebackTargetType | null; contextJson: unknown }): LineageRoot[] | null {
+  if (request.writebackTargetType !== "CRM_COMMUNICATION") return null;
+  const context = asRecord(request.contextJson);
+  const receipt = asRecord(context?.[CRM_RECEIPT_KEY]);
+  const roots = receipt?.roots;
+  invariant(receipt?.version === 1 && Array.isArray(roots) && roots.length > 0
+    && roots.every((root) => { const row = asRecord(root); return row && typeof row.kind === "string"
+      && typeof row.id === "string" && row.id.length > 0 && typeof row.fingerprint === "string" && /^[a-f0-9]{64}$/.test(row.fingerprint); }),
+  409, "UNKNOWN_LINEAGE", "CRM execution context has no complete input receipt.");
+  return roots as LineageRoot[];
+}
+
+async function requireCrmPacketProof(actor: AppActor, workspaceId: string,
+  request: { writebackTargetType: ExecutionWritebackTargetType | null; contextJson: unknown }) {
+  const roots = crmPacketRoots(request);
+  if (!roots) return;
+  invariant(await isArtifactInputProofReadable(actor, workspaceId, roots), 403, "SOURCE_RESTRICTED", "Execution context is no longer readable.");
+  invariant(await isArtifactInputProofPubliclyShareable(actor, workspaceId, roots),
+    403, "SOURCE_RESTRICTED", "Execution context is not shareable with this external destination.");
+}
+
+function withoutCrmReceipt(context: unknown) {
+  const record = asRecord(context);
+  if (!record || !(CRM_RECEIPT_KEY in record)) return context;
+  const { [CRM_RECEIPT_KEY]: _receipt, ...visible } = record;
+  return visible;
+}
+
 function executionRequestAccessWhere(actor: AppActor, workspaceId: string, requestId?: string): Prisma.ExecutionRequestWhereInput {
   const where: Prisma.ExecutionRequestWhereInput = {
     workspaceId,
@@ -372,27 +424,38 @@ async function findExistingExecutionRequestByIdempotency(actor: AppActor, worksp
   });
 }
 
-async function loadExecutionRequest(actor: AppActor, workspaceId: string, requestId: string) {
+async function loadExecutionRequest(actor: AppActor, workspaceId: string, requestId: string, release?: WorkItemReadRelease) {
   const request = await prisma.executionRequest.findFirst({
     where: executionRequestAccessWhere(actor, workspaceId, requestId),
     include: executionRequestInclude,
   });
   invariant(request, 404, "NOT_FOUND", "Execution request not found.");
-  return request;
+  await requireCrmPacketProof(actor, workspaceId, request);
+  if (release) {
+    release.add(crmPacketRoots(request) ?? []);
+    const admitted = await captureReadableDigestInputs({actor,workspaceId,kind:"ExecutionRequest",records:[request]});
+    invariant(admitted.records.length,404,"NOT_FOUND","Execution request not found.");
+    release.add(admitted.roots);
+  } else await requireExecutionRequestProof(actor, workspaceId, request);
+  const candidates = await prisma.executionResult.findMany({ where: { workspaceId, executionRequestId: request.id },
+    orderBy: { id: "asc" }, take: 5001 });
+  invariant(candidates.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Execution result permission scan exceeds its supported size.");
+  const captured = release ? await captureReadableDigestInputs({actor,workspaceId,kind:"ExecutionResult",records:candidates}) : null;
+  const allowed = captured ? new Set(captured.records.map(row=>row.id)) : await readableArtifactIds(actor, workspaceId, "ExecutionResult", candidates);
+  const results = candidates.filter((result) => allowed.has(result.id))
+    .sort((a, b) => b.submittedAt.getTime() - a.submittedAt.getTime() || a.id.localeCompare(b.id)).slice(0, 10);
+  if (release && captured) for (const result of results) release.add(captured.proofs.get(result.id)!);
+  await requireExecutionRequestProof(actor, workspaceId, request);
+  invariant((await readableArtifactIds(actor, workspaceId, "ExecutionResult", results)).size === results.length,
+    409, "SOURCE_CHANGED", "Execution result inputs changed during collection.");
+  return { ...request, results };
 }
 
-function requestOwnerActor(request: { createdByUserId: string | null }, fallback: AppActor): AppActor {
-  if (fallback.kind !== "agent") return fallback;
-  invariant(request.createdByUserId, 400, "INVALID_STATE", "Execution request owner is required for private write-back.");
-  return {
-    kind: "user",
-    user: {
-      id: request.createdByUserId,
-      email: "execution-requester@corgtex.local",
-      displayName: "Execution requester",
-      globalRole: "USER",
-    },
-  };
+async function requireExecutionRequestProof(actor: AppActor, workspaceId: string,
+  request: { id: string; writebackTargetType: ExecutionWritebackTargetType | null; [key: string]: unknown },
+  tx: Prisma.TransactionClient = prisma) {
+  invariant((await readableArtifactIds(actor, workspaceId, "ExecutionRequest", [request], tx)).has(request.id),
+    404, "NOT_FOUND", "Execution request not found.");
 }
 
 function serializeExecutionResult(result: {
@@ -483,31 +546,36 @@ async function validateWritebackTarget(
     case "ACTION": {
       const item = await client.action.findFirst({
         where: { id: targetId, workspaceId, archivedAt: null, ...(actor ? privacyFilter(actor, membership) : {}) },
-        select: { id: true, title: true, status: true },
       });
       invariant(item, 404, "NOT_FOUND", "Action write-back target not found.");
-      return { type, id: item.id, title: item.title, status: item.status, webPath: `/actions/${item.id}` };
+      invariant(actor, 403, "FORBIDDEN", "A current actor is required.");
+      const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "Action", id: item.id, snapshot: item }], client);
+      return { type, id: item.id, title: item.title, status: item.status, webPath: `/actions/${item.id}`, lineageRoots };
     }
     case "TENSION": {
       const item = await client.tension.findFirst({
         where: { id: targetId, workspaceId, archivedAt: null, ...(actor ? privacyFilter(actor, membership) : {}) },
-        select: { id: true, title: true, status: true },
       });
       invariant(item, 404, "NOT_FOUND", "Tension write-back target not found.");
-      return { type, id: item.id, title: item.title, status: item.status, webPath: `/tensions/${item.id}` };
+      invariant(actor, 403, "FORBIDDEN", "A current actor is required.");
+      const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "Tension", id: item.id, snapshot: item }], client);
+      return { type, id: item.id, title: item.title, status: item.status, webPath: `/tensions/${item.id}`, lineageRoots };
     }
     case "PROPOSAL": {
       const item = await client.proposal.findFirst({
         where: { id: targetId, workspaceId, archivedAt: null, ...(actor ? privacyFilter(actor, membership) : {}) },
-        select: { id: true, title: true, status: true },
       });
       invariant(item, 404, "NOT_FOUND", "Proposal write-back target not found.");
-      return { type, id: item.id, title: item.title, status: item.status, webPath: `/proposals/${item.id}` };
+      invariant(actor, 403, "FORBIDDEN", "A current actor is required.");
+      const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "Proposal", id: item.id, snapshot: item }], client);
+      return { type, id: item.id, title: item.title, status: item.status, webPath: `/proposals/${item.id}`, lineageRoots };
     }
     case "MEETING": {
-      const item = await client.meeting.findFirst({ where: { id: targetId, workspaceId, archivedAt: null }, select: { id: true, title: true, status: true } });
+      const item = await client.meeting.findFirst({ where: { id: targetId, workspaceId, archivedAt: null } });
       invariant(item, 404, "NOT_FOUND", "Meeting write-back target not found.");
-      return { type, id: item.id, title: item.title ?? "Untitled meeting", status: item.status, webPath: `/meetings/${item.id}` };
+      invariant(actor, 403, "FORBIDDEN", "A current actor is required.");
+      const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "Meeting", id: item.id, snapshot: item }], client);
+      return { type, id: item.id, title: item.title ?? "Untitled meeting", status: item.status, webPath: `/meetings/${item.id}`, lineageRoots };
     }
     case "BRAIN_ARTICLE": {
       const item = await client.brainArticle.findFirst({
@@ -517,36 +585,25 @@ async function validateWritebackTarget(
             ...(actor ? [{ OR: brainArticlePrivacyFilter(actor, membership) }] : []),
           ],
         },
-        select: { id: true, title: true, authority: true, slug: true },
       });
       invariant(item, 404, "NOT_FOUND", "Brain article write-back target not found.");
-      return { type, id: item.id, title: item.title, status: item.authority, webPath: `/brain/${item.slug}` };
+      invariant(actor, 403, "FORBIDDEN", "A current actor is required.");
+      const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "BrainArticle", id: item.id, snapshot: item }], client);
+      return { type, id: item.id, title: item.title, status: item.authority, webPath: `/brain/${item.slug}`, lineageRoots };
     }
     case "BUILD_ARTIFACT": {
       const item = await client.buildArtifact.findFirst({
         where: { id: targetId, workspaceId, NOT: OPERATIONAL_ARTIFACT_FILTER },
-        select: { id: true, title: true, status: true },
       });
       invariant(item, 404, "NOT_FOUND", "Build artifact write-back target not found.");
-      return { type, id: item.id, title: item.title, status: item.status, webPath: `/build-artifacts/${item.id}` };
+      invariant(actor, 403, "FORBIDDEN", "Build artifact write-back target requires a current actor.");
+      const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "BuildArtifact", id: item.id, snapshot: item }], client);
+      return { type, id: item.id, title: item.title, status: item.status, webPath: `/build-artifacts/${item.id}`, lineageRoots };
     }
     case "CRM_COMMUNICATION": {
       const item = await client.crmCommunicationSuggestion.findFirst({
         where: { id: targetId, workspaceId, ...activeCrmParentWhere(["account", "contact", "deal", "activity"]) },
-        select: {
-          id: true,
-          status: true,
-          channel: true,
-          title: true,
-          subject: true,
-          bodyMd: true,
-          recipientEmail: true,
-          recipientName: true,
-          source: true,
-          accountId: true,
-          contactId: true,
-          dealId: true,
-          activityId: true,
+        include: {
           account: {
             select: {
               id: true,
@@ -587,6 +644,12 @@ async function validateWritebackTarget(
         },
       });
       invariant(item, 404, "NOT_FOUND", "CRM communication write-back target not found.");
+      invariant(actor, 401, "UNAUTHORIZED", "Actor required for CRM execution context.");
+      const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [
+        { kind: "CrmCommunicationSuggestion", id: item.id, snapshot: item },
+        ...([["account", "CrmAccount"], ["contact", "CrmContact"], ["deal", "CrmDeal"], ["activity", "CrmActivity"]] as const)
+          .flatMap(([field, kind]) => item[field] ? [{ kind, id: item[field]!.id, snapshot: item[field]! }] : []),
+      ], client);
       invariant(item.status !== "SENT" && item.status !== "DECLINED", 400, "INVALID_STATE", "Finalized communication suggestions cannot be requested for external execution.");
       return {
         type,
@@ -596,10 +659,16 @@ async function validateWritebackTarget(
         webPath: item.account ? `/leads/accounts/${item.account.id}?view=review` : "/leads?view=review",
         context: crmCommunicationTargetContext(item),
         crmLinks: { accountId: item.accountId, contactId: item.contactId, dealId: item.dealId, activityId: item.activityId },
+        lineageRoots,
       };
     }
-    case "COMMENT":
-      return { type, id: targetId, title: "Execution comment", status: null, webPath: "" };
+    case "COMMENT": {
+      invariant(actor, 403, "FORBIDDEN", "A current actor is required.");
+      const item = await client.executionRequest.findFirst({ where: executionRequestAccessWhere(actor, workspaceId, targetId) });
+      invariant(item, 404, "NOT_FOUND", "Execution comment target not found.");
+      const lineageRoots = await captureArtifactInputProof(actor, workspaceId, [{ kind: "ExecutionRequest", id: item.id, snapshot: item }], client);
+      return { type, id: targetId, title: "Execution comment", status: null, webPath: "", lineageRoots };
+    }
   }
 }
 
@@ -631,7 +700,7 @@ function buildExecutionPacket(params: {
     status: request.status,
     goal: request.goal,
     actor: request.actorJson,
-    relevantContext: request.contextJson,
+    relevantContext: withoutCrmReceipt(request.contextJson),
     allowedScopes: request.allowedScopes,
     policyConstraints: request.policyConstraintsJson,
     expectedOutput: request.expectedOutputJson,
@@ -652,7 +721,9 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
 
   if (idempotencyKey) {
     const existing = await findExistingExecutionRequestByIdempotency(actor, params.workspaceId, idempotencyKey);
-    if (existing) return serializeExecutionRequest(existing);
+    if (existing) { await requireCrmPacketProof(actor, params.workspaceId, existing);
+      await requireExecutionRequestProof(actor, params.workspaceId, existing);
+      return serializeExecutionRequest(await loadExecutionRequest(actor, params.workspaceId, existing.id)); }
   }
 
   const goal = params.goal.trim();
@@ -666,6 +737,13 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
   }
   const target = await validateWritebackTarget(params.workspaceId, targetType, params.writebackTargetId, actor, membership);
   const context = params.context === undefined ? target?.context ?? null : params.context;
+  if (targetType === "CRM_COMMUNICATION" && (params.context !== undefined || actor.kind !== "user")) {
+    invariant(params.lineageRoots?.length, 409, "UNKNOWN_LINEAGE", "Custom CRM execution context requires its complete producer receipt.");
+  }
+  if (params.context !== undefined || actor.kind !== "user" || params.copied) {
+    invariant(params.lineageRoots?.length || getMcpToolInputRoots(actor, params.workspaceId).length,
+      409, "UNKNOWN_LINEAGE", "Copied execution context requires its complete input receipt.");
+  }
 
   const workspace = await prisma.workspace.findUnique({
     where: { id: params.workspaceId },
@@ -676,13 +754,40 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
   let request: NonNullable<ExecutionRequestRecord>;
   try {
     request = await prisma.$transaction(async (tx) => {
+      let packetContext = context;
+      let requestRoots = [...(params.lineageRoots ?? []), ...(target?.lineageRoots ?? [])];
+      let suggestionReceipt: Awaited<ReturnType<typeof prepareProducerLineage>> | undefined;
       if (targetType === "CRM_COMMUNICATION" && target?.id) {
-        await lockActiveCommunicationSuggestion(tx, {
+        const suggestion = await lockActiveCommunicationSuggestion(tx, {
           workspaceId: params.workspaceId,
           suggestionId: target.id,
           expectedLinks: target.crmLinks,
         });
+        const direct = target.lineageRoots?.find((root) => root.kind === "CrmCommunicationSuggestion" && root.id === suggestion.id);
+        invariant(direct, 409, "UNKNOWN_LINEAGE", "CRM execution target has no source receipt.");
+        const snapshots = await captureArtifactInputSnapshotProof(actor, params.workspaceId, direct, tx);
+        const lockedTarget = await validateWritebackTarget(params.workspaceId, targetType, suggestion.id, actor, membership, tx);
+        const roots = [...(lockedTarget?.lineageRoots ?? []), ...(params.lineageRoots ?? [])]
+          .filter((root) => root.kind !== "CrmCommunicationSuggestion" || root.id !== suggestion.id);
+        roots.push(...snapshots);
+        roots.push(...await captureArtifactInputProof(actor, params.workspaceId,
+          [{ kind: "Workspace", id: workspace.id, snapshot: workspace }], tx));
+        invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots, tx), 409, "SOURCE_CHANGED", "CRM execution inputs changed before persistence.");
+        invariant(await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, roots, tx),
+          403, "SOURCE_RESTRICTED", "CRM execution context is not shareable with this external destination.");
+        if (params.lineageRoots?.length) invariant(await isArtifactInputProofReadable(actor, params.workspaceId, params.lineageRoots, tx),
+          409, "SOURCE_CHANGED", "Custom execution context inputs changed before persistence.");
+        const supplied = params.context === undefined ? lockedTarget?.context : params.context;
+        requestRoots = roots;
+        packetContext = { ...(asRecord(supplied) ?? { providedContext: supplied }),
+          [CRM_RECEIPT_KEY]: { version: 1, roots } };
+        suggestionReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "CrmCommunicationSuggestion", id: suggestion.id }, before: suggestion, allowSystemTransition: true });
       }
+      const requestReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+        capture: { lineageInputs: targetType === "CRM_COMMUNICATION" ? params.lineageInputs?.filter((input) => input.kind !== "CrmCommunicationSuggestion" || input.id !== target?.id) : params.lineageInputs, lineageRoots: requestRoots },
+        copied: params.copied, dependencies: [{ kind: "Workspace", id: workspace.id, snapshot: workspace }] });
+      invariant(requestReceipt.mode !== "UNKNOWN", 409, "UNKNOWN_LINEAGE", "Execution inputs cannot be proven.");
       const created = await tx.executionRequest.create({
         data: {
           workspaceId: params.workspaceId,
@@ -691,7 +796,7 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
           provider,
           goal,
           actorJson: jsonInput(params.actor ?? { actorKind: actor.kind }),
-          contextJson: jsonInput(context),
+          contextJson: jsonInput(packetContext),
           allowedScopes,
           policyConstraintsJson: jsonInput(params.policyConstraints ?? null),
           expectedOutputJson: jsonInput(params.expectedOutput ?? null),
@@ -710,8 +815,10 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
         data: { packetJson: packet as Prisma.InputJsonValue },
         include: { results: { orderBy: { submittedAt: "desc" }, take: 10 } },
       });
+      await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "ExecutionRequest", id: updated.id }, content: updated, receipt: requestReceipt });
       if (targetType === "CRM_COMMUNICATION" && target?.id) {
-        await tx.crmCommunicationSuggestion.update({
+        const suggestion = await tx.crmCommunicationSuggestion.update({
           where: { id: target.id },
           data: {
             status: "REQUESTED",
@@ -723,6 +830,9 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
             failureReason: null,
           },
         });
+        invariant(suggestionReceipt, 409, "UNKNOWN_LINEAGE", "CRM execution transition has no receipt.");
+        await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "CrmCommunicationSuggestion", id: suggestion.id }, content: suggestion, receipt: suggestionReceipt });
         await recordAudit(tx, actor, {
           workspaceId: params.workspaceId,
           action: "crm.communication_suggestion.requested",
@@ -748,16 +858,18 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
         },
       });
 
+      await requireExecutionRequestProof(actor, params.workspaceId, updated, tx);
       return updated;
     });
   } catch (error) {
     if (!idempotencyKey || !isPrismaUniqueError(error)) throw error;
     const existing = await findExistingExecutionRequestByIdempotency(actor, params.workspaceId, idempotencyKey);
     invariant(existing, 409, "CONFLICT", "Execution request idempotency conflict.");
-    return serializeExecutionRequest(existing);
+    await requireCrmPacketProof(actor, params.workspaceId, existing);
+    return serializeExecutionRequest(await loadExecutionRequest(actor, params.workspaceId, existing.id));
   }
 
-  return serializeExecutionRequest(request);
+  return serializeExecutionRequest(await loadExecutionRequest(actor, params.workspaceId, request.id));
 }
 
 export async function getExecutionRequest(actor: AppActor, params: { workspaceId: string; requestId: string }) {
@@ -771,20 +883,46 @@ export async function listExecutionRequests(actor: AppActor, params: {
   status?: string | ExecutionRequestStatus | null;
   take?: number | null;
 }) {
+  sealArtifactInputActor(actor);
+  params = {...params};
   requireExecutionScope(actor, "execution:read");
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const status = params.status ? String(params.status).trim().toUpperCase() : null;
   invariant(!status || status in ExecutionRequestStatus, 400, "INVALID_INPUT", "Unsupported execution request status.");
-  const requests = await prisma.executionRequest.findMany({
-    where: {
-      ...executionRequestAccessWhere(actor, params.workspaceId),
-      ...(status ? { status: status as ExecutionRequestStatus } : {}),
-    },
-    include: executionRequestInclude,
-    orderBy: { createdAt: "desc" },
-    take: Math.min(Math.max(params.take ?? 20, 1), 100),
-  });
-  return requests.map(serializeExecutionRequest);
+  invariant(params.take == null || Number.isSafeInteger(params.take), 400, "INVALID_INPUT", "Invalid execution sample size.");
+  const take = Math.min(Math.max(params.take ?? 20, 1), 100);
+  const release = new WorkItemReadRelease(actor, params.workspaceId);
+  const visible: ExecutionRequestRecord[] = [];
+  const budget = createArtifactSampleBudget(take);
+  let after: { id: string; createdAt: Date } | undefined;
+  while (visible.length < take) {
+    const pageTake = budget.nextTake();
+    const requests = await prisma.executionRequest.findMany({
+      where: { ...executionRequestAccessWhere(actor, params.workspaceId),
+        ...(status ? { status: status as ExecutionRequestStatus } : {}),
+        ...(after ? { OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] } : {}),
+      }, include: executionRequestInclude, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: pageTake,
+    });
+    invariant(requests.length <= 100 && (!requests.length || requests.at(-1)!.id !== after?.id),
+      503, "SOURCE_READ_SCAN_CHANGED", "Execution page changed; retry.");
+    budget.consume(requests.length, pageTake);
+    for (const candidate of requests) {
+      let request: ExecutionRequestRecord;
+      try { request = await release.observeRead(() => loadExecutionRequest(actor, params.workspaceId, candidate.id, release)); }
+      catch (error) {
+        if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED", "NOT_FOUND"].includes(error.code)) throw error;
+        continue;
+      }
+      // A concurrently changed status must not enter the requested sample.
+      if (status && request.status !== status) continue;
+      visible.push(request);
+      if (visible.length === take) break;
+    }
+    if (requests.length < pageTake) break;
+    after = requests.at(-1);
+  }
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  return release.finish(visible.map(serializeExecutionRequest));
 }
 
 export async function getExecutionPacket(actor: AppActor, params: { workspaceId: string; requestId: string }) {
@@ -801,134 +939,147 @@ export async function getExecutionPacket(actor: AppActor, params: { workspaceId:
 
   let packetRequest = request;
   if (request.status === "PENDING") {
-    const claim = await prisma.executionRequest.updateMany({
-      where: { ...executionRequestAccessWhere(actor, params.workspaceId, request.id), status: "PENDING" },
-      data: { status: "IN_PROGRESS", claimedAt: new Date() },
+    packetRequest = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "ExecutionRequest" WHERE id = ${request.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+      const before = await tx.executionRequest.findFirst({ where: executionRequestAccessWhere(actor, params.workspaceId, request.id) });
+      invariant(before?.status === "PENDING", 409, "INVALID_STATE", "Execution packet is no longer available for claiming.");
+      await requireExecutionRequestProof(actor, params.workspaceId, before, tx);
+      const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "ExecutionRequest", id: before.id }, before, allowSystemTransition: true });
+      const after = await tx.executionRequest.update({ where: { id: before.id }, data: { status: "IN_PROGRESS", claimedAt: new Date() }, include: executionRequestInclude });
+      await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "ExecutionRequest", id: after.id }, content: after, receipt });
+      return { ...after, results: request.results };
     });
-    invariant(claim.count === 1, 409, "INVALID_STATE", "Execution packet is no longer available for claiming.");
-    packetRequest = await loadExecutionRequest(actor, params.workspaceId, params.requestId);
   }
 
+  await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Workspace", id: workspace.id, snapshot: workspace }]);
+  await requireExecutionRequestProof(actor, params.workspaceId, packetRequest);
   const packet = buildExecutionPacket({ request: packetRequest, workspace });
   return packet;
 }
 
+function recentRows<T extends { id: string; updatedAt?: Date; recordedAt?: Date | null }>(records: T[], take: number) {
+  return [...records].sort((a, b) => ((b.recordedAt ?? b.updatedAt)?.getTime() ?? 0) - ((a.recordedAt ?? a.updatedAt)?.getTime() ?? 0)
+    || a.id.localeCompare(b.id)).slice(0, take);
+}
+
+async function readableExecutionMember(actor: AppActor, workspaceId: string, memberId: string | null, roots: LineageRoot[]) {
+  if (!memberId) return { id: null, name: null };
+  const member = await prisma.member.findFirst({ where: { id: memberId, workspaceId, isActive: true },
+    include: { user: { select: { id: true, displayName: true, email: true } } } });
+  if (!member?.user) return { id: null, name: null };
+  try {
+    roots.push(...await captureArtifactInputProof(actor, workspaceId, [
+      { kind: "Member", id: member.id, snapshot: member },
+      { kind: "User", id: member.user.id, snapshot: member.user },
+    ]));
+    return { id: member.id, name: memberName(member) };
+  } catch (error) {
+    if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_RESTRICTED", "SOURCE_CHANGED"].includes(error.code)) throw error;
+    return { id: null, name: null };
+  }
+}
+
+/** Meeting.recordedAt is required in storage. Order by that same date used by
+ * the response ranking so a recent sample never needs a full-history fold. */
+function meetingSampleAfter(after?: { id: string; recordedAt?: Date | null }): Prisma.MeetingWhereInput {
+  if (!after) return {};
+  invariant(after.recordedAt instanceof Date, 409, "SOURCE_CHANGED", "Meeting ordering is unavailable.");
+  return { OR: [{ recordedAt: { lt: after.recordedAt } }, { recordedAt: after.recordedAt, id: { gt: after.id } }] };
+}
+
+/** Keep only the permitted recent sample and its original receipts. Database
+ * pages use the same deterministic ranking as the returned sample. */
+async function recentExecutionInputs<T extends { id: string; updatedAt: Date; recordedAt?: Date | null }>(params: {
+  actor: AppActor; workspaceId: string; kind: LineageKind; take: number;
+  load: (after: NoInfer<T> | undefined) => Promise<T[]>;
+  release: WorkItemReadRelease;
+  matches?: (row: T) => boolean;
+  admit?: (row: T, proof: LineageRoot[]) => Promise<LineageRoot[] | null>;
+}) {
+  let after: T | undefined;
+  let selected: T[] = [];
+  const budget = createArtifactSampleBudget(params.take);
+  const proofs = new Map<string, LineageRoot[]>();
+  for (;;) {
+    budget.nextTake();
+    const batch = await params.load(after);
+    invariant(batch.length <= 100 && (!batch.length || batch.at(-1)!.id !== after?.id),
+      503, "SOURCE_READ_SCAN_CHANGED", "Execution context page changed; retry.");
+    budget.consume(batch.length, 100);
+    const next = batch.length ? structuredClone(batch.at(-1)!) : undefined;
+    const read = await params.release.observeRead(() => captureReadableDigestInputs({ ...params, records: batch.filter(row => !params.matches || params.matches(row)) }));
+    for (const row of read.records) {
+      const proof = params.admit ? await params.release.observeRead(() => params.admit!(row, read.proofs.get(row.id)!)) : read.proofs.get(row.id)!;
+      if (!proof) continue;
+      selected.push(row);
+      proofs.set(row.id, proof);
+    }
+    selected = recentRows(selected, params.take);
+    const ids = new Set(selected.map(row => row.id));
+    for (const id of proofs.keys()) if (!ids.has(id)) proofs.delete(id);
+    if (batch.length < 100 || selected.length === params.take) break;
+    after = next;
+  }
+  return { records: selected, proofs };
+}
+
 export async function getCompanyContext(actor: AppActor, workspaceId: string) {
-  requireExecutionScope(actor, "execution:read");
-  requireExecutionScope(actor, "workspace:read");
-  requireExecutionScope(actor, "actions:read");
-  requireExecutionScope(actor, "tensions:read");
-  requireExecutionScope(actor, "proposals:read");
-  requireExecutionScope(actor, "meetings:read");
-  requireExecutionScope(actor, "brain:read");
+  for (const scope of ["execution:read", "workspace:read", "actions:read", "tensions:read", "proposals:read", "meetings:read", "brain:read"] as const) requireExecutionScope(actor, scope);
   await requireWorkspaceMembership({ actor, workspaceId });
-
-  const [workspace, actions, tensions, proposals, meetings, articles] = await Promise.all([
-    prisma.workspace.findUnique({
-      where: { id: workspaceId },
-      select: { id: true, slug: true, name: true, description: true, plan: true },
-    }),
-    prisma.action.findMany({
-      where: { workspaceId, archivedAt: null, isPrivate: false },
-      select: {
-        id: true,
-        title: true,
-        status: true,
-        priority: true,
-        assigneeMemberId: true,
-        assigneeMember: { select: { user: { select: { displayName: true, email: true } } } },
-        dueAt: true,
-        updatedAt: true,
-      },
-      orderBy: { updatedAt: "desc" },
-      take: MAX_CONTEXT_ITEMS,
-    }),
-    prisma.tension.findMany({
-      where: { workspaceId, archivedAt: null, isPrivate: false },
-      select: {
-        id: true,
-        title: true,
-        status: true,
-        priority: true,
-        assigneeMemberId: true,
-        assigneeMember: { select: { user: { select: { displayName: true, email: true } } } },
-        raisedByMemberId: true,
-        raisedByMember: { select: { user: { select: { displayName: true, email: true } } } },
-        updatedAt: true,
-      },
-      orderBy: { updatedAt: "desc" },
-      take: MAX_CONTEXT_ITEMS,
-    }),
-    prisma.proposal.findMany({
-      where: { workspaceId, archivedAt: null, isPrivate: false },
-      select: {
-        id: true,
-        title: true,
-        summary: true,
-        status: true,
-        priority: true,
-        ownerMemberId: true,
-        ownerMember: { select: { user: { select: { displayName: true, email: true } } } },
-        updatedAt: true,
-      },
-      orderBy: { updatedAt: "desc" },
-      take: MAX_CONTEXT_ITEMS,
-    }),
-    prisma.meeting.findMany({
-      where: { workspaceId, archivedAt: null },
-      select: { id: true, title: true, status: true, recordedAt: true, summaryMd: true },
-      orderBy: { recordedAt: "desc" },
-      take: 10,
-    }),
-    prisma.brainArticle.findMany({
-      where: { workspaceId, archivedAt: null, isPrivate: false },
-      select: { id: true, slug: true, title: true, type: true, authority: true, updatedAt: true },
-      orderBy: { updatedAt: "desc" },
-      take: MAX_CONTEXT_ITEMS,
-    }),
-  ]);
+  sealArtifactInputActor(actor);
+  const release = new WorkItemReadRelease(actor, workspaceId);
+  const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId } });
   invariant(workspace, 404, "NOT_FOUND", "Workspace not found.");
-
-  const mappedActions = actions.map(({ assigneeMember, ...action }) => {
-    const assignee = memberName(assigneeMember);
-    return {
-      ...action,
-      priorityLabel: formatWorkItemPriority(action.priority),
-      assigneeMemberName: assignee,
-      assignee,
-    };
+  const roots = await release.observeRead(() => captureArtifactInputProof(actor, workspaceId, [{ kind: "Workspace", id: workspaceId, snapshot: workspace }]));
+  const recentQuery = (after: { id: string; updatedAt: Date } | undefined) => ({
+    where: { workspaceId, archivedAt: null, isPrivate: false,
+      ...(after ? { OR: [{ updatedAt: { lt: after.updatedAt } }, { updatedAt: after.updatedAt, id: { gt: after.id } }] } : {}),
+    }, orderBy: [{ updatedAt: "desc" as const }, { id: "asc" as const }], take: 100,
   });
-  const mappedTensions = tensions.map(({ assigneeMember, raisedByMember, ...tension }) => {
-    const responsiblePerson = memberName(assigneeMember);
-    const raisedBy = memberName(raisedByMember);
-    return {
-      ...tension,
-      priorityLabel: formatWorkItemPriority(tension.priority),
-      responsibleMemberId: tension.assigneeMemberId,
-      responsibleMemberName: responsiblePerson,
-      responsiblePerson,
-      raisedByMemberName: raisedBy,
-      raisedBy,
-    };
+  const read = { actor, workspaceId, take: MAX_CONTEXT_ITEMS, release };
+  const [actions, tensions, proposals, meetings, articles] = await Promise.all([
+    recentExecutionInputs<Action>({ ...read, kind: "Action", load: after => prisma.action.findMany(recentQuery(after)) }),
+    recentExecutionInputs<Tension>({ ...read, kind: "Tension", load: after => prisma.tension.findMany(recentQuery(after)) }),
+    recentExecutionInputs<Proposal>({ ...read, kind: "Proposal", load: after => prisma.proposal.findMany(recentQuery(after)) }),
+    recentExecutionInputs<Meeting>({ ...read, kind: "Meeting", take: 10,
+      load: after => prisma.meeting.findMany({ where: { workspaceId, archivedAt: null, ...meetingSampleAfter(after) },
+        orderBy: [{ recordedAt: "desc" }, { id: "asc" }], take: 100 }) }),
+    recentExecutionInputs<BrainArticle>({ ...read, kind: "BrainArticle", load: after => prisma.brainArticle.findMany(recentQuery(after)) }),
+  ]);
+  const select = <T extends { id: string; updatedAt?: Date; recordedAt?: Date | null }>(read: { records: T[]; proofs: Map<string, LineageRoot[]> }, take = MAX_CONTEXT_ITEMS) => {
+    const rows = recentRows(read.records, take);
+    for (const row of rows) roots.push(...(read.proofs.get(row.id) ?? []));
+    return rows;
+  };
+  const mapped = await release.observeRead(async () => {
+  const mappedActions = await Promise.all(select(actions).map(async (row) => {
+    const assignee = await readableExecutionMember(actor, workspaceId, row.assigneeMemberId, roots);
+    return { id: row.id, title: row.title, status: row.status, priority: row.priority, priorityLabel: formatWorkItemPriority(row.priority),
+      dueAt: row.dueAt, updatedAt: row.updatedAt, assigneeMemberId: assignee.id, assigneeMemberName: assignee.name, assignee: assignee.name };
+  }));
+  const mappedTensions = await Promise.all(select(tensions).map(async (row) => {
+    const [assignee, raisedBy] = await Promise.all([readableExecutionMember(actor, workspaceId, row.assigneeMemberId, roots),
+      readableExecutionMember(actor, workspaceId, row.raisedByMemberId, roots)]);
+    return { id: row.id, title: row.title, status: row.status, priority: row.priority, priorityLabel: formatWorkItemPriority(row.priority), updatedAt: row.updatedAt,
+      assigneeMemberId: assignee.id, responsibleMemberId: assignee.id, responsibleMemberName: assignee.name, responsiblePerson: assignee.name,
+      raisedByMemberId: raisedBy.id, raisedByMemberName: raisedBy.name, raisedBy: raisedBy.name };
+  }));
+  const mappedProposals = await Promise.all(select(proposals).map(async (row) => {
+    const owner = await readableExecutionMember(actor, workspaceId, row.ownerMemberId, roots);
+    return { id: row.id, title: row.title, summary: row.summary, status: row.status, priority: row.priority,
+      priorityLabel: formatWorkItemPriority(row.priority), updatedAt: row.updatedAt, ownerMemberId: owner.id, ownerMemberName: owner.name, owner: owner.name };
+  }));
+  const mappedMeetings = select(meetings, 10).map((row) => ({ id: row.id, title: row.title, status: row.status, recordedAt: row.recordedAt, summaryMd: row.summaryMd }));
+  const mappedArticles = select(articles).map((row) => ({ id: row.id, title: row.title, slug: row.slug, type: row.type, authority: row.authority, updatedAt: row.updatedAt }));
+  return { actions: mappedActions, tensions: mappedTensions, proposals: mappedProposals, meetings: mappedMeetings, articles: mappedArticles };
   });
-  const mappedProposals = proposals.map(({ ownerMember, ...proposal }) => {
-    const owner = memberName(ownerMember);
-    return {
-      ...proposal,
-      priorityLabel: formatWorkItemPriority(proposal.priority),
-      ownerMemberName: owner,
-      owner,
-    };
-  });
-
-  return redactJson({
-    workspace,
-    recent: { actions: mappedActions, tensions: mappedTensions, proposals: mappedProposals, meetings, articles },
-    policy: {
-      externalExecution: "External AI workspaces execute; Corgtex supplies scoped context, policy constraints, audit, and reviewable write-back.",
-      defaultWritebackMode: "draft_or_comment",
-    },
-  });
+  release.add(roots);
+  await requireWorkspaceMembership({ actor, workspaceId });
+  return release.finish(redactJson({ workspace: { id: workspace.id, slug: workspace.slug, name: workspace.name, description: workspace.description, plan: workspace.plan },
+    recent: mapped,
+    policy: { externalExecution: "External AI workspaces execute; Corgtex supplies scoped context, policy constraints, audit, and reviewable write-back.", defaultWritebackMode: "draft_or_comment" } }));
 }
 
 function targetTypeSet(targetTypes?: Array<string | ExecutionWritebackTargetType> | null) {
@@ -941,118 +1092,75 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const selectedTypes = targetTypeSet(params.targetTypes);
   const take = Math.min(Math.max(params.take ?? 10, 1), 50);
-  const title = titleMatches(params.query);
+  const query = params.query?.trim().toLocaleLowerCase() ?? "";
   const items: WritebackTargetSummary[] = [];
-
+  sealArtifactInputActor(actor);
+  const release = new WorkItemReadRelease(actor, params.workspaceId);
+  const roots = await release.observeRead(() => captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Workspace", id: params.workspaceId }]));
   const includeType = (type: ExecutionWritebackTargetType) => !selectedTypes || selectedTypes.has(type);
-  if (includeType("ACTION")) {
-    requireExecutionScope(actor, "actions:read");
-    const records = await prisma.action.findMany({
-      where: { workspaceId: params.workspaceId, archivedAt: null, ...privacyFilter(actor, membership), ...(title ? { title } : {}) },
-      select: { id: true, title: true, status: true },
-      orderBy: { updatedAt: "desc" },
-      take,
+  const native = [
+    ["ACTION", "Action", prisma.action, "/actions/"],
+    ["TENSION", "Tension", prisma.tension, "/tensions/"],
+    ["PROPOSAL", "Proposal", prisma.proposal, "/proposals/"],
+    ["MEETING", "Meeting", prisma.meeting, "/meetings/"],
+    ["BRAIN_ARTICLE", "BrainArticle", prisma.brainArticle, "/brain/"],
+    ["BUILD_ARTIFACT", "BuildArtifact", prisma.buildArtifact, "/build-artifacts/"],
+  ] as const;
+  for (const [type, kind, delegate, path] of native) {
+    if (!includeType(type)) continue;
+    requireExecutionScope(actor, targetReadScope(type));
+    const where = type === "BUILD_ARTIFACT" ? { workspaceId: params.workspaceId, NOT: OPERATIONAL_ARTIFACT_FILTER }
+      : type === "BRAIN_ARTICLE" ? { AND: [{ workspaceId: params.workspaceId, archivedAt: null }, { OR: brainArticlePrivacyFilter(actor, membership) }] }
+      : { workspaceId: params.workspaceId, archivedAt: null, ...(["ACTION", "TENSION", "PROPOSAL"].includes(type) ? privacyFilter(actor, membership) : {}) };
+    type TargetRow = { id: string; title: string | null; status?: string; authority?: string; slug?: string; updatedAt: Date; recordedAt?: Date | null };
+    const readable = await recentExecutionInputs<TargetRow>({ actor, workspaceId: params.workspaceId, kind, take, release,
+      matches: row => !query || Boolean(row.title?.toLocaleLowerCase().includes(query)),
+      load: after => (delegate.findMany as (args: unknown) => Promise<TargetRow[]>)({
+        where: after ? { AND: [where, type === "MEETING" ? meetingSampleAfter(after)
+          : { OR: [{ updatedAt: { lt: after.updatedAt } }, { updatedAt: after.updatedAt, id: { gt: after.id } }] }] } : where,
+        orderBy: type === "MEETING" ? [{ recordedAt: "desc" }, { id: "asc" }] : [{ updatedAt: "desc" }, { id: "asc" }], take: 100,
+      }),
     });
-    items.push(...records.map((record) => ({ type: "ACTION" as const, id: record.id, title: record.title, status: record.status, webPath: `/actions/${record.id}` })));
-  }
-  if (includeType("TENSION")) {
-    requireExecutionScope(actor, "tensions:read");
-    const records = await prisma.tension.findMany({
-      where: { workspaceId: params.workspaceId, archivedAt: null, ...privacyFilter(actor, membership), ...(title ? { title } : {}) },
-      select: { id: true, title: true, status: true },
-      orderBy: { updatedAt: "desc" },
-      take,
-    });
-    items.push(...records.map((record) => ({ type: "TENSION" as const, id: record.id, title: record.title, status: record.status, webPath: `/tensions/${record.id}` })));
-  }
-  if (includeType("PROPOSAL")) {
-    requireExecutionScope(actor, "proposals:read");
-    const records = await prisma.proposal.findMany({
-      where: { workspaceId: params.workspaceId, archivedAt: null, ...privacyFilter(actor, membership), ...(title ? { title } : {}) },
-      select: { id: true, title: true, status: true },
-      orderBy: { updatedAt: "desc" },
-      take,
-    });
-    items.push(...records.map((record) => ({ type: "PROPOSAL" as const, id: record.id, title: record.title, status: record.status, webPath: `/proposals/${record.id}` })));
-  }
-  if (includeType("MEETING")) {
-    requireExecutionScope(actor, "meetings:read");
-    const records = await prisma.meeting.findMany({
-      where: { workspaceId: params.workspaceId, archivedAt: null, ...(title ? { title } : {}) },
-      select: { id: true, title: true, status: true },
-      orderBy: { recordedAt: "desc" },
-      take,
-    });
-    items.push(...records.map((record) => ({ type: "MEETING" as const, id: record.id, title: record.title ?? "Untitled meeting", status: record.status, webPath: `/meetings/${record.id}` })));
-  }
-  if (includeType("BRAIN_ARTICLE")) {
-    requireExecutionScope(actor, "brain:read");
-    const records = await prisma.brainArticle.findMany({
-      where: {
-        AND: [
-          { workspaceId: params.workspaceId, archivedAt: null, ...(title ? { title } : {}) },
-          { OR: brainArticlePrivacyFilter(actor, membership) },
-        ],
-      },
-      select: { id: true, slug: true, title: true, authority: true },
-      orderBy: { updatedAt: "desc" },
-      take,
-    });
-    items.push(...records.map((record) => ({ type: "BRAIN_ARTICLE" as const, id: record.id, title: record.title, status: record.authority, webPath: `/brain/${record.slug}` })));
-  }
-  if (includeType("BUILD_ARTIFACT")) {
-    requireExecutionScope(actor, "workspace:read");
-    const records = await prisma.buildArtifact.findMany({
-      where: { workspaceId: params.workspaceId, ...(title ? { title } : {}), NOT: OPERATIONAL_ARTIFACT_FILTER },
-      select: { id: true, title: true, status: true },
-      orderBy: { updatedAt: "desc" },
-      take,
-    });
-    items.push(...records.map((record) => ({ type: "BUILD_ARTIFACT" as const, id: record.id, title: record.title, status: record.status, webPath: `/build-artifacts/${record.id}` })));
+    const records = readable.records;
+    for (const row of records) roots.push(...(readable.proofs.get(row.id) ?? []));
+    items.push(...records.map((row) => ({ type, id: row.id, title: row.title ?? "Untitled meeting", status: row.status ?? row.authority ?? null, webPath: `${path}${type === "BRAIN_ARTICLE" ? row.slug : row.id}` })));
   }
   if (includeType("CRM_COMMUNICATION")) {
     requireExecutionScope(actor, "relationships:read");
-    const records = await prisma.crmCommunicationSuggestion.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        ...activeCrmParentWhere(["account", "contact", "deal", "activity"]),
-        ...(title
-          ? {
-            OR: [
-              { title },
-              { subject: title },
-              { recipientEmail: title },
-              { recipientName: title },
-            ],
+    const readable = await recentExecutionInputs<CrmCommunicationSuggestion>({ actor, workspaceId: params.workspaceId, kind: "CrmCommunicationSuggestion", take, release,
+      load: after => prisma.crmCommunicationSuggestion.findMany({
+        where: { workspaceId: params.workspaceId, ...activeCrmParentWhere(["account", "contact", "deal", "activity"]),
+          ...(after ? { OR: [{ updatedAt: { lt: after.updatedAt } }, { updatedAt: after.updatedAt, id: { gt: after.id } }] } : {}) },
+        orderBy: [{ updatedAt: "desc" }, { id: "asc" }], take: 100,
+      }),
+      matches: row => !query || [row.title, row.subject, row.recipientEmail, row.recipientName].some(value => value?.toLocaleLowerCase().includes(query)),
+      admit: async (row, proof) => {
+        if (!await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, proof)) return null;
+        // Only sampled suggestions retain their independently admitted affiliation.
+        if (row.accountId) {
+          try { return [...proof, ...await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "CrmAccount", id: row.accountId }])]; }
+          catch (error) {
+            if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+            return null;
           }
-          : {}),
+        }
+        return proof;
       },
-      select: {
-        id: true,
-        title: true,
-        subject: true,
-        status: true,
-        accountId: true,
-      },
-      orderBy: { updatedAt: "desc" },
-      take,
     });
-    items.push(...records.map((record) => ({
-      type: "CRM_COMMUNICATION" as const,
-      id: record.id,
-      title: record.subject ?? record.title,
-      status: record.status,
-      webPath: record.accountId ? `/leads/accounts/${record.accountId}?view=review` : "/leads?view=review",
-    })));
+    const sampled = readable.records;
+    for (const row of sampled) roots.push(...(readable.proofs.get(row.id) ?? []));
+    items.push(...sampled.map((row) => ({ type: "CRM_COMMUNICATION" as const, id: row.id,
+      title: row.subject ?? row.title, status: row.status, webPath: row.accountId ? `/leads/accounts/${row.accountId}?view=review` : "/leads?view=review" })));
   }
   if (includeType("COMMENT")) {
+    roots.push(...await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Workspace", id: params.workspaceId }]));
     items.push({ type: "COMMENT", id: null, title: "Comment on execution request", status: null, webPath: "" });
   }
-
-  return { items: items.slice(0, take * 6) };
+  release.add(roots);
+  return release.finish({ items: items.slice(0, take * 6) });
 }
 
-async function validateCrmCommunicationResultOutput(workspaceId: string, targetId: string | null, output: JsonRecord,
+async function validateCrmCommunicationResultOutput(actor: AppActor, workspaceId: string, targetId: string | null, output: JsonRecord,
   client: Prisma.TransactionClient | typeof prisma = prisma) {
   invariant(targetId, 400, "INVALID_INPUT", "CRM communication result target id is required.");
   optionalDate(output.sentAt);
@@ -1061,10 +1169,11 @@ async function validateCrmCommunicationResultOutput(workspaceId: string, targetI
   if (conversationId) {
     const conversation = await client.crmConversation.findFirst({
       where: { id: conversationId, workspaceId, ...activeCrmParentWhere(["account", "contact", "deal"]) },
-      select: { id: true },
     });
     invariant(conversation, 404, "NOT_FOUND", "CRM conversation write-back target not found.");
+    return captureArtifactInputProof(actor, workspaceId, [{ kind: "CrmConversation", id: conversation.id, snapshot: conversation }], client);
   }
+  return [];
 }
 
 async function createCrmCommunicationWriteback(actor: AppActor, params: {
@@ -1072,10 +1181,10 @@ async function createCrmCommunicationWriteback(actor: AppActor, params: {
   targetId: string;
   output: JsonRecord;
   errorMessage: string | null;
-  requestCreatedByUserId: string | null;
+  lineageRoots?: LineageRoot[];
   transaction?: Prisma.TransactionClient;
 }) {
-  const writebackActor = requestOwnerActor({ createdByUserId: params.requestCreatedByUserId }, actor);
+  const writebackActor = actor;
   const conversationId = optionalString(params.output.conversationId);
   if (!params.errorMessage && params.transaction) {
     const conversation = conversationId ? await params.transaction.crmConversation.findUnique({ where: { id: conversationId } }) : null;
@@ -1092,6 +1201,7 @@ async function createCrmCommunicationWriteback(actor: AppActor, params: {
       workspaceId: params.workspaceId,
       suggestionId: params.targetId,
       failureReason: params.errorMessage,
+      lineageRoots: params.lineageRoots,
     }, params.transaction);
     return { entityType: "CrmCommunicationSuggestion", entityId: suggestion?.id ?? params.targetId };
   }
@@ -1100,13 +1210,15 @@ async function createCrmCommunicationWriteback(actor: AppActor, params: {
     workspaceId: params.workspaceId,
     suggestionId: params.targetId,
     sentAt: optionalDate(params.output.sentAt),
+    lineageRoots: params.lineageRoots,
   }, params.transaction);
 
   if (conversationId) {
     await createConversationMessage(writebackActor, {
       workspaceId: params.workspaceId,
       conversationId,
-      senderType: "ADMIN",
+      senderType: actor.kind === "user" ? "ADMIN" : "SYSTEM",
+      lineageRoots: params.lineageRoots, copied: true,
       senderEmail: optionalString(params.output.senderEmail) ?? undefined,
       bodyMd: optionalString(params.output.conversationBodyMd)
         ?? optionalString(params.output.messageBodyMd)
@@ -1126,7 +1238,8 @@ async function createNativeWriteback(actor: AppActor, params: {
   output: JsonRecord;
   requestId: string;
   resultId: string;
-  requestCreatedByUserId: string | null;
+  lineageRoots?: LineageRoot[];
+  transaction?: Prisma.TransactionClient;
 }) {
   if (params.type === "CRM_COMMUNICATION") {
     invariant(params.targetId, 400, "INVALID_INPUT", "CRM communication write-back target id is required.");
@@ -1135,13 +1248,13 @@ async function createNativeWriteback(actor: AppActor, params: {
       targetId: params.targetId,
       output: params.output,
       errorMessage: null,
-      requestCreatedByUserId: params.requestCreatedByUserId,
+      lineageRoots: params.lineageRoots, transaction: params.transaction,
     });
   }
   if (params.targetId || params.type === "COMMENT") {
     return { entityType: "ExecutionResult", entityId: params.resultId };
   }
-  const writebackActor = requestOwnerActor({ createdByUserId: params.requestCreatedByUserId }, actor);
+  const writebackActor = actor;
 
   switch (params.type) {
     case "ACTION": {
@@ -1150,8 +1263,10 @@ async function createNativeWriteback(actor: AppActor, params: {
         title: requiredString(params.output.title, "Action title"),
         bodyMd: optionalString(params.output.bodyMd) ?? optionalString(params.output.body) ?? null,
         isPrivate: true,
-        duplicateGuard: { onExact: "use_existing" },
+        lineageRoots: params.lineageRoots,
         source: { type: "EXECUTION_RESULT", id: params.resultId },
+        _tx: params.transaction,
+        _membership: await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx: params.transaction }),
       });
       return { entityType: "Action", entityId: action.id };
     }
@@ -1161,8 +1276,8 @@ async function createNativeWriteback(actor: AppActor, params: {
         title: requiredString(params.output.title, "Tension title"),
         bodyMd: optionalString(params.output.bodyMd) ?? optionalString(params.output.body) ?? null,
         isPrivate: true,
-        duplicateGuard: { onExact: "use_existing" },
-      });
+        lineageRoots: params.lineageRoots,
+      }, params.transaction);
       return { entityType: "Tension", entityId: tension.id };
     }
     case "PROPOSAL": {
@@ -1172,8 +1287,9 @@ async function createNativeWriteback(actor: AppActor, params: {
         summary: optionalString(params.output.summary),
         bodyMd: requiredString(params.output.bodyMd ?? params.output.body, "Proposal body"),
         isPrivate: true,
-        duplicateGuard: { onExact: "use_existing" },
-      });
+        lineageRoots: params.lineageRoots,
+        includeAiSummary: false,
+      }, params.transaction);
       return { entityType: "Proposal", entityId: proposal.id };
     }
     case "MEETING": {
@@ -1185,7 +1301,8 @@ async function createNativeWriteback(actor: AppActor, params: {
         recordedAt: optionalDate(params.output.recordedAt) ?? new Date(),
         transcript: optionalString(params.output.transcript),
         summaryMd: optionalString(params.output.summaryMd) ?? optionalString(params.output.summary),
-        duplicateGuard: { onExact: "use_existing" },
+        lineageRoots: params.lineageRoots,
+        copied: true, tx: params.transaction,
       });
       return { entityType: "Meeting", entityId: meeting.id };
     }
@@ -1198,7 +1315,8 @@ async function createNativeWriteback(actor: AppActor, params: {
         authority: enumValue(BrainArticleAuthority, params.output.authority, "DRAFT", "Brain article authority"),
         bodyMd: requiredString(params.output.bodyMd ?? params.output.body, "Brain article body"),
         isPrivate: true,
-        duplicateGuard: { onExact: "use_existing" },
+        completeInputRoots: params.lineageRoots,
+        tx: params.transaction,
       });
       return { entityType: "BrainArticle", entityId: article.id };
     }
@@ -1217,6 +1335,9 @@ async function createNativeWriteback(actor: AppActor, params: {
         status: enumValue(BuildArtifactStatus, params.output.status, "OPEN", "Build artifact status"),
         classification: enumValue(BuildArtifactClassification, params.output.classification, "INTERNAL", "Build artifact classification"),
         visibility: enumValue(BuildArtifactVisibility, params.output.visibility, "PRIVATE", "Build artifact visibility"),
+        copied: true,
+        lineageRoots: params.lineageRoots,
+        tx: params.transaction,
       });
       return { entityType: "BuildArtifact", entityId: artifact.id };
     }
@@ -1260,170 +1381,324 @@ function validateNativeWritebackOutput(type: ExecutionWritebackTargetType, targe
   }
 }
 
+/** The settled target/comment path creates only a private Result and fixed
+ * Request lifecycle fields. It consumes no intermediate Result body or native
+ * target body for a writeback; every actual input is preserved before mutation. */
+async function submitSettledExecutionResult(params: {
+  actor: AppActor; workspaceId: string; request: ExecutionRequest; originals: LineageRoot[];
+  idempotencyKey: string; targetType: ExecutionWritebackTargetType | null; targetId: string | null;
+  output: unknown; artifacts: unknown; errorMessage: string | null;
+}): Promise<ExecutionResult> {
+  const { actor, workspaceId, request: original, originals, idempotencyKey } = params;
+  const resultId = randomUUID();
+  const submittedAt = new Date();
+  const ownerBinding: SourceCommitOwnerBinding = { kind: "HUMAN_REQUEST", id: original.id,
+    generation: original.createdAt.getTime(), resultId, idempotencyKey };
+  const closure = await inspectStoredArtifactInputDependencies(prisma, workspaceId, originals);
+  invariant(closure.complete, 409, "UNKNOWN_LINEAGE", "Execution input closure cannot be preserved.");
+  const allocations: ArtifactInputSnapshotAllocation[] = [];
+  const snapshotTargets: SourceCommitWriteTarget[] = [];
+  const seen = new Set<string>();
+  for (const input of closure.roots) {
+    const key = JSON.stringify([input.kind, input.id, input.fingerprint]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    let sourceKind: string = input.kind;
+    let sourceId = input.id;
+    let sourceFingerprint = input.fingerprint;
+    if (input.kind === "ArtifactInputSnapshot") {
+      const saved = await prisma.artifactInputSnapshot.findFirst({ where: { id: input.id, workspaceId },
+        select: { sourceKind: true, sourceId: true, sourceFingerprint: true } });
+      invariant(saved, 409, "SOURCE_CHANGED", "Execution input history is unavailable.");
+      sourceKind = saved.sourceKind; sourceId = saved.sourceId; sourceFingerprint = saved.sourceFingerprint;
+    }
+    const id = randomUUID();
+    allocations.push({ input, id });
+    snapshotTargets.push({ kind: "ArtifactInputSnapshot", id, snapshotInput: input,
+      projectedAuthority: { sourceKind, sourceId, sourceFingerprint } });
+  }
+  let published = false;
+  // This callback attests native retained request controls, never source grants,
+  // membership or semantic input bodies before the source union is held.
+  const assertOwner = async (tx: Prisma.TransactionClient, binding: SourceCommitOwnerBinding) => {
+    invariant(binding.kind === "HUMAN_REQUEST" && binding.id === original.id && binding.generation === ownerBinding.generation
+      && binding.resultId === resultId && binding.idempotencyKey === idempotencyKey,
+    409, "SOURCE_OWNER_UNAVAILABLE", "Execution request owner binding changed.");
+    const [control] = await tx.$queryRaw<Array<Pick<ExecutionRequest,
+      "id" | "workspaceId" | "createdByUserId" | "agentCredentialId" | "status" | "createdAt">>>`
+      SELECT "id", "workspaceId", "createdByUserId", "agentCredentialId", "status", "createdAt"
+      FROM "ExecutionRequest" WHERE "id" = ${original.id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    invariant(control && control.createdAt.getTime() === binding.generation
+      && (actor.kind === "user" ? control.createdByUserId === actor.user.id
+        : actor.authProvider === "credential" && control.agentCredentialId === actor.credentialId),
+    409, "SOURCE_OWNER_UNAVAILABLE", "Execution request ownership changed.");
+    const existing = await tx.executionResult.findFirst({ where: { executionRequestId: original.id },
+      select: { id: true, idempotencyKey: true, status: true, submittedByUserId: true, agentCredentialId: true } });
+    if (!published) invariant(["PENDING", "IN_PROGRESS"].includes(control.status) && control.status === original.status && !existing,
+      409, "CONFLICT", "Execution request is no longer available for this result.");
+    else invariant(control.status === (params.errorMessage ? "FAILED" : "COMPLETED") && existing?.id === resultId
+      && existing.idempotencyKey === idempotencyKey && existing.status === (params.errorMessage ? "REJECTED" : "ACCEPTED")
+      && (actor.kind === "user" ? existing.submittedByUserId === actor.user.id : existing.agentCredentialId === actorCredentialId(actor)),
+    409, "SOURCE_OWNER_UNAVAILABLE", "Execution result lifecycle ownership changed.");
+  };
+  const preparationOptions = { ownerBinding, writeTargets: snapshotTargets };
+  const preparation = await prepareArtifactSourceCommit(actor, workspaceId, originals, preparationOptions);
+  const inputRoots = await prisma.$transaction(tx => withArtifactSourceCommit(actor, workspaceId, tx, originals,
+    preparationOptions, preparation, assertOwner, () => withArtifactInputSnapshotAllocations(actor, workspaceId, tx, allocations, async () => {
+      await assertArtifactInputWriteFence(tx);
+      await requireWorkspaceMembership({ actor, workspaceId, tx });
+      const frozen = await captureImmutableArtifactInputProof(actor, workspaceId, originals, tx);
+      await assertArtifactInputWriteFence(tx);
+      return frozen;
+    })), { maxWait: 5_000, timeout: 120_000 });
+  const terminalRequestStatus = params.errorMessage ? "FAILED" : "COMPLETED";
+  const terminalResultStatus = params.errorMessage ? "REJECTED" : "ACCEPTED";
+  const writeTargets: SourceCommitWriteTarget[] = [...snapshotTargets,
+    { kind: "ExecutionRequest", id: original.id, projectedAuthority: { status: terminalRequestStatus } },
+    { kind: "ExecutionResult", id: resultId, projectedAuthority: { executionRequestId: original.id,
+      submittedByUserId: actor.kind === "user" ? actor.user.id : null, agentCredentialId: actorCredentialId(actor),
+      status: terminalResultStatus, targetId: params.targetId } }];
+  const publicationOptions = { ownerBinding, writeTargets };
+  const publication = await prepareArtifactSourceCommit(actor, workspaceId, inputRoots, publicationOptions);
+  return prisma.$transaction(tx => withArtifactSourceCommit(actor, workspaceId, tx, inputRoots,
+    publicationOptions, publication, assertOwner, () => withArtifactInputSnapshotAllocations(actor, workspaceId, tx, allocations, async () => {
+      await assertArtifactInputWriteFence(tx);
+      await requireWorkspaceMembership({ actor, workspaceId, tx });
+      invariant(await isArtifactInputProofReadable(actor, workspaceId, originals, tx),
+        409, "SOURCE_CHANGED", "Execution inputs changed between preservation and publication.");
+      const before = await tx.executionRequest.findUnique({ where: { id: original.id } });
+      invariant(before && lineageContentFingerprint("ExecutionRequest", before) === lineageContentFingerprint("ExecutionRequest", original),
+        409, "SOURCE_CHANGED", "Execution request changed before publication.");
+      // A complete deterministic copy carries the unchanged old Request body and
+      // the actual submitted inputs through lifecycle changes without self cycles.
+      const requestReceipt = await prepareProducerLineage({ tx, actor, workspaceId,
+        artifact: { kind: "ExecutionRequest", id: original.id }, copied: true, completeCopy: true,
+        capture: { lineageInputs: [], lineageRoots: inputRoots } });
+      invariant(requestReceipt.mode === "DERIVED", 409, "UNKNOWN_LINEAGE", "Execution request inputs cannot be proven.");
+      const claim = await tx.executionRequest.updateMany({ where: { id: original.id, workspaceId,
+        status: original.status }, data: { status: "RESULT_SUBMITTED" } });
+      invariant(claim.count === 1, 409, "CONFLICT", "Execution request is no longer available for this result.");
+      const submitted = await tx.executionRequest.findUniqueOrThrow({ where: { id: original.id } });
+      await finishProducerLineage({ tx, actor, workspaceId, artifact: { kind: "ExecutionRequest", id: original.id },
+        content: submitted, receipt: requestReceipt });
+      const resultReceipt = await prepareProducerLineage({ tx, actor, workspaceId, copied: true, completeCopy: true,
+        capture: { lineageInputs: [], lineageRoots: inputRoots } });
+      invariant(resultReceipt.mode === "DERIVED", 409, "UNKNOWN_LINEAGE", "Execution result inputs cannot be proven.");
+      const result = await tx.executionResult.create({ data: { id: resultId, workspaceId, executionRequestId: original.id,
+        submittedByUserId: actor.kind === "user" ? actor.user.id : null, agentCredentialId: actorCredentialId(actor),
+        status: terminalResultStatus, idempotencyKey, targetType: params.targetType, targetId: params.targetId,
+        outputJson: jsonInput(params.output ?? null), artifactJson: jsonInput(params.artifacts ?? null), errorMessage: params.errorMessage,
+        writebackEntityType: params.errorMessage ? null : "ExecutionResult", writebackEntityId: params.errorMessage ? null : resultId,
+        submittedAt, acceptedAt: params.errorMessage ? null : submittedAt, rejectedAt: params.errorMessage ? submittedAt : null } });
+      await finishProducerLineage({ tx, actor, workspaceId, artifact: { kind: "ExecutionResult", id: resultId }, content: result, receipt: resultReceipt });
+      const completedRequest = await tx.executionRequest.update({ where: { id: original.id }, data: {
+        status: terminalRequestStatus, completedAt: params.errorMessage ? null : submittedAt, failedAt: params.errorMessage ? submittedAt : null } });
+      await finishProducerLineage({ tx, actor, workspaceId, artifact: { kind: "ExecutionRequest", id: original.id },
+        content: completedRequest, receipt: requestReceipt });
+      invariant((await readableArtifactIds(actor, workspaceId, "ExecutionResult", [result], tx)).has(result.id),
+        409, "SOURCE_CHANGED", "Execution result inputs changed before acceptance.");
+      await recordAudit(tx, actor, { workspaceId, action: "execution_result.submitted", entityType: "ExecutionRequest", entityId: original.id,
+        meta: { resultId, targetType: params.targetType, targetId: params.targetId, status: result.status,
+          writebackEntityType: result.writebackEntityType, writebackEntityId: result.writebackEntityId } });
+      await assertArtifactInputWriteFence(tx);
+      published = true;
+      return result;
+    })), { maxWait: 5_000, timeout: 120_000 });
+}
+
 export async function submitExecutionResult(actor: AppActor, params: SubmitExecutionResultParams) {
+  sealArtifactInputActor(actor);
+  params = { ...params, output: structuredClone(params.output), artifacts: structuredClone(params.artifacts),
+    lineageRoots: structuredClone(params.lineageRoots ?? []), lineageInputs: structuredClone(params.lineageInputs ?? []) };
+  const submissionRoots = getMcpToolInputRoots(actor, params.workspaceId);
   requireExecutionScope(actor, "execution:write");
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-
   const idempotencyKey = params.idempotencyKey.trim();
   invariant(idempotencyKey.length > 0, 400, "INVALID_INPUT", "Result idempotency key is required.");
-
   const output = objectInput(params.output);
   const errorMessage = optionalString(params.errorMessage);
-  const transactionResult = await prisma.$transaction(async (tx) => {
-    const claim = await tx.executionRequest.updateMany({
-      where: { ...executionRequestAccessWhere(actor, params.workspaceId, params.requestId),
-        status: { in: ["PENDING", "IN_PROGRESS"] } },
-      data: { status: "RESULT_SUBMITTED" },
+  const accessWhere = { ...executionRequestAccessWhere(actor, params.workspaceId, params.requestId),
+    ...(actor.kind === "user" ? { createdByUserId: actor.user.id } : {}) };
+  const original = await prisma.executionRequest.findFirst({ where: accessWhere });
+  invariant(original && (actor.kind === "user" ? original.createdByUserId === actor.user.id
+    : actor.authProvider === "credential" && original.agentCredentialId === actor.credentialId),
+  404, "NOT_FOUND", "Execution request not found.");
+  // Resolve a concurrent same-key winner from locked lifecycle metadata only.
+  // The retained payload is redeemed with its current complete proof after this
+  // control transaction has released its locks and native SDK calls are safe.
+  const reconcileCommittedResult = async () => {
+    const resultId = await prisma.$transaction(async tx => {
+      await lockArtifactReadAuthorityRows(actor, params.workspaceId, tx);
+      const [current] = await tx.$queryRaw<Array<Pick<ExecutionRequest,
+        "id" | "workspaceId" | "createdByUserId" | "agentCredentialId" | "status">>>`
+        SELECT "id", "workspaceId", "createdByUserId", "agentCredentialId", "status"
+        FROM "ExecutionRequest" WHERE "id" = ${original.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+      await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
+      if (!current || !(actor.kind === "user" ? current.createdByUserId === actor.user.id
+        : actor.authProvider === "credential" && current.agentCredentialId === actor.credentialId)
+        || !["COMPLETED", "FAILED"].includes(current.status)) return null;
+      const retained = await tx.executionResult.findUnique({ where: { executionRequestId_idempotencyKey: {
+        executionRequestId: current.id, idempotencyKey,
+      } }, select: { id: true, status: true } });
+      return retained && ["ACCEPTED", "REJECTED"].includes(retained.status) ? retained.id : null;
     });
-    if (claim.count !== 1) {
-      const current = await tx.executionRequest.findFirst({ where:
-        executionRequestAccessWhere(actor, params.workspaceId, params.requestId) });
-      invariant(current, 404, "NOT_FOUND", "Execution request not found.");
-      const existing = await tx.executionResult.findUnique({
-        where: { executionRequestId_idempotencyKey: { executionRequestId: current.id, idempotencyKey } },
-      });
-      invariant(["COMPLETED", "FAILED"].includes(current.status) && existing
-        && ["ACCEPTED", "REJECTED"].includes(existing.status), 409, "CONFLICT",
-      "Execution request already has a different or incomplete result.");
-      return { kind: "complete" as const, result: existing };
+    if (!resultId) return null;
+    const currentRequest = await prisma.executionRequest.findFirst({ where: accessWhere });
+    invariant(currentRequest, 404, "NOT_FOUND", "Execution request not found.");
+    await requireExecutionRequestProof(actor, params.workspaceId, currentRequest);
+    const retained = await prisma.executionResult.findUnique({ where: { id: resultId } });
+    invariant(retained && retained.executionRequestId === original.id && retained.idempotencyKey === idempotencyKey
+      && ["ACCEPTED", "REJECTED"].includes(retained.status), 409, "CONFLICT", "Execution result is no longer complete.");
+    invariant((await readableArtifactIds(actor, params.workspaceId, "ExecutionResult", [retained])).has(retained.id),
+      404, "NOT_FOUND", "Execution result not found.");
+    await requireExecutionRequestProof(actor, params.workspaceId, currentRequest);
+    return serializeIdempotentExecutionResult(retained);
+  };
+  try {
+    await requireExecutionRequestProof(actor, params.workspaceId, original);
+    if (!["PENDING", "IN_PROGRESS"].includes(original.status)) {
+      // A retry consumes the retained result, never the newly supplied body. All
+      // provider/source redemption stays outside a database write transaction.
+      const existing = await prisma.executionResult.findUnique({ where: { executionRequestId_idempotencyKey: {
+        executionRequestId: original.id, idempotencyKey,
+      } } });
+      invariant(["COMPLETED", "FAILED"].includes(original.status) && existing && ["ACCEPTED", "REJECTED"].includes(existing.status),
+        409, "CONFLICT", "Execution request already has a different or incomplete result.");
+      invariant((await readableArtifactIds(actor, params.workspaceId, "ExecutionResult", [existing])).has(existing.id),
+        404, "NOT_FOUND", "Execution result not found.");
+      await requireExecutionRequestProof(actor, params.workspaceId, original);
+      return serializeIdempotentExecutionResult(existing);
     }
-
-    const request = await tx.executionRequest.findFirst({ where:
-      executionRequestAccessWhere(actor, params.workspaceId, params.requestId) });
-    invariant(request, 404, "NOT_FOUND", "Execution request not found.");
-    const targetType = normalizeExecutionTargetType(params.targetType) ?? request.writebackTargetType;
-    const targetId = optionalString(params.targetId) ?? request.writebackTargetId;
-    if (request.writebackTargetType) {
-      invariant(targetType === request.writebackTargetType, 400, "INVALID_INPUT", "Result target type does not match the execution request.");
-    }
-    if (request.writebackTargetId) {
-      invariant(targetId === request.writebackTargetId, 400, "INVALID_INPUT", "Result target id does not match the execution request.");
-    }
-
-    if (targetType === "CRM_COMMUNICATION") {
-      invariant(targetId, 400, "INVALID_INPUT", "CRM communication result target id is required.");
-      const writeScope = targetWriteScope(targetType);
-      requireExecutionScope(actor, writeScope);
-      invariant(request.allowedScopes.includes(writeScope), 403, "FORBIDDEN", `Execution request does not allow the required scope: ${writeScope}.`);
-      await validateWritebackTarget(params.workspaceId, targetType, targetId, actor, membership, tx);
-      await validateCrmCommunicationResultOutput(params.workspaceId, targetId, output, tx);
-    } else if (!errorMessage) {
+    const submittedRoots = [...(params.lineageRoots ?? []), ...submissionRoots,
+      ...await captureArtifactInputProof(actor, params.workspaceId, params.lineageInputs ?? [])];
+    invariant(submittedRoots.length, 409, "UNKNOWN_LINEAGE", "External results require their actual submitted input receipt.");
+    const targetType = normalizeExecutionTargetType(params.targetType) ?? original.writebackTargetType;
+    const targetId = optionalString(params.targetId) ?? original.writebackTargetId;
+    if (original.writebackTargetType) invariant(targetType === original.writebackTargetType, 400, "INVALID_INPUT", "Result target type does not match the execution request.");
+    if (original.writebackTargetId) invariant(targetId === original.writebackTargetId, 400, "INVALID_INPUT", "Result target id does not match the execution request.");
+    let targetRoots: LineageRoot[] = [];
+    let target: WritebackTargetSummary | null = null;
+    if (targetType === "CRM_COMMUNICATION" || !errorMessage) {
       invariant(targetType, 400, "INVALID_INPUT", "Result target type is required.");
       const writeScope = targetWriteScope(targetType);
       requireExecutionScope(actor, writeScope);
-      invariant(request.allowedScopes.includes(writeScope), 403, "FORBIDDEN", `Execution request does not allow the required scope: ${writeScope}.`);
-      await validateWritebackTarget(params.workspaceId, targetType, targetId, actor, membership, tx);
-      validateNativeWritebackOutput(targetType, targetId ?? null, output);
+      invariant(original.allowedScopes.includes(writeScope), 403, "FORBIDDEN", `Execution request does not allow the required scope: ${writeScope}.`);
+      target = await validateWritebackTarget(params.workspaceId, targetType, targetId, actor, membership);
+      targetRoots = target?.lineageRoots ?? [];
+      if (targetType === "CRM_COMMUNICATION") targetRoots.push(...await validateCrmCommunicationResultOutput(actor, params.workspaceId, targetId, output));
+      else validateNativeWritebackOutput(targetType, targetId ?? null, output);
     }
-
-    const atomicWriteback = targetType === "CRM_COMMUNICATION" && targetId
-      ? await createCrmCommunicationWriteback(actor, { workspaceId: params.workspaceId, targetId, output, errorMessage,
-        requestCreatedByUserId: request.createdByUserId, transaction: tx }) : null;
-    const atomicCrm = targetType === "CRM_COMMUNICATION";
-    const finalizedAt = atomicCrm ? new Date() : null;
-    const created = await tx.executionResult.create({
-      data: {
-          workspaceId: params.workspaceId,
-          executionRequestId: request.id,
-          submittedByUserId: actor.kind === "user" ? actor.user.id : null,
-          agentCredentialId: actorCredentialId(actor),
-          status: atomicCrm ? (errorMessage ? "REJECTED" : "ACCEPTED") : "SUBMITTED",
-          idempotencyKey,
-          targetType,
-          targetId: targetId ?? null,
-          outputJson: jsonInput(params.output ?? null),
-          artifactJson: jsonInput(params.artifacts ?? null),
-          errorMessage,
-          writebackEntityType: atomicWriteback?.entityType ?? null,
-          writebackEntityId: atomicWriteback?.entityId ?? null,
-          acceptedAt: atomicCrm && !errorMessage ? finalizedAt : null,
-          rejectedAt: atomicCrm && errorMessage ? finalizedAt : null,
-      },
-    });
-
-    await tx.executionRequest.update({
-      where: { id: request.id },
-      data: atomicCrm ? { status: errorMessage ? "FAILED" : "COMPLETED",
-        completedAt: errorMessage ? null : finalizedAt, failedAt: errorMessage ? finalizedAt : null }
-        : { status: "RESULT_SUBMITTED" },
-    });
-
-    await recordAudit(tx, actor, {
-        workspaceId: params.workspaceId,
-        action: "execution_result.received",
-        entityType: "ExecutionRequest",
-        entityId: request.id,
-        meta: {
-          resultId: created.id,
-          targetType,
-          targetId: targetId ?? null,
-          outputSummary: redactJson({
-            keys: Object.keys(output).sort(),
-            artifactCount: Array.isArray(params.artifacts) ? params.artifacts.length : undefined,
-            hasError: Boolean(errorMessage),
-          }),
-        },
-    });
-
-    if (atomicCrm) await recordAudit(tx, actor, { workspaceId: params.workspaceId,
-      action: "execution_result.submitted", entityType: "ExecutionRequest", entityId: request.id,
-      meta: { resultId: created.id, targetType, targetId, status: created.status,
-        writebackEntityType: created.writebackEntityType, writebackEntityId: created.writebackEntityId } });
-    return atomicCrm
-      ? { kind: "complete" as const, result: created }
-      : { kind: "native" as const, result: created, request, targetType, targetId };
-  });
-
-  if (transactionResult.kind === "complete") return serializeIdempotentExecutionResult(transactionResult.result);
-  const { result: resultShell, request, targetType, targetId } = transactionResult;
-  const writeback = errorMessage || !targetType ? null : await createNativeWriteback(actor, {
-      workspaceId: params.workspaceId,
-      type: targetType,
-      targetId: targetId ?? null,
-      output,
-      requestId: request.id,
-      resultId: resultShell.id,
-      requestCreatedByUserId: request.createdByUserId,
-    });
-
-  const result = await prisma.$transaction(async (tx) => {
-    const updated = await tx.executionResult.update({
-      where: { id: resultShell.id },
-      data: {
-        status: errorMessage ? "REJECTED" : "ACCEPTED",
-        writebackEntityType: writeback?.entityType ?? null,
-        writebackEntityId: writeback?.entityId ?? null,
-        acceptedAt: errorMessage ? null : new Date(),
-        rejectedAt: errorMessage ? new Date() : null,
-      },
-    });
-
-    await tx.executionRequest.update({
-      where: { id: request.id },
-      data: {
-        status: errorMessage ? "FAILED" : "COMPLETED",
-        completedAt: errorMessage ? null : new Date(),
-        failedAt: errorMessage ? new Date() : null,
-      },
-    });
-
-    await recordAudit(tx, actor, {
-      workspaceId: params.workspaceId,
-      action: "execution_result.submitted",
-      entityType: "ExecutionRequest",
-      entityId: request.id,
-      meta: {
-        resultId: updated.id,
-        targetType,
-        targetId: targetId ?? null,
-        status: updated.status,
-        writebackEntityType: updated.writebackEntityType,
-        writebackEntityId: updated.writebackEntityId,
-      },
-    });
-
-    return updated;
-  });
-
-  return serializeExecutionResult(result);
+    const conversationId = targetType === "CRM_COMMUNICATION" ? optionalString(output.conversationId) : null;
+    const conversation = conversationId ? await prisma.crmConversation.findFirst({ where: {
+      id: conversationId, workspaceId: params.workspaceId, ...activeCrmParentWhere(["account", "contact", "deal"]),
+    } }) : null;
+    invariant(!conversationId || conversation, 404, "NOT_FOUND", "CRM conversation write-back target not found.");
+    const originals = [...submittedRoots, ...await captureArtifactInputProof(actor, params.workspaceId,
+      [{ kind: "ExecutionRequest", id: original.id, snapshot: original }]), ...targetRoots];
+    if (targetType !== "CRM_COMMUNICATION" && (Boolean(targetId) || targetType === "COMMENT")) {
+      const result = await submitSettledExecutionResult({ actor, workspaceId: params.workspaceId, request: original, originals,
+        idempotencyKey, targetType, targetId: targetId ?? null, output: params.output, artifacts: params.artifacts, errorMessage });
+      invariant((await readableArtifactIds(actor, params.workspaceId, "ExecutionResult", [result])).has(result.id),
+        404, "NOT_FOUND", "Execution result not found.");
+      return serializeIdempotentExecutionResult(result);
+    }
+    const lockAndVerify = async (tx: Prisma.TransactionClient) => {
+      await assertArtifactInputWriteFence(tx);
+      await lockArtifactReadAuthorityRows(actor, params.workspaceId, tx);
+      const [before] = await tx.$queryRaw<ExecutionRequest[]>`SELECT * FROM "ExecutionRequest" WHERE id = ${params.requestId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+      invariant(before && lineageContentFingerprint("ExecutionRequest", before) === lineageContentFingerprint("ExecutionRequest", original),
+        409, "SOURCE_CHANGED", "Execution request changed before result publication.");
+      await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
+      return before;
+    };
+    const lockSemanticTargets = async (tx: Prisma.TransactionClient) => {
+      if (targetType === "CRM_COMMUNICATION" && targetId) {
+        await lockActiveCommunicationSuggestion(tx, { workspaceId: params.workspaceId, suggestionId: targetId,
+          expectedLinks: target?.crmLinks, replacements: conversation ?? {} });
+        if (conversationId) await tx.$queryRaw`SELECT id FROM "CrmConversation" WHERE id = ${conversationId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+      }
+    };
+    const preparation = await prepareArtifactCommitPreflight(actor, params.workspaceId, originals);
+    const inputRoots = await prisma.$transaction(async tx => {
+      await lockAndVerify(tx);
+      return withArtifactCommitPreflight(actor, params.workspaceId, tx, originals, preparation, async () => {
+        const frozen = await captureImmutableArtifactInputProof(actor, params.workspaceId, originals, tx);
+        await assertArtifactInputWriteFence(tx);
+        return frozen;
+      }, { beforeSourceEpochs: () => lockSemanticTargets(tx) });
+    }, { maxWait: 5_000, timeout: 120_000 });
+    const publication = await prepareArtifactCommitPreflight(actor, params.workspaceId, inputRoots);
+    const result = await prisma.$transaction(async tx => {
+      const before = await lockAndVerify(tx);
+      return withArtifactCommitPreflight(actor, params.workspaceId, tx, inputRoots, publication, async () => {
+        invariant(await isArtifactInputProofReadable(actor, params.workspaceId, originals, tx),
+          409, "SOURCE_CHANGED", "Execution inputs changed between preparation and publication.");
+        await requireExecutionRequestProof(actor, params.workspaceId, before, tx);
+        const requestReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "ExecutionRequest", id: before.id }, before, allowSystemTransition: true });
+        if (requestReceipt.mode === "DERIVED") requestReceipt.roots = await captureImmutableArtifactInputProof(actor, params.workspaceId, requestReceipt.roots, tx);
+        const claim = await tx.executionRequest.updateMany({ where: { ...executionRequestAccessWhere(actor, params.workspaceId, before.id),
+          status: { in: ["PENDING", "IN_PROGRESS"] } }, data: { status: "RESULT_SUBMITTED" } });
+        invariant(claim.count === 1, 409, "CONFLICT", "Execution request is no longer available for a result.");
+        const request = await tx.executionRequest.findFirst({ where: executionRequestAccessWhere(actor, params.workspaceId, before.id) });
+        invariant(request, 404, "NOT_FOUND", "Execution request not found.");
+        await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "ExecutionRequest", id: request.id }, content: request, receipt: requestReceipt });
+        const resultReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, copied: true,
+          capture: { lineageInputs: [], lineageRoots: inputRoots } });
+        invariant(resultReceipt.mode !== "UNKNOWN", 409, "UNKNOWN_LINEAGE", "External result inputs cannot be proven.");
+        const created = await tx.executionResult.create({ data: {
+          workspaceId: params.workspaceId, executionRequestId: request.id,
+          submittedByUserId: actor.kind === "user" ? actor.user.id : null, agentCredentialId: actorCredentialId(actor),
+          status: "SUBMITTED", idempotencyKey, targetType, targetId: targetId ?? null,
+          outputJson: jsonInput(params.output ?? null), artifactJson: jsonInput(params.artifacts ?? null), errorMessage,
+          writebackEntityType: null, writebackEntityId: null, acceptedAt: null, rejectedAt: null,
+        } });
+        await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "ExecutionResult", id: created.id }, content: created, receipt: resultReceipt });
+        const writebackRoots = await captureImmutableArtifactInputProof(actor, params.workspaceId,
+          await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "ExecutionResult", id: created.id, snapshot: created }], tx), tx);
+        const writeback = targetType === "CRM_COMMUNICATION" && targetId
+          ? await createCrmCommunicationWriteback(actor, { workspaceId: params.workspaceId, targetId, output, errorMessage,
+            lineageRoots: writebackRoots, transaction: tx })
+          : !errorMessage && targetType ? await createNativeWriteback(actor, { workspaceId: params.workspaceId, type: targetType,
+            targetId: targetId ?? null, output, requestId: request.id, resultId: created.id,
+            lineageRoots: writebackRoots, transaction: tx }) : null;
+        const finalResultReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "ExecutionResult", id: created.id }, before: created, allowSystemTransition: true });
+        const finalRequestReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "ExecutionRequest", id: request.id }, before: request, allowSystemTransition: true });
+        if (finalResultReceipt.mode === "DERIVED") finalResultReceipt.roots = await captureImmutableArtifactInputProof(actor, params.workspaceId, finalResultReceipt.roots, tx);
+        if (finalRequestReceipt.mode === "DERIVED") finalRequestReceipt.roots = await captureImmutableArtifactInputProof(actor, params.workspaceId, finalRequestReceipt.roots, tx);
+        const finalizedAt = new Date();
+        const completed = await tx.executionResult.update({ where: { id: created.id }, data: {
+          status: errorMessage ? "REJECTED" : "ACCEPTED", writebackEntityType: writeback?.entityType ?? null,
+          writebackEntityId: writeback?.entityId ?? null, acceptedAt: errorMessage ? null : finalizedAt, rejectedAt: errorMessage ? finalizedAt : null,
+        } });
+        await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "ExecutionResult", id: completed.id }, content: completed, receipt: finalResultReceipt });
+        const completedRequest = await tx.executionRequest.update({ where: { id: request.id }, data: {
+          status: errorMessage ? "FAILED" : "COMPLETED", completedAt: errorMessage ? null : finalizedAt, failedAt: errorMessage ? finalizedAt : null,
+        } });
+        await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "ExecutionRequest", id: completedRequest.id }, content: completedRequest, receipt: finalRequestReceipt });
+        invariant((await readableArtifactIds(actor, params.workspaceId, "ExecutionResult", [completed], tx)).has(completed.id),
+          409, "SOURCE_CHANGED", "Execution result inputs changed before acceptance.");
+        await recordAudit(tx, actor, { workspaceId: params.workspaceId, action: "execution_result.submitted", entityType: "ExecutionRequest", entityId: request.id,
+          meta: { resultId: completed.id, targetType, targetId, status: completed.status, writebackEntityType: completed.writebackEntityType, writebackEntityId: completed.writebackEntityId } });
+        await assertArtifactInputWriteFence(tx);
+        await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
+        return completed;
+      }, { beforeSourceEpochs: () => lockSemanticTargets(tx) });
+    }, { maxWait: 5_000, timeout: 120_000 });
+    invariant((await readableArtifactIds(actor, params.workspaceId, "ExecutionResult", [result])).has(result.id),
+      404, "NOT_FOUND", "Execution result not found.");
+    return serializeIdempotentExecutionResult(result);
+  } catch (error) {
+    if (error instanceof AppError && ["SOURCE_CHANGED", "PERMISSION_CHANGED", "UNKNOWN_LINEAGE", "CONFLICT"].includes(error.code)) {
+      const committed = await reconcileCommittedResult();
+      if (committed) return committed;
+    }
+    throw error;
+  }
 }

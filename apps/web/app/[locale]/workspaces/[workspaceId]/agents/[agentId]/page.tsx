@@ -1,6 +1,6 @@
 import { requirePageActor } from "@/lib/auth";
 import { prisma } from "@corgtex/shared";
-import { getAgentIdentity } from "@corgtex/domain";
+import { getAgentIdentity, listAgentRuns, listCircles, listRoles } from "@corgtex/domain";
 import { AgentProfileClient } from "./AgentProfileClient";
 import { notFound } from "next/navigation";
 import Link from "next/link";
@@ -25,12 +25,7 @@ export default async function AgentProfilePage({
   }
 
   // Get last 10 runs
-  const recentRuns = await prisma.agentRun.findMany({
-    where: { workspaceId, agentKey: agent.agentKey },
-    orderBy: { createdAt: "desc" },
-    take: 10,
-    select: { id: true, goal: true, status: true, triggerType: true, createdAt: true },
-  });
+  const recentRuns = await listAgentRuns(actor, workspaceId, { agentKey: agent.agentKey, take: 10 });
 
   // Calculate 30-day spend
   const thirtyDaysAgo = new Date();
@@ -48,17 +43,9 @@ export default async function AgentProfilePage({
   const thirtyDaySpendUsd = costRaw ? Number(costRaw) : 0;
 
   // Circles
-  const allCircles = await prisma.circle.findMany({
-    where: { workspaceId },
-    select: { id: true, name: true },
-    orderBy: { name: "asc" },
-  });
-  
-  const allRoles = await prisma.role.findMany({
-    where: { circle: { workspaceId } },
-    select: { id: true, name: true },
-    orderBy: { name: "asc" },
-  });
+  const [circles, roles] = await Promise.all([listCircles(actor, workspaceId), listRoles(actor, workspaceId)]);
+  const allCircles = circles.map(({ id, name }) => ({ id, name }));
+  const allRoles = roles.map(({ id, name }) => ({ id, name }));
 
   return (
     <div className="flex-1 overflow-y-auto bg-stone-50/50">

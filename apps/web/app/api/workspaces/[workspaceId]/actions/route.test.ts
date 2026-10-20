@@ -1,6 +1,25 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// Keep real response/release orchestration; only the synthetic proof backend is mocked.
+const readBoundary = vi.hoisted(() => ({
+  admit: vi.fn(async (_actor: unknown, _workspaceId: string, kind: string, rows: Array<{id: string}>) => ({
+    ids: new Set(rows.map(row => row.id)), roots: rows.map(row => ({kind, id: row.id, fingerprint: JSON.stringify(row)})), heads: new Map(),
+  })),
+  finish: vi.fn(async (_actor: unknown, _workspaceId: string, _roots: unknown,
+    remote: () => Promise<void>, finish: (tx: object) => Promise<unknown>) => {await remote(); return finish({});}),
+}));
+vi.mock("../../../../../../../packages/domain/src/auth", () => ({requireWorkspaceMembership: vi.fn(async () => ({id: "member-1", role: "ADMIN"}))}));
+vi.mock("../../../../../../../packages/domain/src/source-lineage", () => ({
+  captureArtifactInputProof: async (_actor: unknown, _workspaceId: string, inputs: Array<{kind: string; id: string; snapshot?: unknown}>) =>
+    inputs.map(input => ({kind: input.kind, id: input.id, fingerprint: JSON.stringify(input.snapshot ?? input.id)})),
+  captureReadableWorkItemInputs: (...args: Parameters<typeof readBoundary.admit>) => readBoundary.admit(...args),
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  mergeLineageInputRoot: (_prior: unknown, root: unknown) => root,
+  withArtifactCountReleaseSnapshot: (...args: Parameters<typeof readBoundary.finish>) => readBoundary.finish(...args),
+}));
+
+
 const {
   actor,
   actionRequestSource,
@@ -20,7 +39,7 @@ const {
       id: "user-1",
       email: "user@example.com",
       displayName: "User",
-      globalRole: "USER",
+      globalRole: "USER" as const,
     },
   },
   actionRequestSource: vi.fn(() => ({ type: "API_REQUEST", id: "request-source-1" })),
@@ -55,6 +74,8 @@ vi.mock("@corgtex/domain", async () => {
   } = await import("../../../../../../../packages/domain/src/work-item-normalization");
 
   return {
+    ...await import("../../../../../../../packages/domain/src/work-item-readable-page"),
+    ...await import("../../../../../../../packages/domain/src/digest-lineage"),
     AppError,
     actionRequestSource,
     coerceWorkItemPriorityInput,
@@ -62,7 +83,15 @@ vi.mock("@corgtex/domain", async () => {
     deleteAction,
     formatWorkItemPriority,
     getWorkspacePermanentPathForEntity,
-    loadAdviceRequestCountSummaries,
+    loadAdviceRequestCountSummaries: async (...args: unknown[]) => {
+      const summaries = await loadAdviceRequestCountSummaries(...args);
+      const observe = args[4] as ((rows: Array<{id: string}>) => Promise<void>) | undefined;
+      const requests = [...summaries.entries()].flatMap(([id, summary]) =>
+        Array.from({length: summary.inputRequestCount ?? 0}, (_, index) => ({id: `${id}-request-${index}`})));
+      await observe?.(requests);
+      return summaries;
+    },
+    readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row: { id: string }) => row.id))),
     listActions,
     normalizeActionWorkItem,
     normalizeGoalWorkItem,
@@ -129,7 +158,7 @@ describe("GET /api/workspaces/[workspaceId]/actions", () => {
         title: "Follow up",
         priority: 2,
         assigneeMemberId: "member-2",
-        assigneeMember: { id: "member-2", user: { displayName: "Assignee", email: "assignee@example.test" } },
+        assigneeMember: { id: "member-2", userId: "user-member-2", user: { displayName: "Assignee", email: "assignee@example.test" } },
       }],
       total: 1,
       take: 50,
@@ -165,7 +194,7 @@ describe("GET /api/workspaces/[workspaceId]/actions", () => {
           activeAdviceRequestCount: null,
           inputRequestCount: null,
           activeInputRequestCount: null,
-          assigneeMember: { id: "member-2", user: { displayName: "Assignee", email: "assignee@example.test" } },
+          assigneeMember: { id: "member-2", userId: "user-member-2", user: { displayName: "Assignee", email: "assignee@example.test" } },
         }],
         total: 1,
         take: 50,
@@ -202,7 +231,7 @@ describe("POST /api/workspaces/[workspaceId]/actions", () => {
       status: "DRAFT",
       priority: 2,
       assigneeMemberId: "member-2",
-      assigneeMember: { id: "member-2", user: { displayName: "Assignee", email: "assignee@example.test" } },
+      assigneeMember: { id: "member-2", userId: "user-member-2", user: { displayName: "Assignee", email: "assignee@example.test" } },
     });
     loadAdviceRequestCountSummaries.mockResolvedValue(new Map([
       ["action-1", {
@@ -253,14 +282,19 @@ describe("POST /api/workspaces/[workspaceId]/actions", () => {
       webUrl: "https://app.corgtex.com/workspaces/workspace-1/actions/action-1",
       permanentUrl: null,
     });
-    expect(loadAdviceRequestCountSummaries).toHaveBeenCalledWith("workspace-1", "ACTION", ["action-1"]);
+    expect(loadAdviceRequestCountSummaries).toHaveBeenCalledWith(actor, "workspace-1", "ACTION", ["action-1"], expect.any(Function));
+    expect(readBoundary.finish).toHaveBeenCalledWith(actor, "workspace-1", expect.arrayContaining([
+      expect.objectContaining({kind: "Action", id: "action-1"}),
+      expect.objectContaining({kind: "Member", id: "member-2"}),
+      expect.objectContaining({kind: "User", id: "user-member-2"}),
+    ]), expect.any(Function), expect.any(Function), expect.any(Map));
   });
 
   it("rejects malformed JSON before creation", async () => {
     const { POST } = await import("./route");
     const response = await POST(new NextRequest("http://localhost/api/workspaces/workspace-1/actions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Idempotency-Key": "invalid-create" },
       body: "{",
     }), context());
 
@@ -269,6 +303,8 @@ describe("POST /api/workspaces/[workspaceId]/actions", () => {
       error: { code: "VALIDATION_ERROR", message: "Request body must be valid JSON." },
     });
     expect(createAction).not.toHaveBeenCalled();
+    expect(actionRequestSource).not.toHaveBeenCalled();
+    expect(prisma.action.findFirst).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -289,7 +325,7 @@ describe("POST /api/workspaces/[workspaceId]/actions", () => {
     ["object assigneeMemberId", { title: "Follow up", assigneeMemberId: {} }],
   ])("rejects %s before creation", async (_label, body) => {
     const { POST } = await import("./route");
-    const response = await POST(actionCreateRequest(body), context());
+    const response = await POST(actionCreateRequest(body, { "Idempotency-Key": "invalid-create" }), context());
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ error: { code: "VALIDATION_ERROR" } });
@@ -386,6 +422,9 @@ describe("POST /api/workspaces/[workspaceId]/actions", () => {
     expect(createAction).toHaveBeenCalledWith(requestActor, expect.objectContaining({
       source: { type: "API_REQUEST", id: "request-source-1" },
     }));
+    expect(readBoundary.admit).toHaveBeenCalledWith(requestActor, "workspace-1", "Action", expect.any(Array), prisma);
+    expect(loadAdviceRequestCountSummaries).toHaveBeenCalledWith(requestActor, "workspace-1", "ACTION", ["action-1"], expect.any(Function));
+    expect(readBoundary.finish).toHaveBeenCalledWith(requestActor, "workspace-1", expect.any(Array), expect.any(Function), expect.any(Function), expect.any(Map));
     await expect(response.json()).resolves.toMatchObject({
       webUrl: "https://app.corgtex.com/workspaces/workspace-1/actions/action-1",
       permanentUrl: "https://app.corgtex.com/p/workspace-1/action-1",
@@ -400,6 +439,60 @@ describe("POST /api/workspaces/[workspaceId]/actions", () => {
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toEqual({ error: { code: "FORBIDDEN", message: "Workspace membership required." } });
     expect(createAction).not.toHaveBeenCalled();
+  });
+
+  it("rejects unauthorized malformed JSON before parsing, source binding, or writes", async () => {
+    requireWorkspaceMembership.mockRejectedValueOnce(routeError(403, "FORBIDDEN", "Workspace membership required."));
+    const { POST } = await import("./route");
+    const req = new NextRequest("http://localhost/api/workspaces/workspace-1/actions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": "unauthorized-create" },
+      body: "{",
+    });
+    const parseBody = vi.spyOn(req, "json");
+    const response = await POST(req, context());
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ error: { code: "FORBIDDEN", message: "Workspace membership required." } });
+    expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor, workspaceId: "workspace-1" });
+    expect(parseBody).not.toHaveBeenCalled();
+    expect(actionRequestSource).not.toHaveBeenCalled();
+    expect(createAction).not.toHaveBeenCalled();
+    expect(getWorkspacePermanentPathForEntity).not.toHaveBeenCalled();
+    expect(prisma.action.findFirst).not.toHaveBeenCalled();
+    expect(readBoundary.admit).not.toHaveBeenCalled();
+  });
+
+  it("returns only the id and contentWithheld when the created action is unreadable", async () => {
+    readBoundary.admit.mockResolvedValueOnce({ ids: new Set(), roots: [], heads: new Map() });
+    const { POST } = await import("./route");
+    const response = await POST(actionCreateRequest({ title: "Follow up" }), context());
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toEqual({
+      action: { id: "action-1", contentWithheld: true },
+      webUrl: "https://app.corgtex.com/workspaces/workspace-1/actions/action-1",
+      permanentUrl: null,
+    });
+    expect(prisma.action.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "action-1", workspaceId: "workspace-1" },
+    }));
+    expect(readBoundary.admit).toHaveBeenCalledWith(actor, "workspace-1", "Action", expect.any(Array), prisma);
+    expect(loadAdviceRequestCountSummaries).not.toHaveBeenCalled();
+    expect(readBoundary.finish).not.toHaveBeenCalled();
+  });
+
+  it("returns a safe error without created content when final response release fails", async () => {
+    readBoundary.finish.mockRejectedValueOnce(new Error("Synthetic final release denied: private action content"));
+    const { POST } = await import("./route");
+    const response = await POST(actionCreateRequest({ title: "Follow up" }), context());
+
+    expect(createAction).toHaveBeenCalledOnce();
+    expect(readBoundary.finish).toHaveBeenCalledOnce();
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "INTERNAL_ERROR", message: "Unexpected server error." },
+    });
   });
 });
 
@@ -419,7 +512,7 @@ describe("PATCH /api/workspaces/[workspaceId]/actions/[actionId]", () => {
       priority: 3,
       assigneeMemberId: "member-2",
       version: 3,
-      assigneeMember: { id: "member-2", user: { displayName: "Assignee", email: "assignee@example.test" } },
+      assigneeMember: { id: "member-2", userId: "user-member-2", user: { displayName: "Assignee", email: "assignee@example.test" } },
     });
     loadAdviceRequestCountSummaries.mockResolvedValue(new Map([
       ["action-1", {
@@ -563,4 +656,12 @@ describe("PATCH /api/workspaces/[workspaceId]/actions/[actionId]", () => {
     expect(response.status).toBe(status);
     await expect(response.json()).resolves.toEqual({ error: { code, message } });
   });
+});
+
+it("withholds the action response when its final release rejects", async () => {
+  prisma.action.findFirst.mockResolvedValue({id: "action-release", assigneeMember: null, raisedByMember: null, upvotes: []});
+  loadAdviceRequestCountSummaries.mockResolvedValue(new Map());
+  readBoundary.finish.mockRejectedValueOnce(new Error("Synthetic final release denied"));
+  const {loadActionWorkItemResponse} = await import("@/lib/work-item-api");
+  await expect(loadActionWorkItemResponse(actor, "workspace-1", "action-release")).rejects.toThrow("Synthetic final release denied");
 });

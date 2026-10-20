@@ -56,6 +56,15 @@ export function authorizationContextTelemetryAttributes(
 }
 
 export async function register() {
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    await import("@corgtex/connectors-sql/native-driver");
+  }
+  // Runtime-only: builds and installations without Redis need no transcript key.
+  if (process.env.NEXT_RUNTIME === "nodejs" && process.env.NEXT_PHASE !== "phase-production-build"
+    && process.env.REDIS_URL?.trim()) {
+    const { assertPendingTranscriptStorageConfiguration } = await import("./lib/pending-transcript-upload");
+    assertPendingTranscriptStorageConfiguration();
+  }
   if (process.env.NEXT_RUNTIME === "nodejs" || process.env.NEXT_RUNTIME === "edge") {
     Sentry.init({
       dsn: process.env.SENTRY_DSN ?? process.env.NEXT_PUBLIC_SENTRY_DSN,

@@ -3,9 +3,15 @@ import { Prisma } from "@prisma/client";
 import { env, prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { defaultModelGateway, resolveModel } from "@corgtex/models";
+import type { ModelAttemptGuard } from "@corgtex/models";
 import {
   AGENT_REGISTRY,
   checkSlackThreadNudge,
+  captureArtifactInputProof,
+  invariant,
+  isArtifactInputProofReadable,
+  lineageContentFingerprint,
+  recordArtifactInputLineage,
   createWorkItemFromCommunicationSource,
   getAgentModelOverride,
   isAgentEnabled,
@@ -119,6 +125,38 @@ async function readSlackAgentConfig(workspaceId: string) {
   return slackAgentConfig(config?.configJson);
 }
 
+/** Replays the original prompt receipt after credential resolution and on every retry. */
+function slackInputAttemptGuard(params: {
+  actor: AppActor;
+  workspaceId: string;
+  proof: Awaited<ReturnType<typeof captureArtifactInputProof>>;
+  channelIds: string[];
+  proactive?: boolean;
+  currentPolicyAllowsSend?: () => Promise<boolean>;
+}): ModelAttemptGuard {
+  return async ({ signal }) => {
+    signal.throwIfAborted();
+    const config = await readSlackAgentConfig(params.workspaceId);
+    signal.throwIfAborted();
+    invariant(config.publicIngestionEnabled && (!params.proactive || config.proactiveEnabled)
+      && params.channelIds.every((id) => !config.mutedChannelIds.includes(id)),
+    409, "SOURCE_CHANGED", "Slack source ingestion was disabled.");
+    if (params.proactive) {
+      const enabled = await isAgentEnabled(params.workspaceId, "slack-agent");
+      signal.throwIfAborted();
+      invariant(enabled, 409, "SOURCE_CHANGED", "Slack agent was disabled.");
+    }
+    if (params.currentPolicyAllowsSend) {
+      const allowed = await params.currentPolicyAllowsSend();
+      signal.throwIfAborted();
+      invariant(allowed, 409, "SOURCE_CHANGED", "Slack nudge policy changed.");
+    }
+    const readable = await isArtifactInputProofReadable(params.actor, params.workspaceId, params.proof);
+    signal.throwIfAborted();
+    invariant(readable, 409, "SOURCE_CHANGED", "Slack inputs changed or are no longer readable.");
+  };
+}
+
 export async function runSlackContextSummary(params: {
   workspaceId: string;
   installationId: string;
@@ -126,6 +164,7 @@ export async function runSlackContextSummary(params: {
   threadTs?: string | null;
   dayISO: string;
   workflowJobId?: string;
+  signal?: AbortSignal;
 }) {
   const config = await readSlackAgentConfig(params.workspaceId);
   if (!config.publicIngestionEnabled || config.mutedChannelIds.includes(params.channelId)) {
@@ -138,14 +177,24 @@ export async function runSlackContextSummary(params: {
       workspaceId: params.workspaceId,
       provider: "SLACK",
       status: "ACTIVE",
+      disconnectedAt: null,
     },
     select: { id: true },
   });
   if (!installation) return { skipped: true, reason: "slack_installation_missing" };
 
+  const channel = await prisma.communicationChannel.findFirst({
+    where: {
+      installationId: params.installationId, workspaceId: params.workspaceId,
+      provider: "SLACK", externalChannelId: params.channelId,
+      kind: "PUBLIC", isIngestEnabled: true, isArchived: false,
+    },
+  });
+  if (!channel) return { skipped: true, reason: "slack_channel_unavailable" };
+
   const { start, end } = dayBounds(params.dayISO);
   const threadTs = params.threadTs?.trim() || null;
-  const messages = await prisma.communicationMessage.findMany({
+  const messageQuery = {
     where: {
       workspaceId: params.workspaceId,
       installationId: params.installationId,
@@ -161,29 +210,24 @@ export async function runSlackContextSummary(params: {
         ? { OR: [{ externalMessageId: threadTs }, { threadExternalId: threadTs }] }
         : {}),
     },
-    orderBy: { messageTs: "asc" },
+    orderBy: [{ messageTs: "asc" as const }, { id: "asc" as const }],
     take: 120,
-  });
+  } satisfies Prisma.CommunicationMessageFindManyArgs;
+  const messages = await prisma.communicationMessage.findMany(messageQuery);
+  // A retention/privacy change must withhold the old receipt without deleting
+  // the original summary or certifying an empty replacement.
+  if (messages.length === 0) return { skipped: true, reason: "no_messages" };
 
-  if (messages.length === 0) {
-    await prisma.communicationContextSummary.deleteMany({
-      where: {
-        installationId: params.installationId,
-        summaryKey: summaryKey(params.channelId, threadTs, params.dayISO),
-      },
-    });
-    return { skipped: true, reason: "no_messages" };
-  }
+  const key = summaryKey(params.channelId, threadTs, params.dayISO);
+  const summaryWhere = { installationId_summaryKey: { installationId: params.installationId, summaryKey: key } };
+  const previous = await prisma.communicationContextSummary.findUnique({ where: summaryWhere });
+  invariant(!previous || previous.workspaceId === params.workspaceId, 409, "SOURCE_CHANGED", "The summary belongs to a different workspace.");
+  const actor: AppActor = { kind: "agent", authProvider: "bootstrap", label: "slack-agent", workspaceIds: [params.workspaceId] };
+  const proof = await captureArtifactInputProof(actor, params.workspaceId, [
+    { kind: "CommunicationChannel", id: channel.id, snapshot: channel },
+    ...messages.map((message) => ({ kind: "CommunicationMessage" as const, id: message.id, snapshot: message })),
+  ]);
 
-  const channel = await prisma.communicationChannel.findUnique({
-    where: {
-      installationId_externalChannelId: {
-        installationId: params.installationId,
-        externalChannelId: params.channelId,
-      },
-    },
-    select: { name: true },
-  });
   const channelLabel = channel?.name ? `#${channel.name}` : params.channelId;
   const transcript = messages.map((message) => {
     const speaker = message.externalUserId ?? "unknown";
@@ -194,6 +238,8 @@ export async function runSlackContextSummary(params: {
   const model = resolveModel(AGENT_REGISTRY["slack-agent"].defaultModelTier);
   const response = await defaultModelGateway.chat({
     model,
+    signal: params.signal,
+    authorizeAttempt: slackInputAttemptGuard({ actor, workspaceId: params.workspaceId, proof, channelIds: [params.channelId] }),
     workspaceId: params.workspaceId,
     workflowJobId: params.workflowJobId,
     taskType: "SUMMARY",
@@ -216,42 +262,68 @@ export async function runSlackContextSummary(params: {
 
   const first = messages[0];
   const last = messages[messages.length - 1];
-  const key = summaryKey(params.channelId, threadTs, params.dayISO);
-  await prisma.communicationContextSummary.upsert({
-    where: {
-      installationId_summaryKey: {
-        installationId: params.installationId,
-        summaryKey: key,
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`slack_summary:${params.installationId}:${key}`}, 0))`;
+    await tx.$queryRaw`SELECT "id" FROM "CommunicationInstallation" WHERE "id" = ${params.installationId} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+    await tx.$queryRaw`SELECT "id" FROM "CommunicationChannel" WHERE "id" = ${channel.id} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+    await tx.$queryRaw`SELECT "id" FROM "CommunicationMessage" WHERE "workspaceId" = ${params.workspaceId} AND "id" IN (${Prisma.join(messages.map((message) => message.id).sort())}) ORDER BY "id" FOR SHARE`;
+    await tx.$queryRaw`SELECT "id" FROM "CommunicationContextSummary" WHERE "installationId" = ${params.installationId} AND "summaryKey" = ${key} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    const current = await tx.communicationContextSummary.findUnique({ where: summaryWhere });
+    invariant(previous ? current?.id === previous.id && current.updatedAt.getTime() === previous.updatedAt.getTime()
+      && lineageContentFingerprint("CommunicationContextSummary", current) === lineageContentFingerprint("CommunicationContextSummary", previous) : !current,
+    409, "SOURCE_CHANGED", "A newer Slack summary already exists.");
+    const currentMessages = await tx.communicationMessage.findMany(messageQuery);
+    invariant(currentMessages.length === messages.length && currentMessages.every((message, index) => message.id === messages[index].id),
+      409, "SOURCE_CHANGED", "The Slack message set changed during summarization.");
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, proof, tx),
+      409, "SOURCE_CHANGED", "Slack summary inputs changed or are no longer readable.");
+    const currentConfig = await tx.workspaceAgentConfig.findUnique({
+      where: { workspaceId_agentKey: { workspaceId: params.workspaceId, agentKey: "slack-agent" } }, select: { configJson: true },
+    });
+    const commitConfig = slackAgentConfig(currentConfig?.configJson);
+    invariant(commitConfig.publicIngestionEnabled && !commitConfig.mutedChannelIds.includes(params.channelId),
+      409, "SOURCE_CHANGED", "Slack context ingestion was disabled.");
+    const summary = await tx.communicationContextSummary.upsert({
+      where: {
+        installationId_summaryKey: {
+          installationId: params.installationId,
+          summaryKey: key,
+        },
       },
-    },
-    update: {
-      title: `Slack ${channelLabel} ${threadTs ? "thread" : "channel"} ${params.dayISO}`,
-      summaryMd: response.content.trim(),
-      messageCount: messages.length,
-      firstMessageTs: first.messageTs,
-      lastMessageTs: last.messageTs,
-      lastMessageExternalId: last.externalMessageId,
-      sourceMessageIds: messages.map((message) => message.id),
-      metadata: toInputJson({ channel: channelLabel, threadTs, dayISO: params.dayISO, workflowJobId: params.workflowJobId }),
-    },
-    create: {
-      installationId: params.installationId,
-      workspaceId: params.workspaceId,
-      provider: "SLACK",
-      externalChannelId: params.channelId,
-      threadExternalId: threadTs,
-      summaryDate: start,
-      summaryKey: key,
-      title: `Slack ${channelLabel} ${threadTs ? "thread" : "channel"} ${params.dayISO}`,
-      summaryMd: response.content.trim(),
-      messageCount: messages.length,
-      firstMessageTs: first.messageTs,
-      lastMessageTs: last.messageTs,
-      lastMessageExternalId: last.externalMessageId,
-      sourceMessageIds: messages.map((message) => message.id),
-      metadata: toInputJson({ channel: channelLabel, threadTs, dayISO: params.dayISO, workflowJobId: params.workflowJobId }),
-    },
-  });
+      update: {
+        title: `Slack ${channelLabel} ${threadTs ? "thread" : "channel"} ${params.dayISO}`,
+        summaryMd: response.content.trim(),
+        messageCount: messages.length,
+        firstMessageTs: first.messageTs,
+        lastMessageTs: last.messageTs,
+        lastMessageExternalId: last.externalMessageId,
+        sourceMessageIds: messages.map((message) => message.id),
+        metadata: toInputJson({ channel: channelLabel, threadTs, dayISO: params.dayISO, workflowJobId: params.workflowJobId }),
+      },
+      create: {
+        installationId: params.installationId,
+        workspaceId: params.workspaceId,
+        provider: "SLACK",
+        externalChannelId: params.channelId,
+        threadExternalId: threadTs,
+        summaryDate: start,
+        summaryKey: key,
+        title: `Slack ${channelLabel} ${threadTs ? "thread" : "channel"} ${params.dayISO}`,
+        summaryMd: response.content.trim(),
+        messageCount: messages.length,
+        firstMessageTs: first.messageTs,
+        lastMessageTs: last.messageTs,
+        lastMessageExternalId: last.externalMessageId,
+        sourceMessageIds: messages.map((message) => message.id),
+        metadata: toInputJson({ channel: channelLabel, threadTs, dayISO: params.dayISO, workflowJobId: params.workflowJobId }),
+      },
+    });
+    await recordArtifactInputLineage({
+      tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CommunicationContextSummary", id: summary.id }, content: summary,
+      origin: "DERIVED", inputs: [], inheritedRoots: proof,
+    });
+  }, { timeout: 30_000 });
 
   return { summarized: true, messageCount: messages.length };
 }
@@ -483,7 +555,7 @@ async function fetchLinkedAnswerEvidence(params: {
     .filter((ts) => /^\d+\.\d{6}$/.test(ts))
     .map((ts) => `/archives/${params.source.externalChannelId}/p${ts.replace(".", "")}`);
   const referencePattern = new RegExp(`(?:^|[\\s<(])https://[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.enterprise)?\\.slack\\.com(?:${references.map(escapeRegExp).join("|")})(?=[?\\s>|]|$)`, "i");
-  if (!references.length || !params.source.messageTs) return { messages: [], limited: true, truncated: false };
+  if (!references.length || !params.source.messageTs) return { records: [], evidence: { messages: [], limited: true, truncated: false } };
   const since = new Date(Math.max(params.source.messageTs.getTime(), now.getTime() - 14 * 24 * 60 * 60 * 1000));
   const messages = await prisma.communicationMessage.findMany({
     where: {
@@ -515,7 +587,7 @@ async function fetchLinkedAnswerEvidence(params: {
     && message.messageTs && message.messageTs >= since && message.messageTs <= now
     && !(message.externalChannelId === params.source.externalChannelId && (message.externalMessageId === threadTs || message.threadExternalId === threadTs))
     && referencePattern.test(message.text ?? ""));
-  return {
+  return { records: eligible, evidence: {
     messages: eligible.map((message) => ({
       id: message.id, channelId: message.externalChannelId, messageTs: message.messageTs!.toISOString(),
       text: message.text!.slice(0, MAX_LINKED_ANSWER_TEXT),
@@ -523,7 +595,7 @@ async function fetchLinkedAnswerEvidence(params: {
     // This lookup is never an exhaustive search for all answers in Slack.
     limited: true,
     truncated: messages.length > MAX_LINKED_ANSWER_MESSAGES || eligible.some((message) => message.text!.length > MAX_LINKED_ANSWER_TEXT),
-  };
+  } };
 }
 
 async function reviewThreadForAction(params: {
@@ -534,9 +606,16 @@ async function reviewThreadForAction(params: {
   nudgeCreatedAt: Date;
   threadMessages: SlackCandidateMessage[];
   linkedActionId?: string | null;
+  signal?: AbortSignal;
+  actor: AppActor;
 }) {
+  const proof = await captureArtifactInputProof(params.actor, params.workspaceId, [params.source, ...params.threadMessages]
+    .map((message) => ({ kind: "CommunicationMessage" as const, id: message.id, snapshot: message })));
   const extraction = await defaultModelGateway.extract({
     model: params.model,
+    signal: params.signal,
+    authorizeAttempt: slackInputAttemptGuard({ actor: params.actor, workspaceId: params.workspaceId, proof,
+      channelIds: [params.source.externalChannelId, ...params.threadMessages.map((message) => message.externalChannelId)], proactive: true }),
     workspaceId: params.workspaceId,
     workflowJobId: params.workflowJobId,
     instruction: [
@@ -648,10 +727,17 @@ export async function runSlackProactiveScan(params: {
   workspaceId: string;
   installationId: string;
   workflowJobId?: string;
+  signal?: AbortSignal;
 }) {
   if (!await isAgentEnabled(params.workspaceId, "slack-agent")) {
     return { skipped: true, reason: "slack_agent_disabled" };
   }
+  const agentActor: AppActor = {
+    kind: "agent",
+    authProvider: "bootstrap",
+    label: "slack-agent",
+    workspaceIds: [params.workspaceId],
+  };
   const config = await readSlackAgentConfig(params.workspaceId);
   if (!config.publicIngestionEnabled || !config.proactiveEnabled) {
     return { skipped: true, reason: "slack_proactive_disabled" };
@@ -845,7 +931,7 @@ export async function runSlackProactiveScan(params: {
 
     if (firstNudgeReviews >= MAX_FIRST_NUDGE_REVIEWS) break;
     if (!await currentNudgePolicyAllowsSend()) break;
-    const linkedAnswers = await fetchLinkedAnswerEvidence({ ...params, source: candidate, channelIds });
+    const { evidence: linkedAnswers, records: linkedAnswerRecords } = await fetchLinkedAnswerEvidence({ ...params, source: candidate, channelIds });
     const evidenceSnapshot = JSON.stringify(linkedAnswers);
     const textHash = createHash("sha256").update(JSON.stringify({ text: candidate.text, sourceMessageTs: candidate.messageTs, linkedAnswers })).digest("hex").slice(0, 16);
     const nonActionClaimKey = `${cachePrefix}${textHash}`;
@@ -862,8 +948,14 @@ export async function runSlackProactiveScan(params: {
     firstNudgeReviews += 1;
     // Silence and punctuation are only candidate signals, not permission to interrupt.
     const reviewedAt = new Date();
+    const proof = await captureArtifactInputProof(agentActor, params.workspaceId, [candidate, ...linkedAnswerRecords]
+      .map((message) => ({ kind: "CommunicationMessage" as const, id: message.id, snapshot: message })));
     const review = await defaultModelGateway.extract({
       model,
+      signal: params.signal,
+      authorizeAttempt: slackInputAttemptGuard({ actor: agentActor, workspaceId: params.workspaceId, proof,
+        channelIds: [candidate.externalChannelId, ...linkedAnswerRecords.map((message) => message.externalChannelId)],
+        proactive: true, currentPolicyAllowsSend: currentNudgePolicyAllowsSend }),
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId,
       instruction: [
@@ -928,7 +1020,7 @@ export async function runSlackProactiveScan(params: {
     const currentConfig = await readSlackAgentConfig(params.workspaceId);
     const currentChannelIds = await eligibleChannelIds(currentConfig.mutedChannelIds);
     if (!currentChannelIds.includes(candidate.externalChannelId)) continue;
-    if (JSON.stringify(await fetchLinkedAnswerEvidence({ ...params, source: candidate, channelIds: currentChannelIds })) !== evidenceSnapshot) continue;
+    if (JSON.stringify((await fetchLinkedAnswerEvidence({ ...params, source: candidate, channelIds: currentChannelIds })).evidence) !== evidenceSnapshot) continue;
     if (output.temporalState === "expired" || output.explicitAsk !== true || output.resolutionState !== "open" || output.workDisposition !== "request") {
       await recordProactiveMarker({
         installationId: params.installationId, workspaceId: params.workspaceId,
@@ -1083,12 +1175,6 @@ export async function runSlackProactiveScan(params: {
     if (nudges >= MAX_PROACTIVE_NUDGES) break;
   }
 
-  const agentActor: AppActor = {
-    kind: "agent",
-    authProvider: "bootstrap",
-    label: "slack-agent",
-    workspaceIds: [params.workspaceId],
-  };
   let actions = 0;
   let semanticReviews = 0;
   const actionCreationCutoff = new Date(now.getTime() - config.unansweredActionCreationDelayMinutes * 60 * 1000);
@@ -1211,6 +1297,8 @@ export async function runSlackProactiveScan(params: {
     if (semanticReviews >= MAX_PROACTIVE_REVIEWS) break;
     semanticReviews += 1;
     const parsed = await reviewThreadForAction({
+      actor: agentActor,
+      signal: params.signal,
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId,
       model,

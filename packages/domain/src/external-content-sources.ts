@@ -1,12 +1,21 @@
-import { createHash } from "node:crypto";
-import { Prisma, type ExternalContentSourceKind, type ExternalContentSourceStatus, type KnowledgeSourceType } from "@prisma/client";
+import { createHash, randomUUID } from "node:crypto";
+import { Prisma, type ExternalContentSourceStatus, type KnowledgeSourceType } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
 import { recordAudit } from "./audit-trail";
 import { requireWorkspaceMembership } from "./auth";
 import { appendEvents } from "./events";
-import { callBoxExternalMcpReadToolForConnection, type ExternalMcpProviderKey } from "./external-mcp";
+import { type ExternalMcpProviderKey } from "./external-mcp";
 import { AppError, invariant } from "./errors";
+import { assertArtifactInputWriteFence, captureArtifactInputProof, captureImmutableArtifactInputProof,
+  isArtifactInputProofReadable, preserveUnknownArtifactInputSnapshot, recordArtifactInputLineage,
+  lineageContentFingerprint, type LineageRoot } from "./source-lineage";
+import { DigestReadRelease } from "./digest-lineage";
+import { scanSourceReadableRecords } from "./source-scoped-read";
+import { captureExternalProviderFetchInput, createExternalProviderSyncActor, assertExternalProviderActorCurrent,
+  getExternalProviderPrincipalUserId, isExternalProviderSelectionCurrent, registerExternalProviderRefetchCallback,
+  assertExternalProviderCapturedResponseCurrent, prepareExternalProviderCommitPreflight, withExternalProviderCommitPreflight,
+  type ExternalProviderCapturedResponse } from "./external-provider-authority";
 
 export const EXTERNAL_CONTENT_SOURCE_KINDS = ["HUB", "FOLDER", "FILE"] as const;
 export const EXTERNAL_CONTENT_SOURCE_STATUSES = ["ACTIVE", "SYNCING", "ERROR", "ARCHIVED"] as const;
@@ -23,22 +32,12 @@ export type ExternalContentKnowledgeInput = {
   content: string;
   metadata: Record<string, unknown>;
   workflowJobId?: string;
+  lineageActor: AppActor;
 };
 
 const MAX_SYNC_CONTENT_CHARS = 500_000;
 const BOX_FOLDER_ITEM_LIMIT = 100;
 const BOX_HUB_ITEM_LIMIT = 100;
-
-const externalContentSyncLogSelect = {
-  id: true,
-  status: true,
-  remoteVersion: true,
-  chunksCreated: true,
-  brainSourceId: true,
-  error: true,
-  startedAt: true,
-  completedAt: true,
-} satisfies Prisma.ExternalContentSyncLogSelect;
 
 const externalContentSourceSelect = {
   id: true,
@@ -57,43 +56,15 @@ const externalContentSourceSelect = {
   lastSyncError: true,
   metadata: true,
   archivedAt: true,
+  archivedByUserId: true,
   archiveReason: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.ExternalContentSourceSelect;
 
-const externalContentSourceListSelect = {
-  ...externalContentSourceSelect,
-  selectedByUser: {
-    select: {
-      id: true,
-      email: true,
-      displayName: true,
-    },
-  },
-  syncLogs: {
-    orderBy: { startedAt: "desc" as const },
-    take: 3,
-    select: externalContentSyncLogSelect,
-  },
-} satisfies Prisma.ExternalContentSourceSelect;
-
-const externalContentSyncSourceSelect = {
-  id: true,
-  workspaceId: true,
-  connectionId: true,
-  providerKey: true,
-  sourceKind: true,
-  externalId: true,
-  title: true,
-  externalUrl: true,
-  lastRemoteVersion: true,
-  metadata: true,
-} satisfies Prisma.ExternalContentSourceSelect;
-
 type ExternalContentSourceRecord = Prisma.ExternalContentSourceGetPayload<{ select: typeof externalContentSourceSelect }>;
-type ExternalContentSourceListRecord = Prisma.ExternalContentSourceGetPayload<{ select: typeof externalContentSourceListSelect }>;
-type ExternalContentSyncSourceRecord = Prisma.ExternalContentSourceGetPayload<{ select: typeof externalContentSyncSourceSelect }>;
+type ExternalContentSourceListRecord = ExternalContentSourceRecord & { selectedByUser: { id: string; email: string; displayName: string | null } | null; syncLogs: Array<{ id: string; status: string; remoteVersion: string | null; chunksCreated: number; brainSourceId: string | null; error: string | null; startedAt: Date; completedAt: Date | null }> };
+type ExternalContentSyncSourceRecord = Prisma.ExternalContentSourceGetPayload<object>;
 
 type MaterializedExternalContent = {
   title: string;
@@ -101,20 +72,13 @@ type MaterializedExternalContent = {
   remoteVersion: string;
   content: string;
   metadata: Record<string, unknown>;
+  receipts: ExternalProviderCapturedResponse[];
 };
 
 function actorUserId(actor: AppActor) {
   return actor.kind === "user" ? actor.user.id : null;
 }
 
-function syncActor(workspaceId: string): AppActor {
-  return {
-    kind: "agent",
-    authProvider: "bootstrap",
-    label: "external-content-sync",
-    workspaceIds: [workspaceId],
-  };
-}
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -299,12 +263,15 @@ async function fetchBoxMaterializedContent(actor: AppActor, source: ExternalCont
   invariant(source.providerKey === "box", 400, "UNSUPPORTED_PROVIDER", "Only Box external content sources can be synced in this phase.");
   invariant(source.connectionId, 404, "NOT_CONNECTED", "Selected Box source is missing a Box connection.");
   const sourceKind = source.sourceKind as ExternalContentSourceKindValue;
-  const callBox = (toolName: string, args: Record<string, unknown>) => callBoxExternalMcpReadToolForConnection(actor, {
-    workspaceId: source.workspaceId,
-    connectionId: source.connectionId as string,
-    toolName,
-    arguments: args,
-  });
+  const receipts: ExternalProviderCapturedResponse[] = [];
+  const callBox = async (toolName: string, args: Record<string, unknown>) => {
+    const receipt = await captureExternalProviderFetchInput(actor, { workspaceId: source.workspaceId,
+      externalContentSourceId: source.id, connectionId: source.connectionId!, sourceKind,
+      externalId: source.externalId, toolName, arguments: args });
+    await assertExternalProviderCapturedResponseCurrent(receipt);
+    receipts.push(receipt);
+    return receipt.payload;
+  };
 
   if (sourceKind === "FILE") {
     const details = await callBox("get_file_details", {
@@ -326,7 +293,7 @@ async function fetchBoxMaterializedContent(actor: AppActor, source: ExternalCont
       payloadText(fileContent, "File content"),
     ].filter(Boolean).join("\n\n"));
     return {
-      title,
+      title, receipts,
       externalUrl: source.externalUrl || boxExternalContentUrl(sourceKind, source.externalId),
       remoteVersion,
       content,
@@ -359,7 +326,7 @@ async function fetchBoxMaterializedContent(actor: AppActor, source: ExternalCont
       itemListText(items),
     ].filter(Boolean).join("\n\n"));
     return {
-      title,
+      title, receipts,
       externalUrl: source.externalUrl || boxExternalContentUrl(sourceKind, source.externalId),
       remoteVersion,
       content,
@@ -390,7 +357,7 @@ async function fetchBoxMaterializedContent(actor: AppActor, source: ExternalCont
     itemListText(items),
   ].filter(Boolean).join("\n\n"));
   return {
-    title,
+    title, receipts,
     externalUrl: source.externalUrl || boxExternalContentUrl(sourceKind, source.externalId),
     remoteVersion,
     content,
@@ -408,25 +375,9 @@ async function failExternalContentSync(params: {
   syncLogId?: string | null;
   error: unknown;
 }) {
-  const message = params.error instanceof Error ? params.error.message : String(params.error);
   await prisma.$transaction(async (tx) => {
-    await tx.externalContentSource.updateMany({
-      where: { id: params.sourceId, workspaceId: params.workspaceId },
-      data: {
-        status: "ERROR",
-        lastSyncError: message,
-      },
-    });
-    if (params.syncLogId) {
-      await tx.externalContentSyncLog.update({
-        where: { id: params.syncLogId },
-        data: {
-          status: "ERROR",
-          error: message,
-          completedAt: new Date(),
-        },
-      });
-    }
+    if (params.syncLogId) await tx.externalContentSyncLog.update({ where: { id: params.syncLogId },
+      data: { status: "ERROR", error: "External content synchronization failed.", completedAt: new Date() } });
   });
 }
 
@@ -437,16 +388,68 @@ export async function listExternalContentSources(actor: AppActor, params: {
 }): Promise<ExternalContentSourceListRecord[]> {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const providerKey = params.providerKey ? validateProviderKey(params.providerKey) : undefined;
-  return prisma.externalContentSource.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      ...(providerKey ? { providerKey } : {}),
-      ...(params.includeArchived ? {} : { archivedAt: null, status: { not: "ARCHIVED" as ExternalContentSourceStatus } }),
-    },
-    orderBy: [{ status: "asc" }, { updatedAt: "desc" }],
-    select: externalContentSourceListSelect,
-  });
+  const userId = getExternalProviderPrincipalUserId(actor, params.workspaceId);
+  if (!userId) return [];
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  const rows = await scanSourceReadableRecords({ actor, workspaceId: params.workspaceId, kind: "ExternalContentSource", release,
+    load: (afterId, take) => prisma.externalContentSource.findMany({
+      where: { workspaceId: params.workspaceId, selectedByUserId: userId, ...(providerKey ? { providerKey } : {}),
+        ...(params.includeArchived ? {} : { archivedAt: null, status: { not: "ARCHIVED" as ExternalContentSourceStatus } }),
+        ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take,
+    }) });
+  if (!rows.length) return release.finish([]);
+  const safe: ExternalContentSourceListRecord[] = [];
+  // The selection is bound to one current user; read and retain that label once.
+  const labels = await prisma.user.findFirst({ where: { id: userId }, select: { id: true, email: true, displayName: true } });
+  const capturedLabels = await release.capture("User", labels ? [labels] : []);
+  const selectedByUser = capturedLabels.records[0] ?? null;
+  for (const row of rows) safe.push({ ...row, lastSyncError: row.lastSyncError ? "Synchronization failed." : null, selectedByUser, syncLogs: [] });
+  return release.finish(safe.sort((left, right) => left.status.localeCompare(right.status) || right.updatedAt.getTime() - left.updatedAt.getTime()));
 }
+
+function selectionRoot(source: { metadata?: unknown }): LineageRoot | null {
+  const value = asRecord(asRecord(source.metadata).selectionInputRoot);
+  return value.kind === "ArtifactInputSnapshot" && typeof value.id === "string" && typeof value.fingerprint === "string"
+    ? { kind: "ArtifactInputSnapshot", id: value.id, fingerprint: value.fingerprint } : null;
+}
+async function originalSelectionRoot(db: Prisma.TransactionClient | typeof prisma, source: { id: string; workspaceId: string; metadata?: unknown;
+  connectionId?: string | null; selectedByUserId?: string | null; providerKey?: string; sourceKind?: string; externalId?: string }) {
+  const root = selectionRoot(source);
+  if (!root) return null;
+  const snapshot = await db.artifactInputSnapshot.findFirst({ where: { id: root.id, workspaceId: source.workspaceId,
+    sourceKind: "ExternalContentSource", sourceId: source.id } });
+  const original = asRecord(snapshot?.contentJson);
+  if (!snapshot || ["connectionId", "selectedByUserId", "providerKey", "sourceKind", "externalId"].some(key => original[key] !== (source as Record<string, unknown>)[key])) return null;
+  return root;
+}
+async function enqueueScopedSync(tx: Prisma.TransactionClient, actor: AppActor, source: ExternalContentSourceRecord, root: LineageRoot) {
+  const job = await tx.workflowJob.create({ data: { workspaceId: source.workspaceId, type: EXTERNAL_CONTENT_SYNC_JOB_TYPE,
+    payload: { sourceId: source.id } } });
+  await recordArtifactInputLineage({ tx, actor, workspaceId: source.workspaceId, artifact: { kind: "WorkflowJobInput", id: job.id },
+    content: job, origin: "DERIVED", inputs: [], inheritedRoots: [root] });
+}
+
+registerExternalProviderRefetchCallback(async ({ actor, workspaceId, sourceId, consumedResponseHash }) => {
+  await prisma.$transaction(async tx => {
+    const source = await tx.externalContentSource.findFirst({ where: { id: sourceId, workspaceId, archivedAt: null } });
+    if (!source || !await isExternalProviderSelectionCurrent(actor, workspaceId, source, tx)) return;
+    const root = await originalSelectionRoot(tx, source);
+    if (!root || !await isArtifactInputProofReadable(actor, workspaceId, [root], tx)) return;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`external_refetch_source:${workspaceId}:${sourceId}`}, 0))`;
+    const active = await tx.workflowJob.findFirst({ where: { workspaceId, type: EXTERNAL_CONTENT_SYNC_JOB_TYPE,
+      status: { in: ["PENDING", "RUNNING"] }, payload: { path: ["sourceId"], equals: sourceId } } });
+    if (active) {
+      try { await captureArtifactInputProof(actor, workspaceId, [{ kind: "WorkflowJobInput", id: active.id }], tx); return; }
+      catch { /* An unproven legacy job cannot substitute for this exact recipe. */ }
+    }
+    const dedupeKey = `external-refetch:${source.id}:${hashPayload([consumedResponseHash, root.fingerprint])}`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${dedupeKey}, 0))`;
+    if (await tx.workflowJob.findFirst({ where: { dedupeKey } })) return;
+    const job = await tx.workflowJob.create({ data: { workspaceId, type: EXTERNAL_CONTENT_SYNC_JOB_TYPE, dedupeKey, payload: { sourceId } } });
+    await recordArtifactInputLineage({ tx, actor, workspaceId, artifact: { kind: "WorkflowJobInput", id: job.id }, content: job,
+      origin: "DERIVED", inputs: [], inheritedRoots: [root] });
+  });
+});
 
 export async function selectExternalContentSource(actor: AppActor, params: {
   workspaceId: string;
@@ -458,6 +461,7 @@ export async function selectExternalContentSource(actor: AppActor, params: {
   connectionId?: string | null;
   metadata?: Record<string, unknown> | null;
 }): Promise<ExternalContentSourceRecord> {
+  invariant(actor.kind === "user", 403, "SOURCE_RESTRICTED", "External provider selection requires its native owner.");
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const providerKey = validateProviderKey(params.providerKey);
   const sourceKind = validateSourceKind(params.sourceKind);
@@ -468,64 +472,31 @@ export async function selectExternalContentSource(actor: AppActor, params: {
   const externalUrl = cleanText(params.externalUrl, 2000) || boxExternalContentUrl(sourceKind, externalId);
 
   return prisma.$transaction(async (tx) => {
-    const source = await tx.externalContentSource.upsert({
-      where: {
-        workspaceId_providerKey_sourceKind_externalId: {
-          workspaceId: params.workspaceId,
-          providerKey,
-          sourceKind: sourceKind as ExternalContentSourceKind,
-          externalId,
-        },
-      },
-      update: {
-        connectionId: connection.id,
-        selectedByUserId: actorUserId(actor),
-        title,
-        externalUrl,
-        syncMode: "SELECTED",
-        status: "SYNCING",
-        lastSyncError: null,
-        archivedAt: null,
-        archiveReason: null,
-        ...(params.metadata ? { metadata: toJsonObject(params.metadata) } : {}),
-      },
-      create: {
-        workspaceId: params.workspaceId,
-        connectionId: connection.id,
-        selectedByUserId: actorUserId(actor),
-        providerKey,
-        sourceKind: sourceKind as ExternalContentSourceKind,
-        externalId,
-        title,
-        externalUrl,
-        syncMode: "SELECTED",
-        status: "SYNCING",
-        metadata: params.metadata ? toJsonObject(params.metadata) : Prisma.DbNull,
-      },
-      select: externalContentSourceSelect,
-    });
-
-    await tx.workflowJob.create({
-      data: {
-        workspaceId: params.workspaceId,
-        type: EXTERNAL_CONTENT_SYNC_JOB_TYPE,
-        payload: { sourceId: source.id },
-      },
-    });
-
-    await recordAudit(tx, actor, {
-      workspaceId: params.workspaceId,
-      action: "external-content-source.selected",
-      entityType: "ExternalContentSource",
-      entityId: source.id,
-      meta: {
-        providerKey,
-        sourceKind,
-        externalId,
-        connectionId: connection.id,
-      },
-    });
-
+    const prior = await tx.externalContentSource.findUnique({ where: { workspaceId_providerKey_sourceKind_externalId: {
+      workspaceId: params.workspaceId, providerKey, sourceKind, externalId } } });
+    if (prior) {
+      invariant(prior.selectedByUserId === actor.user.id, 403, "SOURCE_RESTRICTED", "This selection belongs to another provider principal.");
+      await tx.$queryRaw`SELECT "id" FROM "ExternalContentSource" WHERE "id" = ${prior.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+      await preserveUnknownArtifactInputSnapshot(tx, params.workspaceId, { kind: "ExternalContentSource", id: prior.id }, prior);
+    }
+    const data = { connectionId: connection.id, selectedByUserId: actorUserId(actor), title, externalUrl, syncMode: "SELECTED",
+      status: "SYNCING" as const, lastRemoteVersion: null, lastSyncedAt: null, lastSyncError: null, archivedAt: null, archivedByUserId: null, archiveReason: null,
+      metadata: params.metadata ? toJsonObject(params.metadata) : Prisma.DbNull };
+    const created = prior ? await tx.externalContentSource.update({ where: { id: prior.id }, data })
+      : await tx.externalContentSource.create({ data: { id: randomUUID(), workspaceId: params.workspaceId, providerKey, sourceKind, externalId, ...data } });
+    await assertExternalProviderActorCurrent(actor, params.workspaceId, connection.id, tx);
+    await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind: "ExternalContentSource", id: created.id },
+      content: created, origin: "HUMAN_ORIGINAL", inputs: [] });
+    const recipe = await captureImmutableArtifactInputProof(actor, params.workspaceId,
+      await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "ExternalContentSource", id: created.id, snapshot: created }], tx), tx);
+    invariant(recipe.length === 1, 409, "UNKNOWN_LINEAGE", "External content selection needs one complete immutable recipe.");
+    const source = await tx.externalContentSource.update({ where: { id: created.id }, data: {
+      metadata: toJsonObject({ ...existingMetadata(created.metadata), selectionInputRoot: recipe[0] }) }, select: externalContentSourceSelect });
+    await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind: "ExternalContentSource", id: source.id },
+      content: source, origin: "DERIVED", inputs: [], inheritedRoots: recipe });
+    await enqueueScopedSync(tx, actor, source, recipe[0]);
+    await recordAudit(tx, actor, { workspaceId: params.workspaceId, action: "external-content-source.selected",
+      entityType: "ExternalContentSource", entityId: source.id, meta: { providerKey, sourceKind, externalId, connectionId: connection.id } });
     return source;
   });
 }
@@ -533,51 +504,36 @@ export async function selectExternalContentSource(actor: AppActor, params: {
 export async function enqueueExternalContentSourceSync(actor: AppActor, params: {
   workspaceId: string;
   sourceId: string;
-}): Promise<ExternalContentSourceRecord> {
+}) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   return prisma.$transaction(async (tx) => {
-    const source = await tx.externalContentSource.findFirst({
-      where: {
-        id: params.sourceId,
-        workspaceId: params.workspaceId,
-        archivedAt: null,
-        status: { not: "ARCHIVED" },
-      },
-      select: externalContentSourceSelect,
-    });
-    invariant(source, 404, "NOT_FOUND", "External content source not found.");
-
-    const updated = await tx.externalContentSource.update({
-      where: { id: source.id },
-      data: {
-        status: "SYNCING",
-        lastSyncError: null,
-      },
-      select: externalContentSourceSelect,
-    });
-
-    await tx.workflowJob.create({
-      data: {
-        workspaceId: params.workspaceId,
-        type: EXTERNAL_CONTENT_SYNC_JOB_TYPE,
-        payload: { sourceId: source.id },
-      },
-    });
-
-    await recordAudit(tx, actor, {
-      workspaceId: params.workspaceId,
-      action: "external-content-source.sync_requested",
-      entityType: "ExternalContentSource",
-      entityId: source.id,
-      meta: {
-        providerKey: source.providerKey,
-        sourceKind: source.sourceKind,
-        externalId: source.externalId,
-      },
-    });
-
-    return updated;
+    const source = await tx.externalContentSource.findFirst({ where: { id: params.sourceId, workspaceId: params.workspaceId,
+      archivedAt: null, status: { not: "ARCHIVED" } }, select: externalContentSourceSelect });
+    invariant(source && await isExternalProviderSelectionCurrent(actor, params.workspaceId, source, tx),
+      404, "NOT_FOUND", "External content source not found.");
+    const root = await originalSelectionRoot(tx, source);
+    invariant(root && await isArtifactInputProofReadable(actor, params.workspaceId, [root], tx),
+      409, "UNKNOWN_LINEAGE", "External content selection has no complete original recipe.");
+    await enqueueScopedSync(tx, actor, source, root);
+    await recordAudit(tx, actor, { workspaceId: params.workspaceId, action: "external-content-source.sync_requested",
+      entityType: "ExternalContentSource", entityId: source.id, meta: { providerKey: source.providerKey, sourceKind: source.sourceKind, externalId: source.externalId } });
+    return { sourceId: source.id, status: "QUEUED" as const };
   });
+}
+
+async function hasCompletedExternalContentCopy(source: ExternalContentSyncSourceRecord, recipe: LineageRoot, hashes: string[]) {
+  const syncLogId = asString(asRecord(source.metadata).externalContentSyncLogId);
+  if (!syncLogId) return false;
+  const completed = await prisma.externalContentSyncLog.findFirst({ where: {
+    id: syncLogId, workspaceId: source.workspaceId, sourceId: source.id, status: "SYNCED", completedAt: { not: null },
+  }, select: { brainSourceId: true } });
+  if (!completed?.brainSourceId) return false;
+  const copy = await prisma.brainSource.findFirst({ where: { id: completed.brainSourceId, workspaceId: source.workspaceId,
+    sourceType: "EXTERNAL_CONTENT", archivedAt: null }, select: { metadata: true } });
+  const metadata = asRecord(copy?.metadata);
+  return metadata.externalContentSyncLogId === syncLogId
+    && stableJson(metadata.fetchResponseHashes) === stableJson(hashes)
+    && stableJson(metadata.selectionInputRoot) === stableJson(recipe);
 }
 
 export async function syncExternalContentSource(params: {
@@ -586,192 +542,91 @@ export async function syncExternalContentSource(params: {
   workflowJobId?: string | null;
   syncKnowledge: (input: ExternalContentKnowledgeInput) => Promise<number | void>;
 }) {
-  const actor = syncActor(params.workspaceId);
-  let syncLogId: string | null = null;
-
-  const source = await prisma.$transaction(async (tx) => {
-    const found = await tx.externalContentSource.findFirst({
-      where: {
-        id: params.sourceId,
-        workspaceId: params.workspaceId,
-        archivedAt: null,
-        status: { not: "ARCHIVED" },
-      },
-      select: externalContentSyncSourceSelect,
-    });
-    if (!found) return null;
-    await tx.externalContentSource.update({
-      where: { id: found.id },
-      data: {
-        status: "SYNCING",
-        lastSyncError: null,
-      },
-    });
-    const log = await tx.externalContentSyncLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        sourceId: found.id,
-        workflowJobId: params.workflowJobId ?? null,
-        status: "RUNNING",
-      },
-      select: { id: true },
-    });
-    syncLogId = log.id;
-    return found;
-  });
-
-  if (!source) {
-    return { status: "SKIPPED", reason: "missing_source" as const };
-  }
-
+  invariant(params.workflowJobId, 409, "UNKNOWN_LINEAGE", "External content sync requires its scoped workflow job.");
+  let recipe!: LineageRoot;
+  let jobRoots: LineageRoot[] = [];
+  const actor = await createExternalProviderSyncActor({ workspaceId: params.workspaceId, sourceId: params.sourceId,
+    workflowJobId: params.workflowJobId, validateInputs: async (purposeActor, db, selected, job) => {
+      const root = await originalSelectionRoot(db, selected);
+      if (!root) return false;
+      recipe = root;
+      if (!await isArtifactInputProofReadable(purposeActor, params.workspaceId, [root], db)) return false;
+      jobRoots = await captureArtifactInputProof(purposeActor, params.workspaceId, [{ kind: "WorkflowJobInput", id: String(job.id), snapshot: job }], db);
+      return true;
+    } });
+  const source = await prisma.externalContentSource.findFirst({ where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null } });
+  invariant(source && source.connectionId, 404, "NOT_FOUND", "External content selection not found.");
+  const original = await prisma.artifactInputSnapshot.findFirst({ where: { id: recipe.id, workspaceId: params.workspaceId } });
+  invariant(original, 409, "UNKNOWN_LINEAGE", "External content recipe is missing.");
+  const originalContent = asRecord(original.contentJson);
+  const sourceRecipe = { ...source, title: asString(originalContent.title), externalUrl: asString(originalContent.externalUrl) || null,
+    metadata: originalContent.metadata as Prisma.JsonValue | null };
+  const log = await prisma.externalContentSyncLog.create({ data: { workspaceId: params.workspaceId, sourceId: source.id,
+    workflowJobId: params.workflowJobId, status: "RUNNING" } });
   try {
-    const materialized = await fetchBoxMaterializedContent(actor, source);
-    const existing = existingMetadata(source.metadata);
-    const knowledgeMetadata = {
-      ...existing,
-      ...materialized.metadata,
-      providerKey: source.providerKey,
-      sourceKind: source.sourceKind,
-      externalId: source.externalId,
-      externalUrl: materialized.externalUrl,
-      remoteVersion: materialized.remoteVersion,
-      externalContentSourceId: source.id,
-      snapshotType: "box_synced_snapshot",
-      liveContextAvailable: true,
-      workflowJobId: params.workflowJobId ?? null,
-    };
-
-    if (source.lastRemoteVersion === materialized.remoteVersion) {
-      await prisma.$transaction(async (tx) => {
-        await tx.externalContentSource.update({
-          where: { id: source.id },
-          data: {
-            status: "ACTIVE",
-            title: materialized.title,
-            externalUrl: materialized.externalUrl,
-            lastSyncedAt: new Date(),
-            lastSyncError: null,
-            metadata: toJsonObject({
-              ...existing,
-              providerKey: source.providerKey,
-              sourceKind: source.sourceKind,
-              externalId: source.externalId,
-              externalUrl: materialized.externalUrl,
-              lastRemoteVersion: materialized.remoteVersion,
-              lastNoopSyncAt: new Date().toISOString(),
-            }),
-          },
-        });
-        await tx.externalContentSyncLog.update({
-          where: { id: syncLogId as string },
-          data: {
-            status: "UNCHANGED",
-            remoteVersion: materialized.remoteVersion,
-            chunksCreated: 0,
-            completedAt: new Date(),
-          },
-        });
-      });
+    const materialized = await fetchBoxMaterializedContent(actor, sourceRecipe);
+    await Promise.all(materialized.receipts.map(assertExternalProviderCapturedResponseCurrent));
+    const fetchRoots = await captureArtifactInputProof(actor, params.workspaceId,
+      materialized.receipts.map(receipt => ({ kind: "ExternalProviderFetchInput", id: receipt.input.id, snapshot: receipt.input })));
+    const roots = [recipe, ...jobRoots, ...fetchRoots];
+    const hashes = materialized.receipts.map(receipt => receipt.input.responseHash);
+    // Matching copied bytes are not proof of completed indexing. Bind the shortcut
+    // to this copy's successful log, never an older success for the same source.
+    if (stableJson(asRecord(source.metadata).fetchResponseHashes) === stableJson(hashes)
+      && await hasCompletedExternalContentCopy(source, recipe, hashes)
+      && await isArtifactInputProofReadable(actor, params.workspaceId, [
+        { kind: "ExternalContentSource", id: source.id, fingerprint: lineageContentFingerprint("ExternalContentSource", source) }, ...roots])) {
+      await assertExternalProviderActorCurrent(actor, params.workspaceId, source.connectionId);
+      await prisma.externalContentSyncLog.update({ where: { id: log.id }, data: { status: "UNCHANGED",
+        remoteVersion: materialized.remoteVersion, chunksCreated: 0, completedAt: new Date() } });
       return { status: "UNCHANGED", sourceId: source.id, remoteVersion: materialized.remoteVersion, chunksCreated: 0 };
     }
-
-    const knowledgeInput: ExternalContentKnowledgeInput = {
-      workspaceId: params.workspaceId,
-      sourceType: "EXTERNAL_CONTENT",
-      sourceId: source.id,
-      sourceTitle: materialized.title,
-      content: materialized.content,
-      metadata: knowledgeMetadata,
-      workflowJobId: params.workflowJobId ?? undefined,
-    };
-    const chunksCreated = await params.syncKnowledge(knowledgeInput) ?? 0;
-
-    const brainSource = await prisma.$transaction(async (tx) => {
-      const created = await tx.brainSource.create({
-        data: {
-          workspaceId: params.workspaceId,
-          sourceType: "EXTERNAL_CONTENT",
-          tier: 2,
-          title: materialized.title,
-          content: materialized.content,
-          externalId: `box:${String(source.sourceKind).toLowerCase()}:${source.externalId}:${materialized.remoteVersion}`,
-          channel: "box",
-          metadata: toJsonObject(knowledgeMetadata),
-        },
-        select: { id: true },
-      });
-
-      await recordAudit(tx, actor, {
-        workspaceId: params.workspaceId,
-        action: "brain-source.created",
-        entityType: "BrainSource",
-        entityId: created.id,
-        meta: {
-          sourceType: "EXTERNAL_CONTENT",
-          tier: 2,
-          externalContentSourceId: source.id,
-          providerKey: source.providerKey,
-        },
-      });
-
-      await appendEvents(tx, [{
-        workspaceId: params.workspaceId,
-        type: "brain-source.created",
-        aggregateType: "BrainSource",
-        aggregateId: created.id,
-        payload: { sourceId: created.id },
-      }]);
-
-      await tx.externalContentSource.update({
-        where: { id: source.id },
-        data: {
-          status: "ACTIVE",
-          title: materialized.title,
-          externalUrl: materialized.externalUrl,
-          lastRemoteVersion: materialized.remoteVersion,
-          lastSyncedAt: new Date(),
-          lastSyncError: null,
-          metadata: toJsonObject({
-            ...existing,
-            providerKey: source.providerKey,
-            sourceKind: source.sourceKind,
-            externalId: source.externalId,
-            externalUrl: materialized.externalUrl,
-            lastRemoteVersion: materialized.remoteVersion,
-            lastBrainSourceId: created.id,
-          }),
-        },
-      });
-
-      await tx.externalContentSyncLog.update({
-        where: { id: syncLogId as string },
-        data: {
-          status: "SYNCED",
-          remoteVersion: materialized.remoteVersion,
-          chunksCreated,
-          brainSourceId: created.id,
-          completedAt: new Date(),
-        },
-      });
-
-      return created;
-    });
-
-    return {
-      status: "SYNCED",
-      sourceId: source.id,
-      remoteVersion: materialized.remoteVersion,
-      chunksCreated,
-      brainSourceId: brainSource.id,
-    };
+    const metadata = { ...asRecord(originalContent.metadata), ...materialized.metadata, providerKey: source.providerKey,
+      sourceKind: source.sourceKind, externalId: source.externalId, externalUrl: materialized.externalUrl,
+      remoteVersion: materialized.remoteVersion, externalContentSourceId: source.id, snapshotType: "box_synced_snapshot",
+      selectionInputRoot: recipe, fetchResponseHashes: hashes, materializedContent: materialized.content,
+      externalContentSyncLogId: log.id };
+    const preflight = await prepareExternalProviderCommitPreflight(actor, params.workspaceId, { roots, receipts: materialized.receipts });
+    const written = await prisma.$transaction(async tx => withExternalProviderCommitPreflight(actor, params.workspaceId, tx, preflight, async () => {
+      await tx.$queryRaw`SELECT "id" FROM "ExternalContentSource" WHERE "id" = ${source.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+      await assertArtifactInputWriteFence(tx);
+      await assertExternalProviderActorCurrent(actor, params.workspaceId, source.connectionId!, tx);
+      invariant(await isArtifactInputProofReadable(actor, params.workspaceId, roots, tx),
+        409, "SOURCE_CHANGED", "External provider inputs changed before copying.");
+      const prior = await tx.externalContentSource.findFirst({ where: { id: source.id, workspaceId: params.workspaceId } });
+      invariant(prior && lineageContentFingerprint("ExternalContentSource", prior) === lineageContentFingerprint("ExternalContentSource", source),
+        409, "SOURCE_CHANGED", "External content selection changed before copying.");
+      await preserveUnknownArtifactInputSnapshot(tx, params.workspaceId, { kind: "ExternalContentSource", id: prior.id }, prior);
+      const current = await tx.externalContentSource.update({ where: { id: source.id }, data: { status: "ACTIVE", title: materialized.title,
+        externalUrl: materialized.externalUrl, lastRemoteVersion: materialized.remoteVersion, lastSyncedAt: new Date(),
+        lastSyncError: null, metadata: toJsonObject(metadata) } });
+      await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind: "ExternalContentSource", id: current.id },
+        content: current, origin: "DERIVED", inputs: [], inheritedRoots: roots });
+      const brainSource = await tx.brainSource.create({ data: { workspaceId: params.workspaceId, sourceType: "EXTERNAL_CONTENT", tier: 2,
+        title: materialized.title, content: materialized.content,
+        externalId: `box:${source.sourceKind.toLowerCase()}:${source.externalId}:${hashPayload(hashes)}`, channel: "box", metadata: toJsonObject(metadata) } });
+      await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind: "BrainSource", id: brainSource.id },
+        content: brainSource, origin: "DERIVED", inputs: [{ kind: "ExternalContentSource", id: current.id }], inheritedRoots: roots });
+      await recordAudit(tx, actor, { workspaceId: params.workspaceId, action: "brain-source.created", entityType: "BrainSource", entityId: brainSource.id,
+        meta: { sourceType: "EXTERNAL_CONTENT", tier: 2, externalContentSourceId: source.id, providerKey: source.providerKey } });
+      await appendEvents(tx, [{ workspaceId: params.workspaceId, type: "brain-source.created", aggregateType: "BrainSource", aggregateId: brainSource.id,
+        payload: { sourceId: brainSource.id } }]);
+      await tx.externalContentSyncLog.update({ where: { id: log.id }, data: { status: "COPIED", remoteVersion: materialized.remoteVersion, brainSourceId: brainSource.id } });
+      return { current, brainSource };
+    }));
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, [{ kind: "ExternalContentSource", id: written.current.id,
+      fingerprint: lineageContentFingerprint("ExternalContentSource", written.current) }]),
+    409, "SOURCE_CHANGED", "External provider inputs changed before indexing.");
+    const chunksCreated = await params.syncKnowledge({ workspaceId: params.workspaceId, sourceType: "EXTERNAL_CONTENT", sourceId: written.current.id,
+      sourceTitle: written.current.title, content: materialized.content, metadata, lineageActor: actor, workflowJobId: params.workflowJobId }) ?? 0;
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, [{ kind: "ExternalContentSource", id: written.current.id,
+      fingerprint: lineageContentFingerprint("ExternalContentSource", written.current) }]), 409, "SOURCE_CHANGED", "External provider inputs changed during indexing.");
+    await assertExternalProviderActorCurrent(actor, params.workspaceId, source.connectionId);
+    await prisma.externalContentSyncLog.update({ where: { id: log.id }, data: { status: "SYNCED", chunksCreated, completedAt: new Date() } });
+    return { status: "SYNCED", sourceId: source.id, remoteVersion: materialized.remoteVersion, chunksCreated, brainSourceId: written.brainSource.id };
   } catch (error) {
-    await failExternalContentSync({
-      workspaceId: params.workspaceId,
-      sourceId: source.id,
-      syncLogId,
-      error,
-    });
+    await failExternalContentSync({ workspaceId: params.workspaceId, sourceId: source.id, syncLogId: log.id, error });
     if (error instanceof AppError) throw error;
-    throw new AppError(502, "EXTERNAL_CONTENT_SYNC_FAILED", error instanceof Error ? error.message : "External content sync failed.");
+    throw new AppError(502, "EXTERNAL_CONTENT_SYNC_FAILED", "External content synchronization failed.");
   }
 }

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, intakeMeetingTranscript, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, captureCompanyMemberTranscriptInput, intakeMeetingTranscript, requireWorkspaceMembership } from "@corgtex/domain";
 import { extractMeetingTranscriptFile, validateMeetingTranscriptText } from "@/lib/meeting-transcript-file";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
@@ -28,12 +28,31 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       const formData = await request.formData();
       const file = formData.get("file");
       const pastedTranscript = formString(formData, "transcript");
+      // Freeze all form fields before the first file read or extraction await.
+      const fields = {
+        meetingId: formString(formData, "meetingId"), title: formString(formData, "title"),
+        source: formString(formData, "source") ?? "transcript-upload",
+        provider: formString(formData, "provider"), externalId: formString(formData, "externalId"),
+        sourceUpdatedAt: formString(formData, "sourceUpdatedAt"), sourceUrl: formString(formData, "sourceUrl"),
+        meetingUrl: formString(formData, "meetingUrl"), calendarExternalId: formString(formData, "calendarExternalId"),
+        recordedAt: parseOptionalMeetingDateTimeInput(formString(formData, "recordedAt"),
+          formString(formData, "timeZone"), "Recorded at"),
+        summaryMd: formString(formData, "summaryMd"),
+        ingestionGuidanceMd: formString(formData, "ingestionGuidanceMd"),
+        participantIds: formList(formData, "participantIds"), participantEmails: formList(formData, "participantEmails"),
+      };
       let transcript = pastedTranscript ?? "";
       let fileName: string | null = null;
+      let rawFileBase64: string | undefined;
+      let rawFileMimeType: string | undefined;
 
       if (file instanceof File && file.size > 0) {
         fileName = file.name;
-        transcript = await extractMeetingTranscriptFile(file);
+        if (file.size > 5 * 1024 * 1024) throw new AppError(413, "TRANSCRIPT_FILE_TOO_LARGE", "Transcript files must be 5 MB or smaller.");
+        const originalBytes = Buffer.from(await file.arrayBuffer());
+        rawFileBase64 = originalBytes.toString("base64");
+        rawFileMimeType = file.type || "application/octet-stream";
+        transcript = await extractMeetingTranscriptFile(file, originalBytes);
       }
 
       if (!transcript.trim()) {
@@ -41,29 +60,15 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       }
       validateMeetingTranscriptText(transcript);
 
-      const result = await intakeMeetingTranscript(actor, {
+      const submission = {
         workspaceId,
         transcript,
         fileName,
-        meetingId: formString(formData, "meetingId"),
-        title: formString(formData, "title"),
-        source: formString(formData, "source") ?? "transcript-upload",
-        provider: formString(formData, "provider"),
-        externalId: formString(formData, "externalId"),
-        sourceUpdatedAt: formString(formData, "sourceUpdatedAt"),
-        sourceUrl: formString(formData, "sourceUrl"),
-        meetingUrl: formString(formData, "meetingUrl"),
-        calendarExternalId: formString(formData, "calendarExternalId"),
-        recordedAt: parseOptionalMeetingDateTimeInput(
-          formString(formData, "recordedAt"),
-          formString(formData, "timeZone"),
-          "Recorded at",
-        ),
-        summaryMd: formString(formData, "summaryMd"),
-        ingestionGuidanceMd: formString(formData, "ingestionGuidanceMd"),
-        participantIds: formList(formData, "participantIds"),
-        participantEmails: formList(formData, "participantEmails"),
-      });
+        ...fields,
+        ...(rawFileBase64 ? { rawFileBase64, rawFileMimeType } : {}),
+      };
+      const nativeReceipt = await captureCompanyMemberTranscriptInput(actor, { workspaceId, submission });
+      const result = await intakeMeetingTranscript(actor, { ...submission, nativeReceipt });
 
       return NextResponse.json(result, { status: result.status === "needs_clarification" ? 409 : 201 });
     }
@@ -88,7 +93,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     };
 
     const transcript = validateMeetingTranscriptText(String(body.transcript ?? ""));
-    const result = await intakeMeetingTranscript(actor, {
+    const submission = {
       workspaceId,
       meetingId: typeof body.meetingId === "string" ? body.meetingId : null,
       title: typeof body.title === "string" ? body.title : null,
@@ -109,7 +114,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       ingestionGuidanceMd: typeof body.ingestionGuidanceMd === "string" ? body.ingestionGuidanceMd : null,
       participantIds: Array.isArray(body.participantIds) ? body.participantIds.map((value) => String(value)) : [],
       participantEmails: Array.isArray(body.participantEmails) ? body.participantEmails.map((value) => String(value)) : [],
-    });
+    };
+    const nativeReceipt = await captureCompanyMemberTranscriptInput(actor, { workspaceId, submission });
+    const result = await intakeMeetingTranscript(actor, { ...submission, nativeReceipt });
 
     return NextResponse.json(result, { status: result.status === "needs_clarification" ? 409 : 201 });
   } catch (error) {

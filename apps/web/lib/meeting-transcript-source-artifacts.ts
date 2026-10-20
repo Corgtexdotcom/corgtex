@@ -1,7 +1,26 @@
 import JSZip from "jszip";
-import type { MeetingTranscriptSourceArtifact } from "@corgtex/domain";
+import { AppError, type MeetingTranscriptSourceArtifact } from "@corgtex/domain";
 import { extractTextFromFileBuffer } from "@corgtex/knowledge";
 import { normalizeOptionalMeetingDateTimeInput } from "@/lib/meeting-timezone";
+
+export function transcriptArtifactByteBudget(value: unknown, remaining: number): number {
+  const pending = [value]; let bytes = 0;
+  while (pending.length) {
+    const item = pending.pop();
+    if (typeof item === "string") {
+      bytes += Buffer.byteLength(item) + 2;
+      for (let index = 0; index < item.length && bytes <= remaining; index += 1) {
+        const code = item.charCodeAt(index);
+        if (code < 32 || code === 34 || code === 92) bytes += 5;
+      }
+    }
+    else if (Array.isArray(item)) { bytes += item.length + 2; for (const child of item) pending.push(child); }
+    else if (item && typeof item === "object") { for (const [key, child] of Object.entries(item)) { bytes += key.length * 6 + 4; pending.push(child); } }
+    else bytes += 32;
+    if (bytes > remaining) throw new AppError(413, "TRANSCRIPT_TOO_LARGE", "Transcript import exceeds its aggregate byte limit.");
+  }
+  return bytes;
+}
 
 function formString(formData: FormData, key: string) {
   const value = formData.get(key);
@@ -36,6 +55,7 @@ async function artifactFromBuffer(params: {
   mimeType?: string | null;
   defaults: Omit<MeetingTranscriptSourceArtifact, "fileName" | "mimeType" | "text" | "json">;
 }): Promise<MeetingTranscriptSourceArtifact | null> {
+  if (params.buffer.length > 5 * 1024 * 1024) throw new AppError(413, "TRANSCRIPT_TOO_LARGE", "Transcript file exceeds its byte limit.");
   let text: string | null = null;
   let json: unknown;
   if (isPlainTextLike(params.fileName, params.mimeType)) {
@@ -62,24 +82,39 @@ async function artifactFromBuffer(params: {
     mimeType: params.mimeType,
     text,
     json,
+    rawFileBase64: params.buffer.toString("base64"),
+    rawFileMimeType: params.mimeType || "application/octet-stream",
   };
 }
 
 async function artifactsFromZip(params: {
   buffer: Buffer;
   defaults: Omit<MeetingTranscriptSourceArtifact, "fileName" | "mimeType" | "text" | "json">;
+  remaining: number;
 }) {
   const zip = await JSZip.loadAsync(params.buffer);
   const artifacts: MeetingTranscriptSourceArtifact[] = [];
+  let admitted = 0;
+  const rawArchiveBase64 = params.buffer.toString("base64");
   for (const entry of Object.values(zip.files)) {
     if (entry.dir || artifacts.length >= 500) continue;
+    const declaredSize = (entry as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize;
+    if (declaredSize == null || declaredSize > 5 * 1024 * 1024) throw new AppError(413, "TRANSCRIPT_TOO_LARGE", "Transcript archive entry exceeds its byte limit.");
+    // Decompress at most one bounded entry, then charge its exact captured
+    // projection before retaining it. Avoid a second, lower implied file limit.
+    const minimumEntryBytes = declaredSize + rawArchiveBase64.length;
+    if (admitted + minimumEntryBytes > params.remaining) throw new AppError(413, "TRANSCRIPT_TOO_LARGE", "Transcript archive exceeds its aggregate custody byte limit.");
     const buffer = await entry.async("nodebuffer");
     const artifact = await artifactFromBuffer({
       buffer,
       fileName: entry.name,
       defaults: params.defaults,
     });
-    if (artifact) artifacts.push(artifact);
+    if (artifact) {
+      const captured = { ...artifact, rawArchiveBase64 };
+      admitted += transcriptArtifactByteBudget(captured, params.remaining - admitted);
+      artifacts.push(captured);
+    }
   }
   return artifacts;
 }
@@ -104,9 +139,15 @@ export async function meetingTranscriptArtifactsFromFormData(formData: FormData)
     },
   };
   const artifacts: MeetingTranscriptSourceArtifact[] = [];
-  const pastedTranscript = formString(formData, "transcript");
+  let admitted = 2;
+  const admit = (artifact: MeetingTranscriptSourceArtifact) => {
+    admitted += transcriptArtifactByteBudget(artifact, 20 * 1024 * 1024 - admitted) + 1;
+    artifacts.push(artifact);
+  };
+  const pastedValue = formData.get("transcript");
+  const pastedTranscript = typeof pastedValue === "string" && pastedValue.trim() ? pastedValue : null;
   if (pastedTranscript) {
-    artifacts.push({
+    admit({
       ...defaults,
       fileName: "pasted-transcript.txt",
       mimeType: "text/plain",
@@ -116,9 +157,10 @@ export async function meetingTranscriptArtifactsFromFormData(formData: FormData)
 
   for (const value of [...formData.getAll("file"), ...formData.getAll("files")]) {
     if (!(value instanceof File) || value.size === 0) continue;
+    if (value.size > 5 * 1024 * 1024) throw new AppError(413, "TRANSCRIPT_TOO_LARGE", "Transcript file exceeds its byte limit.");
     const buffer = Buffer.from(await value.arrayBuffer());
     if (isZip(value.name, value.type)) {
-      artifacts.push(...await artifactsFromZip({ buffer, defaults }));
+      for (const artifact of await artifactsFromZip({ buffer, defaults, remaining: 20 * 1024 * 1024 - admitted })) admit(artifact);
       continue;
     }
     const artifact = await artifactFromBuffer({
@@ -127,8 +169,9 @@ export async function meetingTranscriptArtifactsFromFormData(formData: FormData)
       mimeType: value.type,
       defaults,
     });
-    if (artifact) artifacts.push(artifact);
+    if (artifact) admit(artifact);
   }
 
+  transcriptArtifactByteBudget(artifacts, 20 * 1024 * 1024);
   return artifacts;
 }

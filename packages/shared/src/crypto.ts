@@ -49,6 +49,58 @@ export function decryptSecret(value: string) {
   ]).toString("utf8");
 }
 
+/** Decode encrypted base64 bytes with bounded transport/plaintext copies. No
+ * bytes escape this function until GCM authentication has succeeded. */
+export function decryptSecretBase64(value: string, maxBytes: number): Buffer {
+  const [version, ivRaw, tagRaw, ciphertextRaw, extra] = value.split(":");
+  if (version !== SECRET_ENCRYPTION_VERSION || !ivRaw || !tagRaw || !ciphertextRaw || extra !== undefined
+    || !Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error("Unsupported encrypted secret format.");
+  const upperBytes = Math.floor(Math.floor(ciphertextRaw.length * 3 / 4) / 4) * 3;
+  if (upperBytes > maxBytes + 2) throw new Error("Encrypted base64 payload exceeds its byte bound.");
+  const key = encryptionKey(), iv = Buffer.from(ivRaw, "base64url"), tag = Buffer.from(tagRaw, "base64url");
+  const authenticator = createDecipheriv("aes-256-gcm", key, iv);
+  authenticator.setAuthTag(tag);
+  // Authenticate first with bounded discarded plaintext. Only the second pass
+  // interprets base64, so unauthenticated content cannot reach even the decoder.
+  for (let offset = 0; offset < ciphertextRaw.length; offset += 512 * 1024) {
+    const part = ciphertextRaw.slice(offset, offset + 512 * 1024);
+    if (!/^[A-Za-z0-9_-]+$/.test(part)) throw new Error("Invalid encrypted secret ciphertext.");
+    authenticator.update(Buffer.from(part, "base64url"));
+  }
+  authenticator.final();
+  const decipher = createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAuthTag(tag);
+  const output = Buffer.allocUnsafe(Math.min(upperBytes, maxBytes));
+  let written = 0, carry = "", padded = false;
+  const append = (plaintext: Buffer) => {
+    if (!plaintext.length) return;
+    if (padded) throw new Error("Invalid encrypted base64 payload.");
+    const text = carry + plaintext.toString("utf8"), complete = text.length - text.length % 4;
+    const segment = text.slice(0, complete);
+    carry = text.slice(complete);
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(segment) || !/^[A-Za-z0-9+/]*$/.test(carry)) {
+      throw new Error("Invalid encrypted base64 payload.");
+    }
+    padded = segment.includes("=");
+    if (padded && carry) throw new Error("Invalid encrypted base64 payload.");
+    const bytes = Buffer.from(segment, "base64");
+    if (written + bytes.length > maxBytes || written + bytes.length > output.length) {
+      throw new Error("Encrypted base64 payload exceeds its byte bound.");
+    }
+    bytes.copy(output, written); written += bytes.length;
+  };
+  // Base64url transport pages are divisible by four; decoding each page cannot
+  // lose bits at the boundary. Plaintext base64 carries its own final padding.
+  for (let offset = 0; offset < ciphertextRaw.length; offset += 512 * 1024) {
+    const part = ciphertextRaw.slice(offset, offset + 512 * 1024);
+    if (!/^[A-Za-z0-9_-]+$/.test(part)) throw new Error("Invalid encrypted secret ciphertext.");
+    append(decipher.update(Buffer.from(part, "base64url")));
+  }
+  append(decipher.final());
+  if (carry) throw new Error("Invalid encrypted base64 payload.");
+  return output.subarray(0, written);
+}
+
 export function hashPassword(password: string) {
   const salt = randomBytes(16).toString("hex");
   const hash = scryptSync(password, salt, 64).toString("hex");

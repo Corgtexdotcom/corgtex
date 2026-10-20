@@ -36,6 +36,12 @@ vi.mock("./auth", () => ({
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
 }));
 
+beforeEach(() => {
+  // Prisma update returns the complete post-write row; retain that contract for migration -> refresh.
+  prismaMock.oAuthConnection.update.mockReset().mockImplementation(async ({data}: any) =>
+    ({...await prismaMock.oAuthConnection.findUnique({}), ...data, updatedAt: new Date()}));
+});
+
 describe("OAuth integration sync helpers", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -254,7 +260,7 @@ describe("OAuth integration sync helpers", () => {
     await refreshOAuthTokenIfNeeded("conn-1");
 
     expect(prismaMock.oAuthConnection.update).toHaveBeenCalledWith({
-      where: { id: "conn-1" },
+      where: expect.objectContaining({ id: "conn-1", accessToken: "access-token", refreshToken: "refresh-token", tokenStorageVersion: "plaintext" }),
       data: {
         accessToken: "enc:access-token",
         refreshToken: "enc:refresh-token",
@@ -723,4 +729,226 @@ describe("OAuth integration sync helpers", () => {
       scheduled: ["oauth.documents.sync"],
     });
   });
+});
+
+describe("saved OAuth email selection replay", () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+  it.each(["GOOGLE", "MICROSOFT"] as const)("replays an older exact %s message through the original provider selection", async provider => {
+    const {fetchSelectedEmailMessage} = await import("./integrations");
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider, status: "ACTIVE", providerAccountId: "account",
+      accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+    const calls: URL[] = [];
+    const fetchMock = vi.fn(async (url: string) => {
+      const parsed = new URL(url); calls.push(parsed);
+      if (parsed.pathname.endsWith("userinfo") || parsed.pathname === "/v1.0/me") return Response.json({id: "account"});
+      if (parsed.pathname.endsWith("/older-message")) return provider === "GOOGLE"
+        ? Response.json({id: "older-message", snippet: "Original body", payload: {headers: [{name: "Subject", value: "Original"}, {name: "Message-ID", value: "<original@synthetic.test>"}]}})
+        : Response.json({id: "older-message", subject: "Original", bodyPreview: "Original body", receivedDateTime: "2026-06-18T09:00:00Z"});
+      if (provider === "GOOGLE") {
+        expect(parsed.searchParams.get("q")).toBe("(from:sender@synthetic.test) rfc822msgid:<original@synthetic.test>");
+        return Response.json({messages: [{id: "older-message"}]});
+      }
+      if (!parsed.searchParams.has("$skiptoken")) {
+        expect(parsed.searchParams.get("$search")).toBe('"(from:sender@synthetic.test) AND received>=2026-06-18T09:00:00Z AND received<2026-06-18T09:00:01Z"');
+        return Response.json({value: [{id: "newer-message"}], "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?$skiptoken=opaque"});
+      }
+      return Response.json({value: [{id: "older-message"}]});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const guard = vi.fn(async () => {});
+    expect(await fetchSelectedEmailMessage("connection", "older-message", "from:sender@synthetic.test",
+      {authorizeAttempt: guard, expectedAccountId: "account"})).toMatchObject({id: "older-message", snippet: "Original body", filter: "from:sender@synthetic.test"});
+    expect(calls.some(url => url.pathname.endsWith("/older-message"))).toBe(true);
+    expect(guard.mock.calls.length).toBeGreaterThan(fetchMock.mock.calls.length);
+  });
+
+  it.each(["GOOGLE", "MICROSOFT"] as const)("denies an exact %s message outside the original provider selection", async provider => {
+    const {fetchSelectedEmailMessage} = await import("./integrations");
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider, status: "ACTIVE", providerAccountId: "account",
+      accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("userinfo") || parsed.pathname === "/v1.0/me") return Response.json({id: "account"});
+      if (parsed.pathname.endsWith("/older-message")) return provider === "GOOGLE"
+        ? Response.json({id: "older-message", snippet: "Private", payload: {headers: [{name: "Message-ID", value: "<original@synthetic.test>"}]}})
+        : Response.json({id: "older-message", bodyPreview: "Private", receivedDateTime: "2026-06-18T09:00:00Z"});
+      return Response.json(provider === "GOOGLE" ? {messages: []} : {value: []});
+    }));
+    expect(await fetchSelectedEmailMessage("connection", "older-message", "from:sender@synthetic.test",
+      {authorizeAttempt: async () => {}, expectedAccountId: "account"})).toBeNull();
+  });
+
+  it("rejects a Graph nextLink on another host without dispatching to it", async () => {
+    const {fetchSelectedEmailMessage} = await import("./integrations");
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "MICROSOFT", status: "ACTIVE", providerAccountId: "account",
+      accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+    const fetchMock = vi.fn(async (url: string) => new URL(url).pathname === "/v1.0/me" ? Response.json({id: "account"})
+      : new URL(url).pathname.endsWith("/older-message") ? Response.json({id: "older-message", receivedDateTime: "2026-06-18T09:00:00Z"})
+      : Response.json({value: [], "@odata.nextLink": "https://untrusted.example/messages"}));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(fetchSelectedEmailMessage("connection", "older-message", "from:sender@synthetic.test",
+      {authorizeAttempt: async () => {}, expectedAccountId: "account"})).rejects.toMatchObject({status: 503, code: "OAUTH_SELECTION_INCOMPLETE"});
+    expect(fetchMock.mock.calls.every(([url]) => new URL(url).hostname === "graph.microsoft.com")).toBe(true);
+  });
+});
+
+it.each([false, true])("proves headerless Gmail membership through bounded original-query pages (exhausted=%s)", async exhausted => {
+  const {fetchSelectedEmailMessage} = await import("./integrations");
+  prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "GOOGLE", status: "ACTIVE", providerAccountId: "account",
+    accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+  let pages = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    const parsed = new URL(url);
+    if (parsed.pathname.endsWith("userinfo")) return Response.json({id: "account"});
+    if (parsed.pathname.endsWith("/older-message")) return Response.json({id: "older-message", snippet: "Headerless body", payload: {headers: []}});
+    expect(parsed.searchParams.get("q")).toBe("from:sender@synthetic.test OR to:sender@synthetic.test");
+    pages++;
+    if (!exhausted && pages === 2) return Response.json({messages: [{id: "older-message"}]});
+    return Response.json({messages: [{id: `other-${pages}`}], nextPageToken: `page-${pages}`});
+  }));
+  const result = fetchSelectedEmailMessage("connection", "older-message", "from:sender@synthetic.test OR to:sender@synthetic.test",
+    {authorizeAttempt: async () => {}, expectedAccountId: "account"});
+  if (exhausted) { await expect(result).rejects.toMatchObject({status: 503, code: "OAUTH_SELECTION_INCOMPLETE"}); expect(pages).toBe(100); }
+  else { expect(await result).toMatchObject({id: "older-message", snippet: "Headerless body"}); expect(pages).toBe(2); }
+});
+
+
+it("keeps Graph email identity after a folder move on discovery, detail and every selection page", async () => {
+  const {fetchFilteredEmailMessages, fetchSelectedEmailMessage} = await import("./integrations");
+  prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "MICROSOFT", status: "ACTIVE", providerAccountId: "account",
+    accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+  let moved = false;
+  const requests: Array<{url: URL; prefer: string | null}> = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/v1.0/me") return Response.json({id: "account"});
+    const prefer = new Headers(init?.headers).get("Prefer"); requests.push({url: parsed, prefer});
+    const id = prefer === 'IdType="ImmutableId"' ? "StableCaseSensitiveId" : moved ? "moved-id" : "old-folder-id";
+    const message = {id, subject: "Original", bodyPreview: "Original body", receivedDateTime: "2026-06-18T09:00:00Z"};
+    if (parsed.pathname !== "/v1.0/me/messages") return Response.json(message);
+    if (!moved || parsed.searchParams.has("$skiptoken")) return Response.json({value: [message]});
+    return Response.json({value: [], "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?$skiptoken=opaque"});
+  }));
+  const controls = {expectedAccountId: "account", authorizeAttempt: vi.fn(async () => {})};
+  const [discovered] = await fetchFilteredEmailMessages("connection", ["from:sender@synthetic.test"], controls);
+  expect(discovered?.id).toBe("StableCaseSensitiveId");
+  moved = true;
+  expect(await fetchSelectedEmailMessage("connection", discovered!.id, discovered!.filter, controls)).toMatchObject({id: discovered!.id, snippet: "Original body"});
+  expect(requests).toHaveLength(4);
+  expect(requests.every(request => request.prefer === 'IdType="ImmutableId"')).toBe(true);
+});
+
+it.each(["detail", "selection"] as const)("does not case-fold immutable Graph IDs in %s", async boundary => {
+  const {fetchSelectedEmailMessage} = await import("./integrations");
+  prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "MICROSOFT", status: "ACTIVE", providerAccountId: "account",
+    accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+  const requests: Array<{url: URL; prefer: string | null}> = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/v1.0/me") return Response.json({id: "account"});
+    requests.push({url: parsed, prefer: new Headers(init?.headers).get("Prefer")});
+    if (parsed.pathname === "/v1.0/me/messages") return Response.json({value: [{id: "stablecasesensitiveid"}]});
+    return Response.json({id: boundary === "detail" ? "stablecasesensitiveid" : "StableCaseSensitiveId",
+      bodyPreview: "Private body", receivedDateTime: "2026-06-18T09:00:00Z"});
+  }));
+  expect(await fetchSelectedEmailMessage("connection", "StableCaseSensitiveId", "from:sender@synthetic.test",
+    {expectedAccountId: "account", authorizeAttempt: async () => {}})).toBeNull();
+  expect(requests).toHaveLength(boundary === "detail" ? 1 : 2);
+  expect(requests.every(request => request.prefer === 'IdType="ImmutableId"')).toBe(true);
+});
+
+it.each(["discovery", "replay"] as const)("rejects a different Graph mailbox before immutable ID %s", async boundary => {
+  const {fetchFilteredEmailMessages, fetchSelectedEmailMessage} = await import("./integrations");
+  prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "MICROSOFT", status: "ACTIVE", providerAccountId: "original-account",
+    accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+  const fetchMock = vi.fn(async () => Response.json({id: "different-account"}));
+  vi.stubGlobal("fetch", fetchMock);
+  const controls = {expectedAccountId: "original-account", authorizeAttempt: async () => {}};
+  await expect(boundary === "discovery"
+    ? fetchFilteredEmailMessages("connection", ["from:sender@synthetic.test"], controls)
+    : fetchSelectedEmailMessage("connection", "StableCaseSensitiveId", "from:sender@synthetic.test", controls)).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+  expect(fetchMock).toHaveBeenCalledOnce();
+  expect(fetchMock).toHaveBeenCalledWith("https://graph.microsoft.com/v1.0/me", expect.any(Object));
+});
+
+
+it("replays a selected Outlook message beyond a saturated UTC-day search", async () => {
+  const {fetchSelectedEmailMessage} = await import("./integrations");
+  prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "MICROSOFT", status: "ACTIVE", providerAccountId: "account",
+    accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+  const requested: string[] = [];
+  const fetchMock = vi.fn(async (url: string) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/v1.0/me") return Response.json({id: "account"});
+    if (parsed.pathname.endsWith("/older-message")) return Response.json({id: "older-message", bodyPreview: "Original body", receivedDateTime: "2026-06-18T09:00:00.999Z"});
+    const search = parsed.searchParams.get("$search") ?? ""; requested.push(search);
+    return Response.json({value: search.includes("received>=2026-06-18T09:00:00Z AND received<2026-06-18T09:00:01Z")
+      ? [{id: "older-message"}] : Array.from({length: 1000}, (_, index) => ({id: `other-${index}`}))});
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  expect(await fetchSelectedEmailMessage("connection", "older-message", "from:sender@synthetic.test OR subject:invoice",
+    {expectedAccountId: "account", authorizeAttempt: async () => {}})).toMatchObject({id: "older-message", snippet: "Original body"});
+  expect(requested).toEqual(['"(from:sender@synthetic.test OR subject:invoice) AND received>=2026-06-18T09:00:00Z AND received<2026-06-18T09:00:01Z"']);
+});
+
+
+it.each(["saturated", "split-cap", "cycle", "budget", "shape", "row-shape", "bad-token"] as const)("does not treat an incomplete Outlook selection as revocation (%s)", async mode => {
+  const {fetchSelectedEmailMessage} = await import("./integrations");
+  prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "MICROSOFT", status: "ACTIVE", providerAccountId: "account",
+    accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+  let pages = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/v1.0/me") return Response.json({id: "account"});
+    if (parsed.pathname.endsWith("/older-message")) return Response.json({id: "older-message", bodyPreview: "Original body", receivedDateTime: "2026-06-18T09:00:00Z"});
+    pages++;
+    if (mode === "shape") return Response.json({value: null});
+    if (mode === "row-shape") return Response.json({value: [null]});
+    if (mode === "bad-token") return Response.json({value: [], "@odata.nextLink": 123});
+    const size = mode === "saturated" ? 1000 : mode === "split-cap" ? 500 : 1;
+    return Response.json({value: Array.from({length: size}, (_, index) => ({id: `other-${pages}-${index}`})),
+      ...(mode === "saturated" ? {} : {"@odata.nextLink": `https://graph.microsoft.com/v1.0/me/messages?$skiptoken=${mode === "cycle" ? "repeated" : pages}`})});
+  }));
+  await expect(fetchSelectedEmailMessage("connection", "older-message", "subject:invoice",
+    {expectedAccountId: "account", authorizeAttempt: async () => {}})).rejects.toMatchObject({status: 503, code: "OAUTH_SELECTION_INCOMPLETE"});
+  expect(pages).toBe(mode === "budget" ? 100 : mode === "cycle" || mode === "split-cap" ? 2 : 1);
+});
+
+it("keeps Outlook exact membership positive at the ceiling and preserves the UTC rollover", async () => {
+  const {fetchSelectedEmailMessage} = await import("./integrations");
+  prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "MICROSOFT", status: "ACTIVE", providerAccountId: "account",
+    accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/v1.0/me") return Response.json({id: "account"});
+    if (parsed.pathname.endsWith("/older-message")) return Response.json({id: "older-message", bodyPreview: "Original body", receivedDateTime: "2026-12-31T23:59:59.999Z"});
+    expect(parsed.searchParams.get("$search")).toBe('"(subject:invoice) AND received>=2026-12-31T23:59:59Z AND received<2027-01-01T00:00:00Z"');
+    return Response.json({value: [...Array.from({length: 999}, (_, index) => ({id: `other-${index}`})), {id: "older-message"}]});
+  }));
+  expect(await fetchSelectedEmailMessage("connection", "older-message", "subject:invoice",
+    {expectedAccountId: "account", authorizeAttempt: async () => {}})).toMatchObject({id: "older-message"});
+});
+
+it.each(["cycle", "last-page"] as const)("keeps Gmail continuation authority indeterminate or proven at the boundary (%s)", async mode => {
+  const {fetchSelectedEmailMessage} = await import("./integrations");
+  prismaMock.oAuthConnection.findUnique.mockResolvedValue({id: "connection", provider: "GOOGLE", status: "ACTIVE", providerAccountId: "account",
+    accessToken: "enc:synthetic", expiresAt: new Date(Date.now() + 3600_000)});
+  let pages = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    const parsed = new URL(url);
+    if (parsed.pathname.endsWith("userinfo")) return Response.json({id: "account"});
+    if (parsed.pathname.endsWith("/older-message")) return Response.json({id: "older-message", snippet: "Original body", payload: {headers: []}});
+    pages++;
+    if (mode === "last-page" && pages === 100) return Response.json({messages: [{id: "older-message"}], nextPageToken: "more"});
+    return Response.json({messages: [{id: `other-${pages}`}], nextPageToken: mode === "cycle" ? "same" : `page-${pages}`});
+  }));
+  const result = fetchSelectedEmailMessage("connection", "older-message", "subject:synthetic",
+    {authorizeAttempt: async () => {}, expectedAccountId: "account"});
+  if (mode === "cycle") {
+    await expect(result).rejects.toMatchObject({status: 503, code: "OAUTH_SELECTION_INCOMPLETE"});
+    expect(pages).toBe(2);
+  } else {
+    expect(await result).toMatchObject({id: "older-message", snippet: "Original body"});
+    expect(pages).toBe(100);
+  }
 });

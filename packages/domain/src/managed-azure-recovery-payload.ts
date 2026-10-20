@@ -3,7 +3,7 @@ import { isProxy } from "node:util/types";
 import { createManagedReleaseProofReader } from "./managed-release-proof-support";
 import { canonicalizeManagedAzureRollbackPayloadV1, type ManagedAzureRollbackPayloadV1 } from "./managed-azure-rollback-payload";
 
-export type ManagedAzureRollbackPayloadV2 = Omit<ManagedAzureRollbackPayloadV1, "schemaVersion" | "incoming"> & {
+type ManagedAzureRollbackPayloadV2 = Omit<ManagedAzureRollbackPayloadV1, "schemaVersion" | "incoming"> & {
   readonly schemaVersion: 2;
   readonly incoming: ManagedAzureRollbackPayloadV1["incoming"] & { readonly schemaApprovalDigest: string };
   readonly compatibleRecovery: {
@@ -15,12 +15,12 @@ export type ManagedAzureRollbackPayloadV2 = Omit<ManagedAzureRollbackPayloadV1, 
     readonly activationPolicy: "STANDARD" | "EXCLUSIVE";
   };
 };
-export type ManagedAzureExclusiveActivation = {
+type ManagedAzureExclusiveActivation = {
   readonly originalMode: "Single";
   readonly temporaryMode: "Multiple";
   readonly configurationDigests: { readonly web: string; readonly worker: string };
 };
-export type ManagedAzureRollbackPayloadV3 = Omit<ManagedAzureRollbackPayloadV2, "schemaVersion"> & {
+type ManagedAzureRollbackPayloadV3 = Omit<ManagedAzureRollbackPayloadV2, "schemaVersion"> & {
   readonly schemaVersion: 3;
   readonly exclusiveActivation: ManagedAzureExclusiveActivation;
 };
