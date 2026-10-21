@@ -158,15 +158,6 @@ export async function captureExternalMcpResponseInput(actor: AppActor, submitted
   return receipt;
 }
 
-export async function assertExternalMcpCapturedResponseCurrent(receipt: ExternalMcpCapturedResponse) {
-  invariant(capturedReceipts.has(receipt) && externalMcpResponseHash(receipt.payload) === receipt.input.responseHash,
-    409, "SOURCE_CHANGED", "External MCP response changed before use.");
-  const stored = await prisma.externalMcpResponseInput.findFirst({ where: { id: receipt.input.id, workspaceId: receipt.input.workspaceId } });
-  const { lineageContentFingerprint } = await import("./source-lineage");
-  invariant(stored && lineageContentFingerprint("ExternalMcpResponseInput", stored)
-    === lineageContentFingerprint("ExternalMcpResponseInput", receipt.input),
-  409, "SOURCE_CHANGED", "External MCP stored response changed before use.");
-}
 
 type CommitState = { actor: AppActor; actorHash: string; workspaceId: string; userId: string;
   submittedRoots: LineageRoot[]; roots: LineageRoot[];

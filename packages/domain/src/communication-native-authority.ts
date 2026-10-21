@@ -121,7 +121,7 @@ export async function captureSlackNativeMessageFetch(params: MessageTarget, db: 
   fetched.add(receipt);
   return receipt;
 }
-export function assertSlackNativeFetchReceipt(receipt: SlackNativeFetchReceipt) {
+function assertSlackNativeFetchReceipt(receipt: SlackNativeFetchReceipt) {
   invariant(fetched.has(receipt), 409, "UNKNOWN_LINEAGE", "An actual authenticated Slack fetch is required.");
 }
 /** Internal DB-only atomic writer scope. Normal reads never use this preflight capability. */
@@ -365,7 +365,7 @@ export function inspectSlackNativeCommitClaim(claim: SlackNativeCommitClaim) {
 }
 
 /** Native and governing row locks precede every full-proof epoch read. */
-export async function lockSlackNativeInputRows(tx: Prisma.TransactionClient, workspaceId: string,
+async function lockSlackNativeInputRows(tx: Prisma.TransactionClient, workspaceId: string,
   inputIds: readonly string[]) {
   for (const id of [...new Set(inputIds)].sort()) {
     if (!sourceAuthorityRowAlreadyLocked(tx, "CommunicationMessageNativeInput", id))
@@ -417,7 +417,7 @@ export async function lockSlackNativeGoverningRows(tx: Prisma.TransactionClient,
   }
 }
 
-export async function lockSlackNativeCommitRows(tx: Prisma.TransactionClient, workspaceId: string,
+async function lockSlackNativeCommitRows(tx: Prisma.TransactionClient, workspaceId: string,
   inputIds: readonly string[], actor: AppActor) {
   await lockSlackNativeInputRows(tx, workspaceId, inputIds);
   await lockSlackNativeGoverningRows(tx, workspaceId, inputIds, actor);
