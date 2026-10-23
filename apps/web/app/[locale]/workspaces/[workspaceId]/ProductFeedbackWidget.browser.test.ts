@@ -25,6 +25,7 @@ type Fixture = {
   search: string;
   workspaceId: string;
   captures: CaptureRecord[];
+  toasts: string[];
   mode: "success" | "fail" | "canvas-pending" | "blob-pending";
   resolveCanvas: () => void;
   resolveBlob: () => void;
@@ -97,7 +98,7 @@ describe.runIf(process.env.PRODUCT_FEEDBACK_BROWSER_QA === "1")("ProductFeedback
         contents: `import React from 'react'; import {createRoot} from 'react-dom/client';
           import {ProductFeedbackWidget} from ${JSON.stringify(component)};
           const fixture = window.__feedbackFixture = {
-            pathname: '/en/workspaces/demo', search: '', workspaceId: 'demo', captures: [], mode: 'success',
+            pathname: '/en/workspaces/demo', search: '', workspaceId: 'demo', captures: [], toasts: [], mode: 'success',
           };
           const root = createRoot(document.getElementById('root'));
           const render = () => root.render(<ProductFeedbackWidget locale="en" workspaceId={fixture.workspaceId} />);
@@ -145,7 +146,7 @@ describe.runIf(process.env.PRODUCT_FEEDBACK_BROWSER_QA === "1")("ProductFeedback
                export const useSearchParams = () => new URLSearchParams(window.__feedbackFixture.search);`
             : args.path === "next-intl"
               ? `const translate = (key, values) => key + (values?.number ? ' ' + values.number : ''); export const useTranslations = () => translate;`
-              : `const addToast = () => {}; export const useToast = () => ({addToast});`,
+              : `const addToast = message => window.__feedbackFixture.toasts.push(message); export const useToast = () => ({addToast});`,
         }));
       } }],
     });
@@ -380,6 +381,148 @@ describe.runIf(process.env.PRODUCT_FEEDBACK_BROWSER_QA === "1")("ProductFeedback
     await page.evaluate((key: CaptureResolver) => window.__feedbackFixture[key](), resolver);
     await expect.poll(() => page.getByRole("img").count()).toBe(1);
     expect(await page.getByRole("button", { name: "capture", exact: true }).isEnabled()).toBe(true);
+  });
+
+  for (const width of [1100, 390]) {
+    for (const dismissal of ["Escape", "X", "backdrop"]) {
+      it.each(["success", "failure", "network"] as const)(`isolates a late %s after ${dismissal} at ${width}px`, async (outcome) => {
+        await page.setViewportSize({ width, height: 800 });
+        await open();
+        await releaseModule();
+        await expect.poll(() => page.getByRole("img").count()).toBe(1);
+        await page.getByRole("textbox").fill("Request A");
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => { release = resolve; });
+        let posts = 0;
+        await page.route("**/api/workspaces/demo/product-feedback", async (route) => {
+          posts++;
+          await held;
+          if (outcome === "network") await route.abort("failed");
+          else await route.fulfill({ status: outcome === "success" ? 200 : 503,
+            contentType: "application/json", body: JSON.stringify({ error: { message: "Old request failed" } }) });
+        });
+        await page.getByRole("button", { name: "submit", exact: true }).click();
+        await expect.poll(() => posts).toBe(1);
+        expect(await page.getByRole("textbox").isDisabled()).toBe(true);
+        for (const name of ["capture", "attach", "removeScreenshot 1"]) {
+          expect(await page.getByRole("button", { name, exact: true }).isDisabled()).toBe(true);
+        }
+        expect(await page.getByRole("button", { name: "cancel", exact: true }).isDisabled()).toBe(true);
+        if (dismissal === "Escape") await page.keyboard.press("Escape");
+        else if (dismissal === "X") await page.getByRole("button", { name: "close", exact: true }).click();
+        else await page.locator("dialog").evaluate((dialog) => dialog.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+        await page.getByRole("button", { name: "open", exact: true }).click();
+        await expect.poll(() => page.getByRole("img").count()).toBe(2);
+        expect(await page.getByRole("button", { name: "submitting", exact: true }).isDisabled()).toBe(true);
+        // Even a programmatic duplicate submit must respect the transport lock.
+        await page.locator("form").evaluate((form) => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+        await settle();
+        expect(posts).toBe(1);
+        release();
+        await expect.poll(() => page.getByRole("button", { name: "submit", exact: true }).isEnabled()).toBe(true);
+        expect(await page.locator("dialog").evaluate((dialog) => (dialog as HTMLDialogElement).open)).toBe(true);
+        expect(await page.getByRole("textbox").inputValue()).toBe("Request A");
+        expect(await page.getByRole("img").count()).toBe(2);
+        expect(await page.getByRole("alert").count()).toBe(0);
+        expect(await page.evaluate(() => window.__feedbackFixture.toasts)).toEqual([]);
+        await page.getByRole("textbox").fill("New session remains editable");
+        await page.getByRole("button", { name: "removeScreenshot 1", exact: true }).click();
+        expect(await page.getByRole("img").count()).toBe(1);
+        await page.unroute("**/api/workspaces/demo/product-feedback");
+        await page.route("**/api/workspaces/demo/product-feedback", (route) => {
+          posts++;
+          return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+        });
+        await page.getByRole("button", { name: "submit", exact: true }).click();
+        await expect.poll(() => page.locator("dialog").evaluate((dialog) => (dialog as HTMLDialogElement).open)).toBe(false);
+        expect(posts).toBe(2);
+        expect(await page.evaluate(() => window.__feedbackFixture.toasts)).toEqual(["submitted"]);
+        expect(await page.locator("textarea").inputValue()).toBe("");
+        expect(await page.locator('[role="img"]').count()).toBe(0);
+      });
+    }
+  }
+
+  it.each(["pathname", "search", "workspace", "unmount"])("ignores POST completion after %s changes", async (change) => {
+    await open();
+    await releaseModule();
+    await expect.poll(() => page.getByRole("img").count()).toBe(1);
+    await page.getByRole("textbox").fill("Navigation draft");
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let received = false;
+    await page.route("**/api/workspaces/demo/product-feedback", async (route) => {
+      received = true;
+      await held;
+      await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+    });
+    await page.getByRole("button", { name: "submit", exact: true }).click();
+    await expect.poll(() => received).toBe(true);
+    await page.evaluate((value) => {
+      const fixture = window.__feedbackFixture;
+      if (value === "unmount") fixture.unmount();
+      else fixture.navigate(value === "pathname" ? "/en/workspaces/demo/meetings" : "/en/workspaces/demo",
+        value === "search" ? "tab=other" : "", value === "workspace" ? "other" : "demo");
+    }, change);
+    await settle();
+    release();
+    if (change === "unmount") {
+      await settle();
+      expect(await page.locator("#root").textContent()).toBe("");
+    } else {
+      await expect.poll(() => page.getByRole("button", { name: "submit", exact: true }).isEnabled()).toBe(true);
+      expect(await page.getByRole("textbox").inputValue()).toBe("Navigation draft");
+      expect(await page.getByRole("img").count()).toBe(1);
+    }
+  });
+
+  it.each(["failure", "network"])("shows a current session's %s and permits retry", async (outcome) => {
+    await open();
+    await releaseModule();
+    await expect.poll(() => page.getByRole("img").count()).toBe(1);
+    await page.getByRole("textbox").fill("Retry draft");
+    await page.route("**/api/workspaces/demo/product-feedback", (route) => outcome === "network"
+      ? route.abort("failed")
+      : route.fulfill({ status: 503, contentType: "application/json", body: '{"error":{"message":"Current failure"}}' }));
+    await page.getByRole("button", { name: "submit", exact: true }).click();
+    await expect.poll(() => page.getByRole("alert").count()).toBe(1);
+    expect(await page.getByRole("textbox").inputValue()).toBe("Retry draft");
+    expect(await page.getByRole("img").count()).toBe(1);
+    expect(await page.getByRole("button", { name: "submit", exact: true }).isEnabled()).toBe(true);
+    await page.unroute("**/api/workspaces/demo/product-feedback");
+    await page.route("**/api/workspaces/demo/product-feedback", (route) => route.fulfill({
+      status: 200, contentType: "application/json", body: "{}",
+    }));
+    await page.getByRole("button", { name: "submit", exact: true }).click();
+    await expect.poll(() => page.locator("dialog").evaluate((dialog) => (dialog as HTMLDialogElement).open)).toBe(false);
+  });
+
+  it.each(["canvas-pending", "blob-pending"] as const)("preserves a newer %s capture when the old POST finishes", async (mode) => {
+    await open();
+    await releaseModule();
+    await expect.poll(() => page.getByRole("img").count()).toBe(1);
+    await page.getByRole("textbox").fill("Held capture draft");
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let received = false;
+    await page.route("**/api/workspaces/demo/product-feedback", async (route) => {
+      received = true;
+      await held;
+      await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+    });
+    await page.getByRole("button", { name: "submit", exact: true }).click();
+    await expect.poll(() => received).toBe(true);
+    await page.keyboard.press("Escape");
+    await page.evaluate((value) => { window.__feedbackFixture.mode = value; }, mode);
+    await page.getByRole("button", { name: "open", exact: true }).click();
+    const resolver: CaptureResolver = mode === "canvas-pending" ? "resolveCanvas" : "resolveBlob";
+    await expect.poll(() => page.evaluate((key) => typeof window.__feedbackFixture[key], resolver)).toBe("function");
+    release();
+    await expect.poll(() => page.getByRole("button", { name: "submit", exact: true }).isEnabled()).toBe(true);
+    expect(await page.getByRole("button", { name: "capturing", exact: true }).isDisabled()).toBe(true);
+    await page.evaluate((key) => window.__feedbackFixture[key](), resolver);
+    await expect.poll(() => page.getByRole("img").count()).toBe(2);
+    expect(await page.getByRole("textbox").inputValue()).toBe("Held capture draft");
   });
 
   it("rejects oversized and unsupported manual files while accepting supported images", async () => {
