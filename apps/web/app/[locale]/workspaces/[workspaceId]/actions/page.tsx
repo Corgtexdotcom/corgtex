@@ -52,6 +52,8 @@ import {
 import { formatWorkItemPriority, normalizeWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
 import { ActionPagination } from "./ActionPagination";
 import { appendActionReturnTo, buildActionListReturnHref } from "./return-context";
+import { ActionsViewPreferences } from "./ActionsViewPreferences";
+import { actionsViewStorageKey } from "./view-preferences";
 
 export const dynamic = "force-dynamic";
 
@@ -137,6 +139,7 @@ export default async function ActionsPage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
+  const preferenceUserId = actor.kind === "user" ? actor.user.id : null;
   const t = await getTranslations("actions");
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
@@ -903,7 +906,7 @@ export default async function ActionsPage({
       : statusActionColumns;
 
   return (
-    <>
+    <ActionsViewPreferences userId={preferenceUserId} workspaceId={workspaceId} href={listReturnHref}>
       <WorkspacePageHeader title={t("pageTitle")} description={t("pageDescription")} />
 
       {resolvedSearch.versionConflict && (
@@ -1034,7 +1037,7 @@ export default async function ActionsPage({
           <WorkItemKanbanBoard
             columns={actionColumns}
             readOnly={isDemo}
-            storageKey={`work-items:${workspaceId}:actions`}
+            storageKey={`${actionsViewStorageKey(preferenceUserId ?? "agent", workspaceId)}:board`}
             visibleColumnIds={boardGroup === "status" ? visibleActionColumnIds : undefined}
             hideColumnHrefs={boardGroup === "status" ? actionColumnHideHrefs : undefined}
             settingsLabel={tWork("columnSettings")}
@@ -1074,6 +1077,6 @@ export default async function ActionsPage({
           />
         )}
       </section>
-    </>
+    </ActionsViewPreferences>
   );
 }
