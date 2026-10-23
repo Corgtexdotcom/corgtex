@@ -43,7 +43,7 @@ test("nonbrowser reads cannot turn API clients into UI navigations", () => {
 });
 
 test("unverified hosts and ports are never claimed", () => {
-  for (const host of ["selfserve.corgtex.com", "ops.corgtex.com", "chirone.corgtex.com.evil.example", "chirone.corgtex.com:444", "crina.corgtex.com"]) {
+  for (const host of ["selfserve.corgtex.com", "ops.corgtex.com", "chirone.corgtex.com.evil.example", "chirone.corgtex.com:444", "unverified.example.com"]) {
     assert.equal(response(new Request(`https://${host}/`, { headers: { accept: "text/html" } })), null);
   }
 });
