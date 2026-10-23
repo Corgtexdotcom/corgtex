@@ -49,7 +49,7 @@ export type TranscriptSourceTransport = { readonly [transportBrand]: true };
 const transports = new WeakMap<object, Transport>();
 const originals = new WeakMap<object, { transport: Transport; artifact: MeetingTranscriptSourceArtifact; wires: Wire[] }>();
 
-export function transcriptConnectionHash(connection: MeetingTranscriptSourceConnection) {
+function transcriptConnectionHash(connection: MeetingTranscriptSourceConnection) {
   return hash({ id: connection.id, workspaceId: connection.workspaceId, provider: connection.provider,
     status: connection.status, authMode: connection.authMode, apiKeyEnc: connection.apiKeyEnc,
     accessTokenEnc: connection.accessTokenEnc, refreshTokenEnc: connection.refreshTokenEnc,

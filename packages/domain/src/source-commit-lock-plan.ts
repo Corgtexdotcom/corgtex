@@ -698,11 +698,6 @@ export function assertSourceCommitAmbientPolicyCovered(tx:Prisma.TransactionClie
   invariant(scope.state.workspaceId===workspaceId&&rows.some(entry=>entry.kind===identity.kind&&entry.id===identity.id&&entry.epoch===identity.epoch),
     409,"SOURCE_LOCK_UNCOVERED","Commit requested an unplanned ambient policy fence.");
 }
-export function assertSourceCommitPredicateCovered(tx:Prisma.TransactionClient,key:string,table:string,where:Record<string,unknown>,ids:readonly string[]) {
-  const scope=currentScope(tx);
-  const saved=scope.state.discovered.ledger.find(([entry])=>entry===`predicate:${key}`);
-  invariant(saved?.[1]===hash({key,table,where,ids:[...ids].sort(compare)}),409,"SOURCE_LOCK_UNCOVERED","Commit requested an unplanned authority predicate.");
-}
 /** New preallocated outputs may capture their OWN newly inserted epoch after DML.
  * This cannot add older ancestor epochs or grant historical source authority. */
 export function assertSourceCommitNewbornEpochAllowed(tx:Prisma.TransactionClient,workspaceId:string,input:LineageInput) {
