@@ -42,6 +42,7 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("ActionMenu b
  <form onSubmit={e => { e.preventDefault(); fixture.submissions++; }}><input required aria-label="Required" /><button>Save</button></form>
  </>}</ActionMenu>}
  <Dialog open={dialog} onClose={() => setDialog(false)} title="Container"><ActionMenu label="Modal menu"><button id="modal-action">Modal action</button></ActionMenu></Dialog>
+ <ActionMenu label="Form popover" panelRole="dialog"><details><summary id="popover-summary">Edit fields</summary><input id="popover-first" aria-label="First field" /><input id="popover-second" aria-label="Second field" /></details></ActionMenu>
  </>;
 }
         createRoot(document.getElementById("root")).render(
@@ -163,5 +164,25 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("ActionMenu b
     await settled(); await page.locator("#outside").focus(); await page.keyboard.press("Escape");
     expect(await focused("#outside")).toBe(true);
     expect(await page.locator(".action-menu-panel").count()).toBe(0);
+  });
+  it("Tab exits nested menus from the outer trigger's position in both directions", async () => {
+    for (const key of ["Tab", "Shift+Tab"]) {
+      await page.getByRole("button", { name: "Menu", exact: true }).click(); await settled();
+      await page.getByRole("button", { name: "Nested", exact: true }).click(); await settled();
+      await page.keyboard.press(key); await settled();
+      expect(await page.locator(".action-menu-panel").count()).toBe(0);
+      const destination = key === "Tab" ? "Form popover" : "Show dialog";
+      expect(await page.getByRole("button", { name: destination, exact: true }).evaluate(node => document.activeElement === node)).toBe(true);
+    }
+  });
+  it("preserves sequential navigation within a dialog-role popover", async () => {
+    await page.getByRole("button", { name: "Form popover", exact: true }).click(); await settled();
+    expect(await focused("#popover-summary")).toBe(true);
+    await page.keyboard.press("Space"); await page.keyboard.press("Tab");
+    expect(await focused("#popover-first")).toBe(true);
+    await page.keyboard.press("Tab"); await settled();
+    expect(await focused("#popover-second")).toBe(true);
+    expect(await page.locator('.action-menu-panel[role="dialog"]').count()).toBe(1);
+    await page.keyboard.press("Shift+Tab"); expect(await focused("#popover-first")).toBe(true);
   });
 });

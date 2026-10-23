@@ -392,6 +392,7 @@ export default async function TensionsPage({
         actions={(
           <ItemActions
             moreLabel={tCommon("moreActions")}
+            moreRole="dialog"
             primary={primary}
             more={moreItems.length > 0 ? moreItems : null}
           />
@@ -491,6 +492,7 @@ export default async function TensionsPage({
           <>
             <ItemActions
               moreLabel={tCommon("moreActions")}
+              moreRole="dialog"
               primary={primary}
               more={moreItems.length > 0 ? moreItems : null}
             />
