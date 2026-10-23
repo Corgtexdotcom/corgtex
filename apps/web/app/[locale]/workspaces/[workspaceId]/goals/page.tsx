@@ -22,7 +22,7 @@ import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { SegmentedControl, WorkspaceEmptyState, WorkspacePageHeader } from "@/lib/components/ControlPrimitives";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
-import { WorkItemEditForm } from "@/lib/components/WorkItemEditForm";
+import { GoalEditor, GoalEditorChoicesProvider } from "./GoalEditor";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import {
   addKeyResultFormAction,
@@ -30,7 +30,6 @@ import {
   deleteKeyResultFormAction,
   archiveGoalFormAction,
   createGoalFormAction,
-  editGoalFormAction,
   returnGoalToDraftFormAction,
   updateGoalFormAction,
 } from "./actions";
@@ -109,9 +108,6 @@ export default async function GoalsPage({
           workspaceId={workspaceId}
           goal={focusedGoal}
           level={0}
-          allGoals={[]}
-          circles={[]}
-          members={[]}
           canManageAnyGoal={false}
           membershipId={null}
           currentUserId={null}
@@ -146,6 +142,11 @@ export default async function GoalsPage({
 
   await goalReadRelease.finish(undefined);
   return (
+    <GoalEditorChoicesProvider choices={{
+      goals: allGoals.map(({ id, title }) => ({ id, title })),
+      circles: circles.map(({ id, name }) => ({ id, name })),
+      members: members.map(({ id, user }) => ({ id, label: user.displayName ?? user.email })),
+    }}>
     <div className="max-w-5xl mx-auto p-6 space-y-8">
       <WorkspacePageHeader
         className="nr-workspace-page-header-flush"
@@ -194,9 +195,6 @@ export default async function GoalsPage({
             workspaceId={workspaceId}
             goal={focusedGoal}
             level={0}
-            allGoals={allGoals}
-            circles={circles}
-            members={members}
             canManageAnyGoal={canManageAnyGoal}
             membershipId={membership?.id ?? null}
             currentUserId={currentUserId}
@@ -325,9 +323,6 @@ export default async function GoalsPage({
                   workspaceId={workspaceId}
                   goal={goal}
                   level={0}
-                  allGoals={allGoals}
-                  circles={circles}
-                  members={members}
                   canManageAnyGoal={canManageAnyGoal}
                   membershipId={membership?.id ?? null}
                   currentUserId={currentUserId}
@@ -414,6 +409,7 @@ export default async function GoalsPage({
         </div>
       )}
     </div>
+    </GoalEditorChoicesProvider>
   );
 }
 
@@ -421,9 +417,6 @@ function GoalNode({
   workspaceId,
   goal,
   level,
-  allGoals,
-  circles,
-  members,
   canManageAnyGoal,
   membershipId,
   currentUserId,
@@ -431,9 +424,6 @@ function GoalNode({
   workspaceId: string;
   goal: any;
   level: number;
-  allGoals: any[];
-  circles: any[];
-  members: any[];
   canManageAnyGoal: boolean;
   membershipId: string | null;
   currentUserId: string | null;
@@ -443,9 +433,6 @@ function GoalNode({
       workspaceId={workspaceId}
       goal={goal}
       level={level}
-      allGoals={allGoals}
-      circles={circles}
-      members={members}
       canManageAnyGoal={canManageAnyGoal}
       membershipId={membershipId}
       currentUserId={currentUserId}
@@ -457,9 +444,6 @@ function GoalNodeInner({
   workspaceId,
   goal,
   level,
-  allGoals,
-  circles,
-  members,
   canManageAnyGoal,
   membershipId,
   currentUserId,
@@ -467,9 +451,6 @@ function GoalNodeInner({
   workspaceId: string;
   goal: any;
   level: number;
-  allGoals: any[];
-  circles: any[];
-  members: any[];
   canManageAnyGoal: boolean;
   membershipId: string | null;
   currentUserId: string | null;
@@ -637,86 +618,23 @@ function GoalNodeInner({
                   </form>
                 )}
                 {canEditContent && (
-                  <details>
-                    <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
-                      {t("btnEdit")}
-                    </summary>
-                    <WorkItemEditForm
-                      action={editGoalFormAction}
-                      expectedVersion={goal.version}
-                      currentHref={`/workspaces/${workspaceId}/goals?goalId=${encodeURIComponent(goal.id)}`}
-                      submitLabel={goal.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}
-                      className="action-menu-form"
-                    >
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="goalId" value={goal.id} />
-                      <label>
-                        {t("formTitle")}
-                        <input name="title" defaultValue={goal.title} required />
-                      </label>
-                      <label>
-                        {t("formDescription")}
-                        <MarkdownEditor name="descriptionMd" defaultValue={goal.descriptionMd ?? ""} rows={4} />
-                      </label>
-                      <div className="actions-inline">
-                        <label style={{ flex: 1 }}>
-                          {t("formCadence")}
-                          <select name="cadence" defaultValue={goal.cadence}>
-                            {CADENCES.map((item) => (
-                              <option key={item.id} value={item.id}>{item.label}</option>
-                            ))}
-                          </select>
-                        </label>
-                        <label style={{ flex: 1 }}>
-                          {t("formLevel")}
-                          <select name="level" defaultValue={goal.level}>
-                            {LEVELS.map((item) => (
-                              <option key={item} value={item}>{item}</option>
-                            ))}
-                          </select>
-                        </label>
-                      </div>
-                      <div className="actions-inline">
-                        <label style={{ flex: 1 }}>
-                          {t("formStartDate")}
-                          <input name="startDate" type="date" defaultValue={goal.startDate ? new Date(goal.startDate).toISOString().slice(0, 10) : ""} />
-                        </label>
-                        <label style={{ flex: 1 }}>
-                          {t("formTargetDate")}
-                          <input name="targetDate" type="date" defaultValue={goal.targetDate ? new Date(goal.targetDate).toISOString().slice(0, 10) : ""} />
-                        </label>
-                      </div>
-                      <div className="actions-inline">
-                        <label style={{ flex: 1 }}>
-                          {t("formParentGoal")}
-                          <select name="parentGoalId" defaultValue={goal.parentGoalId ?? ""}>
-                            <option value="">{t("formNone")}</option>
-                            {allGoals.filter((item) => item.id !== goal.id).map((item) => (
-                              <option key={item.id} value={item.id}>{item.title}</option>
-                            ))}
-                          </select>
-                        </label>
-                        <label style={{ flex: 1 }}>
-                          {t("formCircle")}
-                          <select name="circleId" defaultValue={goal.circleId ?? ""}>
-                            <option value="">{t("formNone")}</option>
-                            {circles.map((circle) => (
-                              <option key={circle.id} value={circle.id}>{circle.name}</option>
-                            ))}
-                          </select>
-                        </label>
-                        <label style={{ flex: 1 }}>
-                          {t("formOwner")}
-                          <select name="ownerMemberId" defaultValue={goal.ownerMemberId ?? ""}>
-                            <option value="">{t("formNone")}</option>
-                            {members.map((member) => (
-                              <option key={member.id} value={member.id}>{member.user.displayName ?? member.user.email}</option>
-                            ))}
-                          </select>
-                        </label>
-                      </div>
-                    </WorkItemEditForm>
-                  </details>
+                  <GoalEditor
+                    workspaceId={workspaceId}
+                    goal={{
+                      id: goal.id,
+                      version: goal.version,
+                      title: goal.title,
+                      descriptionMd: goal.descriptionMd ?? null,
+                      cadence: goal.cadence,
+                      level: goal.level,
+                      status: goal.status,
+                      startDate: goal.startDate ? new Date(goal.startDate).toISOString().slice(0, 10) : "",
+                      targetDate: goal.targetDate ? new Date(goal.targetDate).toISOString().slice(0, 10) : "",
+                      parentGoalId: goal.parentGoalId ?? null,
+                      circleId: goal.circleId ?? null,
+                      ownerMemberId: goal.ownerMemberId ?? null,
+                    }}
+                  />
                 )}
                 {canEditContent && (
                   <details>
@@ -761,9 +679,6 @@ function GoalNodeInner({
               workspaceId={workspaceId}
               goal={child}
               level={level + 1}
-              allGoals={allGoals}
-              circles={circles}
-              members={members}
               canManageAnyGoal={canManageAnyGoal}
               membershipId={membershipId}
               currentUserId={currentUserId}
