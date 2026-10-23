@@ -688,6 +688,144 @@ export async function refreshOAuthTokenIfNeeded(connectionId: string, controls?:
   return connection;
 }
 
+type CalendarConnectionScope = {
+  userId: string;
+  workspaceId: string;
+  provider: OAuthProvider;
+};
+
+function isCalendarAvailabilityConnection(connection: OAuthConnection, scope: CalendarConnectionScope) {
+  const calendar = syncSettingsRecord(syncSettingsRecord(connection.syncSettings).calendar);
+  return connection.userId === scope.userId && connection.workspaceId === scope.workspaceId
+    && connection.provider === scope.provider && connection.status === "ACTIVE"
+    && hasCalendarSyncScope(scope.provider, connection.scopes) && calendar.enabled !== false;
+}
+
+function assertOAuthConnectionActive(connection: OAuthConnection | null, scope: CalendarConnectionScope): asserts connection is OAuthConnection {
+  invariant(connection?.status === "ACTIVE" && isCalendarAvailabilityConnection(connection, scope),
+    409, "CALENDAR_CONNECTION_UNAVAILABLE", "The calendar connection is no longer eligible.");
+}
+
+function availabilityRecord(value: unknown): Record<string, unknown> {
+  invariant(value !== null && typeof value === "object" && !Array.isArray(value),
+    502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+  return value as Record<string, unknown>;
+}
+
+function availabilityTime(value: unknown) {
+  invariant(typeof value === "string" && Number.isFinite(Date.parse(value)),
+    502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+  return new Date(value).toISOString();
+}
+
+export type CalendarAvailabilityResult =
+  | { provider: "GOOGLE"; calendars: Record<string, { busy: Array<{ start: string; end: string }> }> }
+  | { provider: "MICROSOFT"; schedules: Record<string, Array<{
+    status: string; start: { dateTime: string; timeZone: "UTC" }; end: { dateTime: string; timeZone: "UTC" };
+  }>> }
+  | { error: string };
+
+export async function getCalendarAvailability(actor: AppActor, params: {
+  workspaceId: string; provider: OAuthProvider; emails: string[]; timeMin: string; timeMax: string;
+}): Promise<CalendarAvailabilityResult> {
+  try {
+    invariant(actor.kind === "user", 403, "FORBIDDEN", "Calendar availability requires an authenticated user.");
+    if (params.provider !== "GOOGLE" && params.provider !== "MICROSOFT") {
+      return { error: "Choose GOOGLE or MICROSOFT explicitly before checking calendar availability." };
+    }
+    invariant(Array.isArray(params.emails) && params.emails.length > 0 && params.emails.length <= 20
+      && params.emails.every(email => typeof email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)),
+    400, "INVALID_INPUT", "Provide calendar email addresses.");
+    const timeMin = availabilityTime(params.timeMin);
+    const timeMax = availabilityTime(params.timeMax);
+    invariant(timeMin < timeMax, 400, "INVALID_INPUT", "Provide a valid availability interval.");
+    const emails = [...new Set(params.emails)];
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+    const scope: CalendarConnectionScope = { userId: actor.user.id, workspaceId: params.workspaceId, provider: params.provider };
+    // Never fall back to another workspace, an unbound legacy row, or an implicit provider.
+    const candidates = await prisma.oAuthConnection.findMany({
+      where: { ...scope, status: "ACTIVE" }, take: 2,
+    });
+    invariant(candidates.length === 1 && isCalendarAvailabilityConnection(candidates[0], scope),
+      409, "CALENDAR_CONNECTION_UNAVAILABLE", "Connect an active calendar with read consent in this workspace.");
+    // Reuse the SOURCE refresh classifier and exact-generation CAS. Calendar resource
+    // failures must never revoke the shared Docs/Email grant or adopt a new grant.
+    let expected = candidates[0];
+    const authorizeAttempt = async () => {
+      await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+      const current = await prisma.oAuthConnection.findUnique({ where: { id: expected.id } });
+      assertOAuthConnectionActive(current, scope);
+      const snapshot = oauthConnectionAttemptWhere(expected);
+      invariant(Object.entries(snapshot).every(([key, value]) => {
+        const actual = current[key as keyof OAuthConnection];
+        return value instanceof Date ? actual instanceof Date && actual.getTime() === value.getTime() : actual === value;
+      }), 409, "CALENDAR_CONNECTION_UNAVAILABLE", "The calendar connection changed during availability.");
+    };
+    await authorizeAttempt();
+    const refreshed = await refreshOAuthTokenIfNeeded(expected.id, {
+      connection: expected, authorizeAttempt, onConnectionUpdated: current => { expected = current; },
+    });
+    await authorizeAttempt();
+    const accessToken = oauthAccessToken(refreshed);
+    const google = params.provider === "GOOGLE";
+    const response = await fetch(google
+      ? "https://www.googleapis.com/calendar/v3/freeBusy"
+      : "https://graph.microsoft.com/v1.0/me/calendar/getSchedule", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json",
+        ...(!google && { Prefer: 'outlook.timezone="UTC"' }),
+      },
+      body: JSON.stringify(google ? { timeMin, timeMax, items: emails.map(id => ({ id })) } : {
+        schedules: emails, startTime: { dateTime: timeMin, timeZone: "UTC" },
+        endTime: { dateTime: timeMax, timeZone: "UTC" }, availabilityViewInterval: 30,
+      }),
+    });
+    invariant(response.ok, 502, "CALENDAR_PROVIDER_ERROR", "Calendar availability request failed.");
+    const data = availabilityRecord(await response.json());
+    await authorizeAttempt();
+    if (google) {
+      const raw = availabilityRecord(data.calendars);
+      const calendars: Extract<CalendarAvailabilityResult, { provider: "GOOGLE" }>["calendars"] = {};
+      for (const email of emails) {
+        const item = availabilityRecord(raw[email]);
+        invariant((item.errors === undefined || (Array.isArray(item.errors) && item.errors.length === 0)) && Array.isArray(item.busy),
+          502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+        calendars[email] = { busy: item.busy.map(value => {
+          const interval = availabilityRecord(value);
+          const start = availabilityTime(interval.start), end = availabilityTime(interval.end);
+          invariant(start < end, 502, "CALENDAR_PROVIDER_ERROR", "Invalid busy interval.");
+          return { start, end };
+        }) };
+      }
+      return { provider: "GOOGLE", calendars };
+    }
+    invariant(Array.isArray(data.value), 502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+    const schedules: Extract<CalendarAvailabilityResult, { provider: "MICROSOFT" }>["schedules"] = {};
+    for (const email of emails) {
+      const matches = data.value.map(availabilityRecord).filter(item => typeof item.scheduleId === "string" && item.scheduleId.toLowerCase() === email.toLowerCase());
+      invariant(matches.length === 1, 502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+      const item = matches[0];
+      invariant(!item.error && Array.isArray(item.scheduleItems), 502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+      schedules[email] = item.scheduleItems.map(value => {
+        const interval = availabilityRecord(value);
+        invariant(typeof interval.status === "string" && ["free", "tentative", "busy", "oof", "workingElsewhere"].includes(interval.status),
+          502, "CALENDAR_PROVIDER_ERROR", "Unknown calendar availability.");
+        const start = availabilityRecord(interval.start), end = availabilityRecord(interval.end);
+        invariant(start.timeZone === "UTC" && end.timeZone === "UTC", 502, "CALENDAR_PROVIDER_ERROR", "Unknown calendar time zone.");
+        const startTime = availabilityTime(parseMicrosoftDateTime(start as { dateTime?: string; timeZone?: string }).toISOString());
+        const endTime = availabilityTime(parseMicrosoftDateTime(end as { dateTime?: string; timeZone?: string }).toISOString());
+        invariant(startTime < endTime, 502, "CALENDAR_PROVIDER_ERROR", "Invalid busy interval.");
+        return { status: interval.status, start: { dateTime: startTime, timeZone: "UTC" }, end: { dateTime: endTime, timeZone: "UTC" } };
+      });
+    }
+    return { provider: "MICROSOFT", schedules };
+  } catch {
+    // Provider bodies, exceptions and token envelopes must never reach a tool/model/log.
+    return { error: "Calendar availability is unavailable. Check workspace membership, provider connection and calendar read consent, then retry." };
+  }
+}
+
 export interface CalendarEvent {
   id: string;
   provider: OAuthProvider;
