@@ -21,7 +21,7 @@ describe.runIf(process.env.MOBILE_SHELL_BROWSER_QA === "1")("mobile workspace sh
   let page: Page;
   let errors: string[];
   let unexpectedRequests: string[];
-  const artifacts = fileURLToPath(new URL("../../../../../../.artifacts/pun99-fixed/", import.meta.url));
+  const artifacts = fileURLToPath(new URL(`../../../../../../.artifacts/pun99-fixed/${Date.now()}/`, import.meta.url));
   const more = () => page.locator('.mobile-bottom-nav button[aria-controls="mobile-more-menu"]');
   const panel = () => page.locator("#mobile-more-menu");
   const close = () => panel().locator(":scope > .dialog-content > .dialog-header > .dialog-close");
