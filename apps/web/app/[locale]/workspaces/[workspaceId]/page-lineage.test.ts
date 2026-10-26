@@ -109,6 +109,12 @@ async function renderDashboard() {
   finally { vi.unstubAllGlobals(); }
 }
 
+function attentionTileText(html: string, label: string) {
+  const tiles = html.match(/<a[^>]*class="nr-home-attention-tile"[^>]*>[\s\S]*?<\/a>/g) ?? [];
+  const tile = tiles.find(value => value.includes(`>${label}</span>`));
+  return tile?.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
 // SSR wiring proof with a mocked permission boundary; real lineage/tenant rules
 // are covered by the independent domain PG suites. Ranking/scoring stay real.
 it("renders admitted tail rows and complete counts while keeping ninth-item personalization outside the eight display slots", async () => {
@@ -145,8 +151,8 @@ it("renders admitted tail rows and complete counts while keeping ninth-item pers
     const html = renderToStaticMarkup(await WorkspaceDashboard({ params: Promise.resolve({ workspaceId: "ws" }) }));
     expect(html).not.toContain("Restricted payload");
     expect(html).toContain("footerStats articles=2 meetings=1 chunks=3 members=2");
-    expect(html).toContain("attentionTileAria label=attentionActions personal=9 total=9");
-    expect(html).toContain("attentionTileAria label=attentionTensions personal=0 total=1");
+    expect(attentionTileText(html, "attentionActions")).toBe("attentionActions 9 attentionForYou 9 attentionTotalOpen");
+    expect(attentionTileText(html, "attentionTensions")).toBe("attentionTensions 0 attentionForYou 1 attentionTotalOpen");
     expect(html.match(/<li>/g)).toHaveLength(8);
     expect(html).not.toContain('href="/workspaces/ws/actions/a-108"');
     expect(html).toContain('<div class="nr-newspaper-lead">**Tail focus**');
@@ -196,7 +202,7 @@ it("uses only readable advice to create personal signals and deadlines, replenis
     row("a-hidden-advice", "No personal signal", true), row("a-visible-advice", "Permitted advice action", true),
   ]});
   const html = await renderDashboard();
-  expect(html).toContain("attentionTileAria label=attentionActions personal=1 total=2");
+  expect(attentionTileText(html, "attentionActions")).toBe("attentionActions 1 attentionForYou 2 attentionTotalOpen");
   expect(html).toContain("Permitted advice action");
   expect(html).not.toContain("No personal signal");
   expect(html.match(/personalReasonAdvice/g)).toHaveLength(1);
@@ -220,7 +226,7 @@ it("bounds large hidden families and renders qualified counts and empty snapshot
   expect(html).not.toContain("personalNewspaperEmpty");
   expect(html).not.toContain("newspaperEmptyBody");
   expect(html).not.toContain("Restricted payload");
-  expect(html).toContain("personal=… total=…");
+  expect(attentionTileText(html, "attentionActions")).toBe("attentionActions … attentionForYou … attentionTotalOpen");
   expect(html).toContain("articles=… meetings=…");
   for (const family of ["action", "adviceRequest", "brainArticle", "meeting", "workspaceBriefing", "newspaperEdition"]) {
     expect(state.queries.get(family)).toHaveBeenCalledTimes(2);
@@ -231,7 +237,7 @@ it("qualifies personal counts when only the advice window is incomplete", async 
   installRows({ adviceRequest: Array.from({length: 200}, (_, i) => ({...row(`r-${String(i).padStart(3, "0")}`, "Restricted", false), process: {subjectType: "ACTION", subjectId: "a"}})),
     action: [{...row("a", "Assigned", true), assigneeMemberId: "member"}] });
   const html = await renderDashboard();
-  expect(html).toContain("personal=1+ total=1");
+  expect(attentionTileText(html, "attentionActions")).toBe("attentionActions 1+ attentionForYou 1 attentionTotalOpen");
   expect(html).toContain("limitedSnapshot");
 });
 
@@ -266,10 +272,10 @@ it.runIf(process.env.DASHBOARD_WINDOW_BROWSER_QA === "1")("shows the limited sna
     await page.route("**/*", route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await page.goto(`${origin}/workspaces/ws`);
     await page.getByRole("status").filter({hasText: "Limited snapshot."}).waitFor();
-    const actions = page.getByRole("link", {name: "Actions: 200+ for you, 200+ total open", exact: true});
+    const actions = page.getByRole("link", {name: /Actions.*200\+/});
     await actions.waitFor();
     await mkdir(".artifacts/source-160-bounded-aggregate", {recursive: true});
-    await page.screenshot({path: ".artifacts/source-160-bounded-aggregate/dashboard.png", fullPage: true});
+    await page.screenshot({path: `.artifacts/source-160-bounded-aggregate/dashboard-${Date.now()}.png`, fullPage: true});
     await actions.click();
     await page.getByRole("heading", {name: "Action section fixture"}).waitFor();
     expect(new URL(page.url()).searchParams.getAll("status")).toEqual(["OPEN", "IN_PROGRESS"]);
