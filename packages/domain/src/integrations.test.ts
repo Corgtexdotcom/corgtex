@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => {
   const prismaMock: any = {
     oAuthConnection: {
       findUnique: vi.fn(),
       findFirst: vi.fn(),
+      findMany: vi.fn(),
       create: vi.fn(),
       upsert: vi.fn(),
       update: vi.fn(),
@@ -48,6 +49,7 @@ describe("OAuth integration sync helpers", () => {
     vi.clearAllMocks();
     vi.stubGlobal("fetch", vi.fn());
     requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1" });
+
   });
 
   it("encrypts OAuth tokens when saving a workspace connection", async () => {
@@ -257,7 +259,8 @@ describe("OAuth integration sync helpers", () => {
     });
     const { refreshOAuthTokenIfNeeded } = await import("./integrations");
 
-    await refreshOAuthTokenIfNeeded("conn-1");
+    const encrypted = await refreshOAuthTokenIfNeeded("conn-1");
+    expect(encrypted.accessToken).toBe("enc:access-token");
 
     expect(prismaMock.oAuthConnection.update).toHaveBeenCalledWith({
       where: expect.objectContaining({ id: "conn-1", accessToken: "access-token", refreshToken: "refresh-token", tokenStorageVersion: "plaintext" }),
@@ -951,4 +954,278 @@ it.each(["cycle", "last-page"] as const)("keeps Gmail continuation authority ind
     expect(await result).toMatchObject({id: "older-message", snippet: "Original body"});
     expect(pages).toBe(100);
   }
+});
+describe("read-only calendar availability", () => {
+  const actor = { kind: "user", user: { id: "user-1", email: "user@example.test", displayName: null } } as const;
+  const email = "user@example.test";
+  const timeMin = "2026-10-14T09:00:00.000Z", timeMax = "2026-10-14T17:00:00.000Z";
+  const params = (provider: "GOOGLE" | "MICROSOFT" = "GOOGLE") => ({ workspaceId: "ws-1", provider, emails: [email], timeMin, timeMax });
+  let rows: any[];
+  let encrypt: (value: string) => string;
+  let decrypt: (value: string) => string;
+  const matches = (row: any, where: any) => Object.entries(where).every(([key, value]) =>
+    value === undefined || (value instanceof Date ? row[key]?.getTime() === value.getTime() : row[key] === value));
+  const fixture = (provider: "GOOGLE" | "MICROSOFT" = "GOOGLE", overrides: Record<string, unknown> = {}) => ({
+    id: `conn-${provider}`, userId: actor.user.id, workspaceId: "ws-1", provider, status: "ACTIVE",
+    scopes: [provider === "GOOGLE" ? "https://www.googleapis.com/auth/calendar.readonly" : "Calendars.Read"],
+    accessToken: encrypt("synthetic-access"), refreshToken: encrypt("synthetic-refresh"),
+    tokenStorageVersion: "aes-256-gcm", expiresAt: new Date(Date.now() + 3600_000),
+    updatedAt: new Date("2026-10-14T08:00:00Z"), syncSettings: { calendar: { enabled: true } }, ...overrides,
+  });
+  const providerReply = (provider: "GOOGLE" | "MICROSOFT", emails = [email]) => provider === "GOOGLE"
+    ? { calendars: Object.fromEntries(emails.map(id => [id, { busy: [{ start: timeMin, end: timeMax }] }])) }
+    : { value: emails.map(scheduleId => ({ scheduleId, scheduleItems: [{ status: "busy",
+      start: { dateTime: timeMin, timeZone: "UTC" }, end: { dateTime: timeMax, timeZone: "UTC" },
+      subject: "synthetic-access", location: "synthetic-refresh" }] })) };
+  const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200 });
+
+  beforeEach(async () => {
+    vi.resetModules(); vi.resetAllMocks();
+    vi.stubEnv("ENCRYPTION_KEY", "11".repeat(32));
+    vi.stubEnv("GOOGLE_CLIENT_ID", "synthetic-client"); vi.stubEnv("GOOGLE_CLIENT_SECRET", "synthetic-secret");
+    vi.stubEnv("MICROSOFT_CLIENT_ID", "synthetic-client"); vi.stubEnv("MICROSOFT_CLIENT_SECRET", "synthetic-secret");
+    vi.stubGlobal("fetch", vi.fn());
+    const shared = await import("@corgtex/shared"), crypto = await import("../../shared/src/crypto");
+    encrypt = crypto.encryptSecret; decrypt = crypto.decryptSecret;
+    vi.mocked(shared.encryptSecret).mockImplementation(encrypt);
+    vi.mocked(shared.decryptSecret).mockImplementation(decrypt);
+    rows = [fixture()];
+    requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1", isActive: true });
+    prismaMock.oAuthConnection.findMany.mockImplementation(async ({ where, take }: any) => structuredClone(rows.filter(row => matches(row, where)).slice(0, take)));
+    prismaMock.oAuthConnection.findUnique.mockImplementation(async ({ where }: any) => structuredClone(rows.find(row => row.id === where.id) ?? null));
+    prismaMock.oAuthConnection.update.mockImplementation(async ({ where, data }: any) => {
+      const row = rows.find(row => matches(row, where));
+      if (!row) throw Object.assign(new Error("Connection changed"), { code: "P2025" });
+      Object.assign(row, data, { updatedAt: new Date(row.updatedAt.getTime() + 1) });
+      return structuredClone(row);
+    });
+  });
+
+  afterEach(async () => {
+    const shared = await import("@corgtex/shared");
+    vi.mocked(shared.encryptSecret).mockImplementation(value => `enc:${value}`);
+    vi.mocked(shared.decryptSecret).mockImplementation(value => value.replace(/^enc:/, ""));
+    vi.unstubAllEnvs(); vi.unstubAllGlobals(); vi.restoreAllMocks();
+  });
+
+  it.each(["GOOGLE", "MICROSOFT"] as const)("uses decrypted %s tokens for encrypted, refreshed and legacy rows", async provider => {
+    const { getCalendarAvailability, refreshOAuthTokenIfNeeded } = await import("./integrations");
+    for (const mode of ["encrypted", "refreshed", "legacy"] as const) {
+      rows = [fixture(provider, mode === "legacy" ? {
+        accessToken: "synthetic-access", refreshToken: "synthetic-refresh", tokenStorageVersion: "plaintext",
+      } : mode === "refreshed" ? { expiresAt: new Date(0) } : {})];
+      vi.mocked(fetch).mockReset();
+      if (mode === "refreshed") vi.mocked(fetch).mockResolvedValueOnce(json({
+        access_token: "synthetic-refreshed-access", refresh_token: "synthetic-refreshed-refresh", expires_in: 3600,
+      }));
+      vi.mocked(fetch).mockResolvedValueOnce(json(providerReply(provider)));
+      const result = await getCalendarAvailability(actor, params(provider));
+      expect(result).toMatchObject({ provider });
+      const token = mode === "refreshed" ? "synthetic-refreshed-access" : "synthetic-access";
+      const calls = vi.mocked(fetch).mock.calls;
+      expect(calls.at(-1)?.[1]?.headers).toMatchObject({ Authorization: `Bearer ${token}` });
+      expect(calls.at(-1)?.[0]).toBe(provider === "GOOGLE"
+        ? "https://www.googleapis.com/calendar/v3/freeBusy" : "https://graph.microsoft.com/v1.0/me/calendar/getSchedule");
+      expect(calls).toHaveLength(mode === "refreshed" ? 2 : 1);
+      if (mode === "refreshed") {
+        expect(calls[0][1]?.body?.toString()).toContain("refresh_token=synthetic-refresh");
+        expect(calls[0][1]?.body?.toString()).not.toContain("aes-256-gcm");
+      }
+      expect(rows[0].accessToken).toMatch(/^aes-256-gcm:/);
+      expect(rows[0].refreshToken).toMatch(/^aes-256-gcm:/);
+      expect(decrypt(rows[0].accessToken)).toBe(token);
+      expect(decrypt(rows[0].refreshToken)).toBe(mode === "refreshed" ? "synthetic-refreshed-refresh" : "synthetic-refresh");
+      expect(rows[0].tokenStorageVersion).toBe("aes-256-gcm");
+      const returnedRow = await refreshOAuthTokenIfNeeded(rows[0].id);
+      expect(returnedRow.accessToken).toBe(rows[0].accessToken);
+      expect(JSON.stringify(result)).not.toMatch(/synthetic-(access|refresh)|aes-256-gcm|accessToken|refreshToken|subject|location/);
+    }
+  });
+
+  it.each([
+    { userId: "foreign-user" }, { workspaceId: "foreign-workspace" }, { workspaceId: null },
+    { provider: "MICROSOFT" }, { status: "PAUSED" }, { status: "ERROR" }, { status: "DISCONNECTED" },
+    { scopes: [] }, { scopes: ["https://www.googleapis.com/auth/drive.file"] },
+    { syncSettings: { calendar: { enabled: false } } },
+  ])("performs zero HTTP and zero token writes for ineligible %j", async overrides => {
+    rows = [fixture("GOOGLE", { ...overrides, expiresAt: new Date(0) })];
+    const { getCalendarAvailability } = await import("./integrations");
+    expect(await getCalendarAvailability(actor, params())).toHaveProperty("error");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(prismaMock.oAuthConnection.update).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, null, "", "google", "BOX"])("requires explicit provider %j before lookup/HTTP", async provider => {
+    rows.push(fixture("MICROSOFT"));
+    const { getCalendarAvailability } = await import("./integrations");
+    expect(await getCalendarAvailability(actor, { ...params(), provider } as any)).toHaveProperty("error");
+    expect(prismaMock.oAuthConnection.findMany).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("selects the explicit provider when both providers exist and rejects duplicate candidates", async () => {
+    rows.push(fixture("MICROSOFT"));
+    vi.mocked(fetch).mockResolvedValueOnce(json(providerReply("MICROSOFT")));
+    const { getCalendarAvailability } = await import("./integrations");
+    expect(await getCalendarAvailability(actor, params("MICROSOFT"))).toMatchObject({ provider: "MICROSOFT" });
+    expect(prismaMock.oAuthConnection.findMany).toHaveBeenCalledWith({
+      where: { userId: actor.user.id, workspaceId: "ws-1", provider: "MICROSOFT", status: "ACTIVE" }, take: 2,
+    });
+    rows.push(fixture("GOOGLE", { id: "duplicate" }));
+    vi.mocked(fetch).mockClear();
+    expect(await getCalendarAvailability(actor, params())).toHaveProperty("error"); expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["bootstrap", "credential", "control-plane"])("denies %s actors before connection access", async authProvider => {
+    const { getCalendarAvailability } = await import("./integrations");
+    expect(await getCalendarAvailability({ kind: "agent", authProvider, label: "synthetic" } as any, params())).toHaveProperty("error");
+    expect(requireWorkspaceMembershipMock).not.toHaveBeenCalled();
+    expect(prismaMock.oAuthConnection.findMany).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("requires current active membership both before selection and after refresh", async () => {
+    const { getCalendarAvailability } = await import("./integrations");
+    requireWorkspaceMembershipMock.mockRejectedValueOnce(new Error("not an active member"));
+    expect(await getCalendarAvailability(actor, params())).toHaveProperty("error");
+    expect(prismaMock.oAuthConnection.findMany).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+    requireWorkspaceMembershipMock.mockResolvedValueOnce({ isActive: true }).mockRejectedValueOnce(new Error("membership revoked"));
+    expect(await getCalendarAvailability(actor, params())).toHaveProperty("error"); expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: "PAUSED" }, { status: "DISCONNECTED" }, { workspaceId: "foreign-workspace" },
+    { userId: "foreign-user" }, { provider: "MICROSOFT" }, { scopes: [] },
+    { syncSettings: { calendar: { enabled: false } } },
+  ])("revalidates the helper reread before refresh for %j", async change => {
+    rows[0].expiresAt = new Date(0);
+    const original = prismaMock.oAuthConnection.findMany.getMockImplementation();
+    prismaMock.oAuthConnection.findMany.mockImplementation(async (query: any) => {
+      const selected = await original(query); Object.assign(rows[0], change); return selected;
+    });
+    const { getCalendarAvailability } = await import("./integrations");
+    expect(await getCalendarAvailability(actor, params())).toHaveProperty("error"); expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["PAUSED", "DISCONNECTED"])("cannot revive %s during successful or failed refresh", async status => {
+    const { getCalendarAvailability } = await import("./integrations");
+    for (const success of [true, false]) {
+      rows = [fixture("GOOGLE", { expiresAt: new Date(0) })];
+      vi.mocked(fetch).mockReset().mockImplementationOnce(async () => {
+        rows[0].status = status; rows[0].updatedAt = new Date();
+        return success ? json({ access_token: "synthetic-refreshed-access", expires_in: 3600 }) : new Response("synthetic-access", { status: 401 });
+      });
+      expect(await getCalendarAvailability(actor, params())).toHaveProperty("error");
+      expect(rows[0].status).toBe(status); expect(decrypt(rows[0].accessToken)).toBe("synthetic-access");
+      expect(fetch).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("guards legacy backfill and the refreshed-row reread against pause", async () => {
+    const { getCalendarAvailability } = await import("./integrations");
+    const write = prismaMock.oAuthConnection.update.getMockImplementation();
+    rows = [fixture("GOOGLE", { tokenStorageVersion: "plaintext", accessToken: "synthetic-access", expiresAt: new Date(0) })];
+    prismaMock.oAuthConnection.update.mockImplementationOnce(async (query: any) => {
+      rows[0].status = "PAUSED"; return write(query);
+    });
+    expect(await getCalendarAvailability(actor, params())).toHaveProperty("error");
+    expect(rows[0].accessToken).toBe("synthetic-access"); expect(fetch).not.toHaveBeenCalled();
+    rows = [fixture("MICROSOFT", { expiresAt: new Date(0) })];
+    vi.mocked(fetch).mockResolvedValueOnce(json({ access_token: "synthetic-refreshed-access", expires_in: 3600 }));
+    prismaMock.oAuthConnection.update.mockImplementationOnce(async (query: any) => {
+      const written = await write(query); rows[0].status = "PAUSED"; return written;
+    });
+    expect(await getCalendarAvailability(actor, params("MICROSOFT"))).toHaveProperty("error");
+    expect(rows[0].status).toBe("PAUSED"); expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("rejects pause/restore and token replacement while refresh is in flight", async () => {
+    rows[0].expiresAt = new Date(0);
+    const initial = rows[0].accessToken;
+    vi.mocked(fetch).mockImplementationOnce(async () => {
+      rows[0].status = "ACTIVE"; rows[0].updatedAt = new Date(); rows[0].accessToken = encrypt("replacement");
+      return json({ access_token: "synthetic-refreshed-access", expires_in: 3600 });
+    });
+    const { getCalendarAvailability } = await import("./integrations");
+    expect(await getCalendarAvailability(actor, params())).toHaveProperty("error");
+    expect(rows[0].accessToken).not.toBe(initial); expect(decrypt(rows[0].accessToken)).toBe("replacement");
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("checks connection eligibility immediately before the availability request", async () => {
+    requireWorkspaceMembershipMock.mockImplementationOnce(async () => ({ isActive: true })).mockImplementationOnce(async () => {
+      rows[0].status = "PAUSED"; return { isActive: true };
+    });
+    const { getCalendarAvailability } = await import("./integrations");
+    expect(await getCalendarAvailability(actor, params())).toHaveProperty("error"); expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["GOOGLE", "MICROSOFT"] as const)("never reports partial %s failures or missing schedules as free time", async provider => {
+    rows = [fixture(provider)];
+    const other = "other@example.test", request = { ...params(provider), emails: [email, other] };
+    const { getCalendarAvailability } = await import("./integrations");
+    for (const missing of [false, true]) {
+      const value = providerReply(provider, [email]) as any;
+      if (!missing) {
+        if (provider === "GOOGLE") value.calendars[other] = { errors: [{ reason: "synthetic-access" }] };
+        else value.value.push({ scheduleId: other, error: { message: "synthetic-access" }, scheduleItems: [] });
+      }
+      vi.mocked(fetch).mockResolvedValueOnce(json(value));
+      const result = await getCalendarAvailability(actor, request);
+      expect(result).toHaveProperty("error"); expect(result).not.toHaveProperty("calendars"); expect(result).not.toHaveProperty("schedules");
+      expect(JSON.stringify(result)).not.toContain("synthetic-access");
+    }
+  });
+
+  it.each(["GOOGLE", "MICROSOFT"] as const)("preserves %s authority on transient refresh, recovers and fences genuine revocation", async provider => {
+    const { getCalendarAvailability } = await import("./integrations");
+    for (const failure of ["429", "503", "network", "json", "resource"] as const) {
+      rows = [fixture(provider, { expiresAt: failure === "resource" ? new Date(Date.now() + 3600_000) : new Date(0) })];
+      const original = structuredClone(rows[0]);
+      vi.mocked(fetch).mockReset();
+      if (failure === "network") vi.mocked(fetch).mockRejectedValueOnce(new Error("temporary outage"));
+      else if (failure === "json") vi.mocked(fetch).mockResolvedValueOnce(new Response("invalid-json"));
+      else vi.mocked(fetch).mockResolvedValueOnce(new Response("unavailable", { status: failure === "resource" ? 403 : Number(failure) }));
+      expect(await getCalendarAvailability(actor, params(provider))).toHaveProperty("error");
+      expect(rows[0]).toEqual(original);
+      vi.mocked(fetch).mockReset();
+      if (failure !== "resource") vi.mocked(fetch).mockResolvedValueOnce(json({ access_token: "synthetic-recovered", expires_in: 3600 }));
+      vi.mocked(fetch).mockResolvedValueOnce(json(providerReply(provider)));
+      expect(await getCalendarAvailability(actor, params(provider))).toMatchObject({ provider });
+      expect(rows[0].status).toBe("ACTIVE");
+    }
+    rows = [fixture(provider, { expiresAt: new Date(0) })];
+    vi.mocked(fetch).mockReset().mockResolvedValueOnce(new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }));
+    expect(await getCalendarAvailability(actor, params(provider))).toHaveProperty("error");
+    expect(rows[0].status).toBe("ERROR");
+    vi.mocked(fetch).mockClear();
+    expect(await getCalendarAvailability(actor, params(provider))).toHaveProperty("error");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["GOOGLE", "MICROSOFT"] as const)("withholds an in-flight %s response after reconnect or disconnect", async provider => {
+    const { getCalendarAvailability } = await import("./integrations");
+    for (const change of [{ status: "DISCONNECTED" }, { accessToken: encrypt("replacement") }]) {
+      rows = [fixture(provider)];
+      vi.mocked(fetch).mockReset().mockImplementationOnce(async () => {
+        Object.assign(rows[0], change);
+        return json(providerReply(provider));
+      });
+      expect(await getCalendarAvailability(actor, params(provider))).toHaveProperty("error");
+      expect(fetch).toHaveBeenCalledOnce();
+    }
+  });
+
+  it.each(["http", "throw", "refresh", "decrypt", "malformed"])("controls %s failure without token leakage or event creation", async failure => {
+    const errorLog = vi.spyOn(console, "error"), warnLog = vi.spyOn(console, "warn");
+    const secret = rows[0].accessToken;
+    if (failure === "refresh") rows[0].expiresAt = new Date(0);
+    if (failure === "decrypt") rows[0].accessToken = "aes-256-gcm:broken";
+    if (failure === "throw") vi.mocked(fetch).mockRejectedValueOnce(new Error(`synthetic-access ${secret}`));
+    else if (failure === "malformed") vi.mocked(fetch).mockResolvedValueOnce(json({ calendars: { [email]: { busy: [{ start: "synthetic-access", end: timeMax }] } } }));
+    else vi.mocked(fetch).mockResolvedValueOnce(new Response(`synthetic-access ${secret}`, { status: 401 }));
+    const { getCalendarAvailability } = await import("./integrations");
+    const result = await getCalendarAvailability(actor, params());
+    expect(result).toHaveProperty("error"); expect(JSON.stringify(result)).not.toMatch(/synthetic-access|aes-256-gcm/);
+    expect(errorLog).not.toHaveBeenCalled(); expect(warnLog).not.toHaveBeenCalled();
+    expect(vi.mocked(fetch).mock.calls.every(([url]) => !String(url).includes("/events"))).toBe(true);
+  });
 });
