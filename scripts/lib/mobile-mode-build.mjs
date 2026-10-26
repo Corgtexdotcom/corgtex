@@ -12,6 +12,10 @@ export const MOBILE_SHELL_SOURCE_PATH = "apps/web/app/[locale]/workspaces/[works
 // every descendant build keeps its storage behavior. Unchanged source can be
 // reused by newer releases; a new blob requires inspection before QA can pass.
 export const INSPECTED_MOBILE_MODE_SOURCES = Object.freeze({
+  "615490b0029e9fa5b184a7d303005aceca9dfaf4": Object.freeze({
+    contract: "workspace-scoped-v1",
+    inspectedGitSha: "6380f38715fb9bac9fff0b005e7a7e47905a401a",
+  }),
   "9515874eae16ff76a035dcdbfeb577b5c767431f": Object.freeze({
     contract: "workspace-scoped-v1",
     inspectedGitSha: "29600af5dc24e1215e95c0957e6b425284a3638f",
