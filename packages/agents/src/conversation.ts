@@ -972,6 +972,7 @@ async function executeConversationToolCall({
 }) {
   const args = rawArguments ? JSON.parse(rawArguments) : {};
   await authorizeConversationTool(actor, ctx.workspaceId, toolName, args, ctx.operationScopes);
+  throwIfConversationCanceled(ctx);
   if (isVersionedUpdateTool(toolName)) throw new Error("Versioned updates require a preceding query result from this turn.");
   if (isCrmWriteTool(toolName)) {
     const normalizedArgs = normalizeCrmWriteToolArgs(toolName, ctx, args);
@@ -1003,8 +1004,22 @@ async function executeVersionedFollowupTools(response: import("@corgtex/models")
   if (!executed.some(({ toolName }) => toolName === "update_action" || toolName === "update_tension")) for (const read of executed) { const updateName = read.toolName === "query_actions" ? "update_action" : read.toolName === "query_tensions" ? "update_tension" : null; for (const item of Array.isArray(read.result) ? read.result : []) if (updateName && typeof item?.id === "string" && Number.isInteger(item.version) && item.version > 0) observed.set(`${updateName}:${item.id}`, item.version); }
   const offered = new Map(offeredTools.map(({ function: tool }) => [tool.name, tool])); const valid = calls.every(({ function: tool }) => { const args = parseToolArgs(tool.arguments); const id = tool.name === "update_action" ? args.actionId : tool.name === "update_tension" ? args.tensionId : null; return isVersionedUpdateTool(tool.name) && matchesJsonSchema(args, offered.get(tool.name)?.parameters) && typeof id === "string" && observed.get(`${tool.name}:${id}`) === args.expectedVersion; });
   if (!valid || observed.size === 0) return "rejected" as const; messages.push({ role: "assistant", content: response.content || "", tool_calls: calls });
-  for (const call of calls) { const toolName = call.function.name; const args = effectiveToolArgs(toolName, ctx, call.function.arguments);
-    try { const result = await TOOL_HANDLERS[toolName]!(actor, ctx, args); executed.push({ toolName, args, result }); messages.push({ role: "tool", content: JSON.stringify(result), name: toolName, tool_call_id: call.id }); } catch (err) { const error = conversationToolError(err); failed.push({ toolName, args, error: err instanceof AppError && err.status === 400 ? error : "" }); messages.push({ role: "tool", content: JSON.stringify({ error }), name: toolName, tool_call_id: call.id }); } }
+  for (const call of calls) {
+    throwIfConversationCanceled(ctx);
+    const toolName = call.function.name;
+    const args = effectiveToolArgs(toolName, ctx, call.function.arguments);
+    try {
+      const result = await TOOL_HANDLERS[toolName]!(actor, ctx, args);
+      executed.push({ toolName, args, result });
+      messages.push({ role: "tool", content: JSON.stringify(result), name: toolName, tool_call_id: call.id });
+    } catch (err) {
+      throwIfConversationCanceled(ctx, err);
+      const error = conversationToolError(err);
+      failed.push({ toolName, args, error: err instanceof AppError && err.status === 400 ? error : "" });
+      messages.push({ role: "tool", content: JSON.stringify({ error }), name: toolName, tool_call_id: call.id });
+    }
+    throwIfConversationCanceled(ctx);
+  }
   return "executed" as const;
 }
 
@@ -1395,6 +1410,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
     const authorizeBrainRead = validBrainReadBatch(response.tool_calls) ? await createBrainReadAuthorization(actor, ctx, loadedKnowledge.accessDomains) : null;
 
     for (const call of response.tool_calls) {
+      throwIfConversationCanceled(ctx);
       await authorizeBrainRead?.();
       const handler = TOOL_HANDLERS[call.function.name];
       const toolArgs = effectiveToolArgs(call.function.name, ctx, call.function.arguments);
@@ -1426,6 +1442,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
         failedToolResults.push({ toolName: call.function.name, args: toolArgs, error: "Unknown capability" });
         messages.push({ role: "tool", content: JSON.stringify({ error: "Unknown capability" }), name: call.function.name, tool_call_id: call.id });
       }
+      throwIfConversationCanceled(ctx);
       await authorizeBrainRead?.();
     }
 
@@ -1700,6 +1717,7 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
     const authorizeBrainRead = validBrainReadBatch(initialCalls) ? await createBrainReadAuthorization(actor, ctx, loadedKnowledge.accessDomains) : null;
 
     for (const call of initialCalls) {
+      throwIfConversationCanceled(ctx);
       await authorizeBrainRead?.();
       const handler = TOOL_HANDLERS[call.function.name];
       const toolArgs = effectiveToolArgs(call.function.name, ctx, call.function.arguments);
@@ -1734,6 +1752,7 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
         failedToolResults.push({ toolName: call.function.name, args: toolArgs, error: "Unknown capability" });
         messages.push({ role: "tool", content: JSON.stringify({ error: "Unknown capability" }), name: call.function.name, tool_call_id: call.id });
       }
+      throwIfConversationCanceled(ctx);
       await authorizeBrainRead?.();
     }
 
