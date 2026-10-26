@@ -1,5 +1,6 @@
+import { AdviceRequestWindowNotice } from "@/lib/components/AdviceRequestWindowNotice";
 import Link from "next/link";
-import { AppError, getAction, getWorkspaceArchiveRecord, listActionChecklistItems, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getAction, ArchiveMetadataReadRelease, getWorkspaceArchiveRecord, listActionChecklistItems, listAdviceRequestWindow, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { ConfirmSubmitButton } from "@/lib/components/ConfirmSubmitButton";
@@ -41,10 +42,12 @@ export default async function ActionDetailPage({
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { workspaceId, actionId } = await params;
+  const resolvedSearch = searchParams ? await searchParams : {};
   const returnTo = readActionListReturnHref(workspaceId, (await searchParams)?.returnTo);
   const backHref = returnTo ?? `/workspaces/${workspaceId}/actions`;
   const editHref = (id: string) => appendActionReturnTo(`/workspaces/${workspaceId}/actions/${id}/edit`, returnTo);
   const actor = await requirePageActor();
+  const archiveRelease = new ArchiveMetadataReadRelease(actor, workspaceId);
   const t = await getTranslations("actions");
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
@@ -77,7 +80,7 @@ export default async function ActionDetailPage({
     throw error;
   }
   const isArchived = Boolean(action.archivedAt);
-  const [versionHistory, evidence, checklistItems, externalResourceAttachments, deliberationEntries, inputRequests, archiveRecord, members] = await Promise.all([
+  const [versionHistory, evidence, checklistItems, externalResourceAttachments, deliberationEntries, adviceWindow, archiveRecord, members] = await Promise.all([
     archivedSafeRead(isArchived, listWorkItemVersions(actor, { workspaceId, entityType: "ACTION", entityId: actionId }), {
       entityType: "Action" as const,
       entityId: actionId,
@@ -88,12 +91,13 @@ export default async function ActionDetailPage({
     archivedSafeRead(isArchived, listActionChecklistItems(actor, { workspaceId, actionId }), []),
     archivedSafeRead(isArchived, listExternalResourceAttachments(actor, { workspaceId, entityType: "Action", entityId: actionId }), []),
     archivedSafeRead(isArchived, listDeliberationEntries(actor, { workspaceId, parentType: "ACTION", parentId: actionId }), []),
-    isArchived ? Promise.resolve([]) : listAdviceRequests(actor, { workspaceId, subjectType: "ACTION", subjectId: actionId }),
+    isArchived ? Promise.resolve({ items: [], complete: true, nextCursor: null }) : listAdviceRequestWindow(actor, { workspaceId, subjectType: "ACTION", subjectId: actionId, cursor: typeof resolvedSearch.adviceCursor === "string" ? resolvedSearch.adviceCursor : undefined }),
     isArchived
-      ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Action", entityId: action.id }), null)
+      ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Action", entityId: action.id }, archiveRelease), null)
       : Promise.resolve(null),
     isArchived ? Promise.resolve([]) : listHumanMembers(workspaceId),
   ]);
+  const inputRequests = adviceWindow.items;
   const hasEligibleAssignee = hasEligibleActionAssignee(action.assigneeMemberId, new Set(members.map((member) => member.id)));
   const completionEvidence = evidence.filter((row) => row.purpose === "completion_evidence");
   const feedbackContextEvidence = evidence.filter((row) => row.purpose === "feedback_context");
@@ -249,6 +253,8 @@ export default async function ActionDetailPage({
       ) : null,
     };
   });
+
+  await archiveRelease.finish(undefined);
 
   return (
     <>
@@ -476,8 +482,11 @@ export default async function ActionDetailPage({
         </section>
       )}
 
-      {(canRequestInput || inputRequests.length > 0) && (
+      {(canRequestInput || inputRequests.length > 0 || !adviceWindow.complete || Boolean(resolvedSearch.adviceCursor)) && (
         <WorkItemConversationSurface title={t("sectionInputRequests")} className="work-request-surface">
+          <div id="advice-requests" />
+          <AdviceRequestWindowNotice page={adviceWindow} path={`/workspaces/${workspaceId}/actions/${actionId}`} search={resolvedSearch}
+            labels={{ limited: tWork("adviceWindowLimited"), older: tWork("olderAdviceRequests"), newest: tWork("newestAdviceRequests") }} />
           <WorkItemRequestList
             requests={inputRequestCards}
             labels={{

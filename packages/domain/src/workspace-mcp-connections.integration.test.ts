@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { prisma, runWithSupportOrigin, runWithMcpOrigin, getMcpOrigin } from "@corgtex/shared";
+import { prisma, runWithSupportOrigin, runWithMcpOrigin, getMcpOrigin, mcpScopesHash } from "@corgtex/shared";
 import type { AppActor, McpOrigin } from "@corgtex/shared";
 import { issueMcpAuthorizationCode, exchangeMcpAuthorizationCode, refreshMcpAccessToken, resolveMcpOAuthAccessToken,
   revokeMcpWorkspaceConnection, listMcpWorkspaceConnections } from "./mcp-connector";
@@ -28,7 +28,8 @@ describe("workspace MCP connection contract on real PostgreSQL", () => {
   const origin = async (token: string, workspaceId = a): Promise<McpOrigin> => {
     const session = await resolve(token, workspaceId);
     if (!session) throw new Error("Expected connection");
-    return { kind: "oauth", id: session.connectionId, workspaceId };
+    return { kind: "oauth", id: session.connectionId, workspaceId, scopeHash: mcpScopesHash(session.scopes),
+      grantEpoch: session.grantEpoch, requiredScopes: ["workspace:read"] };
   };
   const disconnect = (id: string, workspaceId = a) => fresh(() => revokeMcpWorkspaceConnection(actor, workspaceId, id));
   const change = (version: number, active: boolean, role: "FULL" | "SETUP" = "FULL") => fresh(async () => {
@@ -239,7 +240,8 @@ describe("workspace MCP connection contract on real PostgreSQL", () => {
     vi.stubEnv("MCP_WORKSPACE_CONNECTIONS_ENABLED", "true");
     const agent = await fresh(() => resolveAgentActorFromBearer(issued.token));
     if (agent?.kind !== "agent") throw new Error("Expected agent");
-    const mcpOrigin: McpOrigin = { kind: "agent", id: agent.credentialId!, workspaceId: a, credentialVersion: agent.credentialVersion };
+    const mcpOrigin: McpOrigin = { kind: "agent", id: agent.credentialId!, workspaceId: a, credentialVersion: agent.credentialVersion,
+      scopeHash: mcpScopesHash(agent.scopes ?? []), requiredScopes: ["workspace:read"] };
     await expect(fresh(() => withMcpConnectionExecution({ workspaceId: a, mcpOrigin }, async () => true))).resolves.toBe(true);
     await fresh(() => revokeAgentCredential(actor, { workspaceId: a, credentialId: agent.credentialId! }));
     await fresh(() => rotateAgentCredential(actor, { workspaceId: a, credentialId: agent.credentialId! }));

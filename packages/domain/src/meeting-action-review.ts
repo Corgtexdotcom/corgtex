@@ -4,6 +4,12 @@ import { isDuplicateGuardMatchError } from "./duplicate-guard";
 import { requireWorkspaceMembership } from "./auth";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { invariant } from "./errors";
+import type { Prisma } from "@prisma/client";
+import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
+import { recordArtifactInputLineage, preserveUnknownArtifactInputSnapshot, captureArtifactInputProof, captureArtifactInputSnapshotProof, lineageContentFingerprint, isArtifactInputProofPubliclyShareable, type LineageRoot } from "./source-lineage";
+
+import { mergeArtifactInputProofs } from "./digest-lineage";
+import { prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./artifact-commit-preflight";
 
 export const SLACK_MEETING_ACTION_REVIEW_FLAG = "SLACK_MEETING_ACTION_REVIEW";
 export const DEFAULT_WEEKLY_PROGRESS_REVIEW_SERIES_EXTERNAL_ID = "ops:weekly-progress-review";
@@ -74,7 +80,9 @@ export type SlackMeetingActionReviewPostPreparation =
     channelId: string;
     threadTs: string | null;
     reviewId: string;
+    reviewFingerprint: string;
     message: ReviewMessage;
+    lineageRoots: LineageRoot[];
   };
 
 export type SlackMeetingActionReviewUpdate = {
@@ -83,6 +91,7 @@ export type SlackMeetingActionReviewUpdate = {
   blocks: unknown[];
   text: string;
   responseText: string;
+  lineageRoots: LineageRoot[];
 };
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -172,44 +181,64 @@ async function resolveReviewInstallation(workspaceId: string, config: SlackMeeti
   });
 }
 
-export async function listMeetingFollowUpProposals(params: {
-  workspaceId: string;
-  meetingId: string;
-  maxProposals?: number;
-  includeReviewed?: boolean;
-}) {
-  return prisma.meetingInsight.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      meetingId: params.meetingId,
-      type: "ACTION_ITEM",
-      operation: "CREATE",
-      status: { in: params.includeReviewed ? ["SUGGESTED", "CONFIRMED", "APPLIED", "DISMISSED"] : ["SUGGESTED", "CONFIRMED"] },
-      supersededAt: null,
-    },
-    orderBy: [
-      { confidence: "desc" },
-      { createdAt: "asc" },
-    ],
-    take: params.maxProposals ?? DEFAULT_MAX_PROPOSALS,
-    select: {
-      id: true,
-      title: true,
-      bodyMd: true,
-      assigneeHint: true,
-      dueAt: true,
-      confidence: true,
-      sourceQuote: true,
-      status: true,
-      supersededAt: true,
-      appliedEntityId: true,
-    },
-  });
+function unavailableLineage(error: unknown) {
+  return error instanceof Error && "code" in error
+    && ["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED", "NOT_FOUND"].includes(String(error.code));
 }
 
-async function reviewExpiresAt(meeting: Pick<MeetingForReview, "workspaceId" | "seriesId" | "recordedAt">, expiresAfterHours: number) {
+async function admittedReviewProposals(actor: AppActor, params: {
+  workspaceId: string; meetingId: string; maxProposals?: number; includeReviewed?: boolean;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const candidates = await prisma.meetingInsight.findMany({
+    where: { workspaceId: params.workspaceId, meetingId: params.meetingId, type: "ACTION_ITEM", operation: "CREATE",
+      status: { in: params.includeReviewed ? ["SUGGESTED", "CONFIRMED", "APPLIED", "DISMISSED"] : ["SUGGESTED", "CONFIRMED"] },
+      supersededAt: null },
+    orderBy: [{ confidence: "desc" }, { createdAt: "asc" }],
+  });
+  const insights: typeof candidates = [];
+  const lineageRoots: LineageRoot[] = [];
+  for (const insight of candidates) {
+    try {
+      const roots = await captureArtifactInputProof(actor, params.workspaceId,
+        [{ kind: "MeetingInsight", id: insight.id, snapshot: insight }]);
+      if (!await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, roots)) continue;
+      insights.push(insight);
+      lineageRoots.push(...roots);
+      if (insights.length >= (params.maxProposals ?? DEFAULT_MAX_PROPOSALS)) break;
+    } catch (error) { if (!unavailableLineage(error)) throw error; }
+  }
+  return { insights, lineageRoots };
+}
+
+export async function listMeetingFollowUpProposals(actor: AppActor, params: {
+  workspaceId: string; meetingId: string; maxProposals?: number; includeReviewed?: boolean;
+}) {
+  return (await admittedReviewProposals(actor, params)).insights;
+}
+
+export async function assertMeetingReviewPublicPublication(actor: AppActor, params: {
+  workspaceId: string; installationId: string; channelId: string; lineageRoots: LineageRoot[];
+}) {
+  invariant(params.lineageRoots.length > 0, 403, "UNKNOWN_LINEAGE", "Review inputs are unavailable.");
+  const channel = await prisma.communicationChannel.findFirst({ where: {
+    workspaceId: params.workspaceId, installationId: params.installationId, externalChannelId: params.channelId,
+    kind: "PUBLIC", isIngestEnabled: true, isArchived: false,
+  } });
+  invariant(channel, 403, "SOURCE_RESTRICTED", "The destination is not an active public workspace channel.");
+  const roots = await captureArtifactInputProof(actor, params.workspaceId,
+    [{ kind: "CommunicationChannel", id: channel.id, snapshot: channel }]);
+  const { validateSlackPostTarget } = await import("./communication");
+  const validation = await validateSlackPostTarget(params.installationId, params.channelId);
+  invariant(validation.ok, 403, "SOURCE_RESTRICTED", "The Slack destination is unavailable.");
+  invariant(await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, [...params.lineageRoots, ...roots]),
+    403, "SOURCE_RESTRICTED", "Review inputs are not available to this public channel.");
+  return mergeArtifactInputProofs(params.lineageRoots, roots);
+}
+
+async function reviewExpiresAt(actor: AppActor, meeting: Pick<MeetingForReview, "workspaceId" | "seriesId" | "recordedAt">, expiresAfterHours: number) {
   const timeExpiry = new Date(Date.now() + expiresAfterHours * 60 * 60 * 1000);
-  if (!meeting.seriesId) return timeExpiry;
+  if (!meeting.seriesId) return { expiresAt: timeExpiry, lineageRoots: [] as LineageRoot[] };
 
   const nextMeeting = await prisma.meeting.findFirst({
     where: {
@@ -219,30 +248,28 @@ async function reviewExpiresAt(meeting: Pick<MeetingForReview, "workspaceId" | "
       recordedAt: { gt: meeting.recordedAt },
     },
     orderBy: { recordedAt: "asc" },
-    select: { recordedAt: true },
+    select: { id: true, recordedAt: true },
   });
   if (nextMeeting?.recordedAt && nextMeeting.recordedAt < timeExpiry) {
-    return nextMeeting.recordedAt;
+    try {
+      const lineageRoots = await captureArtifactInputProof(actor, meeting.workspaceId,
+        [{ kind: "MeetingTranscript", id: nextMeeting.id, snapshot: nextMeeting }]);
+      if (await isArtifactInputProofPubliclyShareable(actor, meeting.workspaceId, lineageRoots)) {
+        return { expiresAt: nextMeeting.recordedAt, lineageRoots };
+      }
+    } catch (error) { if (!unavailableLineage(error)) throw error; }
   }
-  return timeExpiry;
+  return { expiresAt: timeExpiry, lineageRoots: [] as LineageRoot[] };
 }
 
-export async function prepareSlackMeetingActionReviewPost(params: {
+export async function prepareSlackMeetingActionReviewPost(actor: AppActor, params: {
   workspaceId: string;
   meetingId: string;
 }): Promise<SlackMeetingActionReviewPostPreparation> {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const meeting = await prisma.meeting.findFirst({
     where: { id: params.meetingId, workspaceId: params.workspaceId },
-    select: {
-      id: true,
-      workspaceId: true,
-      title: true,
-      summaryMd: true,
-      summaryPostedAt: true,
-      recordedAt: true,
-      seriesId: true,
-      series: { select: { externalId: true } },
-    },
+    include: { series: { select: { externalId: true } } },
   });
   if (!meeting) return null;
 
@@ -266,32 +293,57 @@ export async function prepareSlackMeetingActionReviewPost(params: {
     return { configured: true, skipped: true, reason: "review_already_posted" };
   }
 
-  const expiresAt = await reviewExpiresAt(meeting, config.expiresAfterHours);
-  const review = await prisma.meetingFollowUpReview.upsert({
-    where: { meetingId: meeting.id },
-    update: {
-      workspaceId: params.workspaceId,
-      installationId: installation.id,
-      provider: "SLACK",
-      channelId: config.channelId,
-      threadTs: config.threadTs,
-      status: "OPEN",
-      expiresAt,
-      closedAt: null,
-    },
-    create: {
-      workspaceId: params.workspaceId,
-      meetingId: meeting.id,
-      installationId: installation.id,
-      provider: "SLACK",
-      channelId: config.channelId,
-      threadTs: config.threadTs,
-      status: "OPEN",
-      expiresAt,
-    },
-    select: { id: true },
+  let meetingRoots: LineageRoot[];
+  try {
+    meetingRoots = await captureArtifactInputProof(actor, params.workspaceId,
+      [{ kind: "Meeting", id: meeting.id, snapshot: meeting }]);
+    if (!await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, meetingRoots)) {
+      return { configured: true, skipped: true, reason: "summary_inputs_unavailable" };
+    }
+  } catch (error) {
+    if (!unavailableLineage(error)) throw error;
+    return { configured: true, skipped: true, reason: "summary_inputs_unavailable" };
+  }
+  const expiry = await reviewExpiresAt(actor, meeting, config.expiresAfterHours);
+  const expiresAt = expiry.expiresAt;
+  const { review, reviewRoots } = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "Meeting" WHERE id = ${meeting.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    const metadataRoots = await captureArtifactInputProof(actor, params.workspaceId,
+      [{ kind: "MeetingTranscript", id: meeting.id, snapshot: {
+        id: meeting.id, recordedAt: meeting.recordedAt, seriesId: meeting.seriesId,
+      } }], tx);
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      copied: true, capture: { lineageRoots: [...metadataRoots, ...expiry.lineageRoots] } });
+    const review = await tx.meetingFollowUpReview.upsert({
+      where: { meetingId: meeting.id },
+      update: {
+        workspaceId: params.workspaceId,
+        installationId: installation.id,
+        provider: "SLACK",
+        channelId: config.channelId,
+        threadTs: config.threadTs,
+        status: "OPEN",
+        expiresAt,
+        closedAt: null,
+      },
+      create: {
+        workspaceId: params.workspaceId,
+        meetingId: meeting.id,
+        installationId: installation.id,
+        provider: "SLACK",
+        channelId: config.channelId,
+        threadTs: config.threadTs,
+        status: "OPEN",
+        expiresAt,
+      },
+    });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "MeetingFollowUpReview", id: review.id }, content: review, receipt });
+    const reviewRoots = await captureArtifactInputSnapshotProof(actor, params.workspaceId,
+      { kind: "MeetingFollowUpReview", id: review.id, fingerprint: lineageContentFingerprint("MeetingFollowUpReview", review) }, tx);
+    return { review, reviewRoots };
   });
-  const insights = await listMeetingFollowUpProposals({
+  const admitted = await admittedReviewProposals(actor, {
     workspaceId: params.workspaceId,
     meetingId: meeting.id,
     maxProposals: config.maxProposals,
@@ -306,10 +358,12 @@ export async function prepareSlackMeetingActionReviewPost(params: {
     channelId: config.channelId,
     threadTs: config.threadTs,
     reviewId: review.id,
+    reviewFingerprint: lineageContentFingerprint("MeetingFollowUpReview", review),
+    lineageRoots: [...meetingRoots, ...reviewRoots, ...admitted.lineageRoots],
     message: buildSlackMeetingActionReviewMessage({
       meeting,
       reviewId: review.id,
-      insights,
+      insights: admitted.insights,
       expiresAt,
       timezone: config.timezone,
       maxProposals: config.maxProposals,
@@ -558,67 +612,101 @@ function slackTimestampToDate(ts: string | null) {
   return new Date(seconds * 1000 + (Number.isFinite(millis) ? millis : 0));
 }
 
-export async function markSlackMeetingActionReviewPosted(params: {
+async function updateReviewMetadataTx(tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string, reviewId: string,
+  data: Prisma.MeetingFollowUpReviewUpdateInput) {
+  await tx.$queryRaw`SELECT id FROM "MeetingFollowUpReview" WHERE id = ${reviewId} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+  const before = await tx.meetingFollowUpReview.findFirst({ where: { id: reviewId, workspaceId } });
+  invariant(before, 404, "NOT_FOUND", "Meeting follow-up review not found.");
+  const receipt = await prepareProducerLineage({ tx, actor, workspaceId,
+    artifact: { kind: "MeetingFollowUpReview", id: reviewId }, before, allowSystemTransition: true });
+  const updated = await tx.meetingFollowUpReview.update({ where: { id: reviewId }, data });
+  await finishProducerLineage({ tx, actor, workspaceId,
+    artifact: { kind: "MeetingFollowUpReview", id: reviewId }, content: updated, receipt });
+  return updated;
+}
+
+async function updateReviewMetadata(actor: AppActor, workspaceId: string, reviewId: string,
+  data: Prisma.MeetingFollowUpReviewUpdateInput) {
+  return prisma.$transaction(tx => updateReviewMetadataTx(tx, actor, workspaceId, reviewId, data));
+}
+
+export async function markSlackMeetingActionReviewPosted(actor: AppActor, params: {
   workspaceId: string;
   meetingId: string;
   reviewId: string;
+  reviewFingerprint: string;
   installationId: string;
   channelId: string;
   messageTs: string;
   threadTs: string | null;
   text: string;
   raw?: unknown;
+  lineageRoots: LineageRoot[];
 }) {
-  const message = await prisma.communicationMessage.upsert({
-    where: {
-      installationId_externalChannelId_externalMessageId: {
-        installationId: params.installationId,
-        externalChannelId: params.channelId,
-        externalMessageId: params.messageTs,
-      },
-    },
-    update: {
-      threadExternalId: params.threadTs || params.messageTs,
-      text: params.text,
-      messageTs: slackTimestampToDate(params.messageTs),
-      isBot: true,
-      raw: toInputJson(params.raw ?? {}),
-    },
-    create: {
-      installationId: params.installationId,
-      workspaceId: params.workspaceId,
-      provider: "SLACK",
-      externalChannelId: params.channelId,
-      externalMessageId: params.messageTs,
-      threadExternalId: params.threadTs || params.messageTs,
-      text: params.text,
-      messageTs: slackTimestampToDate(params.messageTs),
-      raw: toInputJson(params.raw ?? {}),
-      isBot: true,
-    },
-    select: { id: true },
-  });
+  const roots = await assertMeetingReviewPublicPublication(actor, params);
+  const preflight = await prepareArtifactCommitPreflight(actor, params.workspaceId, roots);
+  return prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "MeetingFollowUpReview" WHERE id = ${params.reviewId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    const review = await tx.meetingFollowUpReview.findFirst({where: {id: params.reviewId, workspaceId: params.workspaceId}});
+    invariant(review && review.meetingId === params.meetingId && review.installationId === params.installationId && review.channelId === params.channelId
+      && lineageContentFingerprint("MeetingFollowUpReview", review) === params.reviewFingerprint,
+      409, "SOURCE_CHANGED", "Meeting review destination changed before persistence.");
+    return withArtifactCommitPreflight(actor, params.workspaceId, tx, roots, preflight, async () => {
+      invariant(await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, roots, tx),
+        403, "SOURCE_RESTRICTED", "Review inputs are no longer public.");
+      const existing = await tx.communicationMessage.findUnique({where: {installationId_externalChannelId_externalMessageId: {
+        installationId: params.installationId, externalChannelId: params.channelId, externalMessageId: params.messageTs,
+      }}});
+      invariant(!existing || existing.workspaceId === params.workspaceId, 409, "SOURCE_CHANGED", "Slack message workspace changed.");
+      if (existing) await preserveUnknownArtifactInputSnapshot(tx, params.workspaceId, {kind: "CommunicationMessage", id: existing.id}, existing);
+      const message = await tx.communicationMessage.upsert({
+        where: {
+          installationId_externalChannelId_externalMessageId: {
+            installationId: params.installationId,
+            externalChannelId: params.channelId,
+            externalMessageId: params.messageTs,
+          },
+        },
+        update: {
+          threadExternalId: params.threadTs || params.messageTs,
+          text: params.text,
+          messageTs: slackTimestampToDate(params.messageTs),
+          isBot: true,
+          raw: toInputJson(params.raw ?? {}),
+        },
+        create: {
+          installationId: params.installationId,
+          workspaceId: params.workspaceId,
+          provider: "SLACK",
+          externalChannelId: params.channelId,
+          externalMessageId: params.messageTs,
+          threadExternalId: params.threadTs || params.messageTs,
+          text: params.text,
+          messageTs: slackTimestampToDate(params.messageTs),
+          raw: toInputJson(params.raw ?? {}),
+          isBot: true,
+        },
+      });
 
-  await prisma.meetingFollowUpReview.update({
-    where: { id: params.reviewId },
-    data: {
-      messageTs: params.messageTs,
-      threadTs: params.threadTs || params.messageTs,
-      postedAt: new Date(),
-    },
-  });
+      await recordArtifactInputLineage({tx, actor, workspaceId: params.workspaceId,
+        artifact: {kind: "CommunicationMessage", id: message.id}, content: message, origin: "DERIVED", inputs: [], inheritedRoots: roots});
+      await updateReviewMetadataTx(tx, actor, params.workspaceId, params.reviewId, {
+        messageTs: params.messageTs, threadTs: params.threadTs || params.messageTs, postedAt: new Date(),
+      });
 
-  await prisma.communicationEntityLink.create({
-    data: {
-      installationId: params.installationId,
-      workspaceId: params.workspaceId,
-      provider: "SLACK",
-      messageId: message.id,
-      externalUserId: null,
-      entityType: "Meeting",
-      entityId: params.meetingId,
-      action: "meeting_follow_up_review_posted",
-    },
+      await tx.communicationEntityLink.create({
+        data: {
+          installationId: params.installationId,
+          workspaceId: params.workspaceId,
+          provider: "SLACK",
+          messageId: message.id,
+          externalUserId: null,
+          entityType: "Meeting",
+          entityId: params.meetingId,
+          action: "meeting_follow_up_review_posted",
+        },
+      });
+    });
   });
 }
 
@@ -642,17 +730,7 @@ async function loadReviewContext(workspaceId: string, reviewId: string): Promise
   const review = await prisma.meetingFollowUpReview.findFirst({
     where: { id: reviewId, workspaceId },
     include: {
-      meeting: {
-        select: {
-          id: true,
-          workspaceId: true,
-          title: true,
-          summaryMd: true,
-          recordedAt: true,
-          seriesId: true,
-          series: { select: { externalId: true } },
-        },
-      },
+      meeting: { include: { series: { select: { externalId: true } } } },
     },
   });
   invariant(review, 404, "NOT_FOUND", "Meeting follow-up review not found.");
@@ -660,19 +738,16 @@ async function loadReviewContext(workspaceId: string, reviewId: string): Promise
   return { review, config };
 }
 
-async function ensureReviewOpen(review: ReviewContext["review"]) {
+async function ensureReviewOpen(actor: AppActor, review: ReviewContext["review"]) {
   if (review.status === "OPEN" && review.expiresAt <= new Date()) {
-    await prisma.meetingFollowUpReview.update({
-      where: { id: review.id },
-      data: { status: "EXPIRED", closedAt: new Date() },
-    });
+    await updateReviewMetadata(actor, review.workspaceId, review.id, { status: "EXPIRED", closedAt: new Date() });
     invariant(false, 400, "REVIEW_EXPIRED", "This meeting follow-up review has expired.");
   }
   invariant(review.status === "OPEN", 400, "INVALID_STATE", "This meeting follow-up review is no longer open.");
   invariant(review.messageTs, 400, "INVALID_STATE", "This meeting follow-up review has not been posted to Slack.");
 }
 
-async function maybeCloseReview(reviewId: string, workspaceId: string, meetingId: string) {
+async function maybeCloseReview(actor: AppActor, reviewId: string, workspaceId: string, meetingId: string) {
   const remaining = await prisma.meetingInsight.count({
     where: {
       workspaceId,
@@ -684,14 +759,12 @@ async function maybeCloseReview(reviewId: string, workspaceId: string, meetingId
     },
   });
   if (remaining === 0) {
-    await prisma.meetingFollowUpReview.update({
-      where: { id: reviewId },
-      data: { status: "CLOSED", closedAt: new Date() },
-    });
+    await updateReviewMetadata(actor, workspaceId, reviewId, { status: "CLOSED", closedAt: new Date() });
   }
 }
 
-export async function refreshSlackMeetingActionReviewAfterWebApply(params: { workspaceId: string; insightId: string }) {
+export async function refreshSlackMeetingActionReviewAfterWebApply(actor: AppActor, params: { workspaceId: string; insightId: string }) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const insight = await prisma.meetingInsight.findFirst({
     where: { id: params.insightId, workspaceId: params.workspaceId, type: "ACTION_ITEM", operation: "CREATE", status: "APPLIED" },
     select: { meetingId: true },
@@ -702,11 +775,11 @@ export async function refreshSlackMeetingActionReviewAfterWebApply(params: { wor
     select: { id: true, installationId: true, messageTs: true },
   });
   if (!review) return null;
-  await maybeCloseReview(review.id, params.workspaceId, insight.meetingId);
+  await maybeCloseReview(actor, review.id, params.workspaceId, insight.meetingId);
   if (!review.messageTs) return null;
   return {
     installationId: review.installationId,
-    update: await renderReviewUpdate({
+    update: await renderReviewUpdate(actor, {
       workspaceId: params.workspaceId,
       reviewId: review.id,
       responseText: "Follow-up reviewed in Corgtex.",
@@ -714,7 +787,7 @@ export async function refreshSlackMeetingActionReviewAfterWebApply(params: { wor
   };
 }
 
-async function renderReviewUpdate(params: {
+async function renderReviewUpdate(actor: AppActor, params: {
   workspaceId: string;
   reviewId: string;
   responseText: string;
@@ -723,16 +796,22 @@ async function renderReviewUpdate(params: {
   invariant(review.messageTs, 400, "INVALID_STATE", "This meeting follow-up review has not been posted to Slack.");
   const maxProposals = config?.maxProposals ?? DEFAULT_MAX_PROPOSALS;
   const timezone = config?.timezone ?? DEFAULT_REVIEW_TIMEZONE;
-  const insights = await listMeetingFollowUpProposals({
+  const admitted = await admittedReviewProposals(actor, {
     workspaceId: params.workspaceId,
     meetingId: review.meetingId,
     maxProposals,
     includeReviewed: true,
   });
+  const meetingRoots = await captureArtifactInputProof(actor, params.workspaceId, [
+    { kind: "Meeting", id: review.meeting.id, snapshot: review.meeting },
+    { kind: "MeetingFollowUpReview", id: review.id, snapshot: review },
+  ]);
+  invariant(await isArtifactInputProofPubliclyShareable(actor, params.workspaceId, meetingRoots),
+    403, "SOURCE_RESTRICTED", "Review inputs are not available to this public channel.");
   const message = buildSlackMeetingActionReviewMessage({
     meeting: review.meeting,
     reviewId: review.id,
-    insights,
+    insights: admitted.insights,
     expiresAt: review.expiresAt,
     timezone,
     maxProposals,
@@ -743,10 +822,11 @@ async function renderReviewUpdate(params: {
     blocks: message.mainBlocks,
     text: message.text,
     responseText: params.responseText,
+    lineageRoots: [...meetingRoots, ...admitted.lineageRoots],
   };
 }
 
-async function loadReviewInsight(workspaceId: string, reviewId: string, insightId: string) {
+async function loadReviewInsight(actor: AppActor, workspaceId: string, reviewId: string, insightId: string) {
   const { review } = await loadReviewContext(workspaceId, reviewId);
   const insight = await prisma.meetingInsight.findFirst({
     where: {
@@ -759,8 +839,24 @@ async function loadReviewInsight(workspaceId: string, reviewId: string, insightI
     },
   });
   invariant(insight, 404, "NOT_FOUND", "Meeting follow-up proposal not found.");
-  if (insight.status !== "APPLIED") await ensureReviewOpen(review);
+  await captureArtifactInputProof(actor, workspaceId, [{ kind: "MeetingInsight", id: insight.id, snapshot: insight }]);
+  if (insight.status !== "APPLIED") await ensureReviewOpen(actor, review);
   return { review, insight };
+}
+
+async function updateReviewInsight(actor: AppActor, workspaceId: string, insightId: string,
+  data: Prisma.MeetingInsightUncheckedUpdateInput) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "MeetingInsight" WHERE id = ${insightId} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    const before = await tx.meetingInsight.findFirst({ where: { id: insightId, workspaceId } });
+    invariant(before, 404, "NOT_FOUND", "Meeting follow-up proposal not found.");
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId,
+      artifact: { kind: "MeetingInsight", id: insightId }, before, allowSystemTransition: true });
+    const updated = await tx.meetingInsight.update({ where: { id: insightId }, data });
+    await finishProducerLineage({ tx, actor, workspaceId,
+      artifact: { kind: "MeetingInsight", id: insightId }, content: updated, receipt });
+    return updated;
+  });
 }
 
 async function resolveAssigneeMemberId(workspaceId: string, assigneeHint: string | null) {
@@ -805,10 +901,10 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
   insightId: string;
 }): Promise<SlackMeetingActionReviewUpdate> {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  const { review, insight } = await loadReviewInsight(params.workspaceId, params.reviewId, params.insightId);
+  const { review, insight } = await loadReviewInsight(actor, params.workspaceId, params.reviewId, params.insightId);
   if (insight.status === "APPLIED") {
-    await maybeCloseReview(review.id, params.workspaceId, review.meetingId);
-    return renderReviewUpdate({
+    await maybeCloseReview(actor, review.id, params.workspaceId, review.meetingId);
+    return renderReviewUpdate(actor, {
       workspaceId: params.workspaceId,
       reviewId: review.id,
       responseText: "That follow-up was already confirmed.",
@@ -818,7 +914,7 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
 
   const assigneeMemberId = await resolveAssigneeMemberId(params.workspaceId, insight.assigneeHint);
   if (!assigneeMemberId) {
-    return renderReviewUpdate({
+    return renderReviewUpdate(actor, {
       workspaceId: params.workspaceId,
       reviewId: review.id,
       responseText: `Assign an active human owner in Corgtex before confirming this follow-up: ${insightUrl(params.workspaceId, review.meetingId, insight.id)}`,
@@ -831,9 +927,18 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
     `*Created from meeting:* [${review.meeting.title || "Untitled meeting"}](${meetingUrl(params.workspaceId, review.meetingId)})`,
   ].filter(Boolean).join("\n\n");
 
+  // Applying the insight changes its status below. Keep the exact copied input
+  // revision while retaining live permissions and upstream source dependencies.
+  const insightRoots = await prisma.$transaction((tx) => captureArtifactInputSnapshotProof(actor, params.workspaceId,
+    { kind: "MeetingInsight", id: insight.id, fingerprint: lineageContentFingerprint("MeetingInsight", insight) }, tx));
+  const actionRoots = [...insightRoots, ...await captureArtifactInputProof(actor, params.workspaceId, [
+    { kind: "Meeting", id: review.meeting.id, snapshot: review.meeting },
+    { kind: "Member", id: assigneeMemberId },
+  ])];
   let action;
   try {
     action = await createAction(actor, {
+      lineageRoots: actionRoots,
       workspaceId: params.workspaceId,
       title: insight.title,
       bodyMd: fullBody,
@@ -846,7 +951,7 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
     });
   } catch (error) {
     if (!isDuplicateGuardMatchError(error)) throw error;
-    return renderReviewUpdate({
+    return renderReviewUpdate(actor, {
       workspaceId: params.workspaceId,
       reviewId: review.id,
       responseText: `A similar Action exists. Review this follow-up in Corgtex before confirming it: ${insightUrl(params.workspaceId, review.meetingId, insight.id)}`,
@@ -864,16 +969,13 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
     opened = await publishAction(actor, { workspaceId: params.workspaceId, actionId: action.id });
   }
 
-  await prisma.meetingInsight.update({
-    where: { id: insight.id },
-    data: {
-      status: "APPLIED",
-      appliedEntityType: "Action",
-      appliedEntityId: opened.id,
-      reviewedByUserId: actor.kind === "user" ? actor.user.id : null,
-      reviewedAt: new Date(),
-      autoApplyError: null,
-    },
+  await updateReviewInsight(actor, params.workspaceId, insight.id, {
+    status: "APPLIED",
+    appliedEntityType: "Action",
+    appliedEntityId: opened.id,
+    reviewedByUserId: actor.kind === "user" ? actor.user.id : null,
+    reviewedAt: new Date(),
+    autoApplyError: null,
   });
   await prisma.communicationEntityLink.upsert({
     where: { workspaceId_claimKey: { workspaceId: params.workspaceId, claimKey: `meeting-insight:${insight.id}` } },
@@ -890,12 +992,12 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
     },
     update: {},
   });
-  await maybeCloseReview(review.id, params.workspaceId, review.meetingId);
+  await maybeCloseReview(actor, review.id, params.workspaceId, review.meetingId);
 
-  return renderReviewUpdate({
+  return renderReviewUpdate(actor, {
     workspaceId: params.workspaceId,
     reviewId: review.id,
-    responseText: `Created action: ${opened.title}. Undo is available by replying in this Slack context with "undo action" within 24 hours.`,
+    responseText: 'Created the action. Undo is available by replying in this Slack context with "undo action" within 24 hours.',
   });
 }
 
@@ -905,9 +1007,9 @@ export async function dismissSlackMeetingActionReviewProposal(actor: AppActor, p
   insightId: string;
 }): Promise<SlackMeetingActionReviewUpdate> {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  const { review, insight } = await loadReviewInsight(params.workspaceId, params.reviewId, params.insightId);
+  const { review, insight } = await loadReviewInsight(actor, params.workspaceId, params.reviewId, params.insightId);
   if (insight.status === "DISMISSED") {
-    return renderReviewUpdate({
+    return renderReviewUpdate(actor, {
       workspaceId: params.workspaceId,
       reviewId: review.id,
       responseText: "That follow-up was already dismissed.",
@@ -915,16 +1017,13 @@ export async function dismissSlackMeetingActionReviewProposal(actor: AppActor, p
   }
   invariant(insight.status === "SUGGESTED" || insight.status === "CONFIRMED", 400, "INVALID_STATE", "Only pending follow-up proposals can be dismissed.");
 
-  await prisma.meetingInsight.update({
-    where: { id: insight.id },
-    data: {
-      status: "DISMISSED",
-      reviewedByUserId: actor.kind === "user" ? actor.user.id : null,
-      reviewedAt: new Date(),
-    },
+  await updateReviewInsight(actor, params.workspaceId, insight.id, {
+    status: "DISMISSED",
+    reviewedByUserId: actor.kind === "user" ? actor.user.id : null,
+    reviewedAt: new Date(),
   });
-  await maybeCloseReview(review.id, params.workspaceId, review.meetingId);
-  return renderReviewUpdate({
+  await maybeCloseReview(actor, review.id, params.workspaceId, review.meetingId);
+  return renderReviewUpdate(actor, {
     workspaceId: params.workspaceId,
     reviewId: review.id,
     responseText: "Dismissed the follow-up proposal.",
@@ -941,7 +1040,7 @@ export async function buildSlackMeetingActionReviewEditView(actor: AppActor, par
   insightId: string;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  const { insight } = await loadReviewInsight(params.workspaceId, params.reviewId, params.insightId);
+  const { insight } = await loadReviewInsight(actor, params.workspaceId, params.reviewId, params.insightId);
   invariant(insight.status === "SUGGESTED" || insight.status === "CONFIRMED", 400, "INVALID_STATE", "Only pending follow-up proposals can be edited.");
 
   return {
@@ -1025,7 +1124,7 @@ export async function updateSlackMeetingActionReviewProposalFromModal(actor: App
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const metadata = JSON.parse(params.privateMetadata || "{}") as { reviewId?: string; insightId?: string };
   invariant(metadata.reviewId && metadata.insightId, 400, "INVALID_INPUT", "Meeting follow-up edit metadata is missing.");
-  const { review, insight } = await loadReviewInsight(params.workspaceId, metadata.reviewId, metadata.insightId);
+  const { review, insight } = await loadReviewInsight(actor, params.workspaceId, metadata.reviewId, metadata.insightId);
   invariant(insight.status === "SUGGESTED" || insight.status === "CONFIRMED", 400, "INVALID_STATE", "Only pending follow-up proposals can be edited.");
 
   const values = isRecord(params.values) ? params.values : {};
@@ -1036,18 +1135,15 @@ export async function updateSlackMeetingActionReviewProposalFromModal(actor: App
   invariant(title.length > 0, 400, "INVALID_INPUT", "Follow-up title is required.");
   invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Follow-up details are required.");
 
-  await prisma.meetingInsight.update({
-    where: { id: insight.id },
-    data: {
-      title,
-      bodyMd,
-      assigneeHint: assigneeHint || null,
-      dueAt,
-      reviewedByUserId: actor.kind === "user" ? actor.user.id : null,
-      reviewedAt: new Date(),
-    },
+  await updateReviewInsight(actor, params.workspaceId, insight.id, {
+    title,
+    bodyMd,
+    assigneeHint: assigneeHint || null,
+    dueAt,
+    reviewedByUserId: actor.kind === "user" ? actor.user.id : null,
+    reviewedAt: new Date(),
   });
-  return renderReviewUpdate({
+  return renderReviewUpdate(actor, {
     workspaceId: params.workspaceId,
     reviewId: review.id,
     responseText: "Updated the follow-up proposal. It still needs confirmation before an action is created.",

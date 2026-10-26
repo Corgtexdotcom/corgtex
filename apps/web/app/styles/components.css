@@ -4503,7 +4503,7 @@ a.meeting-agenda-item:hover {
   .mobile-bottom-nav a,
   .mobile-bottom-nav button {
     position: relative;
-    min-width: 0;
+    min-width: 44px;
     min-height: 54px;
     padding: 5px 3px;
     border: 0;

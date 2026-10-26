@@ -1,4 +1,4 @@
-import { getModelUsageSummary, getModelUsageBudget, listAgentIdentities } from "@corgtex/domain";
+import { requireWorkspaceMembership, getModelUsageSummary, getModelUsageBudget, listAgentIdentities } from "@corgtex/domain";
 import { AgentBudgetManager } from "../settings/agents/AgentBudgetManager";
 import { AgentSpendLimits } from "./AgentSpendLimits";
 import type { AppActor } from "@corgtex/shared";
@@ -11,6 +11,8 @@ export async function SpendControlTab({
   workspaceId: string;
   actor: AppActor;
 }) {
+  const membership = await requireWorkspaceMembership({actor, workspaceId});
+  if (actor.kind !== "user" || membership?.role !== "ADMIN") return null;
   const [usageSummary, budget, agentIdentities] = await Promise.all([
     getModelUsageSummary(actor, workspaceId, { periodDays: 30 }),
     getModelUsageBudget(actor, workspaceId),
@@ -18,6 +20,9 @@ export async function SpendControlTab({
   ]);
   const t = await getTranslations("agents");
 
+  const partial = !usageSummary.readWindow.complete;
+  const label = (key: "spendTotalCost" | "spendTotalTokens" | "spendApiCalls" | "spendCostByModel" | "spendCostByAgent" | "spendDailyUsage") => partial ? t("usageWindowMetric", { label: t(key) }) : t(key);
+  const metric = (value: string | number) => partial && usageSummary.totalCalls === 0 ? "…" : value;
   const formatUsd = (value: number) => `$${value.toFixed(value >= 0.01 ? 4 : 6)}`;
 
   return (
@@ -42,30 +47,31 @@ export async function SpendControlTab({
       {/* Cost Dashboard */}
       <section>
         <h2 className="nr-section-header" style={{ marginBottom: 24 }}>{t("spendAnalyticsTitle")}</h2>
+        {partial && <p role="status" className="nr-item-meta">{t("usageWindowNotice")}</p>}
 
         <div className="nr-stat-bar" style={{ marginBottom: 40 }}>
           <div className="nr-stat" style={{ display: "flex", flexDirection: "column" }}>
-            <strong style={{ fontSize: "1.3rem" }}>{formatUsd(usageSummary.totalCostUsd)}</strong>
-            <span className="nr-meta">{t("spendTotalCost")}</span>
+            <strong style={{ fontSize: "1.3rem" }}>{metric(formatUsd(usageSummary.totalCostUsd))}</strong>
+            <span className="nr-meta">{label("spendTotalCost")}</span>
           </div>
           <span className="nr-stat-sep" />
           <div className="nr-stat" style={{ display: "flex", flexDirection: "column" }}>
-            <strong style={{ fontSize: "1.3rem" }}>{usageSummary.totalTokens.toLocaleString()}</strong>
-            <span className="nr-meta">{t("spendTotalTokens")}</span>
+            <strong style={{ fontSize: "1.3rem" }}>{metric(usageSummary.totalTokens.toLocaleString())}</strong>
+            <span className="nr-meta">{label("spendTotalTokens")}</span>
           </div>
           <span className="nr-stat-sep" />
           <div className="nr-stat" style={{ display: "flex", flexDirection: "column" }}>
-            <strong style={{ fontSize: "1.3rem" }}>{usageSummary.totalCalls}</strong>
-            <span className="nr-meta">{t("spendApiCalls")}</span>
+            <strong style={{ fontSize: "1.3rem" }}>{metric(usageSummary.totalCalls)}</strong>
+            <span className="nr-meta">{label("spendApiCalls")}</span>
           </div>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: "40px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(340px, 100%), 1fr))", gap: "40px" }}>
           {/* By Model */}
           <section>
-            <h3 className="nr-section-header" style={{ fontSize: "1rem" }}>{t("spendCostByModel")}</h3>
+            <h3 className="nr-section-header" style={{ fontSize: "1rem" }}>{label("spendCostByModel")}</h3>
             <div>
-              {usageSummary.byModel.length === 0 && <p className="nr-item-meta">{t("spendNoModelData")}</p>}
+              {usageSummary.byModel.length === 0 && <p className="nr-item-meta">{t(partial ? "usageWindowEmpty" : "spendNoModelData")}</p>}
               {usageSummary.byModel.map((m) => (
                 <div key={`${m.provider}:${m.model}`} className="nr-item" style={{ padding: "12px 0" }}>
                   <div className="row">
@@ -102,9 +108,9 @@ export async function SpendControlTab({
 
           {/* By Agent */}
           <section>
-            <h3 className="nr-section-header" style={{ fontSize: "1rem" }}>{t("spendCostByAgent")}</h3>
+            <h3 className="nr-section-header" style={{ fontSize: "1rem" }}>{label("spendCostByAgent")}</h3>
             <div>
-              {usageSummary.byAgent.length === 0 && <p className="nr-item-meta">{t("spendNoAgentData")}</p>}
+              {usageSummary.byAgent.length === 0 && <p className="nr-item-meta">{t(partial ? "usageWindowEmpty" : "spendNoAgentData")}</p>}
               {usageSummary.byAgent.map((a) => (
                 <div key={a.agentKey} className="nr-item" style={{ padding: "12px 0" }}>
                   <div className="row">
@@ -140,9 +146,9 @@ export async function SpendControlTab({
 
         {/* Daily usage */}
         <section style={{ marginTop: 40 }}>
-          <h3 className="nr-section-header" style={{ fontSize: "1rem" }}>{t("spendDailyUsage")}</h3>
+          <h3 className="nr-section-header" style={{ fontSize: "1rem" }}>{label("spendDailyUsage")}</h3>
           <div>
-            {usageSummary.byDay.length === 0 && <p className="nr-item-meta">{t("spendNoDailyData")}</p>}
+            {usageSummary.byDay.length === 0 && <p className="nr-item-meta">{t(partial ? "usageWindowEmpty" : "spendNoDailyData")}</p>}
             {usageSummary.byDay.map((d) => (
               <div key={d.date} className="nr-item" style={{ padding: "12px 0", borderBottom: "1px dashed var(--line)" }}>
                 <div className="row">

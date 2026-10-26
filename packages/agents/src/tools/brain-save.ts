@@ -1,26 +1,26 @@
 import type { AppActor } from "@corgtex/shared";
-import { ingestConversationOnDemand } from "@corgtex/domain";
+import type { LineageRoot } from "@corgtex/domain";
 
 export const saveToBrainTool = {
   type: "function" as const,
   function: {
     name: "save_to_brain",
-    description: "Save the current conversation content or a specific piece of information to the Brain knowledge base for permanent storage. Use when the user explicitly asks to save, upload, store, or remember something. This ensures the data is fed into the organizational knowledge graph.",
+    description: "Explain how to save an answer to Brain. This tool does not save content or authorize sharing. Direct the user to Save to Brain on a persisted answer, where they choose no transcript, selected turns, or the full transcript and confirm sharing. A chat request alone does not authorize sharing; never report this tool call as a successful save.",
     parameters: {
       type: "object",
       properties: {
         content: {
           type: "string",
-          description: "The content to save. Can be the full conversation, a transcript the user pasted, or specific information the user wants stored.",
+          description: "Content supplied for the guidance request. It is not saved or accepted as a transcript selection.",
         },
         title: {
           type: "string",
-          description: "A descriptive title for the brain source.",
+          description: "Suggested title for the guidance request. No Brain source is created.",
         },
         sourceType: {
           type: "string",
           enum: ["CONVERSATION", "MEETING", "DOC", "ARTICLE"],
-          description: "The type of content being saved. Use MEETING for transcripts, DOC for documents, CONVERSATION for chat content.",
+          description: "Requested content category for compatibility. It does not authorize ingestion or replace meeting-transcript and file-attachment flows.",
         },
       },
       required: ["content", "title"],
@@ -28,21 +28,8 @@ export const saveToBrainTool = {
   },
 };
 
-export async function saveToBrainAction(actor: AppActor, ctx: { workspaceId: string }, args: {
-  content: string;
-  title: string;
-  sourceType?: string;
+export async function saveToBrainAction(_actor: AppActor, _ctx: { workspaceId: string; lineageRoots?: LineageRoot[] }, _args: {
+  content: string; title: string; sourceType?: string;
 }) {
-  const source = await ingestConversationOnDemand(actor, {
-    workspaceId: ctx.workspaceId,
-    content: args.content,
-    title: args.title,
-    sourceType: args.sourceType,
-  });
-
-  return {
-    success: true,
-    message: `Content saved successfully to the Brain as a ${args.sourceType || "CONVERSATION"} source. It is queued for absorption.`,
-    sourceId: source.id
-  };
+  return { success: false, message: "Use Save to Brain on the answer, then choose whether to include no transcript, selected turns, or the full transcript. Only your confirmation can share conversation content." };
 }

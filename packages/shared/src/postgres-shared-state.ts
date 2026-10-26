@@ -4,8 +4,13 @@ import { decryptSecret, encryptSecret } from "./crypto";
 import { sharedStateKey } from "./shared-state";
 import type { RateLimitOptions, RateLimitResult } from "./rate-limiter";
 
+// Retain generated query/transaction signatures while comparing only the
+// capabilities this adapter uses, including for custom-datasource clients.
+type PostgresSharedStateClient = Pick<PrismaClient,
+  "$queryRaw" | "$executeRaw" | "$transaction" | "sharedCacheVersion">;
+
 // Independent clients may be supplied by integration tests. Production uses the lazy singleton.
-export function createPostgresSharedState(db: PrismaClient = prisma) {
+export function createPostgresSharedState(db: PostgresSharedStateClient = prisma) {
   let nextCleanupAt = 0;
   async function cleanup() {
     if (Date.now() < nextCleanupAt) return;

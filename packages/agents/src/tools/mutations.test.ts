@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createAction, createGoal, createProposal, createProposalFromTension, updateAction, updateTension } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
+import { captureArtifactInputProof, type LineageRoot } from "../../../domain/src/source-lineage";
+import { installSourcePermissionEpochFixture } from "../../../domain/src/source-permission-epochs.test-fixture";
 import { createActionItemAction, createActionTool, createGoalAction, createGoalTool, createProposalAction, createProposalTool, updateActionItemAction, updateActionTool, updateTensionAction, updateTensionTool } from "./mutations";
 
-vi.mock("@corgtex/domain", () => ({
+vi.mock("@corgtex/domain", async () => ({
+  ...await import("../../../domain/src/source-lineage"),
   AppError: class AppError extends Error {
     status: number;
     code: string;
@@ -30,14 +33,30 @@ vi.mock("@corgtex/domain", () => ({
   isDuplicateGuardMatchError: vi.fn((error: any) => error?.code === "DUPLICATE_GUARD_MATCH"),
 }));
 
-vi.mock("@corgtex/shared", () => ({
+vi.mock("@corgtex/shared", async (original) => ({
+  ...await original<any>(),
   prisma: {
+    artifactInputLineage: { findFirst: vi.fn(async () => null) },
+    workspace: { findFirst: vi.fn(async () => ({ id: "ws-1", name: "Synthetic workspace", slug: "synthetic", createdAt: new Date("2026-01-01") })) },
+    $queryRaw: vi.fn(),
+    $executeRaw: vi.fn(),
+    $transaction: vi.fn(async (work) => work(prisma)),
     auditLog: {
       findFirst: vi.fn(),
       update: vi.fn(),
     },
   },
 }));
+
+const scopedActor = {kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"]} as any;
+let lineageRoots: LineageRoot[];
+const context = () => ({workspaceId: "ws-1", sessionId: "session-1", lineageRoots});
+beforeEach(async () => {
+  vi.mocked(prisma.$queryRaw).mockReset();
+  vi.mocked(prisma.$executeRaw).mockReset();
+  installSourcePermissionEpochFixture(prisma);
+  lineageRoots = await captureArtifactInputProof(scopedActor, "ws-1", [{kind: "Workspace", id: "ws-1"}]);
+});
 
 describe("goal mutation tool", () => {
   beforeEach(() => {
@@ -61,7 +80,7 @@ describe("goal mutation tool", () => {
 
     const result = await createGoalAction(
       { kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any,
-      { workspaceId: "ws-1", sessionId: "session-1" },
+      context(),
       {
         title: "Transform 1,000 businesses",
         cadence: "TEN_YEAR",
@@ -99,7 +118,7 @@ describe("action mutation tool", () => {
 
     await createActionItemAction(
       { kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any,
-      { workspaceId: "ws-1", sessionId: "session-1" },
+      context(),
       { title: "Send Acme proposal" },
     );
 
@@ -134,7 +153,7 @@ describe("action mutation tool", () => {
 
     await createActionItemAction(
       { kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any,
-      { workspaceId: "ws-1", sessionId: "session-1" },
+      context(),
       {
         title: "Send Acme proposal",
         duplicateResolution: "update_existing",
@@ -174,7 +193,7 @@ describe("action mutation tool", () => {
 
     const result = await createActionItemAction(
       { kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any,
-      { workspaceId: "ws-1", sessionId: "session-1" },
+      context(),
       { title: "Send Acme proposal" },
     );
 
@@ -217,7 +236,7 @@ describe("proposal mutation tool", () => {
 
     const result = await createProposalAction(
       { kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any,
-      { workspaceId: "ws-1", sessionId: "session-1" },
+      context(),
       {
         title: "Clarify approval policy",
         summary: "Draft from a tension",
@@ -248,7 +267,7 @@ describe("proposal mutation tool", () => {
 
     await createProposalAction(
       { kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any,
-      { workspaceId: "ws-1", sessionId: "session-1" },
+      context(),
       {
         sourceTensionId: "tension-1",
         ownerMemberId: null,
@@ -273,7 +292,7 @@ describe("proposal mutation tool", () => {
 
     const result = await createProposalAction(
       { kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any,
-      { workspaceId: "ws-1", sessionId: "session-1" },
+      context(),
       {
         title: "Clarify approval policy",
         summary: "Regular draft",
@@ -300,7 +319,7 @@ describe("proposal mutation tool", () => {
 
     await createProposalAction(
       { kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any,
-      { workspaceId: "ws-1", sessionId: "session-1" },
+      context(),
       {
         title: "Clarify approval policy",
         bodyMd: "Proposal body",
@@ -322,7 +341,7 @@ describe("proposal mutation tool", () => {
     await expect(
       createProposalAction(
         { kind: "agent", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any,
-        { workspaceId: "ws-1", sessionId: "session-1" },
+        context(),
         {
           title: "Clarify approval policy",
           bodyMd: "Proposal body",
@@ -346,8 +365,8 @@ describe("agent update tools version requirements", () => {
   ];
 
   it.each(updateCases)("[$name] enforces positive observed versions and safe conflicts", async (testCase) => {
-    const actor = { kind: "agent" } as any;
-    const ctx = { workspaceId: "ws-1", sessionId: "session-1" };
+    const actor = scopedActor;
+    const ctx = context();
     expect(testCase.toolDef.function.parameters.required).toContain("expectedVersion");
     expect((testCase.toolDef.function.parameters.properties as any).expectedVersion).toMatchObject({ type: "integer", minimum: 1 });
     testCase.domainFn.mockClear();

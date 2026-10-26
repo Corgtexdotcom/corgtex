@@ -1,8 +1,10 @@
 import type { AgentTriggerType } from "@prisma/client";
-import { prisma, toInputJson } from "@corgtex/shared";
+import { toInputJson, type AppActor } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import {
   AppError,
+  captureArtifactInputProof,
+  type LineageRoot,
   applyGuidanceTermCorrections,
   buildMeetingIntelligenceContext,
   buildMeetingTranscriptChunks,
@@ -12,6 +14,9 @@ import {
   normalizeMeetingBlocks,
   normalizeMeetingProductTerminology,
   recordMeetingTranscriptProcessingStage,
+  isArtifactInputProofReadable,
+  meetingIntelligenceActor,
+  persistMeetingSummaryWithLineage,
 } from "@corgtex/domain";
 import { executeAgentRun } from "../runtime";
 
@@ -96,8 +101,13 @@ export async function runMeetingSummaryAgent(params: {
   triggerRef: string;
   meetingId: string;
   triggerType?: AgentTriggerType;
+  lineageActor?: AppActor;
 }) {
+  const actor = params.lineageActor ?? meetingIntelligenceActor(params.workspaceId);
+  const planRoots = await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "Workspace", id: params.workspaceId }]);
   return executeAgentRun({
+    lineageActor: actor, lineageRoots: planRoots, contextIsAuditedRead: true,
+    contextLineageRoots: context => ((context.meetingContext as Awaited<ReturnType<typeof buildMeetingIntelligenceContext>> | null)?.lineageRoots ?? []) as LineageRoot[],
     agentKey: "meeting-summary",
     workspaceId: params.workspaceId,
     triggerType: params.triggerType ?? "EVENT",
@@ -111,7 +121,7 @@ export async function runMeetingSummaryAgent(params: {
       try {
         return {
           meetingContext: await buildMeetingIntelligenceContext({
-            workspaceId: params.workspaceId,
+            actor, workspaceId: params.workspaceId,
             meetingId: params.meetingId,
             mode: "summary",
           }),
@@ -122,7 +132,7 @@ export async function runMeetingSummaryAgent(params: {
         }
         throw error;
       }
-    }),
+    }, { receipt: helpers.plannedInputReceipt, auditedRead: true }),
     execute: async (context, helpers, runId, model) => {
       const meetingContext = context.meetingContext as Awaited<ReturnType<typeof buildMeetingIntelligenceContext>> | null;
       const meeting = meetingContext?.meeting as {
@@ -157,13 +167,25 @@ export async function runMeetingSummaryAgent(params: {
         };
       }
 
+      if (!meetingContext?.lineageInputs || !meetingContext.lineageRoots || !meetingContext.sourceStateHash) {
+        return { resultJson: { skipped: true, reason: "unknown_lineage", meetingId: meeting.id } };
+      }
+      const revalidateInputs = async () => {
+        if (!await isArtifactInputProofReadable(actor, params.workspaceId, meetingContext.lineageRoots!)) {
+          throw new AppError(409, "SOURCE_CHANGED", "Meeting summary inputs changed during generation.");
+        }
+      };
+      await revalidateInputs();
+      const receipt = await helpers.captureInputs([...meetingContext.lineageRoots, ...helpers.behaviorLineageRoots]);
       const transcript = meeting.transcript.trim();
       const transcriptChunks = transcriptChunksForSummary(transcript);
       const transcriptChunkedForSummary = transcriptChunks.length > 1;
       const blockOutputs: MeetingBlocksJson[] = [];
 
       for (const chunk of transcriptChunks) {
+        await revalidateInputs();
         await recordMeetingTranscriptProcessingStage({
+          workerActor: actor,
           workspaceId: params.workspaceId,
           meetingId: meeting.id,
           stage: "SUMMARIZING",
@@ -179,11 +201,12 @@ export async function runMeetingSummaryAgent(params: {
           meetingId: meeting.id,
           chunkIndex: chunk.chunkIndex,
           chunkCount: chunk.chunkCount,
-        }, async () => defaultModelGateway.extract({
+        }, async (operation) => defaultModelGateway.extract(operation.modelRequest({
           model,
           workspaceId: params.workspaceId,
           agentRunId: runId,
           instruction: [
+            helpers.behaviorContext ?? "",
             "Identify the meeting's actual discussion blocks from transcript evidence.",
             "Do not force a fixed template. Use natural blocks from the conversation, including custom/ad-hoc topics.",
             "A block can be a check-in, update, tension, proposal discussion, decision, planning segment, or custom topic.",
@@ -219,13 +242,14 @@ export async function runMeetingSummaryAgent(params: {
             } : null,
           }),
           schemaHint: MEETING_BLOCK_SCHEMA_HINT,
-        }));
+        })), { receipt });
         blockOutputs.push(normalizeMeetingBlocks(blockExtraction.output));
       }
       const meetingBlocks = mergeMeetingBlockOutputs(blockOutputs);
       const summaryTranscript = transcriptForSummaryChat(transcript, transcriptChunks);
 
-      const summary = await helpers.tool("model.chat", { meetingId: meeting.id }, async () => defaultModelGateway.chat({ model,
+      await revalidateInputs();
+      const summary = await helpers.tool("model.chat", { meetingId: meeting.id }, async (operation) => defaultModelGateway.chat(operation.modelRequest({ model,
         workspaceId: params.workspaceId,
         agentRunId: runId,
         taskType: "SUMMARY",
@@ -233,6 +257,7 @@ export async function runMeetingSummaryAgent(params: {
           {
             role: "system",
             content: [
+              helpers.behaviorContext ?? "",
               "Summarize this meeting for an operator dashboard.",
               "Return clean Markdown only, with no preamble or closing disclaimer.",
               "Write a fuller narrative summary organized around the supplied dynamic meeting blocks, with roughly twice the useful context of a terse recap and no repetition.",
@@ -282,68 +307,29 @@ export async function runMeetingSummaryAgent(params: {
             }),
           },
         ],
-      }));
+      })), { receipt });
 
       const summaryMd = normalizeMeetingProductTerminology(
         applyGuidanceTermCorrections(summary.content, meeting.ingestionGuidanceMd),
       );
-      const persisted = await helpers.step("persist-summary", { meetingId: meeting.id }, async () => prisma.meeting.updateMany({
-        where: {
-          id: meeting.id,
-          workspaceId: params.workspaceId,
-          summaryMd: meeting.summaryMd,
-          transcript: meeting.transcript,
-          ingestionGuidanceMd: meeting.ingestionGuidanceMd,
-        },
-        data: {
-          summaryMd,
-          blocksJson: toInputJson(meetingBlocks),
-        },
-      }));
-      if (persisted.count === 0) {
-        const currentMeeting = await prisma.meeting.findUnique({
-          where: { id: meeting.id },
-          select: {
-            id: true,
-            workspaceId: true,
-            summaryMd: true,
-            transcript: true,
-            ingestionGuidanceMd: true,
-          },
+      const persisted = await helpers.step("persist-summary", { meetingId: meeting.id }, async () => {
+        const result = await persistMeetingSummaryWithLineage(actor, {
+        workspaceId: params.workspaceId,
+        meetingId: meeting.id,
+        sourceStateHash: meetingContext.sourceStateHash!,
+        lineageInputs: meetingContext.lineageInputs!,
+        lineageRoots: [...meetingContext.lineageRoots!, ...helpers.behaviorLineageRoots],
+        summaryMd,
+        blocksJson: toInputJson(meetingBlocks),
         });
-        if (currentMeeting?.workspaceId === params.workspaceId && currentMeeting.summaryMd !== meeting.summaryMd) {
-          return {
-            resultJson: {
-              skipped: true,
-              reason: "summary_changed",
-              meetingId: meeting.id,
-            },
-          };
-        }
-        if (
-          currentMeeting?.workspaceId === params.workspaceId
-          && (
-            currentMeeting.transcript !== meeting.transcript
-            || currentMeeting.ingestionGuidanceMd !== meeting.ingestionGuidanceMd
-          )
-        ) {
-          return {
-            resultJson: {
-              skipped: true,
-              reason: "source_changed",
-              meetingId: meeting.id,
-            },
-          };
-        }
-        return {
-          resultJson: {
-            skipped: true,
-            reason: "missing_meeting",
-            meetingId: meeting.id,
-          },
-        };
+        // The stored Meeting can retain unrelated unproved agenda fields.
+        return { count: result.count, reason: "reason" in result ? result.reason : undefined };
+      }, { receipt });
+      if (persisted.count === 0) {
+        return { resultJson: { skipped: true, reason: persisted.reason ?? "source_changed", meetingId: meeting.id } };
       }
       return {
+        lineageReceipt: receipt,
         resultJson: {
           meetingId: meeting.id,
           summary: summaryMd,

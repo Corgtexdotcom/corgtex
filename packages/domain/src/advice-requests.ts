@@ -1,4 +1,9 @@
+import { createHash } from "node:crypto";
+import { readableArtifactIds, captureArtifactReadHeadObservation, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, type LineageInput, type LineageRoot } from "./source-lineage";
+import { captureReadableDigestInputs } from "./digest-lineage";
+import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import type {
+  AdviceRequest,
   AdviceRequestAudienceType,
   AdviceRequestPreferredChannel,
   AdviceRequestStatus,
@@ -61,9 +66,12 @@ function emptyAdviceRequestCountSummary(): AdviceRequestCountSummary {
 }
 
 export async function loadAdviceRequestCountSummaries(
+  actor: AppActor,
   workspaceId: string,
   subjectType: AdviceSubjectType,
   subjectIds: string[],
+  observe?: (requests: AdviceRequest[]) => Promise<void>,
+  db: Prisma.TransactionClient = prisma,
 ) {
   const uniqueSubjectIds = uniqueStrings(subjectIds);
   const summaries = new Map<string, AdviceRequestCountSummary>(
@@ -71,7 +79,7 @@ export async function loadAdviceRequestCountSummaries(
   );
   if (uniqueSubjectIds.length === 0) return summaries;
 
-  const processes = await prisma.adviceProcess.findMany({
+  const processes = await db.adviceProcess.findMany({
     where: {
       workspaceId,
       subjectType,
@@ -79,16 +87,17 @@ export async function loadAdviceRequestCountSummaries(
     },
     select: {
       subjectId: true,
-      requests: {
-        select: { status: true },
-      },
+      requests: true,
     },
   });
 
+  const visible = await readableArtifactIds(actor, workspaceId, "AdviceRequest", processes.flatMap((process) => process.requests), db);
+  await observe?.(processes.flatMap(process => process.requests).filter(request => visible.has(request.id)));
   for (const process of processes) {
+    const requests = process.requests.filter((request) => visible.has(request.id));
     const summary = summaries.get(process.subjectId) ?? emptyAdviceRequestCountSummary();
-    const total = process.requests.length;
-    const active = process.requests.filter((request) => request.status === "ACTIVE").length;
+    const total = requests.length;
+    const active = requests.filter((request) => request.status === "ACTIVE").length;
     summary.adviceRequestCount += total;
     summary.activeAdviceRequestCount += active;
     summary.inputRequestCount += total;
@@ -357,7 +366,7 @@ function buildAdviceRequestPayload(params: {
   };
 }
 
-export async function createAdviceRequest(actor: AppActor, params: {
+export async function createAdviceRequest(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   subjectType: string;
   subjectId: string;
@@ -395,6 +404,8 @@ export async function createAdviceRequest(actor: AppActor, params: {
           && existing.preferredChannel === preferredChannel
           && JSON.stringify(existing.recipients.map((recipient) => recipient.memberId).sort()) === JSON.stringify((params.audienceType === "MEMBERS" ? memberIds : []).sort()),
         409, "IDEMPOTENCY_CONFLICT", "This advice request key was already used for different content.");
+        invariant((await readableArtifactIds(actor, params.workspaceId, "AdviceRequest", [existing], tx)).has(existing.id),
+          404, "NOT_FOUND", "The earlier input request is no longer readable.");
         return existing;
       }
     }
@@ -433,6 +444,13 @@ export async function createAdviceRequest(actor: AppActor, params: {
       deadlineAt: params.deadlineAt,
     });
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, dependencies: [
+        { kind: subjectType === "ACTION" ? "Action" : subjectType === "TENSION" ? "Tension" : "Proposal", id: params.subjectId },
+        { kind: "Member", id: requesterMember.id },
+        ...(params.audienceType === "MEMBERS" ? memberIds.map((id) => ({ kind: "Member" as const, id })) : []),
+        ...(params.audienceType === "CIRCLE" && params.targetCircleId ? [{ kind: "Circle" as const, id: params.targetCircleId }] : []),
+      ] });
     const request = await tx.adviceRequest.create({
       data: {
         ...(params.idempotencyId ? { id: params.idempotencyId } : {}),
@@ -457,6 +475,9 @@ export async function createAdviceRequest(actor: AppActor, params: {
         skipDuplicates: true,
       });
     }
+
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AdviceRequest", id: request.id }, content: request, receipt });
 
     if (params.reminderAt) {
       await tx.workflowJob.upsert({
@@ -517,54 +538,133 @@ export async function createAdviceRequest(actor: AppActor, params: {
   });
 }
 
-export async function listAdviceRequests(actor: AppActor, params: {
+export async function listAdviceRequestWindow(actor: AppActor, params: {
   workspaceId: string;
   subjectType?: string;
   subjectId?: string;
   processId?: string;
   status?: AdviceRequestStatus;
   take?: number;
+  cursor?: string;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const subjectType = params.subjectType ? normalizeSubjectType(params.subjectType) : undefined;
 
-  return prisma.adviceRequest.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      ...(params.processId ? { processId: params.processId } : {}),
-      ...(params.status ? { status: params.status } : {}),
-      ...(subjectType || params.subjectId
-        ? {
-          process: {
-            ...(subjectType ? { subjectType } : {}),
-            ...(params.subjectId ? { subjectId: params.subjectId } : {}),
-          },
-        }
-        : {}),
-    },
-    include: {
-      requestedBy: {
-        select: { id: true, displayName: true, email: true },
+  const take = params.take ?? 50;
+  invariant(Number.isSafeInteger(take) && take >= 0 && take <= 100, 400, "INVALID_INPUT", "Invalid advice request sample size.");
+  const userProjection = { id: true, email: true, displayName: true, bio: true, avatarUrl: true,
+    linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true } as const;
+  const include = {
+    requestedBy: { select: userProjection }, targetCircle: true,
+    recipients: { orderBy: { id: "asc" }, include: { member: { include: { user: { select: userProjection } } } } },
+    process: true,
+  } satisfies Prisma.AdviceRequestInclude;
+  type Row = Prisma.AdviceRequestGetPayload<{ include: typeof include }>;
+  const selected: Row[] = [];
+  const roots = new Map<string, LineageRoot>();
+  const heads = new Map<string, string>();
+  const scope = createHash("sha256").update(JSON.stringify([actor, params.workspaceId, subjectType ?? null,
+    params.subjectId ?? null, params.processId ?? null, params.status ?? null])).digest("hex");
+  let after: { id: string; createdAt: Date } | undefined;
+  if (params.cursor) {
+    invariant(params.cursor.length <= 2048, 400, "INVALID_INPUT", "Invalid advice continuation.");
+    let decoded;
+    try { decoded = JSON.parse(Buffer.from(params.cursor, "base64url").toString("utf8")); } catch { /* validated below */ }
+    invariant(decoded?.v === 1 && decoded.scope === scope && typeof decoded.id === "string" && decoded.id.length > 0
+      && decoded.id.length <= 256 && typeof decoded.createdAt === "string" && Number.isFinite(Date.parse(decoded.createdAt))
+      && new Date(decoded.createdAt).toISOString() === decoded.createdAt, 400, "INVALID_INPUT", "Invalid advice continuation.");
+    after = { id: decoded.id, createdAt: new Date(decoded.createdAt) };
+  }
+  let examined = 0;
+  let complete = take === 0;
+  while (selected.length < take && examined < 200) {
+    const batchSize = Math.min(100, 200 - examined);
+    const rows: Row[] = await prisma.adviceRequest.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        ...(params.processId ? { processId: params.processId } : {}),
+        ...(params.status ? { status: params.status } : {}),
+        ...(subjectType || params.subjectId ? { process: {
+          ...(subjectType ? { subjectType } : {}), ...(params.subjectId ? { subjectId: params.subjectId } : {}),
+        } } : {}),
+        ...(after ? { OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] } : {}),
       },
-      targetCircle: {
-        select: { id: true, name: true },
+      include, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: batchSize,
+    });
+    invariant(rows.length <= batchSize, 409, "SOURCE_CHANGED", "Advice page changed.");
+    examined += rows.length;
+    // Process is not a source kind: prove its actual subject and compare its returned
+    // projection again in the final snapshot. Never synthesize process authority.
+    const candidates = rows.filter(row => row.process.workspaceId === params.workspaceId
+      && VALID_SUBJECT_TYPES.has(row.process.subjectType as AdviceSubjectType)
+      && row.recipients.every(recipient => recipient.member.workspaceId === params.workspaceId));
+    const observed = await captureArtifactReadHeadObservation(() => captureReadableDigestInputs({
+      actor, workspaceId: params.workspaceId, kind: "AdviceRequest", records: candidates,
+      additionalInputs: row => {
+        const inputs: Array<LineageInput & { snapshot?: Record<string, unknown> }> = [
+          { kind: row.process.subjectType === "ACTION" ? "Action" : row.process.subjectType === "TENSION" ? "Tension" : "Proposal", id: row.process.subjectId },
+          { kind: "User", id: row.requestedBy.id, snapshot: row.requestedBy },
+        ];
+        if (row.targetCircle) inputs.push({ kind: "Circle", id: row.targetCircle.id, snapshot: row.targetCircle });
+        for (const recipient of row.recipients) inputs.push(
+          { kind: "Member", id: recipient.member.id, snapshot: { ...recipient.member, user: { id: recipient.member.user.id, email: recipient.member.user.email, displayName: recipient.member.user.displayName } } },
+          { kind: "User", id: recipient.member.user.id, snapshot: recipient.member.user },
+        );
+        if (row.process.ownerMemberId) inputs.push({ kind: "Member", id: row.process.ownerMemberId });
+        inputs.push({ kind: "Member", id: row.process.authorMemberId });
+        if (row.process.proposalId) inputs.push({ kind: "Proposal", id: row.process.proposalId });
+        return inputs;
       },
-      recipients: {
-        include: {
-          member: {
-            include: {
-              user: {
-                select: { id: true, displayName: true, email: true },
-              },
-            },
-          },
-        },
-      },
-      process: true,
-    },
-    orderBy: { createdAt: "desc" },
-    take: params.take ?? 50,
-  });
+    }));
+    for (const [key, stamp] of observed.heads) {
+      invariant(!heads.has(key) || heads.get(key) === stamp, 409, "SOURCE_CHANGED", "Advice sources changed during collection.");
+      heads.set(key, stamp);
+    }
+    const admitted = new Set(observed.value.records.map(row => row.id));
+    let consumed = 0;
+    for (const row of rows) {
+      const next = { id: row.id, createdAt: new Date(row.createdAt) };
+      invariant(!after || next.createdAt < after.createdAt || (next.createdAt.getTime() === after.createdAt.getTime() && next.id > after.id),
+        409, "SOURCE_CHANGED", "Advice continuation did not advance.");
+      after = next;
+      consumed++;
+      if (!admitted.has(row.id)) continue;
+      selected.push(row);
+      for (const root of observed.value.proofs.get(row.id)!) {
+        const key = `${root.kind}:${root.id}`;
+        roots.set(key, mergeLineageInputRoot(roots.get(key), root));
+      }
+      if (selected.length === take) break;
+    }
+    if (consumed === rows.length && rows.length < batchSize) { complete = true; break; }
+  }
+  const nextCursor = !complete && after
+    ? Buffer.from(JSON.stringify({ v: 1, scope, id: after.id, createdAt: after.createdAt.toISOString() })).toString("base64url") : null;
+  return withArtifactCountReleaseSnapshot(actor, params.workspaceId, [...roots.values()], async () => {}, async tx => {
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
+    // These joins have no standalone manifest. Compare their exact original values,
+    // alongside the original native proofs, within the same release snapshot.
+    for (let offset = 0; offset < selected.length; offset += 100) {
+      const batch = selected.slice(offset, offset + 100);
+      const current = await tx.adviceRequest.findMany({ where: { workspaceId: params.workspaceId, id: { in: batch.map(row => row.id) } }, include });
+      const byId = new Map(current.map(row => [row.id, row]));
+      for (const row of batch) invariant(JSON.stringify(byId.get(row.id)) === JSON.stringify(row),
+        409, "SOURCE_CHANGED", "Advice request details changed before release.");
+    }
+    const identity = (user: Row["requestedBy"]) => ({ id: user.id, displayName: user.displayName, email: user.email });
+    const items = selected.map(row => ({ ...row, requestedBy: identity(row.requestedBy),
+      targetCircle: row.targetCircle ? { id: row.targetCircle.id, name: row.targetCircle.name } : null,
+      recipients: row.recipients.map(recipient => ({ ...recipient, member: { ...recipient.member, user: identity(recipient.member.user) } })),
+    }));
+    return { items, complete, nextCursor };
+  }, heads);
+}
+
+/** Legacy limited array API: never silently return an unfilled partial window. */
+export async function listAdviceRequests(actor: AppActor, params: Omit<Parameters<typeof listAdviceRequestWindow>[1], "cursor">) {
+  const page = await listAdviceRequestWindow(actor, params);
+  invariant(page.complete || page.items.length === (params.take ?? 50), 409, "SOURCE_READ_SCAN_LIMIT", "Use advice request continuation to read older requests.");
+  return page.items;
 }
 
 async function assertCanManageRequest(tx: Prisma.TransactionClient, actor: AppActor, params: {
@@ -611,6 +711,8 @@ export async function closeAdviceRequest(actor: AppActor, params: {
       membershipRole: membership?.role,
     });
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AdviceRequest", id: request.id }, before: request, allowSystemTransition: true });
     const updated = await tx.adviceRequest.update({
       where: { id: params.requestId },
       data: {
@@ -618,6 +720,9 @@ export async function closeAdviceRequest(actor: AppActor, params: {
         completedAt: new Date(),
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AdviceRequest", id: updated.id }, content: updated, receipt });
+
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -657,6 +762,8 @@ export async function withdrawAdviceRequest(actor: AppActor, params: {
       membershipRole: membership?.role,
     });
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AdviceRequest", id: request.id }, before: request, allowSystemTransition: true });
     const updated = await tx.adviceRequest.update({
       where: { id: params.requestId },
       data: {
@@ -664,6 +771,9 @@ export async function withdrawAdviceRequest(actor: AppActor, params: {
         canceledAt: new Date(),
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "AdviceRequest", id: updated.id }, content: updated, receipt });
+
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,

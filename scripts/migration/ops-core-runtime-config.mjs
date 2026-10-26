@@ -1,6 +1,7 @@
 import { AzureCliCredential } from "@azure/identity";
 import { SecretClient } from "@azure/keyvault-secrets";
 import { archiveEvidenceHash } from "./ops-core-archive.mjs";
+import { validateAzureOnlyConfiguration } from "./azure-only-config.mjs";
 
 class RuntimeConfigError extends Error {}
 const need = (condition, code) => { if (!condition) throw new RuntimeConfigError(code); };
@@ -89,6 +90,12 @@ export function prepareOpsCoreRuntimeValues({ plan, sourceEnvironments, database
     need(typeof retained.SESSION_COOKIE_SECRET === "string" && retained.SESSION_COOKIE_SECRET.length > 0
       && typeof retained.ENCRYPTION_KEY === "string" && retained.ENCRYPTION_KEY.length > 0, "RUNTIME_CONTINUITY_SECRET_MISSING");
     const values = { ...retained, DATABASE_URL: databaseUrl, ...(backend === "redis" ? { REDIS_URL: redisUrl } : {}) };
+    const azureOnly = validateAzureOnlyConfiguration({ ...generated, ...values }, p.azureOnly);
+    if (!azureOnly.valid) {
+      const error = new RuntimeConfigError("RUNTIME_AZURE_ONLY_CONFIGURATION_INVALID");
+      error.findings = azureOnly.findings.map(finding => ({ role, ...finding }));
+      throw error;
+    }
     roles[role] = { generated, values };
   }
   for (const name of ["ENCRYPTION_KEY", "SESSION_COOKIE_SECRET"]) {

@@ -1,3 +1,4 @@
+import { isSelfserveReleaseHost, SELFSERVE_RELEASE_HOST_ID, SELFSERVE_RELEASE_ORIGIN, SELFSERVE_RELEASE_PROFILE } from "./managed-azure-selfserve-profile.mjs";
 import { createManagedAzureExclusiveActivation, snapshotManagedAzureExclusiveActivation } from "./managed-azure-exclusive-activation.mjs";
 import { createHash } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
@@ -73,6 +74,7 @@ function preflightProjection(preflight) {
   return Object.freeze({
     deploymentId: preflight.deploymentId,
     ...(preflight.writeIntentProtocolVersion === undefined ? {} : { writeIntentProtocolVersion: preflight.writeIntentProtocolVersion }),
+    ...(preflight.protectedReleaseProfile === undefined ? {} : { protectedReleaseProfile: preflight.protectedReleaseProfile, targetDigest: preflight.targetDigest }),
     ...(preflight.deployment ? { deployment: preflight.deployment } : {}),
     authorityDigest: preflight.authorityDigest,
     origin: preflight.origin,
@@ -227,14 +229,24 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   if (!SHA256.test(preflight.authorityDigest) || preflight.deployment?.deploymentId !== input.deploymentId
     || preflight.deployment?.workloadClass !== input.workloadClass
     || !["HOSTED_DEDICATED", "REMOTE_MANAGED"].includes(preflight.deployment?.deploymentKind)) fail("MANAGED_RELEASE_TARGET_INVALID");
-  const protectedHosted = input.workloadClass === "ACTIVE_CLIENT_PRIMARY" && preflight.deployment.deploymentKind === "HOSTED_DEDICATED";
-  if (protectedHosted && ![1, 2].includes(preflight.writeIntentProtocolVersion)) fail("RECOVERY_INTENT_PROTOCOL_UNAVAILABLE");
-  const configured = protectedHosted
+  const selfserve = isSelfserveReleaseHost(input.deploymentId, preflight.origin);
+  if (selfserve && (input.deploymentId !== SELFSERVE_RELEASE_HOST_ID || preflight.origin !== SELFSERVE_RELEASE_ORIGIN
+    || preflight.deployment.deploymentKind !== "REMOTE_MANAGED" || input.workloadClass !== "ACTIVE_CLIENT_PRIMARY"
+    || preflight.protectedReleaseProfile !== SELFSERVE_RELEASE_PROFILE || !SHA256.test(preflight.targetDigest))) {
+    fail("SELFSERVE_PROTECTED_RELEASE_PROTOCOL_REQUIRED");
+  }
+  const protectedRelease = input.workloadClass === "ACTIVE_CLIENT_PRIMARY"
+    && (preflight.deployment.deploymentKind === "HOSTED_DEDICATED" || selfserve);
+  if (protectedRelease && ![1, 2].includes(preflight.writeIntentProtocolVersion)) fail("RECOVERY_INTENT_PROTOCOL_UNAVAILABLE");
+  const configured = protectedRelease
     ? await deps.targetConfig({ deploymentId: input.deploymentId, execute: false, reason: input.reason })
     : { status: "RECONCILIATION_READY", effects: 0, target: { acrName: input.acrName, acrResourceGroup: input.acrResourceGroup, activationPolicy: "STANDARD" } };
   if (configured?.status !== "RECONCILIATION_READY" || configured.effects !== 0 || configured.target?.acrName !== input.acrName
     || configured.target?.acrResourceGroup !== input.acrResourceGroup || !["STANDARD", "EXCLUSIVE"].includes(configured.target?.activationPolicy)
-    || (protectedHosted && !SHA256.test(configured.targetDigest))) fail("MANAGED_RELEASE_TARGET_INVALID");
+    || (protectedRelease && !SHA256.test(configured.targetDigest))) fail("MANAGED_RELEASE_TARGET_INVALID");
+  if (selfserve && (configured.target.activationPolicy !== "EXCLUSIVE" || configured.targetDigest !== preflight.targetDigest)) {
+    fail("SELFSERVE_PROTECTED_RELEASE_PROTOCOL_REQUIRED");
+  }
   const baselineRelease = releaseIdentity(preflight.release?.baselineImageTag, preflight.release?.baselineVersion);
   const nextRelease = Object.freeze({ gitSha: input.releaseSha, imageTag: `sha-${input.releaseSha}`, version: input.releaseVersion });
   let releasePlan;
@@ -248,19 +260,19 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     || !["MATCH", "ABSENT"].includes(releasePlan.roles?.[role]?.destinationState))) fail("MANAGED_RELEASE_IMAGE_PREFLIGHT_FAILED");
   const recoveryConfig = configured.target.recovery;
   const releaseApproval = configured.target.releaseApproval;
-  if (protectedHosted && (!releaseApproval || releaseApproval.gitSha !== input.releaseSha
+  if (protectedRelease && (!releaseApproval || releaseApproval.gitSha !== input.releaseSha
     || !SHA256.test(releaseApproval.schemaApprovalDigest))) fail("MANAGED_RELEASE_SCHEMA_APPROVAL_REQUIRED");
-  if (protectedHosted && (!recoveryConfig || !SHA.test(recoveryConfig.gitSha) || typeof recoveryConfig.releaseVersion !== "string"
+  if (protectedRelease && (!recoveryConfig || !SHA.test(recoveryConfig.gitSha) || typeof recoveryConfig.releaseVersion !== "string"
     || !SHA256.test(recoveryConfig.schemaCompatibilityApprovalDigest) || recoveryConfig.gitSha === input.releaseSha)) fail("MANAGED_RELEASE_RECOVERY_PREFLIGHT_FAILED");
-  const recoveryRelease = protectedHosted
+  const recoveryRelease = protectedRelease
     ? Object.freeze({ gitSha: recoveryConfig.gitSha, imageTag: `sha-${recoveryConfig.gitSha}`, version: recoveryConfig.releaseVersion }) : nextRelease;
   let recoveryPlan = releasePlan;
   try {
-    if (protectedHosted) recoveryPlan = await deps.resolveRelease({ deploymentId: input.deploymentId,
+    if (protectedRelease) recoveryPlan = await deps.resolveRelease({ deploymentId: input.deploymentId,
       target: releaseTargetWithAcrGroup(preflight.target, input.acrResourceGroup), gitSha: recoveryRelease.gitSha,
       workloadClass: input.workloadClass, deployment: preflight.deployment });
   } catch { fail("MANAGED_RELEASE_RECOVERY_PREFLIGHT_FAILED"); }
-  if (protectedHosted && (!recoveryPlan || ROLES.some((role) => !/^sha256:[0-9a-f]{64}$/.test(recoveryPlan.roles?.[role]?.digest)
+  if (protectedRelease && (!recoveryPlan || ROLES.some((role) => !/^sha256:[0-9a-f]{64}$/.test(recoveryPlan.roles?.[role]?.digest)
     || !["MATCH", "ABSENT"].includes(recoveryPlan.roles?.[role]?.destinationState)))) fail("MANAGED_RELEASE_RECOVERY_PREFLIGHT_FAILED");
 
   const baselines = {};
@@ -270,10 +282,10 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     web: { containerName: baselines.web.containerName, image: baselines.web.image, readyRevision: baselines.web.revisionName, templateDigest: baselines.web.templateDigest },
     worker: { containerName: baselines.worker.containerName, image: baselines.worker.image, readyRevision: baselines.worker.revisionName, templateDigest: baselines.worker.templateDigest },
   };
-  const exclusiveActivation = protectedHosted && configured.target.activationPolicy === "EXCLUSIVE"
+  const exclusiveActivation = protectedRelease && configured.target.activationPolicy === "EXCLUSIVE"
     ? await snapshotManagedAzureExclusiveActivation(deps, preflight.target, baselines) : null;
   if (exclusiveActivation && preflight.writeIntentProtocolVersion !== 2) fail("EXCLUSIVE_ACTIVATION_PROTOCOL_UNAVAILABLE");
-  const rollback = protectedHosted ? {
+  const rollback = protectedRelease ? {
     schemaVersion: exclusiveActivation ? 3 : 2,
     ...(exclusiveActivation ? { exclusiveActivation } : {}),
     target: preflight.target,
@@ -289,11 +301,11 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     incoming: { webDigest: releasePlan.roles.web.digest, workerDigest: releasePlan.roles.worker.digest } };
   const baselineHealth = await deps.healthProbe({ origin: preflight.origin, release: baselineRelease });
   if (!baselineHealth.ok) fail("MANAGED_RELEASE_BASELINE_HEALTH_FAILED");
-  if (protectedHosted) await deps.authPreflight({ deploymentId: input.deploymentId, reason: input.reason, release: baselineRelease });
+  if (protectedRelease) await deps.authPreflight({ deploymentId: input.deploymentId, reason: input.reason, release: baselineRelease });
   if (baselineRelease.imageTag === nextRelease.imageTag) {
     if (baselineRelease.version !== nextRelease.version
       || ROLES.some((role) => baselines[role].imageDigest !== releasePlan.roles[role].digest)) fail("MANAGED_RELEASE_ALREADY_CURRENT_DRIFT");
-    if (!protectedHosted || !input.execute) return safeResult(input, inventory, "ALREADY_CURRENT", { effects: 0 });
+    if (!protectedRelease || !input.execute) return safeResult(input, inventory, "ALREADY_CURRENT", { effects: 0 });
     const operationId = diagnosticOperationId(input.inventoryRef, nextRelease.gitSha, "already-current");
     const noProgress = async () => {};
     const acceptance = await deps.acceptanceProbe({ deploymentId: input.deploymentId, origin: preflight.origin,
@@ -312,9 +324,9 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   if (!input.execute) {
     return safeResult(input, inventory, "DRY_RUN_READY", {
       effects: 0,
-      ...(protectedHosted ? { schemaApprovalDigest: `sha256:${releaseApproval.schemaApprovalDigest}` } : {}),
+      ...(protectedRelease ? { schemaApprovalDigest: `sha256:${releaseApproval.schemaApprovalDigest}` } : {}),
       importsRequired: ROLES.filter((role) => releasePlan.roles[role].destinationState === "ABSENT"),
-      ...(protectedHosted ? { recoveryImportsRequired: ROLES.filter((role) => recoveryPlan.roles[role].destinationState === "ABSENT") } : {}),
+      ...(protectedRelease ? { recoveryImportsRequired: ROLES.filter((role) => recoveryPlan.roles[role].destinationState === "ABSENT") } : {}),
     });
   }
 
@@ -361,7 +373,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     for (const role of ROLES) classified[role] = await classifyRole(role, forwardTemplates[role]);
     if (ROLES.some((role) => classified[role].kind === "UNKNOWN")) return markRecovery(stage, code, detail);
     await recoveryHeartbeat();
-    if (!protectedHosted) {
+    if (!protectedRelease) {
       for (const role of ["worker", "web"]) {
         if (classified[role].kind !== "FORWARD") continue;
         const suffix = managedAzureRevisionSuffix({ leaseId: handle.leaseId, fence: handle.fence, role, phase: "rollback" });
@@ -509,12 +521,12 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       incomingVersion: nextRelease.version,
       owner: deps.owner,
       reason: input.reason,
-      ...(protectedHosted ? { expectedTargetDigest: configured.targetDigest } : {}),
+      ...(protectedRelease ? { expectedTargetDigest: configured.targetDigest } : {}),
     });
     const leasedTarget = await deps.lease("get_target", leaseArgs(handle, { acrName: input.acrName, acrServer: input.acrServer }));
     if (!same(leasedTarget.target, preflight.target) || !same(leasedTarget.deployment, preflight.deployment)
       || leasedTarget.authorityDigest !== preflight.authorityDigest || leasedTarget.release?.baselineImageTag !== baselineRelease.imageTag
-      || (protectedHosted && leasedTarget.targetDigest !== configured.targetDigest)) {
+      || (protectedRelease && leasedTarget.targetDigest !== configured.targetDigest)) {
       await deps.lease("abort", leaseArgs(handle, { reason: input.reason }));
       fail("MANAGED_RELEASE_LEASE_TARGET_DRIFT");
     }
@@ -526,7 +538,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       }
     }
     await deps.lease("record_rollback", leaseArgs(handle, { rollback, reason: input.reason }));
-    for (const plan of protectedHosted ? [releasePlan, recoveryPlan] : [releasePlan]) for (const role of ROLES) {
+    for (const plan of protectedRelease ? [releasePlan, recoveryPlan] : [releasePlan]) for (const role of ROLES) {
       if (plan.roles[role].destinationState !== "ABSENT") continue;
       await heartbeat();
       let imported = await deps.importRole(plan.roles[role]);
@@ -554,9 +566,9 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
         image: releasePlan.roles[role].image,
         release: nextRelease,
         revisionSuffix: suffix,
-        migrateWeb: protectedHosted,
+        migrateWeb: protectedRelease,
       });
-      assertManagedAzureTemplateDelta(baselines[role], forwardTemplates[role], { role, image: releasePlan.roles[role].image, release: nextRelease, revisionSuffix: suffix, migrateWeb: protectedHosted });
+      assertManagedAzureTemplateDelta(baselines[role], forwardTemplates[role], { role, image: releasePlan.roles[role].image, release: nextRelease, revisionSuffix: suffix, migrateWeb: protectedRelease });
     }
     mutationBegun = true;
     await deps.lease("begin", leaseArgs(handle, { reason: input.reason }));
@@ -621,7 +633,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     const health = await deps.healthProbe({ origin: preflight.origin, release: nextRelease });
     if (!health.ok) return await compensate("OBSERVATION", health.code ?? "HEALTH_PROBE_FAILED", forwardTemplates);
     await heartbeat();
-    if (protectedHosted) {
+    if (protectedRelease) {
       const operationId = handle.leaseId;
       const acceptance = await deps.acceptanceProbe({ deploymentId: input.deploymentId, origin: preflight.origin,
         operationId, release: nextRelease, reason: input.reason, onProgress: heartbeat });
@@ -637,7 +649,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     if (exclusive) await exclusive.guard("Single");
     await deps.lease("finalize_success", leaseArgs(handle, { reason: input.reason }));
     return safeResult(input, inventory, "SUCCEEDED", { phase: "COMPLETE",
-      ...(protectedHosted ? { schemaApprovalDigest: `sha256:${releaseApproval.schemaApprovalDigest}` } : {}) });
+      ...(protectedRelease ? { schemaApprovalDigest: `sha256:${releaseApproval.schemaApprovalDigest}` } : {}) });
   } catch (error) {
     if (!handle) throw error;
     if (!mutationBegun) {

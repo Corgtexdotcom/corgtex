@@ -4,6 +4,7 @@ import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { privacyFilter } from "./privacy";
+import { DigestReadRelease } from "./digest-lineage";
 
 export const WORKSPACE_PERMALINK_ENTITY_TYPES = [
   "Action",
@@ -109,54 +110,48 @@ export async function getWorkspacePermanentPathForEntity(params: {
 async function resolveAction(actor: AppActor, membership: MembershipSummary | null, workspaceId: string, entityId: string) {
   return prisma.action.findFirst({
     where: { id: entityId, workspaceId, ...privacyFilter(actor, membership) },
-    select: { id: true, archivedAt: true },
   });
 }
 
 async function resolveTension(actor: AppActor, membership: MembershipSummary | null, workspaceId: string, entityId: string) {
   return prisma.tension.findFirst({
     where: { id: entityId, workspaceId, ...privacyFilter(actor, membership) },
-    select: { id: true, archivedAt: true },
   });
 }
 
 async function resolveProposal(actor: AppActor, membership: MembershipSummary | null, workspaceId: string, entityId: string) {
-  return prisma.proposal.findFirst({
+  const proposal = await prisma.proposal.findFirst({
     where: { id: entityId, workspaceId, ...privacyFilter(actor, membership) },
-    select: { id: true, archivedAt: true },
   });
+  if (!proposal) return null;
+  return proposal;
 }
 
 async function resolveArticle(actor: AppActor, membership: MembershipSummary | null, workspaceId: string, entityId: string) {
   const article = await prisma.brainArticle.findFirst({
     where: { id: entityId, workspaceId },
-    select: {
-      id: true,
-      slug: true,
-      isPrivate: true,
-      archivedAt: true,
-      ownerMember: { select: { userId: true } },
-    },
+    include: { ownerMember: { select: { userId: true } } },
   });
-  if (!article?.isPrivate) return article;
+  if (!article) return null;
   const canReadPrivateDraft = actor.kind === "agent"
     || membership?.role === "ADMIN"
     || (actor.kind === "user" && article.ownerMember?.userId === actor.user.id);
-  return canReadPrivateDraft ? article : null;
+  if (article.isPrivate && !canReadPrivateDraft) return null;
+  return article;
 }
 
 async function resolveMeeting(workspaceId: string, entityId: string) {
   return prisma.meeting.findFirst({
     where: { id: entityId, workspaceId },
-    select: { id: true, archivedAt: true },
   });
 }
 
 async function resolveGoal(actor: AppActor, membership: MembershipSummary | null, workspaceId: string, entityId: string) {
-  return prisma.goal.findFirst({
+  const goal = await prisma.goal.findFirst({
     where: { id: entityId, workspaceId, ...privacyFilter(actor, membership) },
-    select: { id: true, archivedAt: true, cadence: true },
   });
+  if (!goal) return null;
+  return goal;
 }
 
 async function resolveLinkedEntity(
@@ -188,6 +183,18 @@ export async function resolveWorkspacePermalink(actor: AppActor, params: {
   invariant(permalink, 404, "NOT_FOUND", "Permanent link not found.");
   invariant(isWorkspacePermalinkEntityType(permalink.entityType), 404, "NOT_FOUND", "Permanent link target not found.");
 
+  const entity = await resolveLinkedEntity(
+    actor,
+    membership,
+    permalink.entityType,
+    params.workspaceId,
+    permalink.entityId,
+  );
+
+  invariant(entity, 404, "NOT_FOUND", "Permanent link target not found.");
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  const admitted = await release.capture(permalink.entityType, [entity]);
+  invariant(admitted.records.length === 1, 404, "NOT_FOUND", "Permanent link target not found.");
   const archiveRecord = await prisma.workspaceArchiveRecord.findFirst({
     where: {
       workspaceId: params.workspaceId,
@@ -197,36 +204,12 @@ export async function resolveWorkspacePermalink(actor: AppActor, params: {
     },
     orderBy: { archivedAt: "desc" },
   });
-  const entity = await resolveLinkedEntity(
-    actor,
-    membership,
-    permalink.entityType,
-    params.workspaceId,
-    permalink.entityId,
-  );
-
-  if (entity) {
-    return {
-      status: entity.archivedAt ? "ARCHIVED" as const : "ACTIVE" as const,
-      permalink,
-      archiveRecord,
-      canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, permalink.entityType, entity),
-    };
-  }
-
-  if (archiveRecord?.purgedAt) {
-    return {
-      status: "PURGED" as const,
-      permalink,
-      archiveRecord,
-      canonicalPath: permalink.canonicalPath,
-    };
-  }
-
-  return {
-    status: "MISSING" as const,
+  // Original canonical proof and heads survive the archive lookup and are
+  // released with current caller membership before any ID, status or redirect.
+  return release.finish({
+    status: entity.archivedAt ? "ARCHIVED" as const : "ACTIVE" as const,
     permalink,
     archiveRecord,
-    canonicalPath: permalink.canonicalPath,
-  };
+    canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, permalink.entityType, entity),
+  });
 }

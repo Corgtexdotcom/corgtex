@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleRouteError } from "@/lib/http";
-import { handleSlackInteraction, verifySlackRequest } from "@corgtex/domain";
+import { handleSlackInteraction, captureSlackSignedIngress } from "@corgtex/domain";
 
 export async function POST(request: NextRequest) {
   try {
     const rawBody = await request.text();
-    verifySlackRequest(rawBody, request.headers);
+    const signedIngress = captureSlackSignedIngress(rawBody, request.headers);
     const form = new URLSearchParams(rawBody);
     const payloadRaw = form.get("payload");
     if (!payloadRaw) {
@@ -13,7 +13,7 @@ export async function POST(request: NextRequest) {
     }
 
     const payload = JSON.parse(payloadRaw) as Record<string, unknown>;
-    const response = await handleSlackInteraction(payload);
+    const response = await handleSlackInteraction(payload, signedIngress);
     return NextResponse.json(response);
   } catch (error) {
     return handleRouteError(error);

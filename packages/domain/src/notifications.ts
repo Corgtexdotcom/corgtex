@@ -1,8 +1,16 @@
+import { isDeepStrictEqual } from "node:util";
 import type { Prisma } from "@prisma/client";
 import { env, prisma, sendEmail } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { humanMemberIdentityWhere } from "./member-identity";
+import { readNotificationPage, readUnreadNotificationSummary } from "./notifications-read-window";
+import { captureArtifactInputProof, captureArtifactReadHeadObservation, mergeLineageInputRoot,
+  readableArtifactIds, sealArtifactInputActor, withArtifactCountReleaseSnapshot, type LineageRoot } from "./source-lineage";
+import type { SlackAttemptControls, SlackNotificationRecipient } from "./communication";
+import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent } from "./source-permission-epochs";
+import { AppError, invariant } from "./errors";
+import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 
 export const DEFAULT_NOTIFICATION_CHANNEL = "IN_APP";
 export const NOTIFICATION_DELIVERY_JOB_TYPE = "notification.delivery";
@@ -45,7 +53,8 @@ export type StoredNotificationChannel = typeof STORED_NOTIFICATION_CHANNELS[numb
 export type NotificationPreferenceChannel = typeof NOTIFICATION_PREFERENCE_CHANNELS[number];
 export type NotificationPriority = "LOW" | "NORMAL" | "HIGH";
 
-export type NotificationIntentParams = {
+export type NotificationIntentParams = ProducerLineageParams & {
+  lineageActor?: AppActor;
   workspaceId: string;
   type: string;
   recipientUserIds: string[];
@@ -255,6 +264,11 @@ async function createSlackDeliveryIntent(
   await createNotificationDeliveryIntent(tx, notification, NOTIFICATION_DELIVERY_SLACK_CHANNEL);
 }
 
+function isDefinitiveNotificationDenial(error: unknown) {
+  return error instanceof AppError
+    && ["AUTH_REQUIRED", "NOT_A_MEMBER", "SOURCE_RESTRICTED", "UNKNOWN_LINEAGE"].includes(error.code);
+}
+
 export async function createNotificationIntent(
   tx: Prisma.TransactionClient,
   params: NotificationIntentParams,
@@ -274,7 +288,7 @@ export async function createNotificationIntent(
     },
     select: {
       userId: true,
-      user: { select: { email: true } },
+      user: { select: { id: true, email: true, displayName: true, globalRole: true } },
     },
   });
   if (activeRecipients.length === 0) {
@@ -316,63 +330,39 @@ export async function createNotificationIntent(
     const channel = channelByUserId.get(recipient.userId) ?? DEFAULT_NOTIFICATION_CHANNEL;
     return shouldAllowOutbound && channelEnablesSlack(channel);
   };
-  const bulkRecipients = recipients.filter((recipient) => (
-    !notificationDedupeKey(params.dedupeKey, recipient.userId)
-      && !shouldCreateEmailDelivery(recipient)
-      && !shouldCreateSlackDelivery(recipient)
-  ));
-  const individualRecipients = recipients.filter((recipient) => !bulkRecipients.includes(recipient));
+  const lineageActor = params.lineageActor ?? { kind: "agent" as const, authProvider: "bootstrap" as const,
+    label: "notification-without-receipt", workspaceIds: [params.workspaceId] };
+  const receipt = await prepareProducerLineage({ tx, actor: lineageActor, workspaceId: params.workspaceId,
+    copied: true, capture: params.lineageActor ? params : {} });
   let count = 0;
-
-  if (bulkRecipients.length > 0) {
-    const result = await tx.notification.createMany({
-      data: bulkRecipients.map((recipient) => ({
-        workspaceId: params.workspaceId,
-        userId: recipient.userId,
-        type: params.type,
-        priority,
-        entityType: params.entityType ?? null,
-        entityId: params.entityId ?? null,
-        title: params.title,
-        bodyMd: params.bodyMd ?? null,
-      })),
-    });
-    count += result.count;
-  }
-
-  for (const recipient of individualRecipients) {
+  for (const recipient of recipients) {
     const dedupeKey = notificationDedupeKey(params.dedupeKey, recipient.userId);
-    const data = {
-      workspaceId: params.workspaceId,
-      userId: recipient.userId,
-      type: params.type,
-      dedupeKey,
-      priority,
-      entityType: params.entityType ?? null,
-      entityId: params.entityId ?? null,
-      title: params.title,
-      bodyMd: params.bodyMd ?? null,
-    };
-    const notification = dedupeKey
-      ? await tx.notification.upsert({
-        where: { dedupeKey },
-        update: {},
-        create: data,
-        select: { id: true, workspaceId: true, userId: true },
-      })
-      : await tx.notification.create({
-        data,
-        select: { id: true, workspaceId: true, userId: true },
-      });
-
+    // Existing content keeps its own receipt. A retry cannot certify an older
+    // payload with a new caller's input set.
+    if (dedupeKey) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`notification:${dedupeKey}`}, 0))`;
+    const existing = dedupeKey ? await tx.notification.findUnique({ where: { dedupeKey } }) : null;
+    const notification = existing ?? await tx.notification.create({ data: {
+      workspaceId: params.workspaceId, userId: recipient.userId, type: params.type, dedupeKey, priority,
+      entityType: params.entityType ?? null, entityId: params.entityId ?? null,
+      title: params.title, bodyMd: params.bodyMd ?? null,
+    } });
+    if (!existing) await finishProducerLineage({ tx, actor: lineageActor, workspaceId: params.workspaceId,
+      artifact: { kind: "Notification", id: notification.id }, content: notification, receipt });
     count += 1;
-
-    if (shouldCreateEmailDelivery(recipient)) {
-      await createEmailDeliveryIntent(tx, notification);
+    if (!existing && receipt.mode === "UNKNOWN") continue;
+    if (!recipient.user || notification.workspaceId !== params.workspaceId || notification.userId !== recipient.userId) continue;
+    const recipientActor: AppActor = { kind: "user", user: recipient.user };
+    let readable = false;
+    try {
+      readable = (await readableArtifactIds(recipientActor, params.workspaceId, "Notification", [notification], tx)).has(notification.id);
+    } catch (error) {
+      // A revoked recipient does not block other recipients. Infrastructure or
+      // proof drift must abort the producer transaction so its intent can retry.
+      if (!isDefinitiveNotificationDenial(error)) throw error;
     }
-    if (shouldCreateSlackDelivery(recipient)) {
-      await createSlackDeliveryIntent(tx, notification);
-    }
+    if (!readable) continue;
+    if (shouldCreateEmailDelivery(recipient)) await createEmailDeliveryIntent(tx, notification);
+    if (shouldCreateSlackDelivery(recipient)) await createSlackDeliveryIntent(tx, notification);
   }
 
   return { count };
@@ -385,6 +375,98 @@ type NotificationDeliveryWithRecipient = Prisma.NotificationDeliveryGetPayload<{
   };
 }>;
 
+async function refreshReadableDelivery(delivery: NotificationDeliveryWithRecipient, retainProof = false) {
+  const actor = await currentRecipientActor(delivery.userId, delivery.workspaceId);
+  const notification = actor ? await prisma.notification.findFirst({ where: {
+    id: delivery.notificationId, workspaceId: delivery.workspaceId, userId: delivery.userId,
+  } }) : null;
+  let readable = false;
+  let roots: LineageRoot[] = [];
+  let heads = new Map<string, string>();
+  if (actor && notification) {
+    try {
+      if (retainProof) sealArtifactInputActor(actor);
+      const observed = await captureArtifactReadHeadObservation(async () => {
+        readable = (await readableArtifactIds(actor, delivery.workspaceId, "Notification", [notification])).has(notification.id);
+        if (readable && retainProof) roots = await captureArtifactInputProof(actor, delivery.workspaceId,
+          [{ kind: "Notification", id: notification.id, snapshot: notification }]);
+      });
+      heads = observed.heads;
+    } catch (error) {
+      // Unavailable proof infrastructure must leave the queued intent retryable.
+      // A current denial still permanently withholds this outbound content.
+      if (!isDefinitiveNotificationDenial(error)) throw error;
+      readable = false;
+    }
+  }
+  if (!readable || !notification || actor?.kind !== "user") {
+    await prisma.notificationDelivery.update({ where: { id: delivery.id }, data: {
+      status: "SKIPPED", failedAt: new Date(), error: "Notification inputs or recipient access are unavailable.",
+    } });
+    return false;
+  }
+  delivery.notification = notification;
+  delivery.user = { email: actor.user.email };
+  return { actor, roots, heads };
+}
+
+type DeliveryProof = Exclude<Awaited<ReturnType<typeof refreshReadableDelivery>>, false>;
+
+function notificationAttempt(delivery: NotificationDeliveryWithRecipient, original: DeliveryProof,
+  validateDestination?: (tx: Prisma.TransactionClient) => Promise<void>) {
+  const controller = new AbortController();
+  const originalEmail = original.actor.user.email;
+  const controls: SlackAttemptControls = {
+    signal: controller.signal,
+    authorizeAttempt: async ({ signal }) => {
+      try {
+        controller.signal.throwIfAborted();
+        signal.throwIfAborted();
+        await withArtifactCountReleaseSnapshot(original.actor, delivery.workspaceId, original.roots, async () => {}, async tx => {
+          await requireWorkspaceMembership({ actor: original.actor, workspaceId: delivery.workspaceId, tx });
+          const user = await tx.user.findFirst({ where: { id: delivery.userId,
+            memberships: { some: { workspaceId: delivery.workspaceId, isActive: true } } }, select: { email: true } });
+          invariant(user?.email === originalEmail, 403, "SOURCE_RESTRICTED", "Notification recipient identity is unavailable.");
+          await validateDestination?.(tx);
+        }, original.heads);
+        signal.throwIfAborted();
+        controller.signal.throwIfAborted();
+      } catch (error) {
+        controller.abort(error);
+        throw error;
+      }
+    },
+  };
+  return { controls, assertActive: () => controller.signal.throwIfAborted() };
+}
+
+async function readSlackDeliveryBinding(tx: Prisma.TransactionClient, delivery: NotificationDeliveryWithRecipient,
+  recipient: SlackNotificationRecipient) {
+  const installation = await tx.communicationInstallation.findFirst({ where: {
+    workspaceId: delivery.workspaceId, provider: "SLACK", status: "ACTIVE", botTokenEnc: { not: null }, disconnectedAt: null,
+  }, orderBy: { installedAt: "desc" }, select: { id: true, workspaceId: true, provider: true, externalWorkspaceId: true,
+    appId: true, botUserId: true, botTokenEnc: true, status: true, disconnectedAt: true, installedAt: true } });
+  invariant(installation?.id === recipient.installationId, 403, "SOURCE_RESTRICTED", "Notification Slack installation changed.");
+  const mapping = await tx.communicationExternalUser.findFirst({ where: {
+    workspaceId: delivery.workspaceId, installationId: installation.id, provider: "SLACK", userId: delivery.userId,
+    isBot: false, isDeleted: false,
+  }, orderBy: { updatedAt: "desc" }, select: { id: true, workspaceId: true, installationId: true, provider: true,
+    externalUserId: true, userId: true, memberId: true, email: true, isBot: true, isDeleted: true, updatedAt: true } });
+  invariant(mapping?.externalUserId === recipient.externalUserId, 403, "SOURCE_RESTRICTED", "Notification Slack recipient binding changed.");
+  return { installation, mapping };
+}
+
+async function captureSlackDeliveryBinding(delivery: NotificationDeliveryWithRecipient, recipient: SlackNotificationRecipient) {
+  return prisma.$transaction(async tx => {
+    const binding = await readSlackDeliveryBinding(tx, delivery, recipient);
+    const epochs = await capturePermissionEpochs(tx, delivery.workspaceId, [
+      { kind: "CommunicationInstallation", id: binding.installation.id },
+      { kind: "CommunicationExternalUser", id: binding.mapping.id },
+    ]);
+    return { binding, epochs };
+  }, { isolationLevel: "RepeatableRead" });
+}
+
 async function createEmailFallbackDelivery(delivery: NotificationDeliveryWithRecipient) {
   if (!delivery.user.email) return;
   await createEmailDeliveryIntent(prisma, {
@@ -394,7 +476,8 @@ async function createEmailFallbackDelivery(delivery: NotificationDeliveryWithRec
   });
 }
 
-async function deliverEmailNotificationDelivery(delivery: NotificationDeliveryWithRecipient) {
+async function deliverEmailNotificationDelivery(delivery: NotificationDeliveryWithRecipient, original: DeliveryProof) {
+  if (!await refreshReadableDelivery(delivery)) return { status: "SKIPPED" as const };
   if (!delivery.user.email) {
     await prisma.notificationDelivery.update({
       where: { id: delivery.id },
@@ -408,6 +491,7 @@ async function deliverEmailNotificationDelivery(delivery: NotificationDeliveryWi
   }
 
   const attempt = delivery.attempts + 1;
+  const attemptGuard = notificationAttempt(delivery, original);
   const email = renderNotificationEmail({
     workspaceId: delivery.workspaceId,
     title: delivery.notification.title,
@@ -430,7 +514,8 @@ async function deliverEmailNotificationDelivery(delivery: NotificationDeliveryWi
           channel: delivery.channel,
         },
       },
-    });
+    }, attemptGuard.controls);
+    attemptGuard.assertActive();
 
     if (result.status === "SKIPPED") {
       await prisma.notificationDelivery.update({
@@ -458,6 +543,7 @@ async function deliverEmailNotificationDelivery(delivery: NotificationDeliveryWi
     });
     return { status: "SENT" as const };
   } catch (error) {
+    attemptGuard.assertActive();
     const message = error instanceof Error ? error.message : "Unknown notification email delivery error.";
     const finalAttempt = attempt >= NOTIFICATION_DELIVERY_MAX_ATTEMPTS;
     await prisma.notificationDelivery.update({
@@ -477,12 +563,23 @@ async function deliverEmailNotificationDelivery(delivery: NotificationDeliveryWi
   }
 }
 
-async function deliverSlackNotificationDelivery(delivery: NotificationDeliveryWithRecipient) {
+async function deliverSlackNotificationDelivery(delivery: NotificationDeliveryWithRecipient, original: DeliveryProof) {
   const attempt = delivery.attempts + 1;
+  let checkingAuthority = false;
+  let destination: Awaited<ReturnType<typeof captureSlackDeliveryBinding>> | undefined;
+  let recipient: SlackNotificationRecipient | null = null;
+  const attemptGuard = notificationAttempt(delivery, original, async tx => {
+    invariant(destination && recipient, 403, "SOURCE_RESTRICTED", "Notification Slack destination is unavailable.");
+    const current = await readSlackDeliveryBinding(tx, delivery, recipient);
+    invariant(isDeepStrictEqual(current, destination.binding)
+      && await isArtifactPermissionEpochProofCurrent(delivery.workspaceId, destination.epochs, tx),
+    409, "SOURCE_CHANGED", "The original Slack notification destination changed.");
+  });
 
   try {
     const { resolveSlackNotificationRecipient, sendSlackMessage } = await import("./communication");
-    const recipient = await resolveSlackNotificationRecipient({
+    const resolvedEmail = delivery.user.email;
+    recipient = await resolveSlackNotificationRecipient({
       workspaceId: delivery.workspaceId,
       userId: delivery.userId,
       email: delivery.user.email,
@@ -501,6 +598,17 @@ async function deliverSlackNotificationDelivery(delivery: NotificationDeliveryWi
       return { status: "SKIPPED" as const };
     }
 
+    checkingAuthority = true;
+    destination = await captureSlackDeliveryBinding(delivery, recipient);
+    const readable = await refreshReadableDelivery(delivery);
+    checkingAuthority = false;
+    if (!readable) return { status: "SKIPPED" as const };
+    if (delivery.user.email !== resolvedEmail) {
+      await prisma.notificationDelivery.update({ where: { id: delivery.id }, data: {
+        status: "SKIPPED", failedAt: new Date(), error: "Recipient identity changed during Slack resolution.",
+      } });
+      return { status: "SKIPPED" as const };
+    }
     const slack = renderNotificationSlackMessage({
       workspaceId: delivery.workspaceId,
       title: delivery.notification.title,
@@ -509,7 +617,8 @@ async function deliverSlackNotificationDelivery(delivery: NotificationDeliveryWi
     const result = await sendSlackMessage(recipient.installationId, {
       channel: recipient.externalUserId,
       text: slack.text,
-    }, slack.blocks);
+    }, slack.blocks, undefined, attemptGuard.controls);
+    attemptGuard.assertActive();
 
     await prisma.notificationDelivery.update({
       where: { id: delivery.id },
@@ -524,6 +633,10 @@ async function deliverSlackNotificationDelivery(delivery: NotificationDeliveryWi
     });
     return { status: "SENT" as const };
   } catch (error) {
+    // Proof failure is not a Slack transport failure and must not terminalize
+    // the intent or create fallback mail before a later retry can revalidate it.
+    attemptGuard.assertActive();
+    if (checkingAuthority) throw error;
     const message = error instanceof Error ? error.message : "Unknown notification Slack delivery error.";
     await prisma.notificationDelivery.update({
       where: { id: delivery.id },
@@ -550,11 +663,14 @@ export async function deliverNotificationDelivery(deliveryId: string) {
   if (!delivery || delivery.status === "SENT" || delivery.status === "SKIPPED" || delivery.status === "FAILED") {
     return { status: "SKIPPED" as const };
   }
+  const original = await refreshReadableDelivery(delivery, delivery.channel === NOTIFICATION_DELIVERY_SLACK_CHANNEL
+    || delivery.channel === NOTIFICATION_DELIVERY_EMAIL_CHANNEL);
+  if (!original) return { status: "SKIPPED" as const };
   if (delivery.channel === NOTIFICATION_DELIVERY_EMAIL_CHANNEL) {
-    return deliverEmailNotificationDelivery(delivery);
+    return deliverEmailNotificationDelivery(delivery, original);
   }
   if (delivery.channel === NOTIFICATION_DELIVERY_SLACK_CHANNEL) {
-    return deliverSlackNotificationDelivery(delivery);
+    return deliverSlackNotificationDelivery(delivery, original);
   }
   {
     await prisma.notificationDelivery.update({
@@ -569,52 +685,138 @@ export async function deliverNotificationDelivery(deliveryId: string) {
   }
 }
 
+async function currentRecipientActor(userId: string, workspaceId: string): Promise<AppActor | null> {
+  const user = await prisma.user.findFirst({ where: { id: userId,
+    memberships: { some: { workspaceId, isActive: true } } },
+    select: { id: true, email: true, displayName: true, globalRole: true },
+  });
+  return user ? { kind: "user", user } : null;
+}
+
+export const listNotificationPage = readNotificationPage;
+export const getUnreadNotificationSummary = readUnreadNotificationSummary;
+
 export async function listNotifications(actor: AppActor, workspaceId: string, opts?: {
   unreadOnly?: boolean;
   take?: number;
   skip?: number;
 }) {
-  const userId = actor.kind === "user" ? actor.user.id : null;
-  if (!userId) return [];
-
-  await requireWorkspaceMembership({ actor, workspaceId });
-
-  return prisma.notification.findMany({
-    where: {
-      workspaceId,
-      userId,
-      ...(opts?.unreadOnly ? { readAt: null } : {}),
-    },
-    orderBy: { createdAt: "desc" },
-    take: opts?.take ?? 30,
-    skip: opts?.skip,
-  });
+  const page = await readNotificationPage(actor, workspaceId, opts);
+  invariant(!page.hasMore || page.items.length >= (opts?.take ?? 30), 409,
+    "SOURCE_READ_SCAN_LIMIT", "Use notification continuation to read the next window.");
+  return page.items;
 }
 
-export async function countUnreadNotifications(userId: string, workspaceId: string) {
-  return prisma.notification.count({
-    where: { workspaceId, userId, readAt: null },
-  });
+type NotificationWriteWindow = { complete: boolean; nextCursor: string | null };
+function notificationWritePosition(actor: AppActor & { kind: "user" }, workspaceId: string, cursor?: string) {
+  if (cursor === undefined) return undefined;
+  invariant(cursor.length > 0 && cursor.length <= 2048, 400, "INVALID_INPUT", "Invalid notification write continuation.");
+  let value;
+  try { value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")); } catch { /* validated below */ }
+  invariant(value?.v === 1 && value.purpose === "mark-all-read" && value.workspaceId === workspaceId
+    && value.userId === actor.user.id && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 256
+    && typeof value.createdAt === "string" && Number.isFinite(Date.parse(value.createdAt))
+    && new Date(value.createdAt).toISOString() === value.createdAt,
+  400, "INVALID_INPUT", "Invalid notification write continuation.");
+  return { id: value.id as string, createdAt: new Date(value.createdAt) };
+}
+
+async function visitReadableNotifications<T>(actor: AppActor & { kind: "user" }, workspaceId: string,
+  unreadOnly: boolean, visit: (rows: Awaited<ReturnType<typeof prisma.notification.findMany>>) => false | void,
+  finish: (tx: Prisma.TransactionClient, window: NotificationWriteWindow) => Promise<T>, notificationId?: string,
+  window?: { cursor?: string }): Promise<T> {
+  sealArtifactInputActor(actor);
+  const roots = new Map<string, LineageRoot>();
+  const heads = new Map<string, string>();
+  let after: { id: string; createdAt: Date } | undefined = window
+    ? notificationWritePosition(actor, workspaceId, window.cursor) : undefined;
+  let examined = 0;
+  let complete = false;
+  while (!window || examined < 200) {
+    const rows = await prisma.notification.findMany({ where: {
+      workspaceId, userId: actor.user.id, ...(unreadOnly ? { readAt: null } : {}),
+      ...(notificationId === undefined ? {} : { id: notificationId }),
+      ...(after ? { OR: [{ createdAt: { lt: after.createdAt } },
+        { createdAt: after.createdAt, id: { lt: after.id } }] } : {}),
+    }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 100 });
+    invariant(rows.length <= 100, 409, "SOURCE_CHANGED", "Notification write page exceeded its bound.");
+    const last = rows.at(-1);
+    const next = last ? { id: last.id, createdAt: last.createdAt } : after;
+    invariant(!after || !last || last.createdAt < after.createdAt
+      || (last.createdAt.getTime() === after.createdAt.getTime() && last.id < after.id),
+    409, "SOURCE_CHANGED", "Notification write continuation did not advance.");
+    examined += rows.length;
+    const observed = await captureArtifactReadHeadObservation(async () => {
+      const readable = await readableArtifactIds(actor, workspaceId, "Notification", rows);
+      const admitted = rows.filter(row => readable.has(row.id));
+      if (admitted.length) for (const root of await captureArtifactInputProof(actor, workspaceId,
+        admitted.map(row => ({ kind: "Notification", id: row.id, snapshot: row })))) {
+        const key = `${root.kind}:${root.id}`;
+        roots.set(key, mergeLineageInputRoot(roots.get(key), root));
+      }
+      return admitted;
+    });
+    for (const [key, stamp] of observed.heads) {
+      invariant(!heads.has(key) || heads.get(key) === stamp, 409, "SOURCE_CHANGED", "Notification inputs changed during collection.");
+      heads.set(key, stamp);
+    }
+    after = next;
+    const keepGoing = visit(observed.value);
+    if (rows.length < 100) { complete = true; break; }
+    if (keepGoing === false) break;
+  }
+  const nextCursor = window && !complete && after ? Buffer.from(JSON.stringify({
+    v: 1, purpose: "mark-all-read", workspaceId, userId: actor.user.id,
+    id: after.id, createdAt: after.createdAt.toISOString(),
+  })).toString("base64url") : null;
+  // Earlier pages retain their original bodies, epochs and manifest heads. Check
+  // all of them and current membership together before releasing a result/write.
+  return withArtifactCountReleaseSnapshot(actor, workspaceId, [...roots.values()], async () => {}, async tx => {
+    await requireWorkspaceMembership({ actor, workspaceId, tx });
+    return finish(tx, { complete, nextCursor });
+  }, heads);
+}
+
+export async function countUnreadNotifications(actor: AppActor, workspaceId: string) {
+  const summary = await readUnreadNotificationSummary(actor, workspaceId);
+  invariant(summary.available && summary.complete, 409, "SOURCE_READ_SCAN_LIMIT",
+    "Unread total is not available; use the bounded summary.");
+  return summary.count;
 }
 
 export async function markNotificationRead(actor: AppActor, workspaceId: string, notificationId: string) {
-  const userId = actor.kind === "user" ? actor.user.id : null;
-  if (!userId) return;
+  if (actor.kind !== "user" || !actor.user.id) return;
+  const userId = actor.user.id;
 
   await requireWorkspaceMembership({ actor, workspaceId });
 
-  await prisma.notification.updateMany({
-    where: { id: notificationId, workspaceId, userId },
-    data: { readAt: new Date() },
-  });
+  const ids: string[] = [];
+  await visitReadableNotifications(actor, workspaceId, false, rows => {
+    ids.push(...rows.map(row => row.id));
+  }, async tx => {
+    await tx.notification.updateMany({
+      where: { id: { in: ids }, workspaceId, userId },
+      data: { readAt: new Date() },
+    });
+  }, notificationId);
 }
 
-export async function markAllNotificationsRead(actor: AppActor, workspaceId: string) {
-  const userId = actor.kind === "user" ? actor.user.id : null;
-  if (!userId) return;
-
-  await prisma.notification.updateMany({
-    where: { workspaceId, userId, readAt: null },
-    data: { readAt: new Date() },
-  });
+export async function markAllNotificationsRead(actor: AppActor, workspaceId: string, opts?: { cursor?: string }) {
+  if (actor.kind !== "user") return { updatedCount: 0, complete: true, nextCursor: null };
+  const userId = actor.user.id;
+  await requireWorkspaceMembership({ actor, workspaceId });
+  const pages: string[][] = [];
+  return visitReadableNotifications(actor, workspaceId, true, rows => {
+    if (rows.length) pages.push(rows.map(row => row.id));
+  }, async (tx, window) => {
+    let updatedCount = 0;
+    for (const ids of pages) {
+      const updated = await tx.notification.updateMany({
+        where: { id: { in: ids }, workspaceId, userId, readAt: null },
+        data: { readAt: new Date() },
+      });
+      updatedCount += updated.count;
+    }
+    return { updatedCount, ...window };
+  }, undefined, opts ?? {});
 }

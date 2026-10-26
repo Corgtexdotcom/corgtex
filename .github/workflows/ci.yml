@@ -116,6 +116,49 @@ jobs:
   # letting test, migration, and build failures surface in parallel.
   check:
     name: Lint, Typecheck & Test
+    needs: [check-native, test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require native checks and every test shard
+        env:
+          NATIVE_RESULT: ${{ needs.check-native.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          set -euo pipefail
+          test "$NATIVE_RESULT" = success
+          test "$TEST_RESULT" = success
+
+  test:
+    name: Unit & Integration Tests (${{ matrix.shard }}/3)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_test?schema=public
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - name: Prepare verified upstream PostgreSQL fixture
+        uses: ./.github/actions/ci-pgvector
+        timeout-minutes: 15
+        with:
+          database: corgtex_test
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx prisma migrate deploy
+      - run: npx vitest run --project unit --project integration --shard ${{ matrix.shard }}/3
+      - name: Remove isolated PostgreSQL fixture
+        if: always()
+        run: docker rm --force --volumes corgtex-ci-postgres || true
+
+  check-native:
+    name: Lint, Typecheck & Native Checks
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_test?schema=public
@@ -159,8 +202,6 @@ jobs:
           docker pull docker.io/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
           docker pull mcr.microsoft.com/azure-storage/azurite:3.35.0
 
-      - run: npx vitest run --project unit --project integration
-
       - name: Test guarded validation owner adoption
         run: node --test scripts/adopt-validation-support-owner.integration.test.mjs
         env:
@@ -173,6 +214,24 @@ jobs:
 
       - name: Test Azure site image release and read-only Ops receipt
         run: node --test scripts/azure-site-image-release.node-test.mjs scripts/release/ops-readiness-receipt.node-test.mjs
+
+      - name: Test Azure monitor bootstrap defaults
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          bicep_dir="$RUNNER_TEMP/bicep-v0.38.5"
+          mkdir -p "$bicep_dir"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 10 --max-time 60 --max-filesize 104857600 \
+            https://github.com/Azure/bicep/releases/download/v0.38.5/bicep-linux-x64 \
+            --output "$bicep_dir/bicep"
+          # SHA-256 published for bicep-linux-x64 in the official v0.38.5 release.
+          printf '%s  %s\n' 7853e83d533d93afc67d8ccec87b982edbd334137616ade14b994c6b774bde24 "$bicep_dir/bicep" \
+            | sha256sum --check --strict
+          chmod +x "$bicep_dir/bicep"
+          BICEP_CLI_PATH="$bicep_dir/bicep" DOTNET_BUNDLE_EXTRACT_BASE_DIR="$bicep_dir/.net" \
+            node --test infra/azure/hosting/monitor.node-test.mjs
 
       - name: Test Ops and Core migration custody, fences and retained restore
         timeout-minutes: 15

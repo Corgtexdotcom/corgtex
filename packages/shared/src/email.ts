@@ -13,6 +13,37 @@ export type EmailTrackingOptions = {
   metadata?: Record<string, unknown>;
 };
 
+export type EmailAttemptControls = Readonly<{
+  signal: AbortSignal;
+  authorizeAttempt: (context: Readonly<{ signal: AbortSignal }>) => Promise<void>;
+}>;
+
+function bindEmailAttemptControls(resend: Resend, controls?: EmailAttemptControls) {
+  if (!controls) return () => {};
+  const controller = new AbortController();
+  const signal = AbortSignal.any([controls.signal, controller.signal]);
+  const request = resend.fetchRequest.bind(resend);
+  // Resend 6.1.3 exposes this per-instance HTTP boundary. Its implementation
+  // invokes fetch synchronously before its first await and has no internal retry.
+  // A repeated SDK dispatch must still pass the original caller's guard again.
+  resend.fetchRequest = async <T>(path: string, options = {}) => {
+    try {
+      signal.throwIfAborted();
+      await controls.authorizeAttempt({ signal });
+      signal.throwIfAborted();
+    } catch (error) {
+      controller.abort(error);
+      throw error;
+    }
+    const result = await request<T>(path, { ...options, signal });
+    // The SDK translates fetch aborts to ordinary provider errors; keep the
+    // authorization/cancellation latch authoritative for this guarded send.
+    signal.throwIfAborted();
+    return result;
+  };
+  return () => signal.throwIfAborted();
+}
+
 export async function sendEmail(params: {
   to: string;
   cc?: string | string[];
@@ -23,7 +54,7 @@ export async function sendEmail(params: {
   idempotencyKey?: string;
   tracking?: EmailTrackingOptions;
   trackingRequired?: boolean;
-}): Promise<EmailSendResult> {
+}, controls?: EmailAttemptControls): Promise<EmailSendResult> {
   const apiKey = env.RESEND_API_KEY;
   if (!apiKey) {
     console.warn("[email] RESEND_API_KEY not set — skipping email send. Would have sent to:", params.to);
@@ -32,6 +63,7 @@ export async function sendEmail(params: {
   }
 
   const resend = new Resend(apiKey);
+  const assertActive = bindEmailAttemptControls(resend, controls);
   const replyTo = params.replyTo ?? env.EMAIL_REPLY_TO;
 
   const email = {
@@ -46,6 +78,7 @@ export async function sendEmail(params: {
   const { data, error } = params.idempotencyKey
     ? await resend.emails.send(email, { idempotencyKey: params.idempotencyKey })
     : await resend.emails.send(email);
+  assertActive();
 
   if (error) {
     console.error("[email] Resend API error:", error);
@@ -66,6 +99,7 @@ export async function sendEmail(params: {
     }
   }
 
+  assertActive();
   return { status: "SENT", providerMessageId: data?.id ?? null };
 }
 

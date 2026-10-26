@@ -1,13 +1,11 @@
 import type { BrainArticleType, BrainArticleAuthority } from "@prisma/client";
-import { getArticle, getWorkspaceArchiveRecord, listArticles, requireWorkspaceMembership, updateArticle } from "@corgtex/domain";
+import { getArticlePageData, updateArticle } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { notFound } from "next/navigation";
 import Link from "next/link";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { revalidatePath } from "next/cache";
-import { prisma } from "@corgtex/shared";
 import { getTranslations } from "next-intl/server";
 import { publishArticleAction, returnArticleToDraftAction } from "../actions";
 import { BrainArticleTypeControl } from "../BrainArticleTypeControl";
@@ -43,30 +41,8 @@ export default async function BrainArticlePage({
   const actor = await requirePageActor();
   const t = await getTranslations("brain");
 
-  const article = await getArticle(actor, { workspaceId, slug, includeArchived: true });
-  if (!article) notFound();
-  const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const isArchived = Boolean(article.archivedAt);
-  const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
-  const archiveRecord = isArchived
-    ? await getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "BrainArticle", entityId: article.id })
-    : null;
-  const canManage = !isArchived && (actor.kind === "agent"
-    || membership?.role === "ADMIN"
-    || (Boolean(article.ownerMemberId) && article.ownerMemberId === membership?.id));
-
-  // Load sidebar navigation
-  const { items: allArticles } = await listArticles(actor, { workspaceId, take: 50 });
-  const otherArticles = allArticles.filter(a => a.id !== article.id).slice(0, 5);
-
-  const sources = article.sourceIds.length > 0 
-    ? await prisma.brainSource.findMany({
-      where: {
-        workspaceId,
-        id: { in: article.sourceIds },
-      },
-    })
-    : [];
+  const {article, otherArticles, sources, isArchived, isAdmin, canManage, archiveRecord} =
+    await getArticlePageData(actor, {workspaceId, slug});
 
   const ageText = (date: Date) => {
     const days = Math.floor((Date.now() - new Date(date).getTime()) / (1000 * 60 * 60 * 24));

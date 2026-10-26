@@ -14,8 +14,14 @@ const {
   isSlackThreadFollowupSuppressedMock,
   checkSlackThreadNudgeMock,
   slackSourceLinkMock,
+  captureProofMock,
+  proofReadableMock,
+  recordLineageMock,
 } = vi.hoisted(() => ({
   prismaMock: {
+    $transaction: vi.fn(),
+    $queryRaw: vi.fn(),
+    $executeRaw: vi.fn(),
     workspaceAgentConfig: {
       findUnique: vi.fn(),
     },
@@ -30,10 +36,12 @@ const {
       count: vi.fn(),
     },
     communicationChannel: {
+      findFirst: vi.fn(),
       findMany: vi.fn(),
       findUnique: vi.fn(),
     },
     communicationContextSummary: {
+      findUnique: vi.fn(),
       upsert: vi.fn(),
       deleteMany: vi.fn(),
     },
@@ -66,6 +74,9 @@ const {
   isSlackThreadFollowupSuppressedMock: vi.fn(),
   checkSlackThreadNudgeMock: vi.fn(),
   slackSourceLinkMock: vi.fn(),
+  captureProofMock: vi.fn(),
+  proofReadableMock: vi.fn(),
+  recordLineageMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -92,6 +103,13 @@ vi.mock("@corgtex/models", () => ({
 }));
 
 vi.mock("@corgtex/domain", async () => ({
+  captureArtifactInputProof: captureProofMock,
+  isArtifactInputProofReadable: proofReadableMock,
+  recordArtifactInputLineage: recordLineageMock,
+  lineageContentFingerprint: (_kind: string, row: unknown) => JSON.stringify(row),
+  invariant: (condition: boolean, _status: number, code: string, message: string) => {
+    if (!condition) throw Object.assign(new Error(message), { code });
+  },
   isSlackNudgeWindowOpen: (await import("../../../domain/src/slack-nudge-window")).isSlackNudgeWindowOpen,
   AGENT_REGISTRY: {
     "slack-agent": {
@@ -203,6 +221,12 @@ describe("Slack context jobs", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.$transaction.mockImplementation(async (callback) => callback(prismaMock));
+    captureProofMock.mockResolvedValue([{ kind: "CommunicationMessage", id: "message-1", fingerprint: "synthetic" }]);
+    proofReadableMock.mockResolvedValue(true);
+    recordLineageMock.mockResolvedValue({ id: "receipt-1" });
+    prismaMock.communicationContextSummary.findUnique.mockResolvedValue(null);
+    prismaMock.communicationChannel.findFirst.mockResolvedValue({ id: "channel-1", installationId: "install-1", workspaceId: "workspace-1", provider: "SLACK", externalChannelId: "C1", name: "general", kind: "PUBLIC", isIngestEnabled: true, isArchived: false });
     linkedEvidenceMock.mockResolvedValue([]);
     prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue({
       configJson: { proactiveActionPublicationEnabled: true },
@@ -259,8 +283,113 @@ describe("Slack context jobs", () => {
     vi.setSystemTime(new Date("2026-04-29T21:00:00Z"));
   });
 
+  describe("provider attempt guards", () => {
+    afterEach(() => {
+      // Denied attempts abort before consuming the fixture's queued later pages.
+      prismaMock.communicationEntityLink.findMany.mockReset();
+      prismaMock.communicationMessage.findMany.mockReset();
+      extractMock.mockReset();
+    });
+
+  it.each([
+    ["first nudge", "credentials"], ["first nudge", "retry"], ["thread action", "credentials"], ["thread action", "retry"],
+  ] as const)("blocks %s original inputs revoked during %s", async (site, phase) => {
+    const source = candidate({ text: "Can someone confirm the review room?", messageTs: new Date("2026-04-28T09:00:00Z") });
+    if (site === "first nudge") {
+      prismaMock.communicationMessage.findMany.mockResolvedValueOnce([source]);
+      linkedEvidenceMock.mockResolvedValue([linkedAnswer(source)]);
+    } else {
+      preparePendingEvaluation(source, {}, "Jan will send the signed vendor agreement by Friday.");
+    }
+    extractMock.mockReset();
+    let sends = 0;
+    extractMock.mockImplementation(async (request) => {
+      const signal = new AbortController().signal;
+      if (phase === "retry") { await request.authorizeAttempt?.({ signal }); sends += 1; }
+      proofReadableMock.mockResolvedValue(false);
+      await request.authorizeAttempt?.({ signal });
+      sends += 1;
+      return { output: {} };
+    });
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(sends).toBe(phase === "retry" ? 1 : 0);
+    expect(captureProofMock).toHaveBeenCalledTimes(1);
+    const inputs = captureProofMock.mock.calls[0][2];
+    expect(inputs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "CommunicationMessage", id: source.id, snapshot: expect.objectContaining({ text: source.text }) }),
+      expect.objectContaining({ kind: "CommunicationMessage", id: site === "first nudge" ? "answer-1" : "message-2" }),
+    ]));
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["first nudge", "thread action"] as const)("keeps %s source snapshots unchanged across permitted retries", async (site) => {
+    const source = candidate({ text: "Can someone confirm the review room?", messageTs: new Date("2026-04-28T09:00:00Z") });
+    if (site === "first nudge") {
+      prismaMock.communicationMessage.findMany.mockResolvedValueOnce([source]);
+      linkedEvidenceMock.mockResolvedValue([linkedAnswer(source)]);
+    } else preparePendingEvaluation(source, {}, "Jan will send the signed vendor agreement by Friday.");
+    extractMock.mockReset();
+    const controller = new AbortController();
+    let sends = 0;
+    extractMock.mockImplementationOnce(async (request) => {
+      expect(request.signal).toBe(controller.signal);
+      const original = await captureProofMock.mock.results[0].value;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await request.authorizeAttempt({ signal: controller.signal });
+        expect(proofReadableMock.mock.calls.at(-1)![2]).toBe(original);
+        sends += 1;
+      }
+      if (site === "first nudge") expect(JSON.parse(request.input).linkedAnswers).not.toHaveProperty("records");
+      return { output: { intent: "ignore", confidence: 0 } };
+    });
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", signal: controller.signal });
+    expect(sends).toBe(2);
+    expect(captureProofMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["first nudge", "muted"], ["thread action", "disabled"], ["first nudge", "window"],
+    ["thread action", "agent"], ["first nudge", "cancelled"], ["thread action", "cancelled"],
+  ] as const)("blocks %s provider attempt when %s changes during credentials", async (site, change) => {
+    const source = candidate({ text: "Can someone confirm the review room?", messageTs: new Date("2026-04-28T09:00:00Z") });
+    if (site === "first nudge") prismaMock.communicationMessage.findMany.mockResolvedValueOnce([source]);
+    else preparePendingEvaluation(source, {}, "Jan will send the signed vendor agreement by Friday.");
+    extractMock.mockReset();
+    let sends = 0;
+    extractMock.mockImplementationOnce(async (request) => {
+      const controller = new AbortController();
+      if (change === "muted") prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue({ configJson: { mutedChannelIds: ["C1"] } });
+      if (change === "disabled") prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue({ configJson: { proactiveEnabled: false } });
+      if (change === "window") prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue({ configJson: { proactiveNudgeWindowVersion: "new-generation" } });
+      if (change === "agent") isAgentEnabledMock.mockResolvedValue(false);
+      if (change === "cancelled") proofReadableMock.mockImplementationOnce(async () => { controller.abort(new Error("Synthetic cancellation")); return true; });
+      await request.authorizeAttempt({ signal: controller.signal });
+      sends += 1;
+      return { output: {} };
+    });
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" })).rejects.toThrow();
+    expect(sends).toBe(0);
+    expect(captureProofMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["first nudge", "thread action"] as const)("withholds %s when initial source lineage is unavailable", async (site) => {
+    const source = candidate({ text: "Can someone confirm the review room?", messageTs: new Date("2026-04-28T09:00:00Z") });
+    if (site === "first nudge") prismaMock.communicationMessage.findMany.mockResolvedValueOnce([source]);
+    else preparePendingEvaluation(source, {}, "Jan will send the signed vendor agreement by Friday.");
+    captureProofMock.mockRejectedValueOnce(Object.assign(new Error("Unverified original"), { code: "UNKNOWN_LINEAGE" }));
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" })).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    expect(extractMock).not.toHaveBeenCalled();
+  });
+
+  });
+
   it("summarizes stored Slack messages into durable context summaries", async () => {
-    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([
+    prismaMock.communicationMessage.findMany.mockResolvedValue([
       candidate({ id: "message-1", text: "Alice owns the launch checklist." }),
       candidate({ id: "message-2", externalMessageId: "1714320100.000100", text: "Bob will confirm the support window." }),
     ]);

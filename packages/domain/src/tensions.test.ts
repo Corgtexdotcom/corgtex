@@ -1,5 +1,13 @@
+import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createNotificationIntent } from "./notifications";
+import { captureArtifactInputProof, readableArtifactIds } from "./source-lineage";
+import { AppError } from "./errors";
+
+vi.mock("./producer-lineage", () => ({
+  prepareProducerLineage: vi.fn().mockResolvedValue({ mode: "HUMAN_ORIGINAL", inputs: [], roots: [] }),
+  finishProducerLineage: vi.fn().mockResolvedValue(undefined),
+}));
 
 const { prismaMock } = vi.hoisted(() => {
   const prisma = {
@@ -17,6 +25,8 @@ const { prismaMock } = vi.hoisted(() => {
       findMany: vi.fn(),
     },
     tensionUpvote: {
+      findMany: vi.fn(),
+      findUnique: vi.fn().mockResolvedValue(null),
       upsert: vi.fn(),
     },
     member: {
@@ -55,17 +65,64 @@ vi.mock("@corgtex/shared", () => ({
 vi.mock("./notifications", () => ({
   createNotificationIntent: vi.fn().mockResolvedValue({ count: 1 }),
 }));
+vi.mock("./audit-trail", () => ({ recordAudit: vi.fn() }));
 
 vi.mock("./auth", () => ({
   requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "mem-1", workspaceId: "ws-1", userId: "u-1", role: "MEMBER", isActive: true }),
   actorUserIdForWorkspace: vi.fn().mockResolvedValue("u-1"),
 }));
 
+vi.mock("./source-lineage", () => ({
+  collectWorkItemReadSnapshot: vi.fn(async (_workspaceId: string, read: (tx: typeof prismaMock) => Promise<unknown>) => read(prismaMock)),
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  captureReadableWorkItemInputs: vi.fn(async (reader: import("@corgtex/shared").AppActor, workspaceId: string,
+    kind: "Action" | "Proposal" | "Tension", records: Array<{id: string; [key: string]: unknown}>) => {
+    const lineage = await import("./source-lineage");
+    const ids = await lineage.readableArtifactIds(reader, workspaceId, kind, records);
+    const roots = await lineage.captureArtifactInputProof(reader, workspaceId,
+      records.filter(row => ids.has(row.id)).map(row => ({kind,id:row.id,snapshot:row})));
+    return {ids,roots,heads:new Map<string,string>()};
+  }),
+  assertArtifactInputWriteFence: vi.fn(),
+  isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
+  withArtifactCountReleaseSnapshot: vi.fn(async (_actor, _workspaceId, _roots, _remote, finish) => finish({})),
+  captureArtifactInputProof: vi.fn().mockResolvedValue([]),
+  readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) =>
+    new Set(records.map((record: { id: string }) => record.id))),
+}));
+
 const actor = { kind: "user", user: { id: "u-1" } } as any;
 
 describe("tensions domain", () => {
+  it.each(["credential-a", "credential-b"])("rejects private creation by %s before duplicate reads or writes", async credentialId => {
+    const {createTension} = await import("./tensions");
+    const credential = {kind: "agent", authProvider: "credential", credentialId, workspaceIds: ["ws-1"], scopes: ["support:write"]} as any;
+    await expect(createTension(credential, {workspaceId: "ws-1", title: "Private"})).rejects.toMatchObject({code: "PRIVATE_AGENT_ARTIFACT_UNSUPPORTED"});
+    expect(prismaMock.tension.create).not.toHaveBeenCalled();
+    expect(prismaMock.tension.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.tension.findFirst).not.toHaveBeenCalled();
+  });
+  it("rejects public agent creation without complete inputs before looking for duplicates", async () => {
+    const {createTension} = await import("./tensions");
+    await expect(createTension({kind: "agent", workspaceIds: ["ws-1"]} as any, {...{workspaceId: "ws-1", title: "Private"}, isPrivate: false}))
+      .rejects.toMatchObject({code: "UNKNOWN_LINEAGE"});
+    expect(prismaMock.tension.create).not.toHaveBeenCalled();
+    expect(prismaMock.tension.findMany).not.toHaveBeenCalled();
+  });
+
+  it.each(["credential-a", "credential-b"])("does not return a hidden private tension through a no-op update by %s", async credentialId => {
+    const {updateTension} = await import("./tensions");
+    const credential = {kind: "agent", authProvider: "credential", credentialId, workspaceIds: ["ws-1"], scopes: ["tensions:write"]} as any;
+    prismaMock.tension.findUnique.mockResolvedValue({id: "private", workspaceId: "ws-1", status: "DRAFT", isPrivate: true, title: "Private", bodyMd: "Hidden", archivedAt: null});
+    vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set());
+    await expect(updateTension(credential, {workspaceId: "ws-1", tensionId: "private"})).rejects.toMatchObject({code: "NOT_FOUND"});
+    expect(prismaMock.tension.update).not.toHaveBeenCalled();
+    expect(readableArtifactIds).toHaveBeenCalledWith(credential, "ws-1", "Tension", [expect.objectContaining({id: "private"})], prismaMock);
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(captureArtifactInputProof).mockReset().mockResolvedValue([]);
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.$executeRaw.mockResolvedValue({});
@@ -87,6 +144,12 @@ describe("tensions domain", () => {
       title: "Test tension",
     });
     prismaMock.tension.findMany.mockResolvedValue([{ id: "t-1" }]);
+    prismaMock.tensionUpvote.findMany.mockImplementation(async query => {
+      const rows = await prismaMock.tension.findMany.mock.results.at(-1)?.value ?? [];
+      return rows.flatMap((row: {id: string; upvotes?: Array<{id: string}>}) => query.where.tensionId.in.includes(row.id) ? row.upvotes ?? [] : [])
+        .filter((vote: {id: string}) => !query.where.id?.gt || vote.id > query.where.id.gt)
+        .sort((a: {id: string}, b: {id: string}) => a.id.localeCompare(b.id)).slice(0, query.take);
+    });
     prismaMock.adviceProcess.findMany.mockResolvedValue([]);
     prismaMock.tension.findUnique.mockResolvedValue({
       id: "t-1",
@@ -989,6 +1052,7 @@ describe("tensions domain", () => {
           include: {
             user: {
               select: {
+                id: true,
                 displayName: true,
                 email: true,
               },
@@ -996,12 +1060,7 @@ describe("tensions domain", () => {
           },
         },
       }),
-      orderBy: [
-        { priority: "desc" },
-        { upvotes: { _count: "desc" } },
-        { createdAt: "desc" },
-        { id: "desc" },
-      ],
+
     }));
     expect(prismaMock.adviceProcess.findMany).toHaveBeenCalledWith({
       where: {
@@ -1011,9 +1070,7 @@ describe("tensions domain", () => {
       },
       select: {
         subjectId: true,
-        requests: {
-          select: { status: true },
-        },
+        requests: true,
       },
     });
   });
@@ -1021,14 +1078,14 @@ describe("tensions domain", () => {
   it("adds tension input-request counts from advice processes", async () => {
     const { listTensions } = await import("./tensions");
 
-    prismaMock.tension.findMany.mockResolvedValueOnce([{ id: "t-1" }]);
+    prismaMock.tension.findMany.mockResolvedValue([{ id: "t-1" }]);
     prismaMock.adviceProcess.findMany.mockResolvedValueOnce([
       {
         subjectId: "t-1",
         requests: [
-          { status: "ACTIVE" },
-          { status: "CANCELED" },
-          { status: "COMPLETED" },
+          { id: "request-active", status: "ACTIVE" },
+          { id: "request-canceled", status: "CANCELED" },
+          { id: "request-completed", status: "COMPLETED" },
         ],
       },
     ]);
@@ -1076,12 +1133,7 @@ describe("tensions domain", () => {
         resolvedAt: { gte: closedFrom, lte: closedTo },
       }),
     }));
-    expect(prismaMock.tension.count).toHaveBeenCalledWith({
-      where: expect.objectContaining({
-        publishedAt: { gte: openedFrom, lte: openedTo },
-        resolvedAt: { gte: closedFrom, lte: closedTo },
-      }),
-    });
+    expect(prismaMock.tension.count).not.toHaveBeenCalled();
   });
 
   it("sets resolvedAt when resolving a tension", async () => {
@@ -1290,10 +1342,9 @@ describe("tensions domain", () => {
       include: {
         author: { select: { id: true, displayName: true, email: true } },
         circle: { select: { id: true, name: true } },
-        assigneeMember: { include: { user: { select: { displayName: true, email: true } } } },
-        raisedByMember: { include: { user: { select: { displayName: true, email: true } } } },
-        proposal: { select: { id: true, title: true, status: true } },
-        upvotes: true,
+        assigneeMember: { include: { user: { select: { id: true, displayName: true, email: true } } } },
+        raisedByMember: { include: { user: { select: { id: true, displayName: true, email: true } } } },
+        proposal: true,
       },
     });
 
@@ -1483,4 +1534,184 @@ describe("tensions domain", () => {
       }),
     });
   });
+
+  it("records original tension content inside its creation transaction", async () => {
+    const { createTension } = await import("./tensions");
+    await createTension(actor, { workspaceId: "ws-1", title: "Synthetic tension" });
+    expect(prepareProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prismaMock, copied: false }));
+    expect(finishProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx: prismaMock,
+      artifact: { kind: "Tension", id: "t-1" } }));
+  });
+
+  it("keeps agent input proof, duplicate scan, authorship and native write on the supplied transaction", async () => {
+    const { createTension } = await import("./tensions");
+    const { requireWorkspaceMembership, actorUserIdForWorkspace } = await import("./auth");
+    const { isArtifactInputProofReadable } = await import("./source-lineage");
+    const txFindMany = vi.fn().mockResolvedValue([]);
+    const txCreate = vi.fn().mockResolvedValue({ id: "tx-tension", workspaceId: "ws-1", title: "Native tension" });
+    const txMemberFindFirst = vi.fn().mockResolvedValue({ userId: "system-user" });
+    const tx = { ...prismaMock, tension: { ...prismaMock.tension, findMany: txFindMany, create: txCreate },
+      member: { ...prismaMock.member, findFirst: txMemberFindFirst } } as any;
+    const nativeActor = { kind: "agent", label: "system", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any;
+    const root = { kind: "ExecutionResult", id: "result-1", fingerprint: "a".repeat(64) } as any;
+    const result = await createTension(nativeActor, { workspaceId: "ws-1", title: "Native tension",
+      isPrivate: false, lineageRoots: [root], duplicateGuard: {} }, tx);
+    expect(result.id).toBe("tx-tension");
+    expect(requireWorkspaceMembership).toHaveBeenCalledWith(expect.objectContaining({ tx }));
+    expect(isArtifactInputProofReadable).toHaveBeenCalledWith(nativeActor, "ws-1", [root], tx);
+    expect(txFindMany).toHaveBeenCalled();
+    expect(txCreate).toHaveBeenCalledWith({ data: expect.objectContaining({ authorUserId: "system-user" }) });
+    expect(prepareProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx }));
+    expect(finishProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx }));
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.tension.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.tension.create).not.toHaveBeenCalled();
+    expect(actorUserIdForWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate update in a supplied transaction before lookup or writes", async () => {
+    const { createTension } = await import("./tensions");
+    const txFindMany = vi.fn();
+    const txCreate = vi.fn();
+    const tx = { ...prismaMock, tension: { ...prismaMock.tension, findMany: txFindMany, create: txCreate } } as any;
+    await expect(createTension(actor, { workspaceId: "ws-1", title: "Duplicate",
+      duplicateGuard: { resolution: "update_existing", targetEntityId: "t-old" } }, tx))
+      .rejects.toMatchObject({ code: "DUPLICATE_GUARD_TRANSACTION_UNSUPPORTED" });
+    expect(txFindMany).not.toHaveBeenCalled();
+    expect(txCreate).not.toHaveBeenCalled();
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it.each(["list", "detail"] as const)("withholds revoked tension %s labels without hiding the independently public body", async (surface) => {
+    const tension = { id: "public-tension", workspaceId: "ws-1", title: "Public tension", bodyMd: "Independent body",
+      authorUserId: "departed", author: { id: "departed", displayName: "Private profile", email: "private@example.test" },
+      circleId: "restricted-circle", circle: { id: "restricted-circle", name: "Private circle" },
+      assigneeMemberId: "departed-member", assigneeMember: { id: "departed-member", user: { id: "departed", displayName: "Private profile", email: "private@example.test" } },
+      raisedByMemberId: "departed-member", raisedByMember: { id: "departed-member", user: { id: "departed", displayName: "Private profile", email: "private@example.test" } },
+      upvotes: [], proposalId: null, proposal: null,
+    };
+    prismaMock.tension.findMany.mockResolvedValue([tension]);
+    prismaMock.tension.findFirst.mockResolvedValue(tension);
+    const { getTension, listTensions } = await import("./tensions");
+    const read = async () => surface === "list" ? (await listTensions(actor, "ws-1")).items[0] : getTension(actor, { workspaceId: "ws-1", tensionId: tension.id });
+    expect(await read()).toMatchObject({ author: tension.author, raisedByMember: tension.raisedByMember });
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor,_workspace,inputs)=>{
+      if(inputs.some(input=>["User","Member","Circle"].includes(input.kind))) throw new AppError(403,"SOURCE_RESTRICTED","Source unavailable.");
+      return [];
+    });
+    const output = await read();
+    expect(output).toMatchObject({ title: tension.title, bodyMd: tension.bodyMd, authorUserId: null,
+      author: { id: "", displayName: null, email: "" }, assigneeMemberId: null, assigneeMember: null,
+      raisedByMemberId: null, raisedByMember: null, circleId: null, circle: null });
+    expect(JSON.stringify(output)).not.toMatch(/Private profile|Private circle|private@example|departed|restricted-circle/);
+  });
+
+  it.each(["date", "priority", "detail"] as const)("pages complete readable votes beyond 5,001 for %s", async (surface) => {
+    const votes = Array.from({ length: 5_104 }, (_, index) => ({
+      id: `vote-${String(index).padStart(6, "0")}`,
+      tensionId: "many-votes",
+      userId: index < 5_101 ? `member-${index}` : `withheld-${index}`,
+      createdAt: new Date("2026-10-01"),
+    }));
+    const tension = { id: "many-votes", workspaceId: "ws-1", title: "Complete votes", priority: 1,
+      createdAt: new Date("2026-10-01"), upvotes: votes };
+    prismaMock.tension.findMany.mockResolvedValue([tension]);
+    prismaMock.tension.findFirst.mockResolvedValue(tension);
+    prismaMock.tensionUpvote.findMany.mockImplementation(async query => votes
+      .filter(vote => !query.where.id?.gt || vote.id > query.where.id.gt)
+      .slice(0, query.take));
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor, _workspace, inputs) => {
+      if (inputs.some(input => input.kind === "User" && input.id.startsWith("withheld-"))) {
+        throw new AppError(403, "SOURCE_RESTRICTED", "Voter is unavailable.");
+      }
+      return [];
+    });
+    const { getTension, listTensions } = await import("./tensions");
+    const result = surface === "detail"
+      ? await getTension(actor, { workspaceId: "ws-1", tensionId: tension.id })
+      : (await listTensions(actor, "ws-1", { sort: surface, take: 1 })).items[0];
+    expect(result.upvotes).toHaveLength(5_101);
+    expect(new Set(result.upvotes.map(vote => vote.id)).size).toBe(5_101);
+    expect(result.upvotes.at(-1)?.id).toBe("vote-005100");
+    expect(prismaMock.tensionUpvote.findMany.mock.calls.every(([query]) => query.take === 100 && query.orderBy.id === "asc")).toBe(true);
+    expect(prismaMock.tensionUpvote.findMany.mock.calls.length).toBeGreaterThan(50);
+    expect(JSON.stringify(result.upvotes)).not.toContain("withheld-");
+  });
+
+  it("filters exact votes and voter access before priority ranking and pagination", async () => {
+    const hiddenVotes = [1, 2, 3].map((id) => ({ id: `hidden-vote-${id}`, tensionId: "raw-winner", userId: `other-workspace-user-${id}` }));
+    const visibleVote = { id: "permitted-vote", tensionId: "safe-winner", userId: "active-local-user" };
+    const rawWinner = { id: "raw-winner", workspaceId: "ws-1", priority: 1, createdAt: new Date("2026-10-12"), upvotes: hiddenVotes };
+    const safeWinner = { id: "safe-winner", workspaceId: "ws-1", priority: 1, createdAt: new Date("2026-10-11"), upvotes: [visibleVote] };
+    prismaMock.tension.findMany.mockResolvedValue([rawWinner, safeWinner]);
+    const { listTensions, getTension } = await import("./tensions");
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_reader, workspaceId, inputs) => {
+      expect(workspaceId).toBe("ws-1");
+      if (inputs.some((input) => input.kind === "User" && input.id.startsWith("other-workspace-user"))) {
+        throw new AppError(403, "SOURCE_RESTRICTED", "Voter not entitled in target workspace.");
+      }
+      return [];
+    });
+    const page = await listTensions(actor, "ws-1", { take: 1 });
+    expect(page.total).toBe(2); expect(page.items).toHaveLength(1);
+    expect(page.items[0]).toMatchObject({ id: "safe-winner", upvotes: [visibleVote] });
+    expect(captureArtifactInputProof).toHaveBeenCalledWith(actor, "ws-1", [
+      { kind: "TensionUpvote", id: visibleVote.id, snapshot: visibleVote }, { kind: "User", id: visibleVote.userId },
+    ], prismaMock);
+    prismaMock.tension.findFirst.mockResolvedValue(rawWinner);
+    expect((await getTension(actor, { workspaceId: "ws-1", tensionId: rawWinner.id })).upvotes).toEqual([]);
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor,_workspace,inputs)=>{
+      if(inputs.some(input=>input.kind==="User")) throw new AppError(403,"SOURCE_RESTRICTED","Voter membership revoked.");
+      return [];
+    });
+    const afterRevocation = await listTensions(actor, "ws-1", { take: 1 });
+    expect(afterRevocation.items[0]).toMatchObject({ id: "raw-winner", upvotes: [] });
+    expect(JSON.stringify(afterRevocation)).not.toContain("other-workspace-user");
+  });
+
+  it("batches vote reads across readable tensions and hydrates only the selected page", async () => {
+    const rows = Array.from({ length: 205 }, (_, index) => ({ id: `t-${String(index).padStart(3, "0")}`,
+      title: "Tension", workspaceId: "ws-1", priority: 1, createdAt: new Date("2026-10-01") }));
+    const votes = rows.map(row => ({ id: `vote-${row.id}`, tensionId: row.id, userId: "local-member" }));
+    prismaMock.tension.findMany.mockImplementation(async query => {
+      if (query.include) return rows.filter(row => query.where.AND[1].id.in.includes(row.id));
+      const after = query.where.AND?.[1]?.id?.gt;
+      return rows.filter(row => !after || row.id > after).slice(0, query.take);
+    });
+    prismaMock.tensionUpvote.findMany.mockImplementation(async query => votes
+      .filter(vote => query.where.tensionId.in.includes(vote.tensionId) && (!query.where.id?.gt || vote.id > query.where.id.gt))
+      .slice(0, query.take));
+    const { listTensions } = await import("./tensions");
+    await vi.mocked(readableArtifactIds).withImplementation(async (_actor, _workspace, kind, records) =>
+      new Set(records.filter(row => kind !== "Tension" || row.id !== "t-204").map(row => row.id)), async () => {
+      const result = await listTensions(actor, "ws-1", { take: 3 });
+      expect(result.total).toBe(204);
+      expect(result.items.map(row => row.id)).toEqual(["t-203", "t-202", "t-201"]);
+      expect(result.items.every(row => row.upvotes.length === 1)).toBe(true);
+    });
+    const reads = prismaMock.tensionUpvote.findMany.mock.calls.map(([query]) => query);
+    expect(reads).toHaveLength(6);
+    expect(reads.every(query => query.take <= 100 && query.where.tensionId.in.length <= 100
+      && !query.where.tensionId.in.includes("t-204") && query.where.tension.workspaceId === "ws-1")).toBe(true);
+    expect(reads.at(-1).where.tensionId.in).toEqual(["t-203", "t-202", "t-201"]);
+  });
+
+  it.each([10_000, 10_001])("probes the shared ranking/hydration vote budget with %s selected votes", async count => {
+    const tension = { id: "budget", workspaceId: "ws-1", title: "Budget", priority: 1, createdAt: new Date("2026-10-01") };
+    const votes = Array.from({ length: count }, (_, index) => ({ id: `vote-${String(index).padStart(5, "0")}`,
+      tensionId: tension.id, userId: "local-member" }));
+    prismaMock.tension.findMany.mockResolvedValue([tension]);
+    prismaMock.tensionUpvote.findMany.mockImplementation(async query => votes
+      .filter(vote => !query.where.id?.gt || vote.id > query.where.id.gt).slice(0, query.take));
+    const { listTensions } = await import("./tensions");
+    if (count === 10_000) {
+      const result = await listTensions(actor, "ws-1", { take: 1 });
+      expect(result.total).toBe(1);
+      expect(result.items[0].upvotes).toHaveLength(count);
+      expect(prismaMock.tensionUpvote.findMany.mock.calls.at(-1)?.[0].take).toBe(1);
+    } else {
+      await expect(listTensions(actor, "ws-1", { take: 1 })).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
+    }
+  });
+
 });

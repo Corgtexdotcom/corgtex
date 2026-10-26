@@ -298,7 +298,7 @@ describe.runIf(process.env.MOBILE_SHELL_BROWSER_QA === "1")("mobile workspace sh
       })));
       for (const label of labels) {
         expect(label.scroll, `${locale} ${width}px ${label.text} filtered=${filtered}`).toBeLessThanOrEqual(label.client);
-        expect(label.width).toBeGreaterThanOrEqual(44);
+        expect(label.width, `${locale} ${width}px ${label.text} filtered=${filtered}`).toBeGreaterThanOrEqual(44);
       }
       expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
       if (width === 390 && !filtered) await capture("bottom-labels-" + locale + "-390");

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   createConstitutionVersion: vi.fn(),
-  loadConstitutionCorpusSnapshot: vi.fn(),
+  loadConstitutionCorpusSnapshot: vi.fn(), getCurrentConstitution: vi.fn(), captureArtifactInputProof: vi.fn(), isArtifactInputProofReadable: vi.fn(),
   chat: vi.fn(),
   executeAgentRun: vi.fn(),
   prisma: { constitution: { findFirst: vi.fn() } },
@@ -12,6 +12,9 @@ vi.mock("@corgtex/shared", () => ({ prisma: mocks.prisma }));
 vi.mock("@corgtex/domain", () => ({
   createConstitutionVersion: mocks.createConstitutionVersion,
   loadConstitutionCorpusSnapshot: mocks.loadConstitutionCorpusSnapshot,
+  getCurrentConstitution: mocks.getCurrentConstitution, captureArtifactInputProof: mocks.captureArtifactInputProof,
+  isArtifactInputProofReadable: mocks.isArtifactInputProofReadable,
+  invariant: (condition: unknown, _status: number, _code: string, message: string) => { if (!condition) throw new Error(message); },
 }));
 vi.mock("@corgtex/models", () => ({ defaultModelGateway: { chat: mocks.chat } }));
 vi.mock("../runtime", () => ({ executeAgentRun: mocks.executeAgentRun }));
@@ -43,7 +46,9 @@ describe("runConstitutionSynthesisAgent", () => {
       }],
       fingerprint: corpusFingerprint,
     });
-    mocks.prisma.constitution.findFirst.mockResolvedValue(null);
+    mocks.getCurrentConstitution.mockResolvedValue(null);
+    mocks.captureArtifactInputProof.mockResolvedValue([{ kind: "PolicyCorpus", id: "policy-1", fingerprint: "b".repeat(64) }]);
+    mocks.isArtifactInputProofReadable.mockResolvedValue(true);
     mocks.chat.mockResolvedValue({
       content: JSON.stringify({ bodyMd, pointSources }),
       usage: { model: "model-1", inputTokens: 10, outputTokens: 20 },
@@ -51,8 +56,10 @@ describe("runConstitutionSynthesisAgent", () => {
     mocks.createConstitutionVersion.mockResolvedValue({ id: "constitution-1", version: 1 });
     mocks.executeAgentRun.mockImplementation(async (config) => {
       const helpers = {
-        tool: async (_name: string, _meta: unknown, callback: () => Promise<unknown>) => callback(),
-        step: async (_name: string, _meta: unknown, callback: () => Promise<unknown>) => callback(),
+        plannedInputReceipt: { kind: "agent-input-receipt" }, behaviorContext: null, behaviorLineageRoots: [],
+        captureInputs: async () => ({ kind: "agent-input-receipt" }),
+        tool: async (_name: string, _meta: unknown, callback: (operation: import("../runtime").AgentOperationContext) => Promise<unknown>) => callback({modelRequest: request => request}),
+        step: async (_name: string, _meta: unknown, callback: (operation: import("../runtime").AgentOperationContext) => Promise<unknown>) => callback({modelRequest: request => request}),
       };
       const context = await config.buildContext(helpers);
       return config.execute(context, helpers, "run-1", "model-1");
@@ -62,7 +69,7 @@ describe("runConstitutionSynthesisAgent", () => {
   it("persists with the fingerprint captured from the exact synthesis corpus", async () => {
     await runConstitutionSynthesisAgent({ workspaceId: "ws-1", triggerRef: "proposal-1" });
 
-    expect(mocks.loadConstitutionCorpusSnapshot).toHaveBeenCalledWith(mocks.prisma, "ws-1");
+    expect(mocks.loadConstitutionCorpusSnapshot).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent", workspaceIds: ["ws-1"] }), mocks.prisma, "ws-1");
     expect(mocks.createConstitutionVersion).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "ws-1",
       bodyMd,
@@ -114,4 +121,52 @@ describe("runConstitutionSynthesisAgent", () => {
     expect(mocks.chat).not.toHaveBeenCalled();
     expect(mocks.createConstitutionVersion).not.toHaveBeenCalled();
   });
+  it("captures the full admitted corpus including uncited policies and the consumed prior Constitution before either model", async () => {
+    const policies = [{ id: "policy-1", title: "One", bodyMd: "Body one", acceptedAt: new Date() },
+      { id: "policy-2", title: "Two", bodyMd: "Uncited body two", acceptedAt: new Date() }];
+    const prior = { id: "prior-1", version: 2, bodyMd: "Previous known body", createdAt: new Date() };
+    const roots = [{ kind: "PolicyCorpus", id: "policy-1", fingerprint: "b".repeat(64) },
+      { kind: "PolicyCorpus", id: "policy-2", fingerprint: "c".repeat(64) },
+      { kind: "Constitution", id: prior.id, fingerprint: "d".repeat(64) }];
+    mocks.loadConstitutionCorpusSnapshot.mockResolvedValue({ corpus: policies, fingerprint: corpusFingerprint });
+    mocks.getCurrentConstitution.mockResolvedValue(prior);
+    mocks.captureArtifactInputProof.mockResolvedValue(roots);
+    mocks.chat.mockImplementation(async () => {
+      expect(mocks.captureArtifactInputProof).toHaveBeenCalled();
+      return { content: JSON.stringify({ bodyMd, pointSources }), usage: { model: "model-1" } };
+    });
+    await runConstitutionSynthesisAgent({ workspaceId: "ws-1", triggerRef: "trigger" });
+    expect(mocks.captureArtifactInputProof).toHaveBeenCalledWith(expect.any(Object), "ws-1", [
+      { kind: "PolicyCorpus", id: "policy-1", snapshot: policies[0] },
+      { kind: "PolicyCorpus", id: "policy-2", snapshot: policies[1] },
+      { kind: "Constitution", id: prior.id, snapshot: prior },
+    ]);
+    expect(mocks.chat).toHaveBeenCalledTimes(2);
+    expect(mocks.createConstitutionVersion).toHaveBeenCalledWith(expect.objectContaining({ lineageRoots: roots,
+      lineageActor: expect.objectContaining({ label: "constitution-synthesis", workspaceIds: ["ws-1"] }) }));
+  });
+
+  it("uses the first-version prompt when no prior version has a complete readable proof", async () => {
+    mocks.getCurrentConstitution.mockResolvedValue(null);
+    await runConstitutionSynthesisAgent({ workspaceId: "ws-1", triggerRef: "trigger" });
+    expect(mocks.chat).toHaveBeenCalledTimes(1);
+    expect(mocks.chat.mock.calls[0][0].messages[0].content).toContain("FIRST constitution");
+    expect(JSON.parse(mocks.chat.mock.calls[0][0].messages[1].content).currentConstitution).toBeNull();
+  });
+
+  it("withholds stale input context before the first model call", async () => {
+    mocks.isArtifactInputProofReadable.mockResolvedValue(false);
+    await expect(runConstitutionSynthesisAgent({ workspaceId: "ws-1", triggerRef: "trigger" })).rejects.toThrow("inputs are unavailable");
+    expect(mocks.chat).not.toHaveBeenCalled();
+    expect(mocks.createConstitutionVersion).not.toHaveBeenCalled();
+  });
+
+  it("rechecks all inputs before the second model call and blocks persistence after revocation", async () => {
+    mocks.getCurrentConstitution.mockResolvedValue({ id: "prior", version: 2, bodyMd: "Known prior", createdAt: new Date() });
+    mocks.isArtifactInputProofReadable.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    await expect(runConstitutionSynthesisAgent({ workspaceId: "ws-1", triggerRef: "trigger" })).rejects.toThrow("summary inputs changed");
+    expect(mocks.chat).toHaveBeenCalledTimes(1);
+    expect(mocks.createConstitutionVersion).not.toHaveBeenCalled();
+  });
+
 });

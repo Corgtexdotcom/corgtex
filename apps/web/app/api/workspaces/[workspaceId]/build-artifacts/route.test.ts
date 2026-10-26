@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const listBuildArtifacts = vi.fn();
+const listBuildArtifactPage = vi.fn();
 const upsertBuildArtifact = vi.fn();
 const getBuildArtifact = vi.fn();
 const updateBuildArtifact = vi.fn();
@@ -30,7 +30,7 @@ vi.mock("@corgtex/domain", () => ({
       this.code = code;
     }
   },
-  listBuildArtifacts,
+  listBuildArtifactPage,
   upsertBuildArtifact,
   getBuildArtifact,
   updateBuildArtifact,
@@ -64,7 +64,7 @@ function context(params: Record<string, string>) {
 describe("build artifact workspace API routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    listBuildArtifacts.mockResolvedValue([{ id: "artifact-1" }]);
+    listBuildArtifactPage.mockResolvedValue({items: [{ id: "artifact-1" }], complete: true, nextCursor: null, hasMore: false});
     upsertBuildArtifact.mockResolvedValue({ id: "artifact-1" });
     getBuildArtifact.mockResolvedValue({ id: "artifact-1" });
     updateBuildArtifact.mockResolvedValue({ id: "artifact-1", title: "Updated" });
@@ -80,8 +80,8 @@ describe("build artifact workspace API routes", () => {
       context({ workspaceId: "workspace-1" }),
     );
 
-    await expect(listResponse.json()).resolves.toEqual({ items: [{ id: "artifact-1" }] });
-    expect(listBuildArtifacts).toHaveBeenCalledWith(actor, { workspaceId: "workspace-1", status: undefined });
+    await expect(listResponse.json()).resolves.toEqual({ items: [{ id: "artifact-1" }], complete: true, nextCursor: null, hasMore: false });
+    expect(listBuildArtifactPage).toHaveBeenCalledWith(actor, { workspaceId: "workspace-1", status: undefined, cursor: undefined, take: undefined });
 
     const createResponse = await POST(
       new NextRequest("http://localhost/api/workspaces/workspace-1/build-artifacts", {
@@ -119,7 +119,7 @@ describe("build artifact workspace API routes", () => {
     );
 
     expect(response.status).toBe(404);
-    expect(listBuildArtifacts).not.toHaveBeenCalled();
+    expect(listBuildArtifactPage).not.toHaveBeenCalled();
   });
 
   it("gets and updates artifact details", async () => {

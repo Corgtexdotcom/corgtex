@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ExtractionRequest } from "@corgtex/models";
+import { requireWorkspaceMembership } from "./auth";
 
 const {
   prismaMock,
@@ -12,17 +14,20 @@ const {
 } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
+    $queryRaw: vi.fn(),
     auditLog: { create: vi.fn() },
     workspaceFeatureFlag: { findUnique: vi.fn() },
     communicationExternalUser: { findMany: vi.fn() },
+    communicationChannel: { findFirst: vi.fn() },
     communicationInstallation: {
       findFirst: vi.fn(),
       update: vi.fn(),
     },
-    communicationMessage: { upsert: vi.fn(), findUnique: vi.fn() },
+    communicationMessage: { upsert: vi.fn(), findUnique: vi.fn(), findMany: vi.fn() },
     communicationEntityLink: { create: vi.fn() },
     workflowJob: { findFirst: vi.fn(), upsert: vi.fn() },
     meetingFollowUpReview: {
+      findFirst: vi.fn(),
       findUnique: vi.fn(),
       upsert: vi.fn(),
       update: vi.fn(),
@@ -38,6 +43,7 @@ const {
     action: { findMany: vi.fn() },
     proposal: { findMany: vi.fn() },
     meetingInsight: { findMany: vi.fn() },
+    knowledgeChunk: { findMany: vi.fn() },
     deliberationEntry: { findMany: vi.fn() },
   },
   defaultModelGatewayMock: {
@@ -65,6 +71,29 @@ vi.mock("./auth", () => ({
   requireWorkspaceMembership: vi.fn(),
 }));
 
+const receiptMocks = vi.hoisted(() => ({ capture: vi.fn(), snapshot: vi.fn(), public: vi.fn(), readable: vi.fn(), prepare: vi.fn(), finish: vi.fn() }));
+vi.mock("./producer-lineage", () => ({ prepareProducerLineage: receiptMocks.prepare, finishProducerLineage: receiptMocks.finish }));
+vi.mock("./source-lineage", () => ({
+  captureArtifactInputProof: receiptMocks.capture,
+  captureArtifactInputSnapshotProof: receiptMocks.snapshot,
+  isArtifactInputProofReadable: receiptMocks.readable,
+  isArtifactInputProofPubliclyShareable: receiptMocks.public,
+  lineageContentFingerprint: vi.fn((_kind, row) => row?.stateHash ?? "fingerprint"),
+  recordArtifactInputLineage: vi.fn(),
+  readableArtifactIds: vi.fn(async (_actor: unknown, _workspaceId: string, _kind: string,
+    rows: Array<{ id: string }>) => new Set(rows.map((row) => row.id))),
+}));
+
+// Provider/transaction fencing has its own real PostgreSQL integration coverage.
+// Keep this orchestration fixture on the same explicit readable-proof boundary.
+vi.mock("./artifact-commit-preflight", () => ({
+  prepareArtifactCommitPreflight: vi.fn(async () => ({})),
+  withArtifactCommitPreflight: async (_actor: unknown, _ws: string, _tx: unknown, _roots: unknown, _token: unknown, work: () => Promise<unknown>) => {
+    if (!await receiptMocks.readable()) throw new Error("Fixture inputs changed.");
+    return work();
+  },
+}));
+
 vi.mock("./communication", () => ({
   sendSlackMessage: sendSlackMessageMock,
   updateSlackMessage: updateSlackMessageMock,
@@ -83,7 +112,16 @@ vi.mock("./meetings", () => ({
 describe("meeting facilitation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    prismaMock.meeting.findFirst.mockReset();
+    vi.mocked(requireWorkspaceMembership).mockReset().mockResolvedValue(null);
+    receiptMocks.capture.mockReset().mockImplementation(async (_actor, _workspace, inputs) => inputs.map((input: { kind: string; id: string }) => ({ kind: input.kind, id: input.id, fingerprint: "fingerprint" })));
+    receiptMocks.snapshot.mockReset().mockResolvedValue([{ kind: "ArtifactInputSnapshot", id: "prior-agenda", fingerprint: "fingerprint" }]);
+    receiptMocks.readable.mockReset().mockResolvedValue(true);
+    receiptMocks.public.mockReset().mockResolvedValue(true);
+    prismaMock.communicationChannel.findFirst.mockReset().mockResolvedValue({ id: "channel-1", externalChannelId: "C123", kind: "PUBLIC" });
+    receiptMocks.prepare.mockReset().mockImplementation(async ({ capture }) => ({ mode: "DERIVED", inputs: [], roots: capture?.lineageRoots ?? [] }));
+    receiptMocks.finish.mockReset().mockResolvedValue(undefined);
+    prismaMock.meeting.findFirst.mockReset().mockResolvedValue({ id: "meeting-1", workspaceId: "workspace-1" });
+    prismaMock.communicationMessage.findMany.mockReset().mockResolvedValue([]);
     prismaMock.meeting.findMany.mockReset().mockResolvedValue([]);
     prismaMock.workspaceFeatureFlag.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.member.findMany.mockReset().mockResolvedValue([]);
@@ -92,14 +130,17 @@ describe("meeting facilitation", () => {
     prismaMock.action.findMany.mockReset().mockResolvedValue([]);
     prismaMock.proposal.findMany.mockReset().mockResolvedValue([]);
     prismaMock.meetingInsight.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.knowledgeChunk.findMany.mockReset().mockResolvedValue([]);
     prismaMock.deliberationEntry.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.meetingFollowUpReview.findFirst.mockReset().mockResolvedValue({ id: "review-1", workspaceId: "workspace-1", meetingId: "meeting-1", installationId: "slack-1", channelId: "C999" });
     prismaMock.meetingFollowUpReview.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.meetingFollowUpReview.upsert.mockReset().mockResolvedValue({ id: "review-1" });
     prismaMock.meetingFollowUpReview.update.mockReset().mockResolvedValue({ id: "review-1" });
     prismaMock.communicationMessage.upsert.mockReset().mockResolvedValue({ id: "message-1" });
     prismaMock.communicationMessage.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.communicationEntityLink.create.mockReset().mockResolvedValue({ id: "link-1" });
-    prismaMock.$transaction.mockImplementation(async (operations: unknown[]) => Promise.all(operations));
+    prismaMock.$transaction.mockImplementation(async (operations: unknown) => typeof operations === "function"
+      ? operations(prismaMock) : Promise.all(operations as unknown[]));
     defaultModelGatewayMock.extract.mockReset();
     sendSlackMessageMock.mockReset();
     updateSlackMessageMock.mockReset();
@@ -263,7 +304,6 @@ describe("meeting facilitation", () => {
     expect(prismaMock.meeting.update).toHaveBeenCalledWith({
       where: { id: "meeting-1" },
       data: {
-        agendaJson: existingAgenda,
         agendaChannelId: "C123",
         agendaMessageTs: "1710000001.000100",
         agendaPostedAt: expect.any(Date),
@@ -439,6 +479,7 @@ describe("meeting facilitation", () => {
     expect(prismaMock.meeting.update).toHaveBeenCalledWith({
       where: { id: "meeting-fails" },
       data: { agendaJson: expect.objectContaining({ templateKey: "regular_update_v1" }) },
+      select: expect.objectContaining({ agendaJson: true }),
     });
     expect(prismaMock.meeting.update).not.toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ agendaPostedAt: expect.any(Date) }),
@@ -534,8 +575,7 @@ describe("meeting facilitation", () => {
       }),
     }));
     expect(prismaMock.meeting.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      orderBy: { recordedAt: "desc" },
-      take: 10,
+      orderBy: [{ recordedAt: "desc" }, { id: "asc" }],
     }));
     expect(prismaMock.member.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
@@ -558,8 +598,8 @@ describe("meeting facilitation", () => {
       summaryPostedAt: null,
     });
     prismaMock.meetingInsight.findMany.mockResolvedValue([
-      { type: "DECISION", title: "Decision made", bodyMd: "Decision body" },
-      { type: "ACTION_ITEM", title: "Do the thing", bodyMd: "Action body" },
+      { id: "insight-decision", type: "DECISION", title: "Decision made", bodyMd: "Decision body" },
+      { id: "insight-action", type: "ACTION_ITEM", title: "Do the thing", bodyMd: "Action body" },
     ]);
     sendSlackMessageMock.mockResolvedValue({ ok: true, ts: "1710000001.000100" });
     prismaMock.meeting.update.mockResolvedValue({ id: "meeting-1" });
@@ -570,14 +610,46 @@ describe("meeting facilitation", () => {
       meetingId: "meeting-1",
     })).resolves.toEqual({ posted: true });
 
+    expect(receiptMocks.capture).toHaveBeenCalledWith(expect.anything(), "workspace-1", [
+      expect.objectContaining({ kind: "Meeting", id: "meeting-1", snapshot: expect.objectContaining({ summaryMd: "Summary text" }) }),
+      expect.objectContaining({ kind: "MeetingInsight", id: "insight-decision" }),
+      expect.objectContaining({ kind: "MeetingInsight", id: "insight-action" }),
+    ]);
+    expect(receiptMocks.public).toHaveBeenCalledWith(expect.anything(), "workspace-1", expect.arrayContaining([
+      expect.objectContaining({ kind: "Meeting", id: "meeting-1" }),
+      expect.objectContaining({ kind: "MeetingInsight", id: "insight-decision" }),
+      expect.objectContaining({ kind: "MeetingInsight", id: "insight-action" }),
+      expect.objectContaining({ kind: "CommunicationChannel", id: "channel-1" }),
+    ]));
     expect(sendSlackMessageMock).toHaveBeenCalledWith("slack-1", {
       channel: "C123",
       threadTs: "1710000000.000100",
-    }, expect.any(Array));
+    }, expect.any(Array), undefined, expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
     expect(prismaMock.meeting.update).toHaveBeenCalledWith({
       where: { id: "meeting-1" },
       data: { summaryPostedAt: expect.any(Date) },
       });
+  });
+
+  it.each(["unknown", "restricted", "destination"])("withholds summary publication for %s inputs", async (failure) => {
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "meeting-1", workspaceId: "workspace-1", title: "Weekly Tactical", summaryMd: "Summary text",
+      agendaChannelId: "C123", agendaMessageTs: "1710000000.000100", summaryPostedAt: null,
+    });
+    prismaMock.meetingInsight.findMany.mockResolvedValue([
+      { id: "insight-1", type: "DECISION", title: "Decision", bodyMd: "Decision body" },
+    ]);
+    if (failure === "unknown") {
+      const { AppError } = await import("./errors");
+      receiptMocks.capture.mockRejectedValueOnce(new AppError(403, "UNKNOWN_LINEAGE", "Unknown inputs"));
+    }
+    if (failure === "restricted") receiptMocks.public.mockResolvedValue(false);
+    if (failure === "destination") prismaMock.communicationChannel.findFirst.mockResolvedValue(null);
+    const { postMeetingSummaryToAgendaThread } = await import("./meeting-facilitation");
+    await expect(postMeetingSummaryToAgendaThread({ workspaceId: "workspace-1", meetingId: "meeting-1" }))
+      .resolves.toEqual({ skipped: true, reason: "summary_inputs_unavailable" });
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
   });
 
   it("prepares deterministic regular update agendas for recurring meetings without model extraction", async () => {
@@ -719,6 +791,7 @@ describe("meeting facilitation", () => {
     expect(prismaMock.meeting.update).toHaveBeenCalledWith({
       where: { id: "meeting-1" },
       data: { agendaJson: expect.objectContaining({ templateKey: "regular_update_v1" }) },
+      select: expect.objectContaining({ agendaJson: true }),
     });
   });
 
@@ -771,7 +844,76 @@ describe("meeting facilitation", () => {
           title: "Planning session",
         }),
       },
+      select: expect.objectContaining({ agendaJson: true }),
     });
+  });
+
+  it.each((["initial", "overflow", "retry", "fallback"] as const).flatMap(site =>
+    (["source", "installation", "policy", "none"] as const).map(change => ({ site, change }))))("guards review $site Slack attempts after $change changes", async ({ site, change }) => {
+    if (site !== "fallback") prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true,
+      config: { meetingSeriesExternalId: "series", channelId: "C999" } });
+    prismaMock.meeting.findFirst.mockResolvedValue({ id: "meeting-1", workspaceId: "workspace-1", title: "Review", summaryMd: "content ".repeat(site === "overflow" ? 25000 : 5),
+      recordedAt: new Date(), summaryPostedAt: null, seriesId: null, series: { externalId: "series" }, agendaChannelId: "C123", agendaMessageTs: "1.1" });
+    let sends = 0; let calls = 0;
+    const mutate = () => {
+      if (change === "source") receiptMocks.readable.mockResolvedValue(false);
+      if (change === "installation") prismaMock.communicationInstallation.findFirst.mockResolvedValue(null);
+      if (change === "policy") validateSlackPostTargetMock.mockResolvedValue({ ok: false });
+    };
+    sendSlackMessageMock.mockImplementation(async (_id, _target, _blocks, _token, controls) => {
+      calls++;
+      if (site === "retry") { await controls?.authorizeAttempt({ signal: controls.signal }); sends++; }
+      if (site !== "overflow" || calls > 1) mutate();
+      await controls?.authorizeAttempt({ signal: controls.signal }); sends++;
+      return { ts: "123.456" };
+    });
+    const { postMeetingSummaryToAgendaThread } = await import("./meeting-facilitation");
+    const result = await postMeetingSummaryToAgendaThread({ workspaceId: "workspace-1", meetingId: "meeting-1" }).catch(error => error);
+    if (change === "none") { expect(result).toMatchObject({ posted: true }); expect(sends).toBeGreaterThan(0); }
+    else {
+      expect(result).toBeInstanceOf(Error); expect(sends).toBe(site === "overflow" || site === "retry" ? 1 : 0);
+      expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps a swallowed summary attempt denial fatal after authority is restored", async () => {
+    prismaMock.meeting.findFirst.mockResolvedValue({ id: "meeting-1", workspaceId: "workspace-1", title: "Review", summaryMd: "Synthetic summary",
+      recordedAt: new Date(), summaryPostedAt: null, agendaChannelId: "C123", agendaMessageTs: "1.1" });
+    let rejected = false;
+    sendSlackMessageMock.mockImplementation(async (_id, _target, _blocks, _token, controls) => {
+      receiptMocks.readable.mockResolvedValue(false);
+      try { await controls?.authorizeAttempt({ signal: controls.signal }); } catch { rejected = true; }
+      receiptMocks.readable.mockResolvedValue(true);
+      return { ts: "ignored-guard" };
+    });
+    const { postMeetingSummaryToAgendaThread } = await import("./meeting-facilitation");
+    const result = await postMeetingSummaryToAgendaThread({ workspaceId: "workspace-1", meetingId: "meeting-1" }).catch(error => error);
+    expect(rejected).toBe(true); expect(result).toBeInstanceOf(Error);
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+  });
+
+  it("rechecks complete public proof before configured review overflow messages", async () => {
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true,
+      config: { meetingSeriesExternalId: "series", channelId: "C999" } });
+    prismaMock.meeting.findFirst.mockResolvedValueOnce({
+      id: "meeting-1", workspaceId: "workspace-1", title: "Review", summaryMd: "content ".repeat(25000),
+      recordedAt: new Date(), summaryPostedAt: null, seriesId: null, series: { externalId: "series" },
+    });
+    let destinationChecks = 0;
+    receiptMocks.public.mockImplementation(async (_actor, _ws, roots) => {
+      if (roots.some((root: { kind: string }) => root.kind === "CommunicationChannel")) {
+        destinationChecks += 1;
+        return destinationChecks === 1;
+      }
+      return true;
+    });
+    sendSlackMessageMock.mockResolvedValue({ ts: "123.456" });
+    const { postMeetingSummaryToAgendaThread } = await import("./meeting-facilitation");
+    await expect(postMeetingSummaryToAgendaThread({ workspaceId: "workspace-1", meetingId: "meeting-1" }))
+      .rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
+    expect(sendSlackMessageMock).toHaveBeenCalledTimes(1);
+    expect(destinationChecks).toBe(2);
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
   });
 
   it("posts configured customer meeting reviews with summary context and action proposals", async () => {
@@ -822,7 +964,7 @@ describe("meeting facilitation", () => {
     expect(sendSlackMessageMock).toHaveBeenCalledWith("slack-1", {
       channel: "C999",
       threadTs: undefined,
-    }, expect.any(Array));
+    }, expect.any(Array), undefined, expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
     const postedBlocks = JSON.stringify(sendSlackMessageMock.mock.calls[0]?.[2]);
     expect(postedBlocks).toContain("Full generated summary for the customer meeting.");
     expect(postedBlocks).toContain("Milan to confirm rollout channel");
@@ -896,6 +1038,8 @@ describe("meeting facilitation", () => {
   });
 
   it("edits agenda thread parent messages from concrete Slack requests", async () => {
+    prismaMock.communicationMessage.findMany.mockResolvedValue([{ id: "stored-request", externalMessageId: "1710000001.000100", threadExternalId: "1710000000.000100", text: "add Bob's detail to action item 1" }]);
+    fetchSlackThreadMessagesMock.mockResolvedValue([{ ts: "1710000000.000100", threadTs: "1710000000.000100", user: "bot", text: "Unpersisted bot agenda copy" }]);
     const currentAgenda = {
       title: "Weekly Tactical",
       intro: "Discuss current work.",
@@ -983,14 +1127,17 @@ describe("meeting facilitation", () => {
       changeSummary: "Added Bob's rollout detail to action items.",
     });
 
+    expect(JSON.parse(defaultModelGatewayMock.extract.mock.calls[0][0].input).threadMessages).toEqual([]);
+    expect(receiptMocks.capture.mock.invocationCallOrder[0]).toBeLessThan(defaultModelGatewayMock.extract.mock.invocationCallOrder[0]);
+    expect(receiptMocks.finish.mock.invocationCallOrder[0]).toBeLessThan(updateSlackMessageMock.mock.invocationCallOrder[0]);
     expect(updateSlackMessageMock).toHaveBeenCalledWith("slack-1", {
       channel: "C123",
       ts: "1710000000.000100",
-    }, expect.any(Array));
+    }, expect.any(Array), undefined, expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
     expect(sendSlackMessageMock).toHaveBeenCalledWith("slack-1", {
       channel: "C123",
       threadTs: "1710000000.000100",
-    }, expect.any(Array));
+    }, expect.any(Array), undefined, expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
     expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         action: "meeting.agenda.edited",
@@ -1001,6 +1148,7 @@ describe("meeting facilitation", () => {
   });
 
   it("asks for clarification without mutating ambiguous agenda edit requests", async () => {
+    prismaMock.communicationMessage.findMany.mockResolvedValue([{ id: "stored-request", externalMessageId: "1710000001.000100", threadExternalId: "1710000000.000100", text: 'make it better' }]);
     prismaMock.user.findUnique.mockResolvedValue({
       id: "user-1",
       email: "jan@example.com",
@@ -1060,6 +1208,192 @@ describe("meeting facilitation", () => {
     expect(sendSlackMessageMock).toHaveBeenCalledWith("slack-1", {
       channel: "C123",
       threadTs: "1710000000.000100",
-    }, expect.any(Array));
+    }, expect.any(Array), undefined, expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
   });
+  function provenAgendaMeeting() {
+    return { id: "meeting-1", workspaceId: "workspace-1", status: "SCHEDULED", title: "Planning",
+      source: "internal", transcript: null, summaryMd: null, blocksJson: null, agendaJson: null,
+      ingestionGuidanceMd: null, seriesId: null, series: null, participantIds: [], participantEmails: [],
+      recordedAt: new Date("2026-06-23T17:00:00Z"), scheduledEndAt: null, archivedAt: null };
+  }
+
+  function setupAttemptSite(site: "prepare" | "edit") {
+    prismaMock.meeting.findFirst.mockResolvedValue({ ...provenAgendaMeeting(), ...(site === "edit" ? {
+      agendaJson: { title: "Planning", sections: [{ title: "Discussion", items: [{ text: "Plan" }] }] },
+      agendaChannelId: "C123", agendaMessageTs: "1710000000.000100",
+    } : {}) });
+    prismaMock.meeting.update.mockResolvedValue({ ...provenAgendaMeeting(), agendaJson: { title: "Planning" } });
+    prismaMock.user.findUnique.mockResolvedValue({ id: "user-1", email: "jan@example.com", displayName: "Jan", globalRole: "USER" });
+    prismaMock.communicationMessage.findMany.mockResolvedValue([{ id: "stored-request", externalMessageId: "1710000001.000100",
+      threadExternalId: "1710000000.000100", text: "make it better" }]);
+    sendSlackMessageMock.mockResolvedValue({ ok: true, ts: "1710000002.000100" });
+  }
+  async function runAttemptSite(site: "prepare" | "edit") {
+    const api = await import("./meeting-facilitation");
+    return site === "prepare" ? api.prepareAgendaForMeeting({ workspaceId: "workspace-1", meetingId: "meeting-1" })
+      : api.runMeetingAgendaThreadEdit({ workspaceId: "workspace-1", meetingId: "meeting-1", actorUserId: "user-1",
+        installationId: "slack-1", channelId: "C123", threadTs: "1710000000.000100", messageTs: "1710000001.000100", messageText: "make it better" });
+  }
+  const slackCases = (["update", "second", "clarify"] as const).flatMap(site =>
+    (["source", "installation", "policy", "none"] as const).map(change => ({ site, change })));
+  it.each(slackCases)("guards Slack $site send after credential/previous-send $change change", async ({ site, change }) => {
+    setupAttemptSite("edit"); let sends = 0;
+    defaultModelGatewayMock.extract.mockResolvedValue({ output: site === "clarify"
+      ? { action: "clarify", clarification: "Which item?" }
+      : { action: "update", changeSummary: "Changed plan", agenda: { title: "Planning", sections: [{ title: "Discussion", items: [{ text: "New plan" }] }] } } });
+    const mutate = () => {
+      if (change === "source") receiptMocks.readable.mockResolvedValue(false);
+      if (change === "installation") prismaMock.communicationInstallation.findFirst.mockResolvedValue(null);
+      if (change === "policy") validateSlackPostTargetMock.mockResolvedValue({ ok: false });
+    };
+    updateSlackMessageMock.mockImplementation(async (_id, _target, _blocks, _text, controls) => {
+      if (site === "update") mutate();
+      await controls?.authorizeAttempt({ signal: controls.signal }); sends++;
+      if (site === "second") mutate();
+      return { ok: true };
+    });
+    sendSlackMessageMock.mockImplementation(async (_id, _target, _blocks, _token, controls) => {
+      if (site === "clarify") mutate();
+      await controls?.authorizeAttempt({ signal: controls.signal }); sends++;
+      return { ok: true, ts: "2" };
+    });
+    const result = await runAttemptSite("edit").catch(error => error);
+    expect(sends).toBe(change === "none" ? (site === "clarify" ? 1 : 2) : (site === "second" ? 1 : 0));
+    if (change === "none") expect(result).not.toBeInstanceOf(Error);
+    else expect(result).toBeInstanceOf(Error);
+  });
+  it("keeps a swallowed Slack guard failure fatal after the source restores", async () => {
+    setupAttemptSite("edit"); defaultModelGatewayMock.extract.mockResolvedValue({ output: { action: "clarify", clarification: "Which?" } });
+    let denied = false;
+    sendSlackMessageMock.mockImplementation(async (_id, _target, _blocks, _token, controls) => {
+      receiptMocks.readable.mockResolvedValue(false);
+      await controls?.authorizeAttempt({ signal: controls.signal }).catch(() => { denied = true; });
+      receiptMocks.readable.mockResolvedValue(true); return { ok: true, ts: "2" };
+    });
+    await expect(runAttemptSite("edit")).rejects.toBeInstanceOf(Error);
+    expect(denied).toBe(true);
+  });
+  const attemptCases = (["prepare", "edit"] as const).flatMap(site => (["credentials", "retry"] as const).flatMap(boundary =>
+    (site === "edit" ? ["source", "caller", "installation", "policy", "none"] as const : ["source", "caller", "none"] as const)
+      .map(change => ({ site, boundary, change }))));
+  it.each(attemptCases)("guards $site model sends after $boundary $change changes", async ({ site, boundary, change }) => {
+    setupAttemptSite(site); let sends = 0;
+    defaultModelGatewayMock.extract.mockImplementationOnce(async (request: ExtractionRequest) => {
+      const context = { signal: request.signal ?? new AbortController().signal };
+      if (boundary === "retry") { await request.authorizeAttempt?.(context); sends++; }
+      await Promise.resolve();
+      if (change === "source") receiptMocks.readable.mockResolvedValue(false);
+      if (change === "caller") vi.mocked(requireWorkspaceMembership).mockRejectedValue(new Error("caller revoked"));
+      if (change === "installation") prismaMock.communicationInstallation.findFirst.mockResolvedValue(null);
+      if (change === "policy") validateSlackPostTargetMock.mockResolvedValue({ ok: false });
+      await request.authorizeAttempt?.(context); sends++;
+      return { output: { title: "Planning", sections: [], action: "clarify", clarification: "Which item?" } };
+    });
+    const result = await runAttemptSite(site).catch(error => error);
+    expect(sends).toBe((boundary === "retry" ? 1 : 0) + (change === "none" ? 1 : 0));
+    if (change === "none") expect(result).not.toBeInstanceOf(Error);
+    else {
+      expect(result).toBeInstanceOf(Error);
+      expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+      expect(sendSlackMessageMock).not.toHaveBeenCalled();
+    }
+  });
+  it("replays the original Slack prompt proof after the awaited publication policy", async () => {
+    setupAttemptSite("edit"); let sends = 0;
+    defaultModelGatewayMock.extract.mockImplementationOnce(async (request: ExtractionRequest) => {
+      validateSlackPostTargetMock.mockImplementationOnce(async () => {
+        await Promise.resolve();
+        receiptMocks.readable.mockResolvedValue(false);
+        return { ok: true, channelId: "C123" };
+      });
+      await request.authorizeAttempt!({ signal: request.signal! }); sends++;
+      return { output: { action: "clarify", clarification: "Which item?" } };
+    });
+    await expect(runAttemptSite("edit")).rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    expect(sends).toBe(0);
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+  it.each(["prepare", "edit"] as const)("keeps swallowed %s guard failure fatal after authority restores", async site => {
+    setupAttemptSite(site);
+    defaultModelGatewayMock.extract.mockImplementationOnce(async (request: ExtractionRequest) => {
+      receiptMocks.readable.mockResolvedValue(false);
+      await request.authorizeAttempt?.({ signal: request.signal ?? new AbortController().signal }).catch(() => {});
+      receiptMocks.readable.mockResolvedValue(true);
+      return { output: { title: "Planning", sections: [], action: "clarify", clarification: "Which item?" } };
+    });
+    await expect(runAttemptSite(site)).rejects.toBeInstanceOf(Error);
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+  it.each(["prepare", "edit"] as const)("honors the %s gateway cancellation context without fallback/publication", async site => {
+    setupAttemptSite(site); const failure = new Error("gateway cancelled");
+    defaultModelGatewayMock.extract.mockImplementationOnce(async (request: ExtractionRequest) => {
+      const context = new AbortController(); context.abort(failure);
+      await expect(request.authorizeAttempt!({ signal: context.signal })).rejects.toBe(failure);
+      expect(request.signal?.aborted).toBe(true);
+      return { output: { title: "Planning", sections: [], action: "clarify" } };
+    });
+    await expect(runAttemptSite(site)).rejects.toBe(failure);
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("does not generate or persist an agenda without a current complete context receipt", async () => {
+    prismaMock.meeting.findFirst.mockResolvedValue(provenAgendaMeeting());
+    receiptMocks.readable.mockResolvedValue(false);
+    const { prepareAgendaForMeeting } = await import("./meeting-facilitation");
+    await expect(prepareAgendaForMeeting({ workspaceId: "workspace-1", meetingId: "meeting-1" }))
+      .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    expect(defaultModelGatewayMock.extract).not.toHaveBeenCalled();
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a meeting changed during model generation before writing its agenda", async () => {
+    prismaMock.meeting.findFirst.mockResolvedValueOnce({ ...provenAgendaMeeting(), stateHash: "before" })
+      .mockResolvedValue({ ...provenAgendaMeeting(), stateHash: "after" });
+    defaultModelGatewayMock.extract.mockResolvedValue({ output: { title: "Planning", sections: [] } });
+    const { prepareAgendaForMeeting } = await import("./meeting-facilitation");
+    await expect(prepareAgendaForMeeting({ workspaceId: "workspace-1", meetingId: "meeting-1" }))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(defaultModelGatewayMock.extract).toHaveBeenCalledOnce();
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(receiptMocks.finish).not.toHaveBeenCalled();
+  });
+
+  it("records the complete agenda receipt atomically and omits receipt internals from model input", async () => {
+    prismaMock.meeting.findFirst.mockResolvedValue(provenAgendaMeeting());
+    prismaMock.meeting.update.mockResolvedValue({ ...provenAgendaMeeting(), agendaJson: { title: "Planning" } });
+    defaultModelGatewayMock.extract.mockResolvedValue({ output: { title: "Planning", sections: [] } });
+    const { prepareAgendaForMeeting } = await import("./meeting-facilitation");
+    await prepareAgendaForMeeting({ workspaceId: "workspace-1", meetingId: "meeting-1" });
+    const input = JSON.parse(defaultModelGatewayMock.extract.mock.calls[0][0].input);
+    expect(input).not.toHaveProperty("lineageRoots");
+    expect(input).not.toHaveProperty("sourceStateHash");
+    expect(receiptMocks.prepare).toHaveBeenCalledWith(expect.objectContaining({
+      tx: prismaMock, capture: { lineageRoots: expect.arrayContaining([expect.objectContaining({ kind: "MeetingTranscript", id: "meeting-1" })]) },
+    }));
+    expect(receiptMocks.finish).toHaveBeenCalledWith(expect.objectContaining({
+      tx: prismaMock, artifact: { kind: "MeetingAgenda", id: "meeting-1" },
+      receipt: expect.objectContaining({ mode: "DERIVED" }),
+    }));
+  });
+
+  it("rejects unreceipted Slack edit text before model invocation or publication", async () => {
+    prismaMock.user.findUnique.mockResolvedValue({ id: "user-1", email: "jan@example.com", displayName: "Jan", globalRole: "USER" });
+    prismaMock.meeting.findFirst.mockResolvedValue({ ...provenAgendaMeeting(),
+      agendaJson: { title: "Planning", sections: [{ title: "Discussion", items: [{ text: "Plan" }] }] },
+      agendaChannelId: "C123", agendaMessageTs: "1710000000.000100",
+    });
+    const { runMeetingAgendaThreadEdit } = await import("./meeting-facilitation");
+    await expect(runMeetingAgendaThreadEdit({ workspaceId: "workspace-1", meetingId: "meeting-1", actorUserId: "user-1",
+      installationId: "slack-1", channelId: "C123", threadTs: "1710000000.000100", messageTs: "1710000001.000100", messageText: "Secret edit" }))
+      .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
+    expect(defaultModelGatewayMock.extract).not.toHaveBeenCalled();
+    expect(updateSlackMessageMock).not.toHaveBeenCalled();
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+  });
+
 });

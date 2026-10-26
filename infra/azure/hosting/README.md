@@ -45,11 +45,18 @@ at the same source commit; commit identity alone is not proof of image identity.
 az bicep build --file infra/azure/hosting/site.bicep --stdout > /tmp/site.arm.json
 az bicep build --file infra/azure/hosting/monitor.bicep --stdout > /tmp/monitor.arm.json
 az bicep build --file infra/azure/hosting/site-identity.bicep --stdout > /tmp/site-identity.arm.json
+node --test infra/azure/hosting/monitor.node-test.mjs
 npx vitest run --project unit scripts/migration/site-candidate-smoke.test.mjs
 npx vitest run --project unit scripts/migration/hosting-image-receipt.test.mjs
 node scripts/check-public-docs.mjs
 node scripts/check-private-boundary.mjs
 ```
+
+The monitor contract test requires an installed standalone `bicep` CLI on `PATH`
+(or `BICEP_CLI_PATH` pointing to it). It compiles with `--no-restore` and executes
+the command with synthetic targets, an isolated environment and guards that reject
+network probes and issue subprocesses. It needs no account, credentials or provider
+access. Missing compiler or compilation failures fail the test; nothing is skipped.
 
 Fill private copies of the example parameter files with the approved resource IDs
 and image digests. The site must use its dedicated pull-only identity, never the
@@ -257,6 +264,15 @@ when started in that configuration. Copy the exact source `OPS_HEALTH_TARGETS_JS
 array into the private parameters. Names and URLs drive incident deduplication;
 do not silently replace source coverage as part of the hosting move.
 
+Keep the acceptance evidence separate:
+
+| Evidence | What it proves | Still required for active monitoring |
+| --- | --- | --- |
+| Offline contract tests | Compiled Manual/dry-run defaults and synthetic parsing with zero probes or issue writes | Provisioning, actual image startup, probe parity and writer handoff |
+| Provisioned job and one manual dry-run | Image startup, target parsing and output | Real probes, incident behavior and scheduled executions |
+| Approved probes with issue creation off | Target/result parity | Incident create/dedupe/resolve and exclusive scheduled operation |
+| Activation readback and execution evidence | Source schedule fenced and drained; Azure Schedule, issue writing and approved credential bindings verified; incident behavior proven; two scheduled executions observed | Ongoing operation and observation |
+
 After the coordinator approves creation, one manual execution proves image startup,
 target parsing and output only. For real probe parity, review the targets first:
 even a GET demo URL can create a session. Run approved probes with issue creation
@@ -271,8 +287,9 @@ finish before enabling Azure `Schedule` with `*/15 * * * *` (UTC), parallelism 1
 completion count 1, retry limit 0 and timeout 600 seconds. Parallelism is per
 execution, not a global singleton; do not manually start overlapping runs. Do not
 leave both providers active. Prove target/result parity and authorized incident
-create/dedupe/resolve behavior, then observe two scheduled executions. A health
-incident intentionally exits nonzero; distinguish that from startup failure.
+create/dedupe/resolve behavior, then observe two scheduled executions. Check health
+findings and incident publication separately: a published health incident can exit
+successfully, so exit status alone does not prove healthy targets.
 
 Recovery: set Azure back to Manual, stop/drain active executions, then restore
 Railway scheduling. Preserve issue dedupe keys and evidence. Reapplying the monitor

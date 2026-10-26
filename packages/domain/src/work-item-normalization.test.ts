@@ -106,3 +106,10 @@ describe("work item normalization", () => {
     expect(goal).not.toHaveProperty("priorityLabel");
   });
 });
+
+
+it("does not serialize partial Proposal advice samples as exact counts", () => {
+  const window = {scope: "WINDOW", adviceRequestsComplete: false, adviceRequestCount: 2, activeAdviceRequestCount: 1};
+  const result = normalizeProposalWorkItem({relationWindow: window, adviceProcess: {requests: [{status: "ACTIVE"}, {status: "CLOSED"}]}});
+  expect(result).toMatchObject({relationWindow: window, adviceRequestCount: null, activeAdviceRequestCount: null, inputRequestCount: null, activeInputRequestCount: null});
+});

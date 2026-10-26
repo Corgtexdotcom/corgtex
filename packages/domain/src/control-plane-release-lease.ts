@@ -11,7 +11,7 @@ import {
   type ManagedReleaseRecoveryIntent,
 } from "./managed-azure-recovery-intent";
 import { createManagedReleaseProofReader } from "./managed-release-proof-support";
-import { assertManagedAzureTargetBinding, managedAzureRecoveryAuthorityDigest, managedAzureTargetDigest, requireManagedAzureAccountAuthority } from "./managed-azure-targets";
+import { requiresProtectedManagedAzureBinding, isSelfserveReleaseHost, SELFSERVE_RELEASE_PROFILE, assertManagedAzureTargetBinding, managedAzureRecoveryAuthorityDigest, managedAzureTargetDigest, requireManagedAzureAccountAuthority } from "./managed-azure-targets";
 const IMAGE_TAG = /^sha-[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -269,9 +269,9 @@ function rollbackTargetMatches(row: CustomerDeployment, payload: Readonly<Manage
     && row.releaseVersion === payload.previous.releaseVersion;
 }
 function assertProtectedApprovalBinding(row: CustomerDeployment, payload: Readonly<ManagedAzureRollbackPayload>) {
-  if (row.deploymentKind !== "HOSTED_DEDICATED") return;
+  if (!requiresProtectedManagedAzureBinding(row)) return;
   const target = assertManagedAzureTargetBinding(row, payload.target);
-  if (payload.schemaVersion === 1 || row.releaseLeaseIncomingImageTag !== `sha-${target!.releaseApproval.gitSha}`
+  if ((isSelfserveReleaseHost(row) && payload.schemaVersion !== 3) || payload.schemaVersion === 1 || row.releaseLeaseIncomingImageTag !== `sha-${target!.releaseApproval.gitSha}`
     || payload.incoming.schemaApprovalDigest !== `sha256:${target!.releaseApproval.schemaApprovalDigest}`
     || payload.compatibleRecovery.gitSha !== target!.recovery.gitSha
     || payload.compatibleRecovery.imageTag !== `sha-${target!.recovery.gitSha}`
@@ -395,7 +395,7 @@ async function acquisitionProof(tx: Prisma.TransactionClient, row: CustomerDeplo
 }
 async function requireAdmission(tx: Prisma.TransactionClient, row: LockedDeployment, recovery = false) {
   if (!activeManagedAzureDeployment(row)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
-  if (row.deploymentKind === "HOSTED_DEDICATED") await requireManagedAzureAccountAuthority(tx, row);
+  if (requiresProtectedManagedAzureBinding(row)) await requireManagedAzureAccountAuthority(tx, row);
   const proof = await acquisitionProof(tx, row);
   const provenance = proof.provenance;
   if (provenance) assertProvenance(row, provenance, recovery);
@@ -407,8 +407,8 @@ async function requireAdmission(tx: Prisma.TransactionClient, row: LockedDeploym
     if (!envelope?.provenance && !provenance && !eligible(row)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
   } else if (!eligible(row)) reject("MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
   await assertNoTargetOverlap(tx, row);
-  if (row.deploymentKind === "HOSTED_DEDICATED") {
-    const target = assertManagedAzureTargetBinding(row);
+  if (requiresProtectedManagedAzureBinding(row) || proof.targetDigest || proof.recoveryAuthorityDigest) {
+    const target = assertManagedAzureTargetBinding(row, undefined, true);
     const protectedDigest = recovery ? proof.recoveryAuthorityDigest : proof.targetDigest;
     if (!protectedDigest) reject("MANAGED_RELEASE_PROVENANCE_CONFLICT");
     const currentDigest = recovery ? managedAzureRecoveryAuthorityDigest(target!) : managedAzureTargetDigest(target!);
@@ -508,7 +508,7 @@ export async function getManagedReleaseTargetPreflight(deploymentId: string, acr
   return transact(async (tx) => {
     const row = await lock(tx, deploymentId);
     if (!readOnlyPreflightEligible(row, workloadClass)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
-    if (workloadClass === "ACTIVE_CLIENT_PRIMARY" && row.deploymentKind === "HOSTED_DEDICATED") {
+    if (workloadClass === "ACTIVE_CLIENT_PRIMARY" && requiresProtectedManagedAzureBinding(row)) {
       await requireManagedAzureAccountAuthority(tx, row);
     }
     if (workloadClass === "ACTIVE_CLIENT_PRIMARY") assertManagedAzureTargetBinding(row, input.acrIdentity);
@@ -534,15 +534,19 @@ export async function getManagedReleaseTargetPreflight(deploymentId: string, acr
       baselineImageTag: row.releaseImageTag,
       baselineVersion: row.releaseVersion === null ? null : reader.version(row.releaseVersion),
     }, ["baselineImageTag", "baselineVersion"] as const);
+    const protectedProfile = isSelfserveReleaseHost(row) ? { protectedReleaseProfile: SELFSERVE_RELEASE_PROFILE,
+      targetDigest: managedAzureTargetDigest(assertManagedAzureTargetBinding(row, input.acrIdentity)!) } : {};
     return reader.deepFreeze(reader.exactRecord({
       deploymentId: row.id,
+      ...protectedProfile,
       writeIntentProtocolVersion: MANAGED_RELEASE_RUNNER_PROTOCOL_VERSION,
       deployment: deploymentView(reader, row, workloadClass),
       authorityDigest: sha256(JSON.stringify(releaseProvenance(row))),
       origin: canonicalOrigin(row.url),
       release,
       target,
-    }, ["deploymentId", "writeIntentProtocolVersion", "deployment", "authorityDigest", "origin", "release", "target"] as const));
+    }, ["deploymentId", "writeIntentProtocolVersion", "deployment", "authorityDigest", "origin", "release", "target",
+      ...(isSelfserveReleaseHost(row) ? ["protectedReleaseProfile", "targetDigest"] as const : [])] as const));
   });
 }
 
@@ -553,7 +557,7 @@ export async function getManagedReleaseBootstrapTarget(deploymentId: string, acr
   return transact(async (tx) => {
     const row = await lock(tx, deploymentId);
     if (!readOnlyPreflightEligible(row, workloadClass)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
-    if (workloadClass === "ACTIVE_CLIENT_PRIMARY" && row.deploymentKind === "HOSTED_DEDICATED") {
+    if (workloadClass === "ACTIVE_CLIENT_PRIMARY" && requiresProtectedManagedAzureBinding(row)) {
       await requireManagedAzureAccountAuthority(tx, row);
     }
     if (workloadClass === "ACTIVE_CLIENT_PRIMARY") assertManagedAzureTargetBinding(row, input.acrIdentity);
@@ -593,7 +597,7 @@ export async function acquireManagedReleaseLease(params: { deploymentId: string;
     await assertNoTargetOverlap(tx, row);
     let targetDigest: string | null = null;
     let recoveryAuthorityDigest: string | null = null;
-    if (row.deploymentKind === "HOSTED_DEDICATED") {
+    if (requiresProtectedManagedAzureBinding(row)) {
       await requireManagedAzureAccountAuthority(tx, row);
       const target = assertManagedAzureTargetBinding(row);
       targetDigest = managedAzureTargetDigest(target!);
@@ -671,7 +675,7 @@ async function completedCompatibleRecoveryReceipt(
     orderBy: { createdAt: "desc" },
   });
   if (!terminal) return null;
-  if (!activeManagedAzureDeployment(row) || row.deploymentKind !== "HOSTED_DEDICATED") reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
+  if (!activeManagedAzureDeployment(row) || !requiresProtectedManagedAzureBinding(row)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
   await requireManagedAzureAccountAuthority(tx, row);
   await assertNoTargetOverlap(tx, row);
   const target = assertManagedAzureTargetBinding(row, acrIdentity);
@@ -709,6 +713,7 @@ async function completedCompatibleRecoveryReceipt(
   assertProvenance(row, raw.provenance as ReleaseProvenance, true);
   return Object.freeze({ status: "RECOVERED_COMPATIBLE" as const, terminal: true as const, deploymentId: row.id,
     writeIntentProtocolVersion: MANAGED_RELEASE_RUNNER_PROTOCOL_VERSION,
+    ...(isSelfserveReleaseHost(row) ? { protectedReleaseProfile: SELFSERVE_RELEASE_PROFILE } : {}),
     leaseId, fence, originatingLeaseId, originatingFence, targetDigest, recoveryAuthorityDigest,
     releaseImageTag: imageTag, releaseVersion, webDigest, workerDigest, approvalDigest, acceptanceEvidenceDigest });
 }
@@ -732,6 +737,7 @@ export async function getManagedReleaseRecoveryStatus(deploymentId: string, acrI
     return {
       deploymentId: row.id,
       writeIntentProtocolVersion: MANAGED_RELEASE_RUNNER_PROTOCOL_VERSION,
+      ...(isSelfserveReleaseHost(row) ? { protectedReleaseProfile: SELFSERVE_RELEASE_PROFILE } : {}),
       leaseId: row.releaseLeaseId!,
       fence: row.releaseLeaseFence,
       phase: row.releaseLeasePhase,

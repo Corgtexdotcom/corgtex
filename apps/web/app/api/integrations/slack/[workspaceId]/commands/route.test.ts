@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { verifySlackRequest, verifySlackWorkspaceInstallation, handleSlackCommand, handleRouteError } = vi.hoisted(() => ({
-  verifySlackRequest: vi.fn(), verifySlackWorkspaceInstallation: vi.fn(), handleSlackCommand: vi.fn(), handleRouteError: vi.fn(),
+const { captureSlackSignedIngress, verifySlackWorkspaceInstallation, handleSlackCommand, handleRouteError } = vi.hoisted(() => ({
+  captureSlackSignedIngress: vi.fn(), verifySlackWorkspaceInstallation: vi.fn(), handleSlackCommand: vi.fn(), handleRouteError: vi.fn(),
 }));
-vi.mock("@corgtex/domain", () => ({ verifySlackRequest, verifySlackWorkspaceInstallation, handleSlackCommand }));
+vi.mock("@corgtex/domain", () => ({ captureSlackSignedIngress, verifySlackWorkspaceInstallation, handleSlackCommand }));
 vi.mock("@/lib/http", () => ({ handleRouteError }));
 import { POST } from "./route";
 
@@ -27,16 +27,16 @@ describe("workspace-scoped Slack commands route", () => {
     const req = request();
     const response = await POST(req, context());
     expect(response.status).toBe(200);
-    expect(verifySlackRequest).toHaveBeenCalledExactlyOnceWith(rawBody, req.headers, workspaceId);
+    expect(captureSlackSignedIngress).toHaveBeenCalledExactlyOnceWith(rawBody, req.headers, workspaceId);
     expect(verifySlackWorkspaceInstallation).toHaveBeenCalledExactlyOnceWith(workspaceId, expect.objectContaining({ api_app_id: "AEXPECTED" }));
     expect(handleSlackCommand).toHaveBeenCalledTimes(1);
-    expect(verifySlackRequest.mock.invocationCallOrder[0]).toBeLessThan(verifySlackWorkspaceInstallation.mock.invocationCallOrder[0]);
+    expect(captureSlackSignedIngress.mock.invocationCallOrder[0]).toBeLessThan(verifySlackWorkspaceInstallation.mock.invocationCallOrder[0]);
     expect(verifySlackWorkspaceInstallation.mock.invocationCallOrder[0]).toBeLessThan(handleSlackCommand.mock.invocationCallOrder[0]);
   });
 
   it.each([401, 403, 503])("does not look up installation or handle rejected signature/scope/config (%i)", async (status) => {
     const error = { status, code: "SAFE_SLACK_FAILURE" };
-    verifySlackRequest.mockImplementationOnce(() => { throw error; });
+    captureSlackSignedIngress.mockImplementationOnce(() => { throw error; });
     const response = await POST(request(), context());
     expect(response.status).toBe(status);
     expect(verifySlackWorkspaceInstallation).not.toHaveBeenCalled();
