@@ -17,7 +17,7 @@ export function legacyHandoffResponse(request) {
   };
   const path = url.pathname.replace(/^\/(en|es)(?=\/|$)/, "") || "/";
   const browser = request.headers.get("accept")?.includes("text/html");
-  const entry = /^\/(?:login|signup|find-account)?\/?$/.test(path);
+  const entry = /^\/(?:login|signup|find-account|forgot-password|workspaces\/create)?\/?$/.test(path);
   const workspacePage = /^\/workspaces\/[a-f0-9-]{36}(?:\/(?:actions|add|admin|agents|agreements|audit|brain|built|chat|circles|decisions|finance|goals|governance|items|leads|maps|meetings|members|notifications|operator|proposals|roles|settings|tensions|tools|versions)(?:\/[a-zA-Z0-9_-]+)*)?\/?$/.test(path);
   // This JSON endpoint lives under a UI section but is never a browser page.
   const workspaceApi = /^\/workspaces\/[a-f0-9-]{36}\/maps\/context(?:\/|$)/.test(path);

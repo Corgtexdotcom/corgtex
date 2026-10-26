@@ -48,6 +48,24 @@ test("every application workspace page hands browser bookmarks to the fixed root
   }
 });
 
+test("password recovery and workspace-start bookmarks hand off without enabling writes", () => {
+  for (const locale of ["", "/en", "/es"]) {
+    for (const page of ["/forgot-password", "/workspaces/create"]) {
+      const path = `${locale}${page}?token=secret&next=https://evil.example#private`;
+      for (const method of ["GET", "HEAD"]) {
+        const result = response(request(path, { method }));
+        assert.equal(result.status, 302, `${method} ${path}`);
+        assert.equal(result.headers.get("location"), DESTINATION);
+      }
+      for (const method of ["POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
+        assert.equal(response(request(path, { method })).status, 503, `${method} ${path}`);
+      }
+      assert.equal(response(request(path, { headers: { accept: "application/json" } })).status, 503);
+      assert.equal(response(request(`${locale}${page}/unknown`)).status, 503);
+    }
+  }
+});
+
 test("writes, APIs, MCP, OAuth, callbacks, webhook and unknown/encoded paths stay frozen", async () => {
   for (const path of ["/", "/en/login", "/api/auth/callback", "/api/integrations/google/callback", "/mcp", "/api/webhooks/stripe", "/oauth/callback", "/callback", "/en/api/session", "/%6cogin", "//evil.example", "/unknown"]) {
     for (const method of ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {

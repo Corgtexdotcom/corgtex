@@ -77,6 +77,14 @@ test("actual serialized Node utility redirects safely, preserves health and keep
     const redirect = await get("/en/workspaces/a928241f-39c9-43a3-8540-b4325d5ea068/actions/old?code=secret&next=https://evil.example");
     assert.equal(redirect.status, 302); assert.equal(redirect.headers.get("location"), "https://selfserve.corgtex.com/#");
     assert.equal(redirect.headers.get("referrer-policy"), "no-referrer");
+    for (const path of ["/forgot-password", "/en/forgot-password", "/workspaces/create", "/es/workspaces/create"]) {
+      for (const method of ["GET", "HEAD"]) {
+        const result = await get(`${path}?token=secret&next=https://evil.example`, method);
+        assert.equal(result.status, 302, `${method} ${path}`);
+        assert.equal(result.headers.get("location"), "https://selfserve.corgtex.com/#");
+      }
+      assert.equal((await get(path, "POST")).status, 503);
+    }
     for (const section of ["chat", "agents", "agents/old-agent", "decisions", "tools", "maps"]) {
       for (const method of ["GET", "HEAD"]) {
         const result = await get(`/es/workspaces/a928241f-39c9-43a3-8540-b4325d5ea068/${section}?token=secret`, method);
