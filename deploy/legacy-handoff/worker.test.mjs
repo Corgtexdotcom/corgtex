@@ -37,6 +37,15 @@ test("every application workspace page hands browser bookmarks to the fixed root
   for (const suffix of ["api/session", "mcp", "oauth/callback", "callback", "webhooks/provider", "unknown", "%63hat"]) {
     assert.equal(response(request(`/workspaces/a928241f-39c9-43a3-8540-b4325d5ea068/${suffix}`)).status, 503, suffix);
   }
+  for (const route of pages.filter(file => file === "route.ts" || file.endsWith("/route.ts"))) {
+    const suffix = route.replace(/route\.ts$/, "").replace(/\[[^\]]+\]/g, "old-source-id");
+    for (const locale of ["", "/en", "/es"]) {
+      for (const method of ["GET", "HEAD", "POST"]) {
+        const path = `${locale}/workspaces/a928241f-39c9-43a3-8540-b4325d5ea068/${suffix}?object=old-source-id`;
+        assert.equal(response(request(path, { method })).status, 503, `${method} ${path}`);
+      }
+    }
+  }
 });
 
 test("writes, APIs, MCP, OAuth, callbacks, webhook and unknown/encoded paths stay frozen", async () => {

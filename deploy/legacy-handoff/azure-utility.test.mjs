@@ -92,6 +92,7 @@ test("actual serialized Node utility redirects safely, preserves health and keep
       const result = await get(path, method); assert.equal(result.status, 503, `${method} ${path}`);
       assert.equal(result.headers.get("location"), null); assert.equal((await result.json()).applicationWrites, false);
     }
+    assert.equal((await get("/en/workspaces/a928241f-39c9-43a3-8540-b4325d5ea068/maps/context?object=old-id")).status, 503);
     assert.equal((await get("/", "GET", "unverified.example.com")).status, 503);
   } finally { child.kill("SIGTERM"); if (child.exitCode === null) await once(child, "exit"); }
 });
