@@ -87,9 +87,17 @@ describe.runIf(process.env.WORKSPACE_ACCESS_BROWSER_QA === "1")("workspace page 
     server.stdout?.on("data", chunk => { serverLog += String(chunk); });
     server.stderr?.on("data", chunk => { serverLog += String(chunk); });
     await vi.waitFor(() => expect(serverLog).toContain("Ready"), { timeout: 60_000 });
+    // Compile the two fixture routes before Chrome's navigation timeout starts.
+    for (const [pathname, status] of [["/en/workspaces/inaccessible/brain", 404], ["/en", 200]] as const) {
+      const response = await fetch(origin + pathname, {
+        headers: { Cookie: "synthetic_session=active" }, signal: AbortSignal.timeout(120_000),
+      });
+      expect(response.status).toBe(status);
+      await response.text();
+    }
     const { chromium } = await import("playwright");
     browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH });
-  }, 90_000);
+  }, 180_000);
 
   beforeEach(async () => {
     context = await browser.newContext();
@@ -131,7 +139,11 @@ describe.runIf(process.env.WORKSPACE_ACCESS_BROWSER_QA === "1")("workspace page 
       // Next streams Flight navigation with HTTP 200 and carries the fallback
       // digest in the payload; document requests above must return HTTP 404.
       expect(flight.status()).toBe(200);
-      expect(await flight.text()).toContain("NEXT_HTTP_ERROR_FALLBACK;404");
+      // Chrome can discard a parsed stream before getResponseBody; replay its
+      // actual URL/headers with the request API to inspect the fallback payload.
+      const payload = await context.request.get(flight.url(), { headers: flight.request().headers() });
+      expect(payload.status()).toBe(200);
+      expect(await payload.text()).toContain("NEXT_HTTP_ERROR_FALLBACK;404");
       await expect.poll(() => page.locator("body").innerText()).toContain("This page could not be found");
       expect(page.url()).toBe(`${origin}/${locale}/workspaces/inaccessible/brain`);
     });
