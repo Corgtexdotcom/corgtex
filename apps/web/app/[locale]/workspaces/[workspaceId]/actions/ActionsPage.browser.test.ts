@@ -14,7 +14,7 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("Actions card
   let origin: string;
   const errors: string[] = [];
   const webRoot = new URL("../../../../../", import.meta.url);
-  const artifactRoot = new URL("../../.artifacts/pun101/", webRoot);
+  const artifactRoot = new URL(`../../.artifacts/pun101/${Date.now()}/`, webRoot);
 
   beforeAll(async () => {
     await mkdir(artifactRoot, { recursive: true });
