@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const redirect = vi.fn((location: string) => {
   throw new Error(`redirect:${location}`);
 });
+const notFound = vi.fn(() => {
+  throw new Error("NEXT_HTTP_ERROR_FALLBACK;404");
+});
 const cookies = vi.fn();
 const headers = vi.fn();
 const requireWorkspaceMembership = vi.fn();
@@ -26,6 +29,7 @@ class MockAppError extends Error {
 
 vi.mock("next/navigation", () => ({
   redirect,
+  notFound,
 }));
 
 vi.mock("next/headers", () => ({
@@ -64,6 +68,82 @@ afterEach(() => {
 });
 
 describe("requirePageActor", () => {
+  describe("workspace page access", () => {
+    const actor = { kind: "user", user: { id: "viewer", email: "viewer@example.test" } };
+    beforeEach(() => {
+      cookies.mockResolvedValue({ get: () => ({ value: "token" }) });
+      resolveSessionActor.mockResolvedValue(actor);
+      getWorkspaceSupportGrant.mockResolvedValue(null);
+      requireWorkspaceMembership.mockResolvedValue({ isActive: true, role: "CONTRIBUTOR" });
+    });
+
+    it.each([
+      ["/en/workspaces/inaccessible/brain", {}],
+      ["/es/workspaces/nonexistent/meetings", {}],
+      ["/en/workspaces/stale-membership/actions", { rsc: "1", "next-router-state-tree": "synthetic-navigation" }],
+    ])("uses the same 404 for inaccessible, missing and stale navigation: %s", async (pathname, navigationHeaders) => {
+      headers.mockResolvedValue(new Headers({ "x-corgtex-pathname": pathname, ...navigationHeaders }));
+      requireWorkspaceMembership.mockRejectedValue(new MockAppError(403, "NOT_A_MEMBER", "Private denial details"));
+      const { requirePageActor } = await import("./auth");
+      await expect(requirePageActor()).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404");
+      expect(notFound).toHaveBeenCalledOnce();
+      expect(redirect).not.toHaveBeenCalled();
+    });
+
+    it.each(["WORKSPACE_SCOPE_MISMATCH", "FORBIDDEN", "SUPPORT_CONTENT_RESTRICTED", "SUPPORT_AUTHORIZATION_REVOKED", "AGENT_WORKSPACE_SCOPE_REQUIRED"])("hides known membership denial %s", async (code) => {
+      headers.mockResolvedValue(new Headers({ "x-corgtex-pathname": "/en/workspaces/other" }));
+      requireWorkspaceMembership.mockRejectedValue(new MockAppError(403, code, "Denied"));
+      const { requirePageActor } = await import("./auth");
+      await expect(requirePageActor()).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404");
+    });
+
+    it.each([new Error("database unavailable"), new MockAppError(503, "SERVICE_UNAVAILABLE", "Unavailable"), new MockAppError(403, "UPSTREAM_FORBIDDEN", "Backend credentials rejected"), new MockAppError(500, "NOT_A_MEMBER", "Unexpected failure")])("preserves backend failures: %s", async (error) => {
+      headers.mockResolvedValue(new Headers({ "x-corgtex-pathname": "/en/workspaces/ws-a" }));
+      requireWorkspaceMembership.mockRejectedValue(error);
+      const { requirePageActor } = await import("./auth");
+      await expect(requirePageActor()).rejects.toBe(error);
+      expect(notFound).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])("retains login redirect for missing/expired sessions (expired=%s)", async (expired) => {
+      cookies.mockResolvedValue({ get: () => expired ? { value: "expired" } : undefined });
+      resolveSessionActor.mockResolvedValue(null);
+      const { requirePageActor } = await import("./auth");
+      await expect(requirePageActor()).rejects.toThrow("redirect:/login");
+      expect(requireWorkspaceMembership).not.toHaveBeenCalled();
+      expect(notFound).not.toHaveBeenCalled();
+    });
+
+    it("retains the domain denial for server actions", async () => {
+      headers.mockResolvedValue(new Headers({ "x-corgtex-pathname": "/en/workspaces/ws-a", "next-action": "synthetic-action" }));
+      const error = new MockAppError(403, "NOT_A_MEMBER", "Denied");
+      requireWorkspaceMembership.mockRejectedValue(error);
+      const { requirePageActor } = await import("./auth");
+      await expect(requirePageActor()).rejects.toBe(error);
+      expect(notFound).not.toHaveBeenCalled();
+    });
+
+    it("retains the domain denial for API reads", async () => {
+      const error = new MockAppError(403, "NOT_A_MEMBER", "Denied");
+      requireWorkspaceMembership.mockRejectedValue(error);
+      const { resolveRequestActor } = await import("./auth");
+      await expect(resolveRequestActor({
+        method: "GET", headers: new Headers(), cookies: { get: () => ({ value: "token" }) },
+        nextUrl: { pathname: "/api/workspaces/ws-a/actions" },
+      } as never)).rejects.toBe(error);
+      expect(notFound).not.toHaveBeenCalled();
+    });
+
+    it("rechecks access after a membership is revoked", async () => {
+      headers.mockResolvedValue(new Headers({ "x-corgtex-pathname": "/en/workspaces/ws-a/brain" }));
+      const { requirePageActor } = await import("./auth");
+      await expect(requirePageActor()).resolves.toBe(actor);
+      requireWorkspaceMembership.mockRejectedValue(new MockAppError(403, "NOT_A_MEMBER", "Revoked"));
+      await expect(requirePageActor()).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404");
+      expect(requireWorkspaceMembership).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it("redirects Setup before a server-rendered workspace caller can read content", async () => {
     cookies.mockResolvedValue({ get: () => ({ value: "token" }) });
     resolveSessionActor.mockResolvedValue({ kind: "user", user: { id: "support", isSupportAccount: true } });
