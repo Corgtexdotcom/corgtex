@@ -49,7 +49,7 @@ export type TranscriptSourceTransport = { readonly [transportBrand]: true };
 const transports = new WeakMap<object, Transport>();
 const originals = new WeakMap<object, { transport: Transport; artifact: MeetingTranscriptSourceArtifact; wires: Wire[] }>();
 
-export function transcriptConnectionHash(connection: MeetingTranscriptSourceConnection) {
+function transcriptConnectionHash(connection: MeetingTranscriptSourceConnection) {
   return hash({ id: connection.id, workspaceId: connection.workspaceId, provider: connection.provider,
     status: connection.status, authMode: connection.authMode, apiKeyEnc: connection.apiKeyEnc,
     accessTokenEnc: connection.accessTokenEnc, refreshTokenEnc: connection.refreshTokenEnc,
@@ -190,7 +190,7 @@ async function archiveWires(state: Transport, wires: Wire[]): Promise<TransportA
   const promise = create(); state.archives.set(wires, promise); return promise;
 }
 
-export type ProviderTranscriptPayload = {
+type ProviderTranscriptPayload = {
   version: 1; connectionId: string; provider: string; externalId: string; workspaceId: string;
   recordId: string; meetingId: string; manifestId: string; configHash: string; epochs: PermissionEpochProof;
   archive: TransportArchiveHeader; artifact: NormalizedMeetingTranscriptSourceArtifact; record: Record<string, unknown>;

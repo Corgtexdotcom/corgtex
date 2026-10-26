@@ -3,7 +3,7 @@ import { prisma, type AppActor } from "@corgtex/shared";
 import { captureArtifactReadHeadObservation, type LineageRoot } from "./source-lineage";
 import {captureReadableDigestInputs} from "./digest-lineage";
 
-export const MAINTENANCE_TARGET_PAGE = 100;
+const MAINTENANCE_TARGET_PAGE = 100;
 export type WikiLookupCursor = { priority: 0 | 1 | 2 | 3; afterId?: string };
 export type WikiLookupResult = {
   target: BrainArticle | null;
@@ -11,7 +11,7 @@ export type WikiLookupResult = {
   next: WikiLookupCursor | null;
   heads: Array<[string, string]>;
 };
-export function maintenanceWikiSlug(ref: string) {
+function maintenanceWikiSlug(ref: string) {
   return ref.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 120);
 }
 

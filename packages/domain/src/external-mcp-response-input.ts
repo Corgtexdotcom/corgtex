@@ -26,7 +26,6 @@ export type ExternalMcpResponseInputRecord = { id: string; workspaceId: string; 
   requestJson: unknown; encryptedResponseJson: string; responseHash: string; connectionGrantHash: string;
   originalLocalEpochsJson: unknown; fetchedAt: Date; createdAt: Date };
 export type ExternalMcpCapturedResponse = Readonly<{ input: ExternalMcpResponseInputRecord; payload: unknown }>;
-const capturedReceipts = new WeakSet<object>();
 const outputReceipts = new WeakMap<object, { actor: AppActor; workspaceId: string; valueHash: string; roots: LineageRoot[] }>();
 const MAX_NATIVE_INPUTS = 128;
 const MAX_ROOTS = 10000;
@@ -154,19 +153,9 @@ export async function captureExternalMcpResponseInput(actor: AppActor, submitted
   assertPrincipal();
   const receipt = Object.freeze({ input: Object.freeze(structuredClone(input)) as ExternalMcpResponseInputRecord,
     payload: freezeJson(structuredClone(payload)) });
-  capturedReceipts.add(receipt);
   return receipt;
 }
 
-export async function assertExternalMcpCapturedResponseCurrent(receipt: ExternalMcpCapturedResponse) {
-  invariant(capturedReceipts.has(receipt) && externalMcpResponseHash(receipt.payload) === receipt.input.responseHash,
-    409, "SOURCE_CHANGED", "External MCP response changed before use.");
-  const stored = await prisma.externalMcpResponseInput.findFirst({ where: { id: receipt.input.id, workspaceId: receipt.input.workspaceId } });
-  const { lineageContentFingerprint } = await import("./source-lineage");
-  invariant(stored && lineageContentFingerprint("ExternalMcpResponseInput", stored)
-    === lineageContentFingerprint("ExternalMcpResponseInput", receipt.input),
-  409, "SOURCE_CHANGED", "External MCP stored response changed before use.");
-}
 
 type CommitState = { actor: AppActor; actorHash: string; workspaceId: string; userId: string;
   submittedRoots: LineageRoot[]; roots: LineageRoot[];

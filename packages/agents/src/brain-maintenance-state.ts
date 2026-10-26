@@ -3,7 +3,7 @@ import type { WikiLookupCursor } from "../../domain/src/brain-maintenance-links"
 
 export const MAINTENANCE_PAGE_SIZE = 25;
 export const MAINTENANCE_PHASES = ["LINKS", "ORPHANS", "SOURCES", "DISCUSSIONS", "RETENTION"] as const;
-export type MaintenancePhase = typeof MAINTENANCE_PHASES[number];
+type MaintenancePhase = typeof MAINTENANCE_PHASES[number];
 /** Internal durable workflow state. Never embed this in an AgentRun, event,
  * model prompt or public result. IDs do not confer source permission. */
 export type MaintenanceRelationScan = {

@@ -3,7 +3,7 @@ import type { TableDefinition } from "./cursor";
 
 // Native declaration matches the domain receipt contract.
 // Cursor bookmarks retain their existing ordering-only wire format.
-export interface CapturedSqlColumn {
+interface CapturedSqlColumn {
   name: string;
   type: string;
   typeOid: number;

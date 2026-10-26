@@ -387,12 +387,15 @@ export async function handleCalendarSync(jobId: string, payload: { connectionId?
       events,
     });
     await updateOAuthConnectionForAttempt(expectedConnection, {
-      lastSyncAt: new Date(), lastSyncError: null, status: "ACTIVE",
+      lastSyncAt: new Date(), lastSyncError: null,
     }, controls);
   } catch (error) {
-    console.warn("Calendar sync failed:", error);
+    // Shared credential revocation belongs to the authoritative token-refresh
+    // boundary. Calendar resource and downstream failures establish no such denial.
+    const diagnostic = "Calendar sync failed; retry after checking provider and processing availability.";
+    console.warn(diagnostic);
     await updateOAuthConnectionForAttempt(expectedConnection, {
-      lastSyncError: error instanceof Error ? error.message : "Calendar sync failed.", status: "ERROR",
+      lastSyncError: diagnostic,
     }, controls);
     throw error;
   }

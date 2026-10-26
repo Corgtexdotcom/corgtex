@@ -79,7 +79,7 @@ export const SOURCE_AUTHORITY_REGISTRY = freezeDescriptor({
 } satisfies Record<LineageKind, Descriptor>);
 
 // Physical governors which are not themselves model inputs still need explicit allowlisted SQL identifiers.
-export const SOURCE_AUTHORITY_GOVERNOR_TABLES = ["OAuthConnection", "TranscriptTransportArchive", "NativeTranscriptPublication", "MeetingTranscriptSourceConnection", "MeetingTranscriptSourceRecord", "CommunicationInstallation", "CommunicationIngressInput", "WorkspaceIntegrationBinding", "ExternalMcpConnection",
+const SOURCE_AUTHORITY_GOVERNOR_TABLES = ["OAuthConnection", "TranscriptTransportArchive", "NativeTranscriptPublication", "MeetingTranscriptSourceConnection", "MeetingTranscriptSourceRecord", "CommunicationInstallation", "CommunicationIngressInput", "WorkspaceIntegrationBinding", "ExternalMcpConnection",
   "SqlKnowledgePublication", "SqlKnowledgeStagedChunk", "InformationCategoryPolicy", "WorkspaceSupportGrant", "AgentCredential", "McpOAuthAccessToken", "McpOAuthClient", "WorkspaceFeatureFlag", "WorkspaceModuleGrant",
   "AdviceRequestRecipient", "WorkspaceArchiveRecord", "WorkspaceToolLinkCircleTag", "ArtifactInputLineage", "WorkflowJob", "RecorderTranscriptBinding", "RecorderTranscriptAttempt", "RecorderTranscriptClaim", "RecorderTranscriptPublication", "WorkspaceMeetingRecorderConfig", "MeetingRecording", "MeetingRecorderProviderEvent", "MeetingRecorderSmokeRun", "MeetingTranscriptProcessingProgress", "AuditLog", "Event"] as const;
 export const SOURCE_AUTHORITY_TABLES:readonly string[] = Object.freeze([...new Set([...Object.values(SOURCE_AUTHORITY_REGISTRY).flatMap(d => d.table ? [d.table] : []), ...SOURCE_AUTHORITY_GOVERNOR_TABLES])]);
