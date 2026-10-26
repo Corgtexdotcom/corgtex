@@ -51,7 +51,8 @@ After obtaining that evidence through the existing authorized identity, prepare:
 ```sh
 node scripts/prepare-legacy-azure-handoff.mjs \
   /private/path/reviewed-azure-handoff-input.json \
-  .artifacts/legacy-handoff/azure-command-plan.json
+  .artifacts/legacy-handoff/azure-command-plan.json \
+  "$REVIEWED_AZURE_RESOURCE_ID"
 ```
 
 The input has `resourceId`, `observedAt`, `hostname`, `baseline` (the current
@@ -65,6 +66,20 @@ Only proven `/api/health` and/or `/healthz` paths may be supplied.
 Every retained HTTP probe must explicitly target one of those supplied paths;
 omitted paths, root probes and unreviewed paths block preparation. Probes are never
 rewritten. Freshness uses the process clock; input fields cannot override it.
+
+The required third CLI argument is the full expected Azure resource ID from
+independently reviewed operator configuration, not from the evidence JSON. The API
+likewise requires `prepareAzureHandoff(evidence, { expectedResourceId })`. Evidence
+must match the complete subscription, resource group and app ID; it cannot override
+the separate binding. This binds the proposed target, not Azure identity or deploy
+authorization. Never fill a missing binding by copying an unverified evidence field.
+
+The utility embeds one explicit listener port: the sole literal template `PORT`,
+or 3000 when absent. Secret-backed, duplicate or invalid `PORT` entries block
+preparation. Every retained HTTP/TCP probe must use that port; HTTPS probes are
+refused. The listener ignores inherited image/runtime `PORT` defaults. Existing
+env and probes remain unchanged; independently verify ingress targets this port
+and prove it works in the retained image before any deployment approval.
 
 The CLI creates a new mode-0600 artifact with only command/args delta and hashes;
 it never prints or copies baseline environment values. It does not overwrite an

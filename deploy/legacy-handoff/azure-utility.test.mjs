@@ -7,7 +7,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import http from "node:http";
-import { prepareAzureHandoff, digest } from "./azure-utility.mjs";
+import { prepareAzureHandoff as prepareWithBinding, digest } from "./azure-utility.mjs";
+
+const resourceId = "/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/example/providers/Microsoft.App/containerApps/ca-corgtex-chirone-prod-web";
+const trustedBinding = { expectedResourceId: resourceId };
+const prepareAzureHandoff = evidence => prepareWithBinding(evidence, trustedBinding);
 
 const baseline = { revisionSuffix: "frozen", containers: [{ name: "web",
   image: `registry.example/web@sha256:${"a".repeat(64)}`, command: ["node"], args: ["-e", "reviewed frozen utility"],
@@ -19,7 +23,7 @@ const health = { status: "ok", mode: "source-freeze-utility", applicationWrites:
 const input = () => ({ baseline: structuredClone(baseline), expectedTemplateSha256: digest(baseline),
   expectedCommandSha256: digest({ command: baseline.containers[0].command, args: baseline.containers[0].args }),
   health, healthPaths: ["/api/health"], hostname: "chirone.corgtex.com",
-  resourceId: "/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/example/providers/Microsoft.App/containerApps/ca-corgtex-chirone-prod-web",
+  resourceId,
   observedAt: new Date().toISOString() });
 
 test("offline candidate changes only command/args and leaves the input untouched", () => {
@@ -30,6 +34,7 @@ test("offline candidate changes only command/args and leaves the input untouched
   assert.deepEqual(restored, before);
   assert.deepEqual(value.baseline, before);
   assert.equal(summary.providerWrites, 0);
+  assert.equal(summary.listenerPort, 3000);
   assert.deepEqual(candidate.containers[0].command, ["/usr/bin/env", "-u", "NODE_OPTIONS", "-u", "NODE_PATH", "/usr/local/bin/node"]);
 });
 
@@ -55,9 +60,20 @@ test("stale evidence, mutable image, worker health and unknown topology are refu
 });
 
 test("actual serialized Node utility redirects safely, preserves health and keeps protocols frozen", async () => {
-  const { candidate } = prepareAzureHandoff(input());
+  const reservation = http.createServer();
+  reservation.listen(0, "127.0.0.1");
+  await once(reservation, "listening");
+  const expectedPort = reservation.address().port;
+  await new Promise(resolve => reservation.close(resolve));
+  const value = input();
+  value.baseline.containers[0].env.push({ name: "PORT", value: String(expectedPort) });
+  value.baseline.containers[0].probes[0].httpGet.port = expectedPort;
+  value.expectedTemplateSha256 = digest(value.baseline);
+  const { candidate, summary } = prepareAzureHandoff(value);
+  assert.equal(summary.listenerPort, expectedPort);
   const child = spawn(process.execPath, candidate.containers[0].args, {
-    env: { PATH: process.env.PATH, PORT: "0" }, stdio: ["ignore", "pipe", "pipe"],
+    // Even inherited image/runtime environment cannot change the reviewed port.
+    env: { PATH: process.env.PATH, PORT: "1" }, stdio: ["ignore", "pipe", "pipe"],
   });
   let errors = ""; child.stderr.on("data", chunk => { errors += chunk; });
   try {
@@ -66,6 +82,7 @@ test("actual serialized Node utility redirects safely, preserves health and keep
       child.once("exit", () => { clearTimeout(timer); reject(new Error(`utility exited: ${errors}`)); });
       child.stdout.on("data", chunk => { const match = String(chunk).match(/HANDOFF_LISTENING:(\d+)/); if (match) { clearTimeout(timer); resolve(match[1]); } });
     });
+    assert.equal(Number(port), expectedPort);
     const get = (path, method = "GET", host = "chirone.corgtex.com") => new Promise((resolve, reject) => {
       const req = http.request({ hostname: "127.0.0.1", port, path, method,
         headers: { host, accept: "text/html" } }, res => {
@@ -105,6 +122,47 @@ test("actual serialized Node utility redirects safely, preserves health and keep
   } finally { child.kill("SIGTERM"); if (child.exitCode === null) await once(child, "exit"); }
 });
 
+test("full Azure target binding comes from the trusted caller, never evidence", () => {
+  assert.throws(() => prepareWithBinding(input()), /HANDOFF_TRUSTED_AZURE_RESOURCE_BINDING_REQUIRED/);
+  for (const otherId of [resourceId.replace("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
+    resourceId.replace("resourceGroups/example", "resourceGroups/another")]) {
+    const value = { ...input(), resourceId: otherId, expectedResourceId: otherId };
+    assert.throws(() => prepareAzureHandoff(value), /HANDOFF_AZURE_RESOURCE_BINDING_MISMATCH/);
+  }
+});
+
+test("retained HTTP and TCP probes must match one verified HTTP listener port", () => {
+  for (const [probe, error] of [
+    [{ type: "Readiness", httpGet: { path: "/api/health", port: 8080 } }, /HANDOFF_RETAINED_PROBE_PORT_NOT_SERVED/],
+    [{ type: "Startup", tcpSocket: { port: 8080 } }, /HANDOFF_RETAINED_PROBE_PORT_NOT_SERVED/],
+    [{ type: "Readiness", httpGet: { path: "/api/health" } }, /HANDOFF_RETAINED_PROBE_PORT_NOT_SERVED/],
+    [{ type: "Readiness", httpGet: { path: "/api/health", port: "3000" } }, /HANDOFF_RETAINED_PROBE_PORT_NOT_SERVED/],
+    [{ type: "Liveness", httpGet: { path: "/api/health", port: 3000, scheme: "HTTPS" } }, /HANDOFF_RETAINED_PROBE_SCHEME_NOT_SERVED/],
+  ]) {
+    const value = input();
+    value.baseline.containers[0].probes = [probe];
+    value.expectedTemplateSha256 = digest(value.baseline);
+    assert.throws(() => prepareAzureHandoff(value), error);
+  }
+  for (const entries of [[{ name: "PORT", secretRef: "unverified-port" }],
+    [{ name: "PORT", value: "3000" }, { name: "PORT", value: "3000" }],
+    ...["", "0", "65536", "not-a-port"].map(value => [{ name: "PORT", value }])]) {
+    const value = input();
+    value.baseline.containers[0].env.push(...entries);
+    value.expectedTemplateSha256 = digest(value.baseline);
+    assert.throws(() => prepareAzureHandoff(value), /HANDOFF_LISTENER_PORT_UNVERIFIED/);
+  }
+  const value = input();
+  value.baseline.containers[0].env.push({ name: "PORT", value: "8080" });
+  value.baseline.containers[0].probes[0].httpGet.port = 8080;
+  value.baseline.containers[0].probes.push({ type: "Startup", tcpSocket: { port: 8080 } });
+  value.expectedTemplateSha256 = digest(value.baseline);
+  const { candidate, summary } = prepareAzureHandoff(value);
+  assert.equal(summary.listenerPort, 8080);
+  assert.deepEqual(candidate.containers[0].env, value.baseline.containers[0].env);
+  assert.deepEqual(candidate.containers[0].probes, value.baseline.containers[0].probes);
+});
+
 test("every retained HTTP probe must use a reviewed served health path", () => {
   for (const type of ["Readiness", "Liveness", "Startup"]) {
     for (const httpGet of [{ path: "/api/health", port: 3000 }, { port: 3000 }, { path: "/", port: 3000 }, null]) {
@@ -139,9 +197,26 @@ test("CLI refuses stale evidence even when it supplies a matching now field", as
     value.now = Date.parse(value.observedAt);
     await writeFile(inputPath, JSON.stringify(value), { mode: 0o600 });
     const cli = fileURLToPath(new URL("../../scripts/prepare-legacy-azure-handoff.mjs", import.meta.url));
-    assert.throws(() => execFileSync(process.execPath, [cli, inputPath, outputPath], { stdio: "pipe" }),
+    assert.throws(() => execFileSync(process.execPath, [cli, inputPath, outputPath, resourceId], { stdio: "pipe" }),
       error => error.status === 1 && error.stderr.toString().trim() === "HANDOFF_FRESH_BASELINE_REQUIRED");
     await assert.rejects(stat(outputPath), { code: "ENOENT" });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("CLI requires a separate exact resource binding and never emits a mismatched plan", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "handoff-binding-test-"));
+  const inputPath = path.join(directory, "input.json"), outputPath = path.join(directory, "plan.json");
+  const cli = fileURLToPath(new URL("../../scripts/prepare-legacy-azure-handoff.mjs", import.meta.url));
+  try {
+    const value = input();
+    value.resourceId = resourceId.replace("resourceGroups/example", "resourceGroups/another");
+    value.expectedResourceId = value.resourceId;
+    await writeFile(inputPath, JSON.stringify(value), { mode: 0o600 });
+    for (const binding of [[], [resourceId]]) {
+      assert.throws(() => execFileSync(process.execPath, [cli, inputPath, outputPath, ...binding], { stdio: "pipe" }),
+        error => error.status === 1 && /HANDOFF_(INPUT_OUTPUT_AND_RESOURCE_BINDING_REQUIRED|AZURE_RESOURCE_BINDING_MISMATCH)/.test(error.stderr.toString()));
+      await assert.rejects(stat(outputPath), { code: "ENOENT" });
+    }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -155,13 +230,13 @@ test("offline CLI emits only a new private command delta, never baseline environ
     value.expectedTemplateSha256 = digest(value.baseline);
     await writeFile(inputPath, JSON.stringify(value), { mode: 0o600 });
     const cli = fileURLToPath(new URL("../../scripts/prepare-legacy-azure-handoff.mjs", import.meta.url));
-    const stdout = execFileSync(process.execPath, [cli, inputPath, outputPath], { encoding: "utf8" });
+    const stdout = execFileSync(process.execPath, [cli, inputPath, outputPath, resourceId], { encoding: "utf8" });
     const saved = await readFile(outputPath, "utf8"), artifact = JSON.parse(saved);
     assert.deepEqual(Object.keys(artifact).sort(), ["containerCommandDelta", "summary"]);
     assert.equal(saved.includes("synthetic-private-sentinel"), false);
     assert.equal(stdout.includes("synthetic-private-sentinel"), false);
     assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
-    assert.throws(() => execFileSync(process.execPath, [cli, inputPath, outputPath], { stdio: "pipe" }));
+    assert.throws(() => execFileSync(process.execPath, [cli, inputPath, outputPath, resourceId], { stdio: "pipe" }));
     assert.equal(await readFile(outputPath, "utf8"), saved);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

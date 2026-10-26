@@ -3,11 +3,11 @@ import { readFile, writeFile } from "node:fs/promises";
 import { prepareAzureHandoff } from "../deploy/legacy-handoff/azure-utility.mjs";
 
 // Offline artifact creation only. No Azure CLI, auth, network or deployment calls.
-const [inputPath, outputPath] = process.argv.slice(2);
+const [inputPath, outputPath, expectedResourceId] = process.argv.slice(2);
 try {
-  if (!inputPath || !outputPath || process.argv.length !== 4) throw new Error("HANDOFF_INPUT_AND_OUTPUT_REQUIRED");
+  if (!inputPath || !outputPath || !expectedResourceId || process.argv.length !== 5) throw new Error("HANDOFF_INPUT_OUTPUT_AND_RESOURCE_BINDING_REQUIRED");
   const evidence = JSON.parse(await readFile(inputPath, "utf8"));
-  const { candidate, summary } = prepareAzureHandoff(evidence);
+  const { candidate, summary } = prepareAzureHandoff(evidence, { expectedResourceId });
   const container = candidate.containers[0];
   // Never persist or print the full template: it may contain private env values.
   await writeFile(outputPath, JSON.stringify({ summary, containerCommandDelta: {

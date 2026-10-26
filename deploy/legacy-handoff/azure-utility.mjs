@@ -11,7 +11,7 @@ const need = (value, code) => { if (!value) throw new Error(`HANDOFF_${code}`); 
 
 // Serialized as a Node -e program, following the existing sourceFreezeServer
 // command override. It never loads the application, image entrypoint or queues.
-export function frozenHandoffServer(decide, health, healthPaths) {
+export function frozenHandoffServer(decide, health, healthPaths, listenerPort) {
   const http = require("node:http");
   const frozen = JSON.stringify({ error: "source_frozen", applicationWrites: false });
   const server = http.createServer(async (incoming, outgoing) => {
@@ -38,7 +38,7 @@ export function frozenHandoffServer(decide, health, healthPaths) {
       outgoing.end(head ? "" : await result.text());
     } catch { refuse(); }
   });
-  server.listen(Number(process.env.PORT || 3000), "0.0.0.0", () => {
+  server.listen(listenerPort, "0.0.0.0", () => {
     console.log(`HANDOFF_LISTENING:${server.address().port}`);
   });
   process.on("SIGTERM", () => server.close(() => process.exit(0)));
@@ -47,9 +47,12 @@ export function frozenHandoffServer(decide, health, healthPaths) {
 // Offline only. Caller supplies the reviewed current Azure template and hashes.
 // Hash equality binds evidence bytes; it is not authorization to deploy.
 export function prepareAzureHandoff({ baseline, expectedTemplateSha256, expectedCommandSha256,
-  health, healthPaths, hostname, resourceId, observedAt }) {
+  health, healthPaths, hostname, resourceId, observedAt }, { expectedResourceId } = {}) {
   need(LEGACY_HOSTS.includes(hostname), "HOST_NOT_REVIEWED");
-  need(typeof resourceId === "string" && /^\/subscriptions\/[a-f0-9-]{36}\/resourceGroups\/[a-zA-Z0-9_.()-]+\/providers\/Microsoft\.App\/containerApps\/ca-corgtex-chirone-prod-web$/.test(resourceId), "AZURE_RESOURCE_BINDING_REQUIRED");
+  // The trusted caller supplies its reviewed target separately from evidence.
+  // Evidence cannot choose its own subscription/resource-group authorization.
+  need(typeof expectedResourceId === "string" && /^\/subscriptions\/[a-f0-9-]{36}\/resourceGroups\/[a-zA-Z0-9_.()-]+\/providers\/Microsoft\.App\/containerApps\/ca-corgtex-chirone-prod-web$/.test(expectedResourceId), "TRUSTED_AZURE_RESOURCE_BINDING_REQUIRED");
+  need(resourceId === expectedResourceId, "AZURE_RESOURCE_BINDING_MISMATCH");
   const age = Date.now() - Date.parse(observedAt);
   need(Number.isFinite(age) && age >= 0 && age <= 3600000, "FRESH_BASELINE_REQUIRED");
   need(/^[a-f0-9]{64}$/.test(expectedTemplateSha256 || "") && digest(baseline) === expectedTemplateSha256, "TEMPLATE_CHANGED");
@@ -73,22 +76,34 @@ export function prepareAzureHandoff({ baseline, expectedTemplateSha256, expected
     && (!Object.hasOwn(health, "proofSha256") || /^[a-f0-9]{64}$/.test(health.proofSha256)), "FROZEN_WEB_HEALTH_REQUIRED");
   need(Array.isArray(healthPaths) && healthPaths.length > 0 && new Set(healthPaths).size === healthPaths.length
     && healthPaths.every(path => ["/api/health", "/healthz"].includes(path)), "REVIEWED_HEALTH_PATHS_REQUIRED");
+  need(!Object.hasOwn(original, "env") || Array.isArray(original.env), "LISTENER_PORT_UNVERIFIED");
+  const portEntries = (original.env ?? []).filter(entry => entry?.name === "PORT");
+  need(portEntries.length <= 1, "LISTENER_PORT_UNVERIFIED");
+  const portValue = portEntries.length === 0 ? "3000" : portEntries[0].value;
+  need(!portEntries[0]?.secretRef && typeof portValue === "string" && /^[1-9][0-9]{0,4}$/.test(portValue)
+    && Number(portValue) <= 65535, "LISTENER_PORT_UNVERIFIED");
+  const listenerPort = Number(portValue);
   need(!Object.hasOwn(original, "probes") || Array.isArray(original.probes), "RETAINED_PROBE_PATH_NOT_SERVED");
   for (const probe of original.probes ?? []) {
     // An omitted HTTP path defaults to root, which must remain frozen. Never
     // broaden reviewed health authorization or silently rewrite retained probes.
     if (probe && Object.hasOwn(probe, "httpGet")) {
       need(healthPaths.includes(probe.httpGet?.path), "RETAINED_PROBE_PATH_NOT_SERVED");
+      need(probe.httpGet.scheme === undefined || probe.httpGet.scheme === "HTTP", "RETAINED_PROBE_SCHEME_NOT_SERVED");
+      need(probe.httpGet.port === listenerPort, "RETAINED_PROBE_PORT_NOT_SERVED");
+    }
+    if (probe && Object.hasOwn(probe, "tcpSocket")) {
+      need(probe.tcpSocket?.port === listenerPort, "RETAINED_PROBE_PORT_NOT_SERVED");
     }
   }
   const source = `const LEGACY_HOSTS=${JSON.stringify([hostname])};const DESTINATION=${JSON.stringify(DESTINATION)};`
-    + `const decide=${legacyHandoffResponse.toString()};(${frozenHandoffServer.toString()})(decide,${JSON.stringify(health)},${JSON.stringify(healthPaths)});`;
+    + `const decide=${legacyHandoffResponse.toString()};(${frozenHandoffServer.toString()})(decide,${JSON.stringify(health)},${JSON.stringify(healthPaths)},${listenerPort});`;
   const candidate = structuredClone(baseline);
   // Azure command overrides the image ENTRYPOINT; no shell and no inherited
   // Node preload options. The retained image must prove this executable exists.
   candidate.containers[0].command = ["/usr/bin/env", "-u", "NODE_OPTIONS", "-u", "NODE_PATH", "/usr/local/bin/node"];
   candidate.containers[0].args = ["-e", source];
-  return { candidate, summary: { kind: "azure-frozen-web-handoff-preparation", hostname, resourceId, observedAt,
+  return { candidate, summary: { kind: "azure-frozen-web-handoff-preparation", hostname, resourceId, observedAt, listenerPort,
     baselineTemplateSha256: expectedTemplateSha256, baselineCommandSha256: expectedCommandSha256,
     candidateTemplateSha256: digest(candidate), generatedSourceSha256: createHash("sha256").update(source).digest("hex"),
     changedFields: ["containers[0].command", "containers[0].args"],
