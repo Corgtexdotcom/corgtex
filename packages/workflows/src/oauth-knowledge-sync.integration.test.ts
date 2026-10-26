@@ -1,14 +1,17 @@
 import { withOAuthKnowledgeSyncLease } from "../../domain/src/oauth-knowledge-sync-lease";
-import type { Prisma } from "@prisma/client";
+import { PrismaClient, type Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, expect, it, vi } from "vitest";
 import { encryptSecret, getPrismaClient, prisma, type AppActor } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import { searchIndexedKnowledge } from "../../knowledge/src/retrieval";
 import { isArtifactInputProofReadable, captureArtifactInputProof } from "../../domain/src/source-lineage";
 import { createCrmAccount, createContact, getCrmConversation, listCrmActivities } from "../../domain/src/crm";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
-import { handleOAuthDocumentsSync, handleOAuthEmailSync } from "./handlers/knowledge-sync";
+import * as knowledge from "@corgtex/knowledge";
+import * as domain from "@corgtex/domain";
+import { runPendingJobs } from "./outbox";
+import { handleCalendarSync, handleOAuthDocumentsSync, handleOAuthEmailSync } from "./handlers/knowledge-sync";
 
 beforeEach(truncateAllTables);
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.useRealTimers(); });
@@ -597,3 +600,197 @@ it.each([["GOOGLE", "fetch"], ["GOOGLE", "model"], ["MICROSOFT", "fetch"], ["MIC
   expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, originalNativeProof)).toBe(true);
   if (phase === "fetch") expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, originalDocumentProof)).toBe(true);
 }, 120_000);
+
+// Observe committed authority through a distinct Prisma connection, including the
+// trigger-maintained epochs and permission events. All providers below are stubbed.
+const calendarObserver = new PrismaClient();
+afterAll(() => calendarObserver.$disconnect());
+const calendarDiagnostic = "Calendar sync failed; retry after checking provider and processing availability.";
+async function calendarFixture(provider: "GOOGLE" | "MICROSOFT") {
+  const f = await fixture("documents", false, provider);
+  await f.run();
+  const emailJob = await prisma.workflowJob.create({data: {workspaceId: f.workspace.id, type: "oauth.email.sync",
+    payload: {connectionId: f.connection.id}, status: "RUNNING", lockedBy: "synthetic-email-worker", lockedAt: new Date(), startedAt: new Date(), attempts: 1}});
+  await handleOAuthEmailSync(emailJob.id, {connectionId: f.connection.id}, f.workspace.id, structuredClone(emailJob));
+  const inputs = await prisma.oAuthProviderFetchInput.findMany({where: {workspaceId: f.workspace.id}, orderBy: {id: "asc"}});
+  expect(new Set(inputs.map(input => input.sourceKind))).toEqual(new Set(["documents", "email"]));
+  const nativeProofs = await Promise.all(inputs.map(input => captureArtifactInputProof(f.actor, f.workspace.id, [{kind: "OAuthProviderFetchInput", id: input.id}])));
+  const documents = await prisma.document.findMany({where: {workspaceId: f.workspace.id}, orderBy: {id: "asc"}});
+  expect(documents).toHaveLength(2);
+  const derivedProofs = await Promise.all(documents.map(document => captureArtifactInputProof(f.actor, f.workspace.id, [{kind: "Document", id: document.id}])));
+  const respond = f.fetchMock.getMockImplementation()!;
+  const isCalendar = (input: string | URL | Request) => String(input).includes("/calendar/v3/") || String(input).includes("/v1.0/me/events?");
+  const isToken = (input: string | URL | Request) => String(input).includes("/token");
+  const healthy = async (input: string | URL | Request) => isCalendar(input) ? Response.json({items: [], value: []})
+    : isToken(input) ? Response.json({access_token: "synthetic-refreshed-calendar", expires_in: 3600}) : respond(input);
+  f.fetchMock.mockImplementation(healthy);
+  const run = () => handleCalendarSync("synthetic-calendar-job", {connectionId: f.connection.id}, f.workspace.id);
+  await run();
+  const read = async () => ({
+    connection: await calendarObserver.oAuthConnection.findUniqueOrThrow({where: {id: f.connection.id}}),
+    epochs: await calendarObserver.sourcePermissionEpoch.findMany({where: {workspaceId: f.workspace.id,
+      sourceId: f.connection.id, sourceKind: {in: ["OAuthConnectionPolicy", "OAuthDocumentsPolicy", "OAuthEmailPolicy"]}}, orderBy: {id: "asc"}}),
+    inputs: await calendarObserver.oAuthProviderFetchInput.findMany({where: {workspaceId: f.workspace.id}, orderBy: {id: "asc"}}),
+    lineage: await calendarObserver.artifactInputLineage.findMany({where: {workspaceId: f.workspace.id}, orderBy: {id: "asc"}}),
+    permissionEvents: await calendarObserver.event.findMany({where: {workspaceId: f.workspace.id, type: "source-permission.changed"}, orderBy: {id: "asc"}}),
+  });
+  const readable = async (expected = true) => {
+    for (const proof of [...nativeProofs, ...derivedProofs]) expect(await isArtifactInputProofReadable(f.actor, f.workspace.id, proof)).toBe(expected);
+  };
+  const expire = () => prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {expiresAt: new Date(0),
+    refreshToken: encryptSecret("synthetic-refresh"), tokenStorageVersion: "aes-256-gcm"}});
+  return {...f, run, read, readable, expire, nativeProofs, derivedProofs, healthy, isCalendar, isToken};
+}
+function calendarFailure(failure: number | "network" | "malformed" | "empty") {
+  if (failure === "network") throw new TypeError("Synthetic private transport payload");
+  return failure === "malformed" ? new Response("{invalid-json") : failure === "empty" ? new Response("")
+    : new Response("Synthetic private provider payload", {status: failure});
+}
+type CalendarState = Awaited<ReturnType<Awaited<ReturnType<typeof calendarFixture>>["read"]>>;
+function expectPreservedCalendarAuthority(before: CalendarState, after: CalendarState) {
+  expect(after).toEqual({...before, connection: {...before.connection, updatedAt: after.connection.updatedAt, lastSyncError: calendarDiagnostic}});
+}
+it.each(["GOOGLE", "MICROSOFT"] as const)("preserves saved Docs and Email proofs through %s Calendar failures and a real outbox retry", async provider => {
+  const f = await calendarFixture(provider);
+  for (const failure of [429, 503, 401, 403, "network", "malformed"] as const) {
+    const before = await f.read();
+    f.fetchMock.mockImplementation(async input => f.isCalendar(input) ? calendarFailure(failure) : f.healthy(input));
+    await expect(f.run()).rejects.toThrow();
+    expectPreservedCalendarAuthority(before, await f.read());
+    // Calendar-only denials cannot prove revocation of either native family.
+    await f.readable();
+    f.fetchMock.mockImplementation(f.healthy);
+    await f.run();
+    expect((await f.read()).connection.lastSyncError).toBeNull();
+  }
+  const job = await prisma.workflowJob.create({data: {workspaceId: f.workspace.id, type: "calendar.sync", payload: {connectionId: f.connection.id}}});
+  const before = await f.read();
+  let fetches = 0, unavailable = true;
+  f.fetchMock.mockImplementation(async input => {
+    if (f.isCalendar(input)) { fetches++; if (unavailable) return calendarFailure(503); }
+    return f.healthy(input);
+  });
+  expect(await runPendingJobs("synthetic-calendar-worker", 1, 1)).toBe(1);
+  expect(await calendarObserver.workflowJob.findUniqueOrThrow({where: {id: job.id}})).toMatchObject({status: "PENDING", attempts: 1, completedAt: null});
+  expectPreservedCalendarAuthority(before, await f.read());
+  unavailable = false;
+  await prisma.workflowJob.update({where: {id: job.id}, data: {runAfter: new Date(0)}});
+  expect(await runPendingJobs("synthetic-calendar-worker", 1, 1)).toBe(1);
+  expect(fetches).toBe(2);
+  expect(await calendarObserver.workflowJob.findUniqueOrThrow({where: {id: job.id}})).toMatchObject({status: "COMPLETED", attempts: 2, error: null});
+  expect((await f.read()).connection).toMatchObject({status: "ACTIVE", lastSyncError: null});
+  expect((await f.read()).connection.lastSyncAt!.getTime()).toBeGreaterThan(before.connection.lastSyncAt!.getTime());
+  await f.readable();
+}, 120_000);
+
+it.each(["GOOGLE", "MICROSOFT"] as const)("keeps both %s proof families through transient refresh and fails closed on invalid_grant", async provider => {
+  const f = await calendarFixture(provider);
+  for (const failure of [429, 503, "network", "malformed", "empty"] as const) {
+    await f.expire();
+    const before = await f.read();
+    f.fetchMock.mockImplementation(async input => f.isToken(input) ? calendarFailure(failure) : f.healthy(input));
+    await expect(f.run()).rejects.toThrow();
+    expectPreservedCalendarAuthority(before, await f.read());
+    for (const proof of f.nativeProofs) await expect(isArtifactInputProofReadable(f.actor, f.workspace.id, proof)).rejects.toThrow();
+    f.fetchMock.mockImplementation(f.healthy);
+    await f.readable();
+    await f.run();
+  }
+  await f.expire();
+  const beforeRefresh = await f.read();
+  f.fetchMock.mockImplementation(async input => f.isCalendar(input) ? calendarFailure(503) : f.healthy(input));
+  await expect(f.run()).rejects.toThrow();
+  const refreshed = await f.read();
+  expect(refreshed.connection).toMatchObject({status: "ACTIVE", lastSyncAt: beforeRefresh.connection.lastSyncAt, lastSyncError: calendarDiagnostic});
+  expect(refreshed.connection.accessToken).not.toBe(beforeRefresh.connection.accessToken);
+  expect(refreshed.epochs).toEqual(beforeRefresh.epochs);
+  expect(refreshed.permissionEvents).toEqual(beforeRefresh.permissionEvents);
+  await f.readable();
+  await f.expire();
+  const beforeDenial = await f.read();
+  f.fetchMock.mockImplementation(async input => f.isToken(input) ? Response.json({error: "invalid_grant"}, {status: 400}) : f.healthy(input));
+  await expect(f.run()).rejects.toMatchObject({code: "OAUTH_PROVIDER_AUTH_REVOKED"});
+  const denied = await f.read();
+  expect(denied.connection).toMatchObject({status: "ERROR", lastSyncAt: beforeDenial.connection.lastSyncAt});
+  expect(denied.epochs).not.toEqual(beforeDenial.epochs);
+  expect(denied.inputs).toEqual(beforeDenial.inputs);
+  expect(denied.lineage).toEqual(beforeDenial.lineage);
+  await f.readable(false);
+  // A status-only restoration cannot revive captured epochs. This is synthetic
+  // evidence, not an application recovery path or broad reactivation behavior.
+  await prisma.oAuthConnection.update({where: {id: f.connection.id}, data: {status: "ACTIVE"}});
+  f.fetchMock.mockImplementation(f.healthy);
+  await f.readable(false);
+}, 120_000);
+
+it.each(["index", "recorder", "crm"] as const)("retains both saved proof families after a downstream Calendar %s failure", async phase => {
+  const f = await calendarFixture("GOOGLE");
+  const before = await f.read();
+  const failure = new Error("Synthetic downstream private payload");
+  const target = phase === "index" ? vi.spyOn(knowledge, "syncKnowledgeForSource") : phase === "recorder"
+    ? vi.spyOn(domain, "syncCalendarEventRecorder") : vi.spyOn(domain, "materializeCrmCalendarTouchpoints");
+  target.mockRejectedValueOnce(failure);
+  const event = {id: "synthetic-event", summary: "Synthetic meeting", start: {dateTime: "2026-10-19T12:00:00Z"},
+    end: {dateTime: "2026-10-19T13:00:00Z"}, hangoutLink: "https://meet.google.com/aaa-bbbb-ccc", attendees: []};
+  f.fetchMock.mockImplementation(async input => f.isCalendar(input) ? Response.json({items: [event]}) : f.healthy(input));
+  await expect(f.run()).rejects.toBe(failure);
+  expect(target).toHaveBeenCalledTimes(1);
+  expectPreservedCalendarAuthority(before, await f.read());
+  await f.readable();
+  target.mockRestore();
+  f.fetchMock.mockImplementation(f.healthy);
+  await f.run();
+  expect((await f.read()).connection.lastSyncError).toBeNull();
+});
+
+it("retains committed Calendar CRM work and retries it without duplicate activity after a later failure", async () => {
+  const f = await calendarFixture("GOOGLE");
+  const account = await createCrmAccount(f.actor, {workspaceId: f.workspace.id, name: "Synthetic calendar account", domain: "synthetic.example"});
+  await createContact(f.actor, {workspaceId: f.workspace.id, accountId: account.id, name: "Synthetic attendee", email: f.remote.from});
+  const before = await f.read();
+  const materialize = domain.materializeCrmCalendarTouchpoints;
+  const failure = new Error("Synthetic failure after committed CRM processing");
+  const target = vi.spyOn(domain, "materializeCrmCalendarTouchpoints").mockImplementationOnce(async params => {
+    await materialize(params);
+    throw failure;
+  });
+  const event = {id: "synthetic-committed-event", summary: "Synthetic meeting", start: {dateTime: "2026-10-19T12:00:00Z"},
+    end: {dateTime: "2026-10-19T13:00:00Z"}, hangoutLink: "https://meet.google.com/aaa-bbbb-ccc", attendees: [{email: f.remote.from}]};
+  f.fetchMock.mockImplementation(async input => f.isCalendar(input) ? Response.json({items: [event]}) : f.healthy(input));
+  await expect(f.run()).rejects.toBe(failure);
+  expectPreservedCalendarAuthority(before, await f.read());
+  const committed = await calendarObserver.crmActivity.findMany({where: {workspaceId: f.workspace.id}});
+  expect(committed).toHaveLength(1);
+  await f.readable();
+  target.mockRestore();
+  await f.run();
+  expect(await calendarObserver.crmActivity.findMany({where: {workspaceId: f.workspace.id}, select: {id: true}})).toEqual([{id: committed[0]!.id}]);
+  expect((await f.read()).connection.lastSyncError).toBeNull();
+});
+
+it.each([
+  ["GOOGLE", "reconnect", "diagnostic"], ["GOOGLE", "reconnect", "checkpoint"],
+  ["GOOGLE", "disconnect", "diagnostic"], ["GOOGLE", "disconnect", "checkpoint"],
+  ["MICROSOFT", "reconnect", "diagnostic"], ["MICROSOFT", "reconnect", "checkpoint"],
+  ["MICROSOFT", "disconnect", "diagnostic"], ["MICROSOFT", "disconnect", "checkpoint"],
+] as const)("fences the actual %s %s during Calendar %s writes", async (provider, change, phase) => {
+  const f = await calendarFixture(provider);
+  const update = prisma.oAuthConnection.update.bind(prisma.oAuthConnection);
+  let replacement: CalendarState["connection"] | undefined;
+  vi.spyOn(prisma.oAuthConnection, "update").mockImplementation((async args => {
+    const data = args.data;
+    const matchingWrite = phase === "diagnostic" ? data.lastSyncError === calendarDiagnostic : data.lastSyncAt !== undefined;
+    if (!replacement && matchingWrite) {
+      await update({where: {id: f.connection.id}, data: change === "disconnect"
+        ? {status: "DISCONNECTED", disconnectedAt: new Date()}
+        : {accessToken: encryptSecret("synthetic-reconnected-access"), refreshToken: encryptSecret("synthetic-reconnected-refresh"),
+          expiresAt: new Date(Date.now() + 7200_000), syncSettings: {...f.connection.syncSettings as Prisma.JsonObject, calendar: {enabled: false}}}});
+      replacement = await calendarObserver.oAuthConnection.findUniqueOrThrow({where: {id: f.connection.id}});
+    }
+    return update(args);
+  }) as typeof prisma.oAuthConnection.update);
+  if (phase === "diagnostic") f.fetchMock.mockImplementation(async input => f.isCalendar(input) ? calendarFailure(503) : f.healthy(input));
+  await expect(f.run()).rejects.toMatchObject({code: "OAUTH_PROVIDER_INDETERMINATE"});
+  expect(replacement).toBeDefined();
+  expect(await calendarObserver.oAuthConnection.findUniqueOrThrow({where: {id: f.connection.id}})).toEqual(replacement);
+});
