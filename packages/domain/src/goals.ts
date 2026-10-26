@@ -1,3 +1,6 @@
+import { requireCreationInputRoots } from "./draft-permissions";
+import { randomUUID } from "node:crypto";
+import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { prisma } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { appendEvents } from "./events";
@@ -6,7 +9,10 @@ import { recordAudit } from "./audit-trail";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
+import { captureHumanArtifactInputAdvance, advanceHumanArtifactInputLineage, readableArtifactIds, readableBrainSourceIds, type LineageInput, type LineageRoot } from "./source-lineage";
+import { DigestReadRelease, captureReadableDigestInputs } from "./digest-lineage";
 import { privacyFilter } from "./privacy";
+import { resolveKnowledgeAccessDomains } from "./brain-access";
 import {
   requireCollaborativeWorkItemEditor,
   requirePrivateDraftEditor,
@@ -19,7 +25,7 @@ import {
   normalizeDuplicateGuardText,
   type DuplicateGuardOptions,
 } from "./duplicate-guard";
-import type { Goal, GoalLevel, GoalCadence, GoalStatus, Prisma } from "@prisma/client";
+import type { Circle, Goal, GoalLevel, GoalCadence, GoalStatus, Prisma } from "@prisma/client";
 import {
   acquireWorkItemAdvisoryLock,
   changedDataFields,
@@ -53,6 +59,8 @@ type CreateGoalParams = {
   keyResults?: GoalKeyResultInput[];
   duplicateGuard?: DuplicateGuardOptions | null;
   _membership?: MembershipSummary | null;
+  lineageInputs?: LineageInput[];
+  lineageRoots?: LineageRoot[];
 };
 
 const COMPANY_UNDERSTANDING_SOURCE = "company-understanding";
@@ -101,6 +109,7 @@ async function lockGoalForAuthorizedMutation(
     archivedAt?: Date | null;
     isPrivate?: boolean | null;
     status: GoalStatus;
+    updatedAt?: Date;
   },
 ) {
   try {
@@ -112,7 +121,7 @@ async function lockGoalForAuthorizedMutation(
         status: goal.status,
         isPrivate: goal.isPrivate ?? false,
       },
-      data: { updatedAt: new Date() },
+      data: { updatedAt: goal.updatedAt ?? new Date() },
       select: { id: true },
     });
   } catch (error) {
@@ -134,6 +143,7 @@ async function lockGoalForKeyResultMutation(
     authorUserId?: string | null;
     isPrivate?: boolean | null;
     status: GoalStatus;
+    updatedAt?: Date;
   },
 ) {
   requireEditableGoalKeyResults(actor, membership, goal);
@@ -236,6 +246,9 @@ async function assertGoalInWorkspace(tx: Prisma.TransactionClient, workspaceId: 
       status: true,
       progressPercent: true,
       version: true,
+      sortOrder: true,
+      createdAt: true,
+      updatedAt: true,
     },
   });
   invariant(goal && goal.workspaceId === workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
@@ -363,34 +376,43 @@ function canReadGoalRecord(
     authorUserId?: string | null;
   },
 ) {
-  if (actor.kind === "user" && actor.user.globalRole === "OPERATOR") return true;
   if (goal.isPrivate !== true) return true;
   if (goal.status !== "DRAFT") return false;
-  if (actor.kind === "agent") return true;
+  if (actor.kind !== "user" || !membership?.isActive || membership.userId !== actor.user.id) return false;
   if (membership?.role === "ADMIN") return true;
   return actor.kind === "user" && goal.authorUserId === actor.user.id;
 }
 
-type GoalParentVisibilityRecord = {
+type GoalParentVisibilityRecord = Pick<Goal, "id" | "isPrivate" | "status" | "authorUserId"> & {
+  circle?: Circle | null;
   parentGoal?: GoalParentVisibilityRecord | null;
-  isPrivate?: boolean | null;
-  status?: GoalStatus | null;
-  authorUserId?: string | null;
 };
 
-function stripInvisibleGoalParents<T extends { parentGoal?: GoalParentVisibilityRecord | null }>(
-  actor: AppActor,
-  membership: MembershipSummary | null | undefined,
-  goal: T,
-): T {
-  if (!goal.parentGoal) return goal;
-  if (!canReadGoalRecord(actor, membership, goal.parentGoal)) {
-    return { ...goal, parentGoal: null };
+async function readableGoalParents<T extends GoalParentVisibilityRecord>(
+  release: DigestReadRelease, actor: AppActor, membership: MembershipSummary | null | undefined, goal: T,
+): Promise<T> {
+  const circle = goal.circle ? (await release.capture("Circle", [goal.circle])).records[0] ?? null : null;
+  let parentGoal: GoalParentVisibilityRecord | null = null;
+  if (goal.parentGoal && canReadGoalRecord(actor, membership, goal.parentGoal)
+    && (await release.capture("Goal", [goal.parentGoal])).records.length) {
+    parentGoal = await readableGoalParents(release, actor, membership, goal.parentGoal);
   }
-  return {
-    ...goal,
-    parentGoal: stripInvisibleGoalParents(actor, membership, goal.parentGoal),
-  };
+  return {...goal, circle, ...(goal.parentGoal !== undefined ? {parentGoal} : {})};
+}
+
+
+async function createGoalKeyResultsWithLineage(tx: Prisma.TransactionClient, actor: AppActor,
+  params: CreateGoalParams, goalId: string, keyResults: Prisma.KeyResultCreateManyInput[]) {
+  const now = new Date();
+  const rows = keyResults.map((keyResult) => ({ ...keyResult, goalId, id: randomUUID(),
+    targetValue: keyResult.targetValue ?? null, currentValue: keyResult.currentValue ?? 0,
+    unit: keyResult.unit ?? null, progressPercent: keyResult.progressPercent ?? 0,
+    sortOrder: keyResult.sortOrder ?? 0, createdAt: now, updatedAt: now }));
+  const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, capture: params });
+  await tx.keyResult.createMany({ data: rows });
+  for (const row of rows) await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+    artifact: { kind: "KeyResult", id: row.id }, content: row, receipt });
+  return rows;
 }
 
 async function appendMissingDuplicateGoalKeyResults(
@@ -410,7 +432,6 @@ async function appendMissingDuplicateGoalKeyResults(
 
     const existingKeyResults = await tx.keyResult.findMany({
       where: { goalId },
-      select: { title: true, progressPercent: true, sortOrder: true },
       orderBy: { sortOrder: "asc" },
     });
     const existingTitles = new Set(existingKeyResults.map((keyResult) => normalizeDuplicateGuardText(keyResult.title)));
@@ -418,14 +439,18 @@ async function appendMissingDuplicateGoalKeyResults(
     if (missingKeyResults.length === 0) return false;
 
     const maxSortOrder = existingKeyResults.reduce((max, keyResult) => Math.max(max, keyResult.sortOrder ?? 0), -1);
-    await tx.keyResult.createMany({
-      data: missingKeyResults.map((keyResult, index) => ({
+    const addedRows = await createGoalKeyResultsWithLineage(tx, actor, params, goalId, missingKeyResults.map((keyResult, index) => ({
         ...keyResult,
         goalId,
         sortOrder: maxSortOrder + index + 1,
-      })),
-    });
+      })));
 
+    const progressInputs = [...existingKeyResults, ...addedRows].map((keyResult) => ({
+      kind: "KeyResult" as const, id: keyResult.id, snapshot: keyResult,
+    }));
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Goal", id: goal.id }, before: goal, completeCopy: true,
+      dependencies: progressInputs, snapshotDependencies: progressInputs });
     const progressValues = [
       ...existingKeyResults.map((keyResult) => keyResult.progressPercent ?? 0),
       ...missingKeyResults.map((keyResult) => keyResult.progressPercent),
@@ -461,6 +486,9 @@ async function appendMissingDuplicateGoalKeyResults(
       where: { id: goalId, version: goal.version },
       data: { progressPercent, version: newVersion },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Goal", id: goal.id }, content: updated, receipt });
+
 
     await recomputeGoalParentsInTransaction(tx, [goal.parentGoalId], actor);
 
@@ -502,6 +530,9 @@ export async function createGoal(
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
   });
+  const requestedStatus = params.status ?? (actor.kind === "agent" ? "ACTIVE" : "DRAFT");
+  const isPrivate = params.isPrivate ?? (requestedStatus === "DRAFT");
+  params = { ...params, lineageRoots: await requireCreationInputRoots({ actor, workspaceId: params.workspaceId, isPrivate, roots: params.lineageRoots }) };
 
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Goal title is required.");
@@ -519,8 +550,12 @@ export async function createGoal(
     startDate: params.startDate,
     actorUserId: actor.kind === "user" ? actor.user.id : null,
     membershipId: membership?.id ?? null,
-    includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
-  }, params.duplicateGuard);
+    includePrivate: actor.kind === "user" && membership?.role === "ADMIN",
+  }, params.duplicateGuard, undefined, async (rows) => {
+    const records = rows as Array<{ id: string; [key: string]: unknown }>;
+    const visible = await readableArtifactIds(actor, params.workspaceId, "Goal", records);
+    return records.filter((record) => visible.has(record.id));
+  });
   if (duplicateDecision?.resolution === "use_existing") {
     return getGoal(actor, { workspaceId: params.workspaceId, goalId: duplicateDecision.match.entityId });
   }
@@ -531,6 +566,8 @@ export async function createGoal(
       workspaceId: params.workspaceId,
       goalId: duplicateDecision.match.entityId,
       _membership: params._membership,
+      lineageInputs: params.lineageInputs,
+      lineageRoots: params.lineageRoots,
     };
     if ((mergedDescription ?? null) !== (existing.descriptionMd ?? null)) updateParams.descriptionMd = mergedDescription;
     if (!existing.ownerMemberId && params.ownerMemberId) updateParams.ownerMemberId = params.ownerMemberId;
@@ -541,7 +578,7 @@ export async function createGoal(
     if (params.cadence && existing.cadence !== params.cadence) updateParams.cadence = params.cadence;
     if (params.level && existing.level !== params.level) updateParams.level = params.level;
     if (params.status && existing.status !== params.status) updateParams.status = params.status;
-    const updatedFields = Object.keys(updateParams).length > 3;
+    const updatedFields = Object.keys(updateParams).some((field) => !["workspaceId", "goalId", "_membership", "lineageInputs", "lineageRoots"].includes(field));
     if (updatedFields) {
       updateParams.expectedVersion = existing.version;
       await updateGoal(actor, updateParams);
@@ -553,13 +590,12 @@ export async function createGoal(
   }
 
   return prisma.$transaction(async (tx) => {
+    await requireCreationInputRoots({ actor, workspaceId: params.workspaceId, isPrivate, roots: params.lineageRoots, tx });
     await validateGoalReferences(tx, actor, membership, params);
     const keyResults = normalizeKeyResults(params.keyResults);
     const progressPercent = keyResults.length > 0
       ? Math.round(keyResults.reduce((total, keyResult) => total + keyResult.progressPercent, 0) / keyResults.length)
       : 0;
-    const requestedStatus = params.status ?? (actor.kind === "agent" ? "ACTIVE" : "DRAFT");
-    const isPrivate = params.isPrivate ?? (requestedStatus === "DRAFT");
     const status = isPrivate
       ? "DRAFT"
       : requestedStatus === "DRAFT"
@@ -572,6 +608,7 @@ export async function createGoal(
       authorUserId = await resolveWorkspaceMemberUserId(tx, params.workspaceId, params.authorMemberId, "Goal author must be an active member of this workspace.");
     }
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, capture: params });
     const goal = await tx.goal.create({
       data: {
         workspaceId: params.workspaceId,
@@ -592,6 +629,9 @@ export async function createGoal(
       },
     });
 
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Goal", id: goal.id }, content: goal, receipt });
+
     await ensureWorkspacePermalink(tx, actor, {
       workspaceId: params.workspaceId,
       entityType: "Goal",
@@ -600,12 +640,7 @@ export async function createGoal(
     });
 
     if (keyResults.length > 0) {
-      await tx.keyResult.createMany({
-        data: keyResults.map((keyResult) => ({
-          goalId: goal.id,
-          ...keyResult,
-        })),
-      });
+      await createGoalKeyResultsWithLineage(tx, actor, params, goal.id, keyResults.map((keyResult) => ({ goalId: goal.id, ...keyResult })));
     }
 
     await recordAudit(tx, actor, {
@@ -639,7 +674,7 @@ export async function createGoal(
 
 export async function updateGoal(
   actor: AppActor,
-  params: {
+  params: ProducerLineageParams & {
     workspaceId: string;
     goalId: string;
     title?: string;
@@ -666,6 +701,8 @@ export async function updateGoal(
   return prisma.$transaction(async (tx) => {
     await acquireWorkItemAdvisoryLock(tx, "Goal", params.goalId);
     const goal = await assertGoalInWorkspace(tx, params.workspaceId, params.goalId);
+    invariant((await readableArtifactIds(actor, params.workspaceId, "Goal", [goal], tx)).has(goal.id),
+      404, "NOT_FOUND", "Goal not found.");
     const parentGoalIdsToRecompute = new Set<string>();
     if (
       params.parentGoalId !== undefined
@@ -785,6 +822,8 @@ export async function updateGoal(
     const changedUpdateFields = changedDataFields(goal as unknown as Record<string, unknown>, data);
     if (changedUpdateFields.length === 0) return goal;
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Goal", id: goal.id }, before: goal, capture: params });
     let updated: typeof goal;
     try {
       updated = await tx.goal.update({
@@ -804,6 +843,8 @@ export async function updateGoal(
       }
       throw error;
     }
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Goal", id: goal.id }, content: updated, receipt });
     if (
       changedUpdateFields.includes("parentGoalId")
       || changedUpdateFields.includes("progressPercent")
@@ -943,6 +984,28 @@ export async function deleteGoal(
   });
 }
 
+const goalReaderUserSelect = {
+  id: true, displayName: true, email: true, bio: true, avatarUrl: true,
+  linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true,
+} satisfies Prisma.UserSelect;
+const goalReaderMemberInclude = { user: { select: goalReaderUserSelect } } satisfies Prisma.MemberInclude;
+type GoalReaderMember = Prisma.MemberGetPayload<{ include: typeof goalReaderMemberInclude }>;
+
+async function readableGoalMember(release: DigestReadRelease, member: GoalReaderMember | null) {
+  if (!member) return null;
+  const user = member.user;
+  const canonical = { ...member, user: { id: user.id, displayName: user.displayName, email: user.email } };
+  if (!(await release.capture("Member", [canonical])).records.length) return null;
+  if (!(await release.capture("User", [user])).records.length) return null;
+  return { ...member, user: { displayName: user.displayName, email: user.email } };
+}
+
+function goalReadRelease(actor: AppActor, workspaceId: string, release?: DigestReadRelease) {
+  invariant(!release || release.actor === actor && release.workspaceId === workspaceId,
+    409, "SOURCE_CHANGED", "Goal read collection scope changed.");
+  return release ?? new DigestReadRelease(actor, workspaceId);
+}
+
 export async function getGoal(
   actor: AppActor,
   params: {
@@ -950,7 +1013,8 @@ export async function getGoal(
     goalId: string;
     includeArchived?: boolean;
     _membership?: MembershipSummary | null;
-  }
+  },
+  readRelease?: DigestReadRelease,
 ) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -966,86 +1030,121 @@ export async function getGoal(
       ...(params.includeArchived ? {} : { archivedAt: null }),
     },
     include: {
-      ownerMember: {
-        include: {
-          user: {
-            select: { displayName: true, email: true },
-          },
-        },
-      },
-      childGoals: {
-        where: {
-          ...privacyFilter(actor, membership),
-          archivedAt: null,
-        },
-      },
-      keyResults: {
-        orderBy: { sortOrder: "asc" },
-      },
-      updates: {
-        orderBy: { createdAt: "desc" },
-        include: {
-          authorMember: {
-            include: {
-              user: {
-                select: { displayName: true, email: true },
-              },
-            },
-          },
-        },
-      },
+      ownerMember: { include: goalReaderMemberInclude },
+      childGoals: { where: { ...privacyFilter(actor, membership), archivedAt: null } },
+      keyResults: { orderBy: { sortOrder: "asc" } },
+      updates: { orderBy: { createdAt: "desc" }, include: { authorMember: { include: goalReaderMemberInclude } } },
     },
   });
 
   invariant(goal, 404, "NOT_FOUND", "Goal not found.");
-  return goal;
+  const release = goalReadRelease(actor, params.workspaceId, readRelease);
+  invariant((await release.capture("Goal", [goal])).records.length, 404, "NOT_FOUND", "Goal not found.");
+  const childGoals = (await release.capture("Goal", goal.childGoals ?? [])).records;
+  const keyResults = (await release.capture("KeyResult", goal.keyResults ?? [])).records;
+  const admittedUpdates = (await release.capture("GoalUpdate", goal.updates ?? [])).records;
+  const ownerMember = await readableGoalMember(release, goal.ownerMember);
+  const updates = [];
+  for (const update of admittedUpdates) updates.push({ ...update, authorMember: await readableGoalMember(release, update.authorMember) });
+  return release.finish({ ...goal, ownerMember, childGoals, keyResults, updates });
 }
 
-export async function listGoals(
-  actor: AppActor,
-  params: {
-    workspaceId: string;
-    level?: GoalLevel;
-    cadence?: GoalCadence;
-    circleId?: string | null;
-    ownerMemberId?: string | null;
-    status?: GoalStatus;
-    parentGoalId?: string | null;
-    take?: number;
-    skip?: number;
-    archiveFilter?: ArchiveFilter;
-    _membership?: MembershipSummary | null;
+type ListGoalsParams = {
+  workspaceId: string;
+  level?: GoalLevel;
+  cadence?: GoalCadence;
+  circleId?: string | null;
+  ownerMemberId?: string | null;
+  status?: GoalStatus;
+  parentGoalId?: string | null;
+  take?: number;
+  skip?: number;
+  archiveFilter?: ArchiveFilter;
+  _membership?: MembershipSummary | null;
+};
+
+/** A fixed bounded candidate window; the cursor follows the last consumed row. */
+export async function listGoalsPage(actor: AppActor, params: ListGoalsParams & {cursor?: string}, readRelease?: DigestReadRelease) {
+  const membership = await requireWorkspaceMembership({actor, workspaceId:params.workspaceId, resolvedMembership:params._membership});
+  const take = params.take ?? 100, skip = params.skip ?? 0;
+  invariant(Number.isSafeInteger(take) && take > 0 && take <= 200 && Number.isSafeInteger(skip) && skip >= 0 && skip <= 200,
+    400, "INVALID_INPUT", "Invalid goal window.");
+  const query: Prisma.GoalWhereInput = {workspaceId:params.workspaceId,...privacyFilter(actor,membership),...archiveFilterWhere(params.archiveFilter)};
+  if(params.level!==undefined)query.level=params.level;
+  if(params.cadence!==undefined)query.cadence=params.cadence;
+  if(params.circleId!==undefined)query.circleId=params.circleId;
+  if(params.ownerMemberId!==undefined)query.ownerMemberId=params.ownerMemberId;
+  if(params.status!==undefined)query.status=params.status;
+  if(params.parentGoalId!==undefined)query.parentGoalId=params.parentGoalId;
+  const scope=JSON.stringify([params.workspaceId,params.level,params.cadence,
+    params.circleId===undefined?"*":params.circleId,params.ownerMemberId===undefined?"*":params.ownerMemberId,
+    params.status,params.parentGoalId===undefined?"*":params.parentGoalId,params.archiveFilter??"active"]);
+  let after:Pick<Goal,"id"|"sortOrder"|"createdAt">|undefined;
+  if(params.cursor!==undefined) {
+    try {
+      invariant(params.cursor.length<=4096&&/^[A-Za-z0-9_-]+$/.test(params.cursor),400,"INVALID_INPUT","Invalid goal cursor.");
+      const value=JSON.parse(Buffer.from(params.cursor,"base64url").toString("utf8"));
+      invariant(value?.purpose==="goals-window-v1"&&value.scope===scope&&typeof value.id==="string"&&value.id.length>0&&value.id.length<=256
+        &&Number.isSafeInteger(value.sortOrder)&&typeof value.createdAt==="string"&&Number.isFinite(Date.parse(value.createdAt)),400,"INVALID_INPUT","Invalid goal cursor.");
+      after={id:value.id,sortOrder:value.sortOrder,createdAt:new Date(value.createdAt)};
+    }catch{invariant(false,400,"INVALID_INPUT","Invalid goal cursor.");}
   }
-) {
-  const membership = await requireWorkspaceMembership({
-    actor,
-    workspaceId: params.workspaceId,
-    resolvedMembership: params._membership,
+  const release=goalReadRelease(actor,params.workspaceId,readRelease);
+  const include={ownerMember:{include:goalReaderMemberInclude},keyResults:true,circle:true} satisfies Prisma.GoalInclude;
+  const candidates=await prisma.goal.findMany({where:{AND:[query,...(after?[{OR:[
+    {sortOrder:{gt:after.sortOrder}},
+    {sortOrder:after.sortOrder,createdAt:{lt:after.createdAt}},
+    {sortOrder:after.sortOrder,createdAt:after.createdAt,id:{gt:after.id}},
+  ]}]:[])]},orderBy:[{sortOrder:"asc"},{createdAt:"desc"},{id:"asc"}],take:200,include});
+  const selected:typeof candidates=[];
+  let visible=0,lastIndex=-1;
+  for(let offset=0;offset<candidates.length&&selected.length<take;offset+=100){
+    const batch=candidates.slice(offset,offset+100);
+    const captured=await release.observeRead(()=>captureReadableDigestInputs({actor,workspaceId:params.workspaceId,kind:"Goal",records:batch}));
+    for(let i=0;i<batch.length;i++){
+      lastIndex=offset+i;
+      const goal=batch[i];const proof=captured.proofs.get(goal.id);
+      if(!proof)continue;
+      if(visible++<skip)continue;
+      selected.push(goal);release.add(proof);
+      if(selected.length===take)break;
+    }
+  }
+  const complete=candidates.length<200&&lastIndex===candidates.length-1;
+  const last=candidates[lastIndex];
+  const nextCursor=complete||!last?null:Buffer.from(JSON.stringify({purpose:"goals-window-v1",scope,id:last.id,
+    sortOrder:last.sortOrder,createdAt:last.createdAt.toISOString()})).toString("base64url");
+  const items=[];
+  for(const goal of selected)items.push({...goal,
+    ownerMember:await readableGoalMember(release,goal.ownerMember),
+    circle:goal.circle&&(await release.capture("Circle",[goal.circle])).records[0]||null,
+    keyResults:(await release.capture("KeyResult",goal.keyResults??[])).records,
   });
+  return release.finish({items,complete,nextCursor});
+}
 
-  const query: any = { workspaceId: params.workspaceId, ...privacyFilter(actor, membership), ...archiveFilterWhere(params.archiveFilter) };
-  if (params.level !== undefined) query.level = params.level;
-  if (params.cadence !== undefined) query.cadence = params.cadence;
-  if (params.circleId !== undefined) query.circleId = params.circleId;
-  if (params.ownerMemberId !== undefined) query.ownerMemberId = params.ownerMemberId;
-  if (params.status !== undefined) query.status = params.status;
-  if (params.parentGoalId !== undefined) query.parentGoalId = params.parentGoalId;
+/** Compatibility callers requesting an exact array must not receive a truncated result. */
+export async function listGoals(actor:AppActor,params:ListGoalsParams){
+  if(params.take===0){
+    await requireWorkspaceMembership({actor,workspaceId:params.workspaceId,resolvedMembership:params._membership});
+    return new DigestReadRelease(actor,params.workspaceId).finish([]);
+  }
+  const page=await listGoalsPage(actor,{...params,take:params.take??200});
+  invariant(page.complete||(params.take!==undefined&&page.items.length===params.take),409,"SOURCE_READ_SCAN_LIMIT","Goal list is incomplete; use the bounded goal window.");
+  return page.items;
+}
 
-  return prisma.goal.findMany({
-    where: query,
-    take: params.take,
-    skip: params.skip,
-    orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
-    include: {
-      ownerMember: {
-        include: {
-          user: { select: { displayName: true, email: true } },
-        },
-      },
-      keyResults: true,
-      circle: true,
-    },
-  });
+/** Build only the admitted window; a parent outside it is deliberately not fetched. */
+export function buildGoalTree<T extends {id:string;parentGoalId:string|null}>(goals:T[]){
+  type Node=T&{childGoals:Node[]};
+  const byId=new Map<string,Node>(goals.map(goal=>[goal.id,{...goal,childGoals:[]}]));
+  const roots:Node[]=[];
+  for(const goal of goals){
+    const row=byId.get(goal.id)!;
+    if(goal.parentGoalId&&byId.has(goal.parentGoalId))byId.get(goal.parentGoalId)!.childGoals.push(row);
+    else roots.push(row);
+  }
+  return roots;
 }
 
 export async function listCompanyDirectionFromBrain(
@@ -1078,7 +1177,6 @@ export async function listCompanyDirectionFromBrain(
         },
       },
       orderBy: [{ updatedAt: "desc" }],
-      take,
       include: {
         links: {
           where: {
@@ -1097,24 +1195,34 @@ export async function listCompanyDirectionFromBrain(
             status: "OPEN",
           },
           orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
-          take: questionTake,
         })
       : Promise.resolve([]),
   ]);
 
+  const [visibleGoalIds, visibleQuestionIds] = await Promise.all([
+    readableArtifactIds(actor, params.workspaceId, "Goal", goals),
+    readableArtifactIds(actor, params.workspaceId, "CheckIn", questions),
+  ]);
+  const visibleGoals = goals.filter((goal) => visibleGoalIds.has(goal.id)).slice(0, take);
+  const visibleQuestions = questions.filter((question) => visibleQuestionIds.has(question.id)).slice(0, questionTake);
+  const allLinks = visibleGoals.flatMap((goal) => goal.links);
+  const visibleLinkIds = await readableArtifactIds(actor, params.workspaceId, "GoalLink", allLinks);
+  for (const goal of visibleGoals) goal.links = goal.links.filter((link) => visibleLinkIds.has(link.id));
+
   const brainSourceIds = new Set<string>();
   const brainArticleIds = new Set<string>();
-  for (const goal of goals) {
+  for (const goal of visibleGoals) {
     for (const link of goal.links) {
       if (link.entityType === "BrainSource") brainSourceIds.add(link.entityId);
       if (link.entityType === "BrainArticle") brainArticleIds.add(link.entityId);
     }
   }
-  for (const question of questions) {
+  for (const question of visibleQuestions) {
     if (question.relatedEntityType === "BrainSource" && question.relatedEntityId) brainSourceIds.add(question.relatedEntityId);
     if (question.relatedEntityType === "BrainArticle" && question.relatedEntityId) brainArticleIds.add(question.relatedEntityId);
   }
 
+  const domains = await resolveKnowledgeAccessDomains(actor, params.workspaceId);
   const [brainSources, brainArticles] = await Promise.all([
     brainSourceIds.size > 0
       ? prisma.brainSource.findMany({
@@ -1122,14 +1230,7 @@ export async function listCompanyDirectionFromBrain(
             workspaceId: params.workspaceId,
             id: { in: Array.from(brainSourceIds) },
             archivedAt: null,
-          },
-          select: {
-            id: true,
-            sourceType: true,
-            title: true,
-            fileName: true,
-            channel: true,
-            createdAt: true,
+            accessDomain: { in: domains },
           },
         })
       : Promise.resolve([]),
@@ -1140,19 +1241,18 @@ export async function listCompanyDirectionFromBrain(
             id: { in: Array.from(brainArticleIds) },
             archivedAt: null,
           },
-          select: {
-            id: true,
-            slug: true,
-            title: true,
-            type: true,
-            authority: true,
-          },
         })
       : Promise.resolve([]),
   ]);
 
-  const sourceById = new Map(brainSources.map((source) => [source.id, source]));
-  const articleById = new Map(brainArticles.map((article) => [article.id, article]));
+  const visibleSourceIds = await readableBrainSourceIds(actor, params.workspaceId, brainSources);
+  const sourceById = new Map(brainSources.filter((source) => visibleSourceIds.has(source.id)).map((source) => [source.id, source]));
+  const visibleArticleIds = await readableArtifactIds(actor, params.workspaceId, "BrainArticle", brainArticles);
+  const articleById = new Map(brainArticles.filter((article) => visibleArticleIds.has(article.id)).map((article) => [article.id, article]));
+  const evidenceVisible = (entityType: string, entityId: string) =>
+    entityType === "BrainSource" ? sourceById.has(entityId)
+      : entityType === "BrainArticle" ? articleById.has(entityId) : false;
+  for (const goal of visibleGoals) goal.links = goal.links.filter((link) => evidenceVisible(link.entityType, link.entityId));
 
   const evidenceDisplay = (entityType: string, entityId: string) => {
     if (entityType === "BrainSource") {
@@ -1192,7 +1292,7 @@ export async function listCompanyDirectionFromBrain(
     };
   };
 
-  const mappedGoals = goals.map((goal): CompanyDirectionGoal => {
+  const mappedGoals = visibleGoals.map((goal): CompanyDirectionGoal => {
     const evidenceLinks = goal.links.map(mapEvidenceLink);
     const confidence = evidenceLinks.length > 0
       ? Math.max(...evidenceLinks.map((link) => link.confidence))
@@ -1209,8 +1309,9 @@ export async function listCompanyDirectionFromBrain(
     };
   });
 
-  const mappedQuestions = questions.map((question): CompanyDirectionQuestion => {
+  const mappedQuestions = visibleQuestions.map((question): CompanyDirectionQuestion => {
     const relatedEvidence = question.relatedEntityType && question.relatedEntityId
+      && evidenceVisible(question.relatedEntityType, question.relatedEntityId)
       ? {
           entityType: question.relatedEntityType,
           entityId: question.relatedEntityId,
@@ -1240,7 +1341,7 @@ export async function listCompanyDirectionFromBrain(
 
 export async function addKeyResult(
   actor: AppActor,
-  params: {
+  params: ProducerLineageParams & {
     workspaceId: string;
     goalId: string;
     title: string;
@@ -1266,12 +1367,13 @@ export async function addKeyResult(
     await acquireWorkItemAdvisoryLock(tx, "Goal", params.goalId);
     const goal = await tx.goal.findUnique({
       where: { id: params.goalId },
-      select: { id: true, workspaceId: true, archivedAt: true, authorUserId: true, isPrivate: true, status: true },
+      select: { id: true, workspaceId: true, archivedAt: true, authorUserId: true, isPrivate: true, status: true, updatedAt: true },
     });
     invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
     await lockGoalForKeyResultMutation(tx, actor, membership, goal);
     const previousKeyResults = await tx.keyResult.findMany({ where: { goalId: params.goalId }, orderBy: { id: "asc" } });
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, capture: params });
     const kr = await tx.keyResult.create({
       data: {
         goalId: params.goalId,
@@ -1283,6 +1385,9 @@ export async function addKeyResult(
       },
     });
 
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "KeyResult", id: kr.id }, content: kr, receipt });
+
     await recomputeGoalProgress(params.goalId, actor, tx, { forceVersion: true, changedFields: ["keyResults"], previousKeyResults });
 
     return kr;
@@ -1291,7 +1396,7 @@ export async function addKeyResult(
 
 export async function updateKeyResult(
   actor: AppActor,
-  params: {
+  params: ProducerLineageParams & {
     workspaceId: string;
     krId: string;
     title?: string;
@@ -1372,10 +1477,15 @@ export async function updateKeyResult(
 
     const previousKeyResults = await tx.keyResult.findMany({ where: { goalId: kr.goalId }, orderBy: { id: "asc" } });
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "KeyResult", id: kr.id }, before: kr, capture: params });
     const updated = await tx.keyResult.update({
       where: { id: params.krId },
       data,
     });
+
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "KeyResult", id: updated.id }, content: updated, receipt });
 
     await recomputeGoalProgress(updated.goalId, actor, tx, { forceVersion: true, changedFields: ["keyResults"], previousKeyResults });
 
@@ -1426,7 +1536,7 @@ export async function deleteKeyResult(
 
 export async function postGoalUpdate(
   actor: AppActor,
-  params: {
+  params: ProducerLineageParams & {
     workspaceId: string;
     goalId: string;
     bodyMd: string;
@@ -1489,8 +1599,16 @@ export async function postGoalUpdate(
       );
     }
 
+    const admission = params.statusChange || newProgress !== null
+      ? await captureHumanArtifactInputAdvance({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "Goal", id: goal.id }, before: goal, allowSystemTransition: true })
+      : undefined;
+
     await lockGoalForAuthorizedMutation(tx, goal);
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, dependencies: [{ kind: "Goal", id: goal.id }],
+      snapshotDependencies: [{ kind: "Goal", id: goal.id }] });
     const update = await tx.goalUpdate.create({
       data: {
         goalId: params.goalId,
@@ -1500,6 +1618,9 @@ export async function postGoalUpdate(
         newProgress,
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "GoalUpdate", id: update.id }, content: update, receipt });
+
 
     const updateData: any = {};
     if (params.statusChange) {
@@ -1575,6 +1696,10 @@ export async function postGoalUpdate(
         if (goal.parentGoalId) parentGoalIdsToRecompute.add(goal.parentGoalId);
       }
 
+      await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "Goal", id: goal.id }, before: goal, after: updatedGoal, admission,
+        allowSystemTransition: true });
+
       await recomputeGoalParentsInTransaction(tx, parentGoalIdsToRecompute, actor);
 
       await appendEvents(tx, [
@@ -1607,6 +1732,8 @@ export async function createGoalLink(
     source?: string | null;
     metadata?: Prisma.InputJsonValue;
     _membership?: MembershipSummary | null;
+    lineageInputs?: LineageInput[];
+    lineageRoots?: LineageRoot[];
   }
 ) {
   const membership = await requireWorkspaceMembership({
@@ -1625,6 +1752,23 @@ export async function createGoalLink(
   const source = params.source?.trim() || null;
 
   return prisma.$transaction(async (tx) => {
+    await acquireWorkItemAdvisoryLock(tx, "Goal", params.goalId);
+    if (params.entityType === "BrainSource") {
+      const target = await tx.brainSource.findFirst({ where: { id: params.entityId, workspaceId: params.workspaceId } });
+      invariant(target && (await readableBrainSourceIds(actor, params.workspaceId, [target], tx)).has(target.id),
+        404, "NOT_FOUND", "Linked source not found.");
+    }
+    if (params.entityType === "BrainArticle") {
+      const target = await tx.brainArticle.findFirst({ where: { id: params.entityId, workspaceId: params.workspaceId } });
+      invariant(target && (await readableArtifactIds(actor, params.workspaceId, "BrainArticle", [target], tx)).has(target.id),
+        404, "NOT_FOUND", "Linked article not found.");
+    }
+    const prior = await tx.goalLink.findUnique({ where: { goalId_entityType_entityId: {
+      goalId: params.goalId, entityType: params.entityType, entityId: params.entityId,
+    } } });
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: prior ? { kind: "GoalLink", id: prior.id } : undefined,
+      before: prior ?? undefined, capture: params });
     const link = await tx.goalLink.upsert({
       where: {
         goalId_entityType_entityId: {
@@ -1649,6 +1793,9 @@ export async function createGoalLink(
         metadata: params.metadata,
       },
     });
+
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "GoalLink", id: link.id }, content: link, receipt });
 
     await appendEvents(tx, [
       {
@@ -1758,6 +1905,12 @@ export async function recomputeGoalProgress(
         workspaceIds: [goal.workspaceId],
       };
 
+      const drivers = goal.keyResults.length
+        ? goal.keyResults.map((keyResult) => ({ kind: "KeyResult" as const, id: keyResult.id, snapshot: keyResult }))
+        : goal.childGoals.map((child) => ({ kind: "Goal" as const, id: child.id, snapshot: child }));
+      const receipt = await prepareProducerLineage({ tx, actor: effectiveActor, workspaceId: goal.workspaceId,
+        artifact: { kind: "Goal", id: goal.id }, before: goal, completeCopy: true,
+        dependencies: drivers, snapshotDependencies: drivers });
       const newVersion = await recordWorkItemVersion(tx, effectiveActor, {
         workspaceId: goal.workspaceId,
         entityType: "Goal",
@@ -1790,13 +1943,15 @@ export async function recomputeGoalProgress(
       });
 
       try {
-        await tx.goal.update({
+        const updated = await tx.goal.update({
           where: { id: goalId, version: goal.version },
           data: {
             ...(computedProgress !== goal.progressPercent ? { progressPercent: computedProgress } : {}),
             version: newVersion,
           },
         });
+        await finishProducerLineage({ tx, actor: effectiveActor, workspaceId: goal.workspaceId,
+          artifact: { kind: "Goal", id: goal.id }, content: updated, receipt });
       } catch (error) {
         if (isPrismaNotFoundError(error)) {
           invariant(false, 409, "VERSION_CONFLICT", "Goal changed during progress recomputation. Refresh and try again.");
@@ -1819,74 +1974,63 @@ export async function recomputeGoalProgress(
   }
 }
 
-export async function getGoalTree(actor: AppActor, workspaceId: string, opts?: { cadence?: GoalCadence }) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  
-  const query: any = { workspaceId, ...privacyFilter(actor, membership), archivedAt: null };
-  if (opts?.cadence) query.cadence = opts.cadence;
-  
-  const allGoals = await prisma.goal.findMany({
-    where: query,
-    include: {
-      ownerMember: { include: { user: { select: { displayName: true, email: true } } } },
-      keyResults: true,
-      circle: true,
-    },
-    orderBy: { sortOrder: "asc" }
-  });
-
-  const goalsById = new Map<string, any>();
-  for (const g of allGoals) {
-    goalsById.set(g.id, { ...g, childGoals: [] });
-  }
-
-  const rootGoals: any[] = [];
-  for (const g of allGoals) {
-    const mapped = goalsById.get(g.id);
-    if (g.parentGoalId && goalsById.has(g.parentGoalId)) {
-      goalsById.get(g.parentGoalId).childGoals.push(mapped);
-    } else {
-      rootGoals.push(mapped);
-    }
-  }
-
-  return rootGoals;
+export async function getGoalTree(actor:AppActor,workspaceId:string,opts?:{cadence?:GoalCadence}){
+  return buildGoalTree(await listGoals(actor,{workspaceId,cadence:opts?.cadence}));
 }
 
-export async function getMyGoalSlice(actor: AppActor, memberId: string, workspaceId: string) {
-  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+function goalSectionCursor(cursor: string | undefined, purpose: string, scope: string) {
+  if (cursor === undefined) return null;
+  try {
+    invariant(cursor.length <= 4096 && /^[A-Za-z0-9_-]+$/.test(cursor), 400, "INVALID_INPUT", "Invalid goal section cursor.");
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    invariant(value?.purpose === purpose && value.scope === scope && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 256
+      && typeof value.date === "string" && Number.isFinite(Date.parse(value.date))
+      && (value.targetDate === null || typeof value.targetDate === "string" && Number.isFinite(Date.parse(value.targetDate))),
+    400, "INVALID_INPUT", "Invalid goal section cursor.");
+    return {id: value.id as string, date: new Date(value.date), targetDate: value.targetDate === null ? null : new Date(value.targetDate)};
+  } catch { invariant(false, 400, "INVALID_INPUT", "Invalid goal section cursor."); }
+}
 
+export async function getMyGoalSlicePage(actor: AppActor, memberId: string, workspaceId: string,
+  opts: {cursor?: string} = {}, readRelease?: DigestReadRelease) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const scope = JSON.stringify([workspaceId, memberId]);
+  const after = goalSectionCursor(opts.cursor, "my-goals-v1", scope);
+  const laterWithinDate: Prisma.GoalWhereInput[] = after ? [
+    {targetDate: after.targetDate, updatedAt: {lt: after.date}},
+    {targetDate: after.targetDate, updatedAt: after.date, id: {gt: after.id}},
+  ] : [];
   const myGoals = await prisma.goal.findMany({
     where: {
-      workspaceId,
-      ...privacyFilter(actor, membership),
-      ownerMemberId: memberId,
-      archivedAt: null,
-      status: { in: ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"] },
+      workspaceId, ...privacyFilter(actor, membership), ownerMemberId: memberId, archivedAt: null,
+      status: {in: ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"]},
+      ...(after ? {AND: [{OR: [...(after.targetDate ? [{targetDate: {gt: after.targetDate}}, {targetDate: null}] : []), ...laterWithinDate]}]} : {}),
     },
-    include: {
-      circle: true,
-      parentGoal: {
-        include: {
-          circle: true,
-          parentGoal: {
-            include: { circle: true },
-          },
-        },
-      },
-    },
-    orderBy: [
-      { targetDate: "asc" },
-      { updatedAt: "desc" },
-    ],
+    include: {circle: true, parentGoal: {include: {circle: true, parentGoal: {include: {circle: true}}}}},
+    orderBy: [{targetDate: "asc"}, {updatedAt: "desc"}, {id: "asc"}], take: 200,
   });
+  const release = goalReadRelease(actor, workspaceId, readRelease);
+  const items = [];
+  for (let offset = 0; offset < myGoals.length; offset += 100) {
+    const admitted = (await release.capture("Goal", myGoals.slice(offset, offset + 100))).records;
+    for (const goal of admitted) items.push(await readableGoalParents(release, actor, membership, goal));
+  }
+  const complete = myGoals.length < 200;
+  const last = myGoals.at(-1);
+  const nextCursor = complete || !last ? null : Buffer.from(JSON.stringify({purpose: "my-goals-v1", scope,
+    id: last.id, date: last.updatedAt.toISOString(), targetDate: last.targetDate?.toISOString() ?? null})).toString("base64url");
+  return release.finish({items, complete, nextCursor});
+}
 
-  return myGoals.map((goal) => stripInvisibleGoalParents(actor, membership, goal));
+export async function getMyGoalSlice(actor: AppActor, memberId: string, workspaceId: string, readRelease?: DigestReadRelease) {
+  const page = await getMyGoalSlicePage(actor, memberId, workspaceId, {}, readRelease);
+  invariant(page.complete, 409, "SOURCE_READ_SCAN_LIMIT", "My goals are incomplete; use the bounded goal window.");
+  return page.items;
 }
 
 export async function createRecognition(
   actor: AppActor,
-  params: {
+  params: ProducerLineageParams & {
     workspaceId: string;
     goalId?: string | null;
     recipientMemberId: string;
@@ -1903,27 +2047,36 @@ export async function createRecognition(
     resolvedMembership: params._membership,
   });
 
-  return prisma.recognition.create({
-    data: {
-      workspaceId: params.workspaceId,
-      goalId: params.goalId || null,
-      recipientMemberId: params.recipientMemberId,
-      authorMemberId: membership!.id,
-      title: params.title,
-      storyMd: params.storyMd,
-      valueTags: params.valueTags || [],
-      visibility: params.visibility || "WORKSPACE",
-    },
+  return prisma.$transaction(async (tx) => {
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, dependencies: params.goalId ? [{ kind: "Goal", id: params.goalId }] : [] });
+    const recognition = await tx.recognition.create({
+      data: {
+        workspaceId: params.workspaceId,
+        goalId: params.goalId || null,
+        recipientMemberId: params.recipientMemberId,
+        authorMemberId: membership!.id,
+        title: params.title,
+        storyMd: params.storyMd,
+        valueTags: params.valueTags || [],
+        visibility: params.visibility || "WORKSPACE",
+      },
+    });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "Recognition", id: recognition.id }, content: recognition, receipt });
+    return recognition;
   });
 }
 
-export async function listRecognitions(
+export async function listRecognitionsPage(
   actor: AppActor,
   params: {
     workspaceId: string;
     recipientMemberId?: string;
+    cursor?: string;
     _membership?: MembershipSummary | null;
-  }
+  },
+  readRelease?: DigestReadRelease,
 ) {
   await requireWorkspaceMembership({
     actor,
@@ -1934,12 +2087,38 @@ export async function listRecognitions(
   const query: any = { workspaceId: params.workspaceId };
   if (params.recipientMemberId) query.recipientMemberId = params.recipientMemberId;
 
-  return prisma.recognition.findMany({
+  const scope = JSON.stringify([params.workspaceId, params.recipientMemberId ?? null]);
+  const after = goalSectionCursor(params.cursor, "recognitions-v1", scope);
+  if (after) query.AND = [{OR: [{createdAt: {lt: after.date}}, {createdAt: after.date, id: {gt: after.id}}]}];
+  const rows = await prisma.recognition.findMany({
     where: query,
     include: {
-      author: { include: { user: { select: { displayName: true } } } },
-      recipient: { include: { user: { select: { displayName: true } } } },
+      author: { include: goalReaderMemberInclude },
+      recipient: { include: goalReaderMemberInclude },
     },
-    orderBy: { createdAt: "desc" },
+    orderBy: [{createdAt: "desc"}, {id: "asc"}], take: 200,
   });
+  const release=goalReadRelease(actor,params.workspaceId,readRelease);
+  const admitted: typeof rows = [];
+  for (let offset=0; offset<rows.length; offset+=100) admitted.push(...(await release.capture("Recognition",rows.slice(offset,offset+100))).records);
+  const result=[];
+  for(const row of admitted){
+    const author=await readableGoalMember(release,row.author),recipient=await readableGoalMember(release,row.recipient);
+    result.push({...row,
+      author:author?{...author,user:{displayName:author.user.displayName}}:null,
+      recipient:recipient?{...recipient,user:{displayName:recipient.user.displayName}}:null});
+  }
+  const complete = rows.length < 200;
+  const last = rows.at(-1);
+  const nextCursor = complete || !last ? null : Buffer.from(JSON.stringify({purpose: "recognitions-v1", scope,
+    id: last.id, date: last.createdAt.toISOString(), targetDate: null})).toString("base64url");
+  return release.finish({items: result, complete, nextCursor});
+}
+
+export async function listRecognitions(actor: AppActor, params: {
+  workspaceId: string; recipientMemberId?: string; _membership?: MembershipSummary | null;
+}, readRelease?: DigestReadRelease) {
+  const page = await listRecognitionsPage(actor, params, readRelease);
+  invariant(page.complete, 409, "SOURCE_READ_SCAN_LIMIT", "Recognitions are incomplete; use the bounded recognition window.");
+  return page.items;
 }

@@ -4,7 +4,7 @@ import { managedAzureReleaseEligible } from "./managed-azure-release-policy";
 import { persistCustomerDeploymentHealth } from "./customer-deployment-health";
 import { loadControlPlaneSnapshots } from "./control-plane-snapshots";
 import { createHash, randomUUID } from "node:crypto";
-import { assertManagedAzureTargetBinding, reconcileManagedAzureTarget, reconcileManagedAzureTargetSchema,
+import { requiresProtectedManagedAzureBinding, assertManagedAzureTargetBinding, reconcileManagedAzureTarget, reconcileManagedAzureTargetSchema,
   requireManagedAzureAccountAuthority } from "./managed-azure-targets";
 import type { CustomerDeploymentAccessRole, CustomerDeploymentCloudProvider, CustomerDeploymentKind, CustomerDeploymentStatus, FleetSnapshotKind, MeetingRecorderProvider, MemberRole, ModuleAccessLevel as PrismaModuleAccessLevel, ModuleGrantPrincipalType as PrismaModuleGrantPrincipalType, Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, env, prisma, toInputJson } from "@corgtex/shared";
@@ -5261,7 +5261,7 @@ export async function listControlPlaneCustomerMembers(actor: AppActor, deploymen
   const adapter = createControlPlaneAdapter(deployment);
 
   if (deployment.managedWorkspaceId) {
-    const members = await listMembersEnriched(deployment.managedWorkspaceId, { includeInactive: true });
+    const members = await listMembersEnriched(actor, deployment.managedWorkspaceId, { includeInactive: true });
     return {
       deploymentId,
       accessMode: adapter.kind,
@@ -7806,7 +7806,8 @@ function normalizeRemoteAgentRun(run: JsonRecord) {
     agentKey: stringField(run.agentKey) ?? stringField(run.key) ?? stringField(run.name) ?? "unknown",
     triggerType: stringField(run.triggerType),
     status: stringField(run.status) ?? "UNKNOWN",
-    goal: stringField(run.goal),
+    // Cached remote metadata has no verifiable content receipt.
+    goal: "Content unavailable",
     approvalRequired: booleanField(run.approvalRequired) ?? false,
     createdAt: stringField(run.createdAt),
     startedAt: stringField(run.startedAt),
@@ -8109,14 +8110,13 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
         agentKey: true,
         triggerType: true,
         status: true,
-        goal: true,
         approvalRequired: true,
         createdAt: true,
         startedAt: true,
         completedAt: true,
         failedAt: true,
       },
-    }),
+    }).then(runs => runs.map(run => ({ ...run, goal: "Content unavailable" }))),
     prisma.agentRun.findMany({
       where: { workspaceId: managedWorkspaceId, status: "WAITING_APPROVAL" },
       orderBy: { createdAt: "desc" },
@@ -8125,14 +8125,13 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
         agentKey: true,
         triggerType: true,
         status: true,
-        goal: true,
         approvalRequired: true,
         createdAt: true,
         startedAt: true,
         completedAt: true,
         failedAt: true,
       },
-    }),
+    }).then(runs => runs.map(run => ({ ...run, goal: "Content unavailable" }))),
     prisma.workflowJob.findMany({
       where: { workspaceId: managedWorkspaceId, status: "FAILED" },
       orderBy: { updatedAt: "desc" },
@@ -10025,17 +10024,17 @@ export async function recordVerifiedControlPlaneRelease(actor: AppActor, params:
       const current = await lockManagedAzureDeployment(tx, params.deploymentId);
       invariant(current && current.customerAccountId === deployment.customerAccountId && current.url === deployment.url,
         409, "MANAGED_AZURE_TARGET_DRIFT", "Managed Azure target changed before the release baseline could be recorded.");
-      if (current.deploymentKind === "HOSTED_DEDICATED") {
+      if (requiresProtectedManagedAzureBinding(current)) {
         await requireManagedAzureAccountAuthority(tx, current);
         const supplied = params.managedAzureTarget;
         invariant(supplied?.workloadClass === "ACTIVE_CLIENT_PRIMARY", 409, "MANAGED_AZURE_TARGET_DRIFT",
-          "Protected hosted release recording requires the selected primary workload.");
+          "Protected release recording requires the selected primary workload.");
         const protectedTarget = assertManagedAzureTargetBinding(current, { acrName: supplied.acrName!, acrServer: supplied.acrServer! });
         invariant(protectedTarget && supplied.subscriptionId === protectedTarget.subscriptionId
           && supplied.resourceGroup === protectedTarget.resourceGroup && supplied.webAppName === protectedTarget.webAppName
           && supplied.workerAppName === protectedTarget.workerAppName && supplied.acrName === protectedTarget.acrName
           && supplied.acrServer === protectedTarget.acrServer && managedAzureTargetMatchesDeployment(current, supplied),
-        409, "MANAGED_AZURE_TARGET_DRIFT", "Protected hosted release target or selection changed before recording.");
+        409, "MANAGED_AZURE_TARGET_DRIFT", "Protected release target or selection changed before recording.");
       } else {
         const recordDeployment = verifiedManagedAzureBaselineDrift(deployment, current, health, releaseImageTag)
           ? { ...current, deploymentStatus: "ACTIVE" as const, provisioningStatus: "active" }
@@ -11306,6 +11305,8 @@ const MANAGED_RELEASE_OPERATIONAL_WORKSPACE = {
   description: "Internal workspace for private managed-release operational artifacts.",
 } as const;
 type ManagedReleasePreflightProjection = {
+  protectedReleaseProfile?: "SELF_SERVE_IMPORTER_FENCE_V1";
+  targetDigest?: string;
   writeIntentProtocolVersion?: number;
   deployment?: Record<string, unknown>;
   authorityDigest?: string;
@@ -11351,6 +11352,10 @@ function managedReleasePreflightProjection(value: unknown): ManagedReleasePrefli
   409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
   invariant(record.writeIntentProtocolVersion === undefined || record.writeIntentProtocolVersion === 1 || record.writeIntentProtocolVersion === 2,
     409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+  invariant(record.protectedReleaseProfile === undefined && record.targetDigest === undefined
+    || record.protectedReleaseProfile === "SELF_SERVE_IMPORTER_FENCE_V1"
+      && typeof record.targetDigest === "string" && /^[a-f0-9]{64}$/.test(record.targetDigest),
+  409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Protected release profile is invalid.");
   const release = record.release as Record<string, unknown>;
   const target = record.target as Record<string, unknown>;
   invariant(typeof release.baselineImageTag === "string"
@@ -11364,6 +11369,8 @@ function managedReleasePreflightProjection(value: unknown): ManagedReleasePrefli
   409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
   return {
     deploymentId: record.deploymentId,
+    ...(record.protectedReleaseProfile === "SELF_SERVE_IMPORTER_FENCE_V1"
+      ? { protectedReleaseProfile: record.protectedReleaseProfile, targetDigest: record.targetDigest as string } : {}),
     ...(record.writeIntentProtocolVersion === undefined ? {} : { writeIntentProtocolVersion: record.writeIntentProtocolVersion }),
     ...(record.deployment ? { deployment: record.deployment as Record<string, unknown> } : {}),
     ...(typeof record.authorityDigest === "string" ? { authorityDigest: record.authorityDigest } : {}),

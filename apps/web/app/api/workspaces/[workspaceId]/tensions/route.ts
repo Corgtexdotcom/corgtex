@@ -63,7 +63,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     });
     const origin = env.APP_URL.replace(/\/$/, "");
     const permanentPath = await getWorkspacePermanentPathForEntity({ workspaceId, entityType: "Tension", entityId: tension.id });
-    const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, tension.id) ?? tension;
+    const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, tension.id) ?? tension;
     return NextResponse.json({
       tension: serializeTensionWorkItem(tensionForResponse),
       webUrl: `${origin}/workspaces/${workspaceId}/tensions/${tension.id}`,

@@ -8,7 +8,7 @@
  * resolution logic or call sites.
  */
 
-import type { ModuleAccessLevel as PrismaModuleAccessLevel, ModuleAccessRequestStatus, ModuleGrantPrincipalType as PrismaModuleGrantPrincipalType } from "@prisma/client";
+import { Prisma, type ModuleAccessLevel as PrismaModuleAccessLevel, type ModuleAccessRequestStatus, type ModuleGrantPrincipalType as PrismaModuleGrantPrincipalType } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import {
@@ -53,9 +53,9 @@ export function toPrismaAccessLevel(level: ModuleAccessLevel): PrismaModuleAcces
 }
 
 /** Read every workspace feature flag as a boolean map, applying registry defaults. */
-export async function getWorkspaceModuleFlags(workspaceId: string): Promise<Record<string, boolean>> {
+export async function getWorkspaceModuleFlags(workspaceId: string, db: Prisma.TransactionClient = prisma): Promise<Record<string, boolean>> {
   const [records, defaults] = await Promise.all([
-    prisma.workspaceFeatureFlag.findMany({
+    db.workspaceFeatureFlag.findMany({
       where: { workspaceId },
       select: { flag: true, enabled: true },
     }),
@@ -96,17 +96,19 @@ export async function gatherModuleAccessContext(params: {
   workspaceId: string;
   memberId: string | null;
   role: MemberRoleKey | null;
+  db?: Prisma.TransactionClient;
 }): Promise<ModuleAccessContext> {
   const { workspaceId, memberId, role } = params;
+  const db = params.db ?? prisma;
 
   const [flags, grantRows, assignments, circles] = await Promise.all([
-    getWorkspaceModuleFlags(workspaceId),
-    prisma.workspaceModuleGrant.findMany({
+    getWorkspaceModuleFlags(workspaceId, db),
+    db.workspaceModuleGrant.findMany({
       where: { workspaceId },
       select: { moduleKey: true, principalType: true, principalId: true, accessLevel: true },
     }),
     memberId
-      ? prisma.roleAssignment.findMany({
+      ? db.roleAssignment.findMany({
           where: {
             memberId,
             ...activeRoleAssignmentWhere(),
@@ -114,7 +116,7 @@ export async function gatherModuleAccessContext(params: {
           select: { roleId: true, role: { select: { circleId: true } } },
         })
       : Promise.resolve([]),
-    prisma.circle.findMany({
+    db.circle.findMany({
       where: { workspaceId },
       select: { id: true, parentCircleId: true },
     }),
@@ -157,11 +159,13 @@ export async function resolveSingleModuleAccess(params: {
   memberId: string | null;
   role: MemberRoleKey | null;
   module: ModuleManifest;
+  db?: Prisma.TransactionClient;
 }): Promise<ModuleAccessLevel> {
   const context = await gatherModuleAccessContext({
     workspaceId: params.workspaceId,
     memberId: params.memberId,
     role: params.role,
+    db: params.db,
   });
   return resolveModuleAccess(context, params.module);
 }

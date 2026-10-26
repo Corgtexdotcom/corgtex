@@ -1,3 +1,4 @@
+import { assertMeetingTranscriptWorkerCurrent } from "./native-meeting-workflow-principal";
 import { createHash } from "node:crypto";
 import { CrmActivityType } from "@prisma/client";
 import type { MeetingInsightType, MeetingInsight, MeetingInsightOperation, Prisma, ProposalResolutionOutcome } from "@prisma/client";
@@ -5,7 +6,7 @@ import { prisma, type AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { AppError, invariant } from "./errors";
-import { defaultModelGateway } from "@corgtex/models";
+import { defaultModelGateway, type ModelAttemptGuard } from "@corgtex/models";
 import { createAction, meetingInsightActionSourcePayload, publishAction, updateAction } from "./actions";
 import type { DuplicateGuardOptions } from "./duplicate-guard";
 import { createTension, updateTension } from "./tensions";
@@ -13,7 +14,20 @@ import { createProposal, createProposalFromTension, resolveProposal } from "./pr
 import { postDeliberationEntry } from "./deliberation";
 import { createActivity, createContact, createDeal } from "./crm";
 import { createCrmMeetingReviewInsights, crmInsightPayload, requireCrmInsightEmail } from "./crm-information-gathering";
-import { buildMeetingIntelligenceContext } from "./meeting-intelligence-context";
+import { buildMeetingIntelligenceContext, preserveMeetingLineageAfterMetadataWrite, readMeetingInputBatches } from "./meeting-intelligence-context";
+import {
+  captureArtifactInputProof,
+  captureArtifactInputSnapshotProof,
+  captureImmutableArtifactInputProof,
+  assertArtifactInputWriteFence,
+  invalidateArtifactInputLineage,
+  isArtifactInputProofReadable,
+  lineageContentFingerprint,
+  readableArtifactIds,
+  recordArtifactInputLineage,
+  type LineageInput,
+  type LineageRoot,
+} from "./source-lineage";
 import { shouldBypassAutoApplyForSlackMeetingActionReview } from "./meeting-action-review";
 import {
   normalizeMeetingBlocks,
@@ -27,6 +41,9 @@ import {
   type MeetingTranscriptChunk,
 } from "./meeting-transcript-chunks";
 import { recordMeetingTranscriptProcessingStage } from "./meeting-transcript-processing";
+import { prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./artifact-commit-preflight";
+import { acquireWorkItemAdvisoryLock } from "./work-item-versions";
+import { acquireConstitutionCorpusAdvisoryLock } from "./constitutions";
 
 const AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.8;
 const AUTO_APPLY_DELIBERATION_THRESHOLD = 0.85;
@@ -468,7 +485,7 @@ export async function extractMeetingInsights(
   let meetingContext;
   try {
     meetingContext = await buildMeetingIntelligenceContext({
-      workspaceId: params.workspaceId,
+      actor, workspaceId: params.workspaceId,
       meetingId: params.meetingId,
       mode: "insights",
     });
@@ -489,6 +506,12 @@ export async function extractMeetingInsights(
     throw error;
   }
   const meeting = meetingContext.meeting;
+  invariant(meetingContext.lineageInputs && meetingContext.lineageRoots?.length && meetingContext.sourceStateHash,
+    409, "UNKNOWN_LINEAGE", "Meeting insights require the complete prompt receipt.");
+  const lineageInputs = meetingContext.lineageInputs;
+  const lineageRoots = structuredClone(meetingContext.lineageRoots);
+  invariant(await isArtifactInputProofReadable(actor, params.workspaceId, lineageRoots),
+    409, "SOURCE_CHANGED", "Meeting insight inputs changed before generation.");
 
   invariant(meeting, 404, "NOT_FOUND", "Meeting not found.");
   invariant(meeting.transcript, 400, "INVALID_STATE", "Meeting has no transcript to analyze.");
@@ -612,9 +635,29 @@ Be conservative — only extract items you're confident about.
   const transcriptChunks = transcriptChunksForExtraction(transcript);
   const transcriptChunkedForExtraction = transcriptChunks.length > 1;
   const extractedItems: Array<Record<string, unknown>> = [];
+  const controller = new AbortController();
+  const authorizeAttempt: ModelAttemptGuard = async ({ signal }) => {
+    try {
+      controller.signal.throwIfAborted();
+      signal.throwIfAborted();
+      await assertMeetingTranscriptWorkerCurrent(actor, params.workspaceId);
+      invariant(await isArtifactInputProofReadable(actor, params.workspaceId, lineageRoots),
+        409, "SOURCE_CHANGED", "Meeting insight inputs changed during generation.");
+      // Proof replay can await external authority. Recheck the original worker
+      // purpose afterward; never recapture a replacement claim or input receipt.
+      await assertMeetingTranscriptWorkerCurrent(actor, params.workspaceId);
+      signal.throwIfAborted();
+      controller.signal.throwIfAborted();
+    } catch (error) {
+      controller.abort(error);
+      throw error;
+    }
+  };
 
   for (const chunk of transcriptChunks) {
+    await authorizeAttempt({ signal: controller.signal });
     await recordMeetingTranscriptProcessingStage({
+          workerActor: actor,
       workspaceId: params.workspaceId,
       meetingId: meeting.id,
       stage: "EXTRACTING_INSIGHTS",
@@ -627,6 +670,8 @@ Be conservative — only extract items you're confident about.
       chunkCount: transcriptChunkedForExtraction ? chunk.chunkCount : null,
     });
     const extraction = await defaultModelGateway.extract({
+      signal: controller.signal,
+      authorizeAttempt,
       workspaceId: params.workspaceId,
       instruction,
       input: JSON.stringify({
@@ -654,6 +699,7 @@ Be conservative — only extract items you're confident about.
           followUps: meetingContext.followUps,
           recentDeliberation: meetingContext.deliberationEntries,
           knowledge: meetingContext.knowledge,
+          knowledgeComplete: meetingContext.knowledgeComplete ?? false,
           attendees: meetingContext.attendees,
         } : null,
         automationPolicy: {
@@ -665,6 +711,7 @@ Be conservative — only extract items you're confident about.
       schemaHint,
     });
 
+    controller.signal.throwIfAborted();
     const parsed = extraction.output as { insights?: Array<Record<string, unknown>> };
     if (Array.isArray(parsed.insights)) {
       extractedItems.push(...parsed.insights);
@@ -712,20 +759,40 @@ Be conservative — only extract items you're confident about.
   for (const item of insights) addCommitment(item);
 
   const extractedInsights = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await assertMeetingTranscriptWorkerCurrent(actor, params.workspaceId, tx);
+    await tx.$queryRaw`SELECT id FROM "Meeting" WHERE id = ${meeting.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    const currentMeeting = await tx.meeting.findFirst({ where: { id: meeting.id, workspaceId: params.workspaceId, archivedAt: null } });
+    invariant(currentMeeting && lineageContentFingerprint("Meeting", currentMeeting) === meetingContext.sourceStateHash,
+      409, "SOURCE_CHANGED", "Meeting changed during insight generation.");
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, lineageRoots, tx),
+      409, "SOURCE_CHANGED", "Meeting insight inputs changed during generation.");
+    const currentSourceRecord = await tx.meetingTranscriptSourceRecord.findFirst({
+      where: { workspaceId: params.workspaceId, meetingId: meeting.id, status: "ACTIVE" },
+      orderBy: [{ sourceUpdatedAt: { sort: "desc", nulls: "last" } }, { recordedAt: "desc" }, { createdAt: "desc" }],
+      select: { id: true, recordedAt: true, sourceUpdatedAt: true },
+    });
+    invariant((currentSourceRecord?.id ?? null) === (latestSourceRecord?.id ?? null)
+      && JSON.stringify(currentSourceRecord?.sourceUpdatedAt ?? null) === JSON.stringify(latestSourceRecord?.sourceUpdatedAt ?? null),
+    409, "SOURCE_CHANGED", "The active transcript source changed during insight generation.");
     const createdInsights: MeetingInsight[] = [];
     const seenDedupeKeys = new Set<string>();
 
-    await tx.meetingInsight.deleteMany({
-      where: {
-        workspaceId: params.workspaceId,
-        meetingId: meeting.id,
-        status: "SUGGESTED",
-        reviewedAt: null,
-        sourceRecordId: null,
-      },
+    await tx.meetingInsight.updateMany({
+      where: { workspaceId: params.workspaceId, meetingId: meeting.id, status: "SUGGESTED",
+        reviewedAt: null, sourceRecordId: null, supersededAt: null,
+        NOT: { type: { in: ["CRM_CONTACT", "CRM_DEAL", "CRM_ACTIVITY"] } } },
+      data: { supersededAt: new Date() },
     });
 
-    const sourceCommitments = await tx.meetingInsight.findMany({
+    const postprocessingRoots: LineageRoot[] = [];
+    const admitCommitments = async (rows: MeetingInsight[]) => {
+      const visible = await readableArtifactIds(actor, params.workspaceId, "MeetingInsight", rows, tx);
+      const admitted = rows.filter((row) => visible.has(row.id));
+      for (const row of admitted) postprocessingRoots.push(...await captureArtifactInputSnapshotProof(actor, params.workspaceId,
+        { kind: "MeetingInsight", id: row.id, fingerprint: lineageContentFingerprint("MeetingInsight", row) }, tx));
+      return admitted;
+    };
+    const sourceCommitments = await readMeetingInputBatches((page) => tx.meetingInsight.findMany({
       where: {
         workspaceId: params.workspaceId,
         meetingId: meeting.id,
@@ -735,7 +802,8 @@ Be conservative — only extract items you're confident about.
         operation: "CREATE",
         type: { in: ["ACTION_ITEM", "FOLLOW_UP"] },
       },
-    });
+      orderBy: { id: "asc" }, ...page,
+    }), admitCommitments);
     const sourceCommitmentIdentities = new Set<string>();
     for (const existing of sourceCommitments) {
       const item = withCommitmentContext({ ...existing, body: existing.bodyMd });
@@ -744,7 +812,7 @@ Be conservative — only extract items you're confident about.
       if (identity) sourceCommitmentIdentities.add(identity);
     }
     if (latestSourceRecord) {
-      const reviewedLegacyCommitments = await tx.meetingInsight.findMany({
+      const reviewedLegacyCommitments = await readMeetingInputBatches((page) => tx.meetingInsight.findMany({
         where: {
           workspaceId: params.workspaceId,
           meetingId: meeting.id,
@@ -757,7 +825,8 @@ Be conservative — only extract items you're confident about.
             { status: "SUGGESTED", reviewedAt: { not: null } },
           ],
         },
-      });
+        orderBy: { id: "asc" }, ...page,
+      }), admitCommitments);
       for (const existing of reviewedLegacyCommitments) {
         const item = withCommitmentContext({ ...existing, body: existing.bodyMd });
         addCommitment(item);
@@ -772,17 +841,17 @@ Be conservative — only extract items you're confident about.
       const metadata = pending.metadataJson && typeof pending.metadataJson === "object" && !Array.isArray(pending.metadataJson)
         ? pending.metadataJson : {};
       if (metadata.requiresCommitmentReview === true) continue;
-      await tx.meetingInsight.updateMany({
-        where: {
-          id: pending.id,
-          workspaceId: params.workspaceId,
-          meetingId: meeting.id,
-          sourceRecordId: latestSourceRecord?.id ?? null,
-          status: "SUGGESTED",
-          reviewedAt: null,
-          supersededAt: null,
-        },
+      await tx.$queryRaw`SELECT id FROM "MeetingInsight" WHERE id = ${pending.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+      const lockedPending = await tx.meetingInsight.findFirst({ where: { id: pending.id, workspaceId: params.workspaceId } });
+      invariant(lockedPending && lineageContentFingerprint("MeetingInsight", lockedPending) === lineageContentFingerprint("MeetingInsight", pending),
+        409, "SOURCE_CHANGED", "An existing commitment changed during processing.");
+      const updatedPending = await tx.meetingInsight.update({
+        where: { id: pending.id },
         data: { metadataJson: { ...metadata, requiresCommitmentReview: true } },
+      });
+      await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+        artifact: { kind: "MeetingInsight", id: pending.id }, content: updatedPending, origin: "DERIVED",
+        inputs: lineageInputs, inheritedRoots: [...lineageRoots, ...postprocessingRoots], transitiveOnlyKinds: ["Meeting"],
       });
     }
     
@@ -899,9 +968,12 @@ Be conservative — only extract items you're confident about.
             },
           ],
         },
-        select: { id: true },
       });
-      if (existingInsight) continue;
+      if (existingInsight && (await readableArtifactIds(actor, params.workspaceId, "MeetingInsight", [existingInsight], tx)).has(existingInsight.id)) {
+        postprocessingRoots.push(...await captureArtifactInputSnapshotProof(actor, params.workspaceId,
+          { kind: "MeetingInsight", id: existingInsight.id, fingerprint: lineageContentFingerprint("MeetingInsight", existingInsight) }, tx));
+        continue;
+      }
 
       const createdCount = await tx.meetingInsight.createMany({
         data: [insightData],
@@ -918,6 +990,10 @@ Be conservative — only extract items you're confident about.
         orderBy: { createdAt: "desc" },
       });
       if (created) {
+        await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "MeetingInsight", id: created.id }, content: created, origin: "DERIVED",
+          inputs: lineageInputs, inheritedRoots: [...lineageRoots, ...postprocessingRoots], transitiveOnlyKinds: ["Meeting"],
+        });
         createdInsights.push(created);
         if (created.targetEntityType && created.targetEntityId && insightData.sourceRecordedAt) {
           await tx.meetingInsight.updateMany({
@@ -958,18 +1034,37 @@ Be conservative — only extract items you're confident about.
       });
     }
 
-    await tx.meeting.update({
-      where: { id: meeting.id },
-      data: { aiProcessedAt: new Date() },
-    });
+    const updatedMeeting = await tx.meeting.update({ where: { id: meeting.id }, data: { aiProcessedAt: new Date() } });
+    await preserveMeetingLineageAfterMetadataWrite(tx, actor, params.workspaceId, currentMeeting, updatedMeeting);
 
+    await assertMeetingTranscriptWorkerCurrent(actor, params.workspaceId, tx);
     return createdInsights;
   });
-  const crmInsights = await createCrmMeetingReviewInsights({
+  const crmInsights = await createCrmMeetingReviewInsights(actor, {
     workspaceId: params.workspaceId,
     meetingId: meeting.id,
   });
-  return [...extractedInsights, ...crmInsights];
+  const visibleCrmIds = await readableArtifactIds(actor, params.workspaceId, "MeetingInsight", crmInsights);
+  return [...extractedInsights, ...crmInsights.filter((insight) => visibleCrmIds.has(insight.id))];
+}
+
+async function updateInsightWithLineage(actor: AppActor, workspaceId: string, insight: MeetingInsight,
+  data: Prisma.MeetingInsightUncheckedUpdateInput, extra?: { lineageInputs?: LineageInput[]; lineageRoots?: LineageRoot[]; unknown?: boolean }) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "MeetingInsight" WHERE id = ${insight.id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    const current = await tx.meetingInsight.findUnique({ where: { id: insight.id, workspaceId } });
+    invariant(current && lineageContentFingerprint("MeetingInsight", current) === lineageContentFingerprint("MeetingInsight", insight),
+      409, "SOURCE_CHANGED", "Insight changed while reviewing.");
+    invariant((await readableArtifactIds(actor, workspaceId, "MeetingInsight", [current], tx)).has(current.id),
+      404, "NOT_FOUND", "Insight not found.");
+    const roots = await captureArtifactInputSnapshotProof(actor, workspaceId, { kind: "MeetingInsight", id: current.id, fingerprint: lineageContentFingerprint("MeetingInsight", current) }, tx);
+    const updated = await tx.meetingInsight.update({ where: { id: current.id }, data });
+    if (extra?.unknown) await invalidateArtifactInputLineage({ tx, workspaceId,
+      artifact: { kind: "MeetingInsight", id: updated.id }, content: updated });
+    else await recordArtifactInputLineage({ tx, actor, workspaceId, artifact: { kind: "MeetingInsight", id: updated.id },
+      content: updated, origin: "DERIVED", inputs: extra?.lineageInputs ?? [], inheritedRoots: [...roots, ...(extra?.lineageRoots ?? [])] });
+    return updated;
+  });
 }
 
 export async function confirmInsight(
@@ -986,22 +1081,21 @@ export async function confirmInsight(
   });
 
   invariant(insight, 404, "NOT_FOUND", "Insight not found.");
+  invariant((await readableArtifactIds(actor, params.workspaceId, "MeetingInsight", [insight])).has(insight.id),
+    404, "NOT_FOUND", "Insight not found.");
   invariant(insight.status === "SUGGESTED", 400, "INVALID_STATE", "Insight is not in SUGGESTED state.");
   invariant(!insight.supersededAt, 400, "INVALID_STATE", "Insight has been superseded by newer transcript evidence.");
 
-  return prisma.meetingInsight.update({
-    where: { id: params.insightId },
-    data: {
+  return updateInsightWithLineage(actor, params.workspaceId, insight, {
       status: "CONFIRMED",
       reviewedByUserId: actor.kind === "user" ? actor.user.id : null,
       reviewedAt: new Date(),
-    },
   });
 }
 
 export async function updateInsight(
   actor: AppActor,
-  params: { workspaceId: string; insightId: string; title?: string | null; bodyMd?: string | null; assigneeHint?: string | null; dueAt?: Date | string | null }
+  params: { workspaceId: string; insightId: string; title?: string | null; bodyMd?: string | null; assigneeHint?: string | null; dueAt?: Date | string | null; lineageInputs?: LineageInput[]; lineageRoots?: LineageRoot[] }
 ) {
   await requireWorkspaceMembership({
     actor,
@@ -1013,6 +1107,8 @@ export async function updateInsight(
   });
 
   invariant(insight, 404, "NOT_FOUND", "Insight not found.");
+  invariant((await readableArtifactIds(actor, params.workspaceId, "MeetingInsight", [insight])).has(insight.id),
+    404, "NOT_FOUND", "Insight not found.");
   invariant(isActiveReviewableInsight(insight), 400, "INVALID_STATE", "Only reviewable insights can be edited.");
 
   const title = params.title?.trim();
@@ -1021,17 +1117,15 @@ export async function updateInsight(
   const dueAt = params.dueAt === undefined ? undefined : normalizeDueAt(params.dueAt);
   invariant(title === undefined || title.length > 0, 400, "INVALID_INPUT", "Insight title is required.");
   
-  return prisma.meetingInsight.update({
-    where: { id: params.insightId },
-    data: {
+  return updateInsightWithLineage(actor, params.workspaceId, insight, {
       ...(title !== undefined ? { title } : {}),
       ...(bodyMd !== undefined ? { bodyMd } : {}),
       ...(params.assigneeHint !== undefined ? { assigneeHint: assigneeHint || null } : {}),
       ...(dueAt !== undefined ? { dueAt } : {}),
       reviewedByUserId: actor.kind === "user" ? actor.user.id : null,
       reviewedAt: new Date(),
-    },
-  });
+  }, { lineageInputs: params.lineageInputs, lineageRoots: params.lineageRoots,
+    unknown: actor.kind !== "user" && !params.lineageRoots?.length });
 }
 
 export async function dismissInsight(
@@ -1048,15 +1142,109 @@ export async function dismissInsight(
   });
 
   invariant(insight, 404, "NOT_FOUND", "Insight not found.");
+  invariant((await readableArtifactIds(actor, params.workspaceId, "MeetingInsight", [insight])).has(insight.id),
+    404, "NOT_FOUND", "Insight not found.");
 
-  return prisma.meetingInsight.update({
-    where: { id: params.insightId },
-    data: {
+  return updateInsightWithLineage(actor, params.workspaceId, insight, {
       status: "DISMISSED",
       reviewedByUserId: actor.kind === "user" ? actor.user.id : null,
       reviewedAt: new Date(),
-    },
   });
+}
+
+/** Preparation writes immutable history only. All resolution effects share the
+ * publication transaction; no provider replay runs while its locks are held. */
+async function applyResolutionWithLineage(actor: AppActor, workspaceId: string,
+  insight: MeetingInsight & { meeting: NonNullable<Awaited<ReturnType<typeof prisma.meeting.findFirst>>> },
+  autoApplied?: boolean) {
+  const targetKind = insight.targetEntityType;
+  const targetId = insight.targetEntityId;
+  invariant(targetId && (targetKind === "Action" || targetKind === "Tension" || targetKind === "Proposal"),
+    400, "INVALID_STATE", "Resolved insight must point to a supported target record.");
+  const outcome = (insight.resolutionOutcome || "ADOPTED") as ProposalResolutionOutcome;
+  const flow = targetKind === "Proposal" ? await prisma.approvalFlow.findFirst({
+    where: { workspaceId, subjectType: "PROPOSAL", subjectId: targetId }, select: { id: true },
+  }) : null;
+  const policy = targetKind === "Proposal" && outcome === "ADOPTED" ? await prisma.policyCorpus.findFirst({
+    where: { workspaceId, proposalId: targetId }, select: { id: true },
+  }) : null;
+  const originals = await captureArtifactInputProof(actor, workspaceId, [
+    { kind: "MeetingInsight", id: insight.id, snapshot: insight as unknown as Record<string, unknown> },
+    { kind: "Meeting", id: insight.meetingId, snapshot: insight.meeting as unknown as Record<string, unknown> },
+    { kind: targetKind, id: targetId },
+    ...(flow ? [{ kind: "ApprovalFlow" as const, id: flow.id }] : []),
+    ...(policy ? [{ kind: "PolicyCorpus" as const, id: policy.id }] : []),
+  ]);
+  const lockAndVerify = async (tx: Prisma.TransactionClient) => {
+    await assertArtifactInputWriteFence(tx);
+    await acquireWorkItemAdvisoryLock(tx, targetKind, targetId);
+    if (targetKind === "Proposal" && outcome === "ADOPTED") await acquireConstitutionCorpusAdvisoryLock(tx, workspaceId);
+    if (targetKind === "Action") await tx.$queryRaw`SELECT id FROM "Action" WHERE id = ${targetId} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    else if (targetKind === "Tension") await tx.$queryRaw`SELECT id FROM "Tension" WHERE id = ${targetId} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    else await tx.$queryRaw`SELECT id FROM "Proposal" WHERE id = ${targetId} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    // Generation owns Meeting before it supersedes Insight rows. Follow the
+    // same order so concurrent generation cannot deadlock this publication.
+    await tx.$queryRaw`SELECT id FROM "Meeting" WHERE id = ${insight.meetingId} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    await tx.$queryRaw`SELECT id FROM "MeetingInsight" WHERE id = ${insight.id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    if (flow) await tx.$queryRaw`SELECT id FROM "ApprovalFlow" WHERE id = ${flow.id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    if (policy) await tx.$queryRaw`SELECT id FROM "PolicyCorpus" WHERE id = ${policy.id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
+    await requireWorkspaceMembership({ actor, workspaceId, tx });
+    const currentInsight = await tx.meetingInsight.findUnique({ where: { id: insight.id, workspaceId } });
+    const currentMeeting = await tx.meeting.findFirst({ where: { id: insight.meetingId, workspaceId } });
+    const target = targetKind === "Action" ? await tx.action.findFirst({ where: { id: targetId, workspaceId } })
+      : targetKind === "Tension" ? await tx.tension.findFirst({ where: { id: targetId, workspaceId } })
+        : await tx.proposal.findFirst({ where: { id: targetId, workspaceId } });
+    const matches = (kind: LineageInput["kind"], row: { id: string } | null) => row && originals.some(root =>
+      root.kind === kind && root.id === row.id && root.fingerprint === lineageContentFingerprint(kind, row));
+    invariant(matches("MeetingInsight", currentInsight) && currentInsight && isActiveReviewableInsight(currentInsight)
+      && matches("Meeting", currentMeeting) && currentMeeting && !currentMeeting.archivedAt
+      && matches(targetKind, target) && target && !target.isPrivate && !target.archivedAt
+      && (target.status === "OPEN" || (targetKind === "Action" && target.status === "IN_PROGRESS")),
+    409, "SOURCE_CHANGED", "Resolution source or public target changed.");
+    if (targetKind === "Proposal") {
+      const currentFlow = await tx.approvalFlow.findFirst({ where: { workspaceId, subjectType: "PROPOSAL", subjectId: targetId } });
+      const currentPolicy = outcome === "ADOPTED" ? await tx.policyCorpus.findFirst({ where: { workspaceId, proposalId: targetId } }) : null;
+      invariant((currentFlow?.id ?? null) === (flow?.id ?? null) && (!currentFlow || matches("ApprovalFlow", currentFlow))
+        && (currentPolicy?.id ?? null) === (policy?.id ?? null) && (!currentPolicy || matches("PolicyCorpus", currentPolicy)),
+      409, "SOURCE_CHANGED", "Resolution workflow changed.");
+    }
+  };
+  const preparation = await prepareArtifactCommitPreflight(actor, workspaceId, originals);
+  const frozen = await prisma.$transaction(async tx => {
+    await lockAndVerify(tx);
+    return withArtifactCommitPreflight(actor, workspaceId, tx, originals, preparation,
+      () => captureImmutableArtifactInputProof(actor, workspaceId, originals, tx));
+  });
+  const publication = await prepareArtifactCommitPreflight(actor, workspaceId, frozen);
+  const result = await prisma.$transaction(async tx => {
+    await lockAndVerify(tx);
+    return withArtifactCommitPreflight(actor, workspaceId, tx, frozen, publication, async () => {
+      const sourceCapture = { lineageInputs: [] as LineageInput[], lineageRoots: frozen, lineageCopied: true };
+      const meetingContext = `*Created from meeting:* [${insight.meeting.title || "Untitled"}](/workspaces/${workspaceId}/meetings/${insight.meetingId})`;
+      const fullBody = [stripMeetingBlockContext(insight.bodyMd), meetingContext].filter(Boolean).join("\n\n");
+      if (targetKind === "Action") await updateAction(actor, { ...sourceCapture, workspaceId, actionId: targetId,
+        status: "COMPLETED", completedVia: fullBody, _tx: tx });
+      else if (targetKind === "Tension") await updateTension(actor, { ...sourceCapture, workspaceId, tensionId: targetId,
+        status: "RESOLVED", resolvedVia: `Meeting: ${insight.meeting.title || insight.meetingId}` }, tx);
+      else await resolveProposal(actor, { ...sourceCapture, workspaceId, proposalId: targetId, outcome, decisionMd: fullBody }, tx);
+      const targetOutput = await captureImmutableArtifactInputProof(actor, workspaceId,
+        await captureArtifactInputProof(actor, workspaceId, [{ kind: targetKind, id: targetId }], tx), tx);
+      const updated = await tx.meetingInsight.update({ where: { id: insight.id, workspaceId }, data: {
+        status: "APPLIED", appliedEntityType: targetKind, appliedEntityId: targetId,
+        reviewedByUserId: actor.kind === "user" ? actor.user.id : null, reviewedAt: new Date(),
+        autoAppliedAt: autoApplied ? new Date() : null, autoApplyError: null,
+      } });
+      await recordArtifactInputLineage({ tx, actor, workspaceId, artifact: { kind: "MeetingInsight", id: updated.id },
+        content: updated, origin: "DERIVED", inputs: [], inheritedRoots: [...frozen, ...targetOutput] });
+      await assertArtifactInputWriteFence(tx);
+      await requireWorkspaceMembership({ actor, workspaceId, tx });
+      return updated;
+    });
+  });
+  invariant(await isArtifactInputProofReadable(actor, workspaceId, frozen),
+    409, "SOURCE_CHANGED", "Resolution permissions changed before returning.");
+  await captureArtifactInputProof(actor, workspaceId, [{ kind: "MeetingInsight", id: result.id, snapshot: result as unknown as Record<string, unknown> }]);
+  return result;
 }
 
 export async function applyInsight(
@@ -1074,8 +1262,25 @@ export async function applyInsight(
   });
 
   invariant(insight, 404, "NOT_FOUND", "Insight not found.");
+  invariant((await readableArtifactIds(actor, params.workspaceId, "MeetingInsight", [insight])).has(insight.id),
+    404, "NOT_FOUND", "Insight not found.");
   invariant(isActiveReviewableInsight(insight), 400, "INVALID_STATE", "Insight must be active and reviewable before applying.");
 
+  invariant((await readableArtifactIds(actor, params.workspaceId, "Meeting", [insight.meeting])).has(insight.meeting.id),
+    404, "NOT_FOUND", "Meeting not found.");
+  if (insight.operation === "RESOLVE" && insight.type !== "DELIBERATION_ENTRY") {
+    return applyResolutionWithLineage(actor, params.workspaceId, insight, params.autoApplied);
+  }
+  const outputRoots = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "MeetingInsight" WHERE id = ${insight.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    await tx.$queryRaw`SELECT id FROM "Meeting" WHERE id = ${insight.meetingId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    const insightRoots = await captureArtifactInputSnapshotProof(actor, params.workspaceId,
+      { kind: "MeetingInsight", id: insight.id, fingerprint: lineageContentFingerprint("MeetingInsight", insight) }, tx);
+    const meetingRoots = await captureArtifactInputSnapshotProof(actor, params.workspaceId,
+      { kind: "Meeting", id: insight.meeting.id, fingerprint: lineageContentFingerprint("Meeting", insight.meeting) }, tx);
+    return [...new Map([...insightRoots, ...meetingRoots].map((root) => [`${root.kind}:${root.id}:${root.fingerprint}`, root])).values()];
+  });
+  const sourceCapture = { lineageInputs: [] as LineageInput[], lineageRoots: outputRoots };
   let appliedEntityType: string | null = null;
   let appliedEntityId: string | null = null;
 
@@ -1110,7 +1315,7 @@ export async function applyInsight(
       invariant(tension, 404, "NOT_FOUND", "Tension not found.");
     }
 
-    const entry = await postDeliberationEntry(actor, {
+    const entry = await postDeliberationEntry(actor, { ...sourceCapture,
       workspaceId: params.workspaceId,
       parentType,
       parentId: insight.targetEntityId,
@@ -1119,42 +1324,11 @@ export async function applyInsight(
     });
     appliedEntityType = "DeliberationEntry";
     appliedEntityId = entry.id;
-  } else if (insight.operation === "RESOLVE") {
-    invariant(insight.targetEntityType && insight.targetEntityId, 400, "INVALID_STATE", "Resolved insight must point to a target record.");
-
-    if (insight.targetEntityType === "Action") {
-      await updateAction(actor, {
-        workspaceId: params.workspaceId,
-        actionId: insight.targetEntityId,
-        status: "COMPLETED",
-        completedVia: fullBody,
-      });
-      appliedEntityType = "Action";
-      appliedEntityId = insight.targetEntityId;
-    } else if (insight.targetEntityType === "Tension") {
-      await updateTension(actor, {
-        workspaceId: params.workspaceId,
-        tensionId: insight.targetEntityId,
-        status: "RESOLVED",
-        resolvedVia: `Meeting: ${insight.meeting.title || insight.meetingId}`,
-      });
-      appliedEntityType = "Tension";
-      appliedEntityId = insight.targetEntityId;
-    } else if (insight.targetEntityType === "Proposal") {
-      const outcome = (insight.resolutionOutcome || "ADOPTED") as ProposalResolutionOutcome;
-      await resolveProposal(actor, {
-        workspaceId: params.workspaceId,
-        proposalId: insight.targetEntityId,
-        outcome,
-        decisionMd: fullBody,
-      });
-      appliedEntityType = "Proposal";
-      appliedEntityId = insight.targetEntityId;
-    }
   } else if (insight.type === "CRM_CONTACT") {
     const crm = crmInsightPayload(insight.metadataJson);
     const email = requireCrmInsightEmail(crm);
     const contact = await createContact(actor, {
+      ...sourceCapture,
       workspaceId: params.workspaceId,
       email,
       name: crm.name,
@@ -1168,6 +1342,7 @@ export async function applyInsight(
     const crm = crmInsightPayload(insight.metadataJson);
     invariant(crm.contactId, 400, "INVALID_INPUT", "CRM deal insight requires a contact.");
     const deal = await createDeal(actor, {
+      ...sourceCapture,
       workspaceId: params.workspaceId,
       contactId: crm.contactId,
       accountId: crm.accountId,
@@ -1180,6 +1355,7 @@ export async function applyInsight(
   } else if (insight.type === "CRM_ACTIVITY") {
     const crm = crmInsightPayload(insight.metadataJson);
     const activity = await createActivity(actor, {
+      ...sourceCapture,
       workspaceId: params.workspaceId,
       accountId: crm.accountId,
       contactId: crm.contactId,
@@ -1195,25 +1371,37 @@ export async function applyInsight(
   } else if (insight.type === "DECISION") {
     appliedEntityType = "Decision";
     
-    const existing = insight.meeting.decisionsJson as { items: any[] } | null;
-    const items = Array.isArray(existing?.items) ? existing.items : [];
-    items.push({
-      title: insight.title,
-      bodyMd: humanBody,
-      confirmedAt: new Date().toISOString(),
-    });
-
-    await prisma.meeting.update({
-      where: { id: insight.meetingId },
-      data: { decisionsJson: { items } }
+    await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Meeting" WHERE id = ${insight.meetingId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+      const current = await tx.meeting.findFirst({ where: { id: insight.meetingId, workspaceId: params.workspaceId, archivedAt: null } });
+      invariant(current && lineageContentFingerprint("Meeting", current) === lineageContentFingerprint("Meeting", insight.meeting),
+        409, "SOURCE_CHANGED", "Meeting changed while applying a decision.");
+      const prior = await captureArtifactInputSnapshotProof(actor, params.workspaceId,
+        { kind: "Meeting", id: current.id, fingerprint: lineageContentFingerprint("Meeting", current) }, tx);
+      const existing = current.decisionsJson as { items?: Prisma.JsonValue[] } | null;
+      const items: Prisma.InputJsonValue[] = [...(Array.isArray(existing?.items) ? existing.items : [])] as Prisma.InputJsonValue[];
+      items.push({ title: insight.title, bodyMd: humanBody, confirmedAt: new Date().toISOString() });
+      const updated = await tx.meeting.update({ where: { id: current.id }, data: { decisionsJson: { items } } });
+      await recordArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId, artifact: { kind: "Meeting", id: current.id },
+        content: updated, origin: "DERIVED", inputs: [], inheritedRoots: [...prior, ...outputRoots] });
     });
   } else {
     // Attempt fuzzy match for a member reference if a hint exists.
-    const loadMemberDirectory = params.loadMemberDirectory ?? createWorkspaceMemberDirectoryLoader(params.workspaceId);
+    const requestedDirectory = params.loadMemberDirectory ?? createWorkspaceMemberDirectoryLoader(params.workspaceId);
+    let directoryPromise: ReturnType<MemberDirectoryLoader> | null = null;
+    const loadMemberDirectory: MemberDirectoryLoader = () => directoryPromise ??= requestedDirectory();
+    if (insight.assigneeHint && !isCollectiveAssigneeHint(insight.assigneeHint)) {
+      const directory = await loadMemberDirectory();
+      outputRoots.push(...await captureArtifactInputProof(actor, params.workspaceId, directory.map((member) => ({
+        kind: "Member" as const, id: member.id, snapshot: { id: member.id, user: {
+          displayName: member.user.displayName, email: member.user.email,
+        } },
+      }))));
+    }
     const hintedMemberId = await resolveHintedAssigneeMemberId(insight.assigneeHint, loadMemberDirectory);
 
     if (insight.type === "ACTION_ITEM" || insight.type === "FOLLOW_UP") {
-      const action = await createAction(actor, {
+      const action = await createAction(actor, { ...sourceCapture,
         workspaceId: params.workspaceId,
         title: insight.title,
         bodyMd: fullBody,
@@ -1234,7 +1422,7 @@ export async function applyInsight(
       appliedEntityType = "Action";
       appliedEntityId = opened.id;
     } else if (insight.type === "TENSION") {
-      const tension = await createTension(actor, {
+      const tension = await createTension(actor, { ...sourceCapture,
         workspaceId: params.workspaceId,
         title: insight.title,
         bodyMd: fullBody,
@@ -1252,7 +1440,7 @@ export async function applyInsight(
       appliedEntityId = opened.id;
     } else if (insight.type === "PROPOSAL") {
       const proposal = insight.targetEntityType === "Tension" && insight.targetEntityId
-        ? await createProposalFromTension(actor, {
+        ? await createProposalFromTension(actor, { ...sourceCapture,
           workspaceId: params.workspaceId,
           sourceTensionId: insight.targetEntityId,
           title: insight.title,
@@ -1260,7 +1448,7 @@ export async function applyInsight(
           meetingId: insight.meetingId,
           isPrivate: false,
         })
-        : await createProposal(actor, {
+        : await createProposal(actor, { ...sourceCapture,
           workspaceId: params.workspaceId,
           title: insight.title,
           bodyMd: fullBody,
@@ -1272,9 +1460,7 @@ export async function applyInsight(
     }
   }
 
-  return prisma.meetingInsight.update({
-    where: { id: params.insightId },
-    data: {
+  return updateInsightWithLineage(actor, params.workspaceId, insight, {
       status: "APPLIED",
       appliedEntityType,
       appliedEntityId,
@@ -1282,7 +1468,6 @@ export async function applyInsight(
       reviewedAt: new Date(),
       autoAppliedAt: params.autoApplied ? new Date() : null,
       autoApplyError: null,
-    },
   });
 }
 
@@ -1296,7 +1481,7 @@ export async function autoApplyMeetingInsights(
   });
 
   const confidenceThreshold = params.confidenceThreshold ?? AUTO_APPLY_CONFIDENCE_THRESHOLD;
-  const insights = await prisma.meetingInsight.findMany({
+  const insights = await readMeetingInputBatches((page) => prisma.meetingInsight.findMany({
     where: {
       workspaceId: params.workspaceId,
       meetingId: params.meetingId,
@@ -1304,9 +1489,11 @@ export async function autoApplyMeetingInsights(
       supersededAt: null,
       confidence: { gte: confidenceThreshold },
     },
-    orderBy: { createdAt: "asc" },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }], ...page,
+  }), async (rows) => {
+    const ids = await readableArtifactIds(actor, params.workspaceId, "MeetingInsight", rows);
+    return rows.filter((row) => ids.has(row.id));
   });
-
   let applied = 0;
   let failed = 0;
   let skipped = 0;
@@ -1406,12 +1593,12 @@ export async function confirmAllInsights(
     updateWhere.type = params.onlyType;
   }
 
-  await prisma.meetingInsight.updateMany({
-    where: updateWhere,
-    data: {
-      status: "CONFIRMED",
-      reviewedByUserId: actor.kind === "user" ? actor.user.id : null,
-      reviewedAt: new Date(),
-    },
+  const candidates = await readMeetingInputBatches((page) => prisma.meetingInsight.findMany({ where: updateWhere, orderBy: { id: "asc" }, ...page }), async (rows) => {
+    const ids = await readableArtifactIds(actor, params.workspaceId, "MeetingInsight", rows);
+    return rows.filter((row) => ids.has(row.id));
   });
+  for (const insight of candidates) {
+    await updateInsightWithLineage(actor, params.workspaceId, insight, { status: "CONFIRMED",
+      reviewedByUserId: actor.kind === "user" ? actor.user.id : null, reviewedAt: new Date() });
+  }
 }

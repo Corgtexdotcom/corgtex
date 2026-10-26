@@ -1,23 +1,24 @@
 import { NextResponse } from "next/server";
+import { buildAssetResponseHeaders } from "@/lib/build-asset-response-headers";
 import { getBuildArtifactAssetSignedUrl } from "@corgtex/domain";
 import { withWorkspaceRoute } from "@/lib/route-handler";
 import { disabledWorkspaceFeatureResponse } from "@/lib/workspace-feature-route";
+import { authorizedOwnedDownloadStream } from "@/lib/authorized-download-stream";
+import { getSupportAuthorizationContext, runWithSupportOrigin } from "@corgtex/shared";
 
 export const dynamic = "force-dynamic";
 
-export const GET = withWorkspaceRoute(async (_request, { actor, workspaceId, params }) => {
+export const GET = withWorkspaceRoute(async (request, { actor, workspaceId, params }) => {
   const disabled = await disabledWorkspaceFeatureResponse(workspaceId, "BUILD_ARTIFACTS");
   if (disabled) return disabled;
 
-  const { signedUrl, file } = await getBuildArtifactAssetSignedUrl(actor, {
+  const { file, mimeType, authorize, byteBinding } = await getBuildArtifactAssetSignedUrl(actor, {
     workspaceId,
     artifactId: params.artifactId,
     assetId: params.assetId,
   });
-  if (file) return new NextResponse(new Uint8Array(file.data), { headers: {
-    "Content-Type": "application/octet-stream", "Content-Disposition": "attachment",
-    "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
-  } });
-  if (!signedUrl) return new NextResponse(null, { status: 404 });
-  return NextResponse.redirect(signedUrl, 302);
+  const origin = getSupportAuthorizationContext()?.origin ?? (actor.kind === "agent" ? actor.supportOrigin : undefined);
+  const body = await authorizedOwnedDownloadStream(file.data, () => origin ? runWithSupportOrigin(origin, authorize) : authorize(),
+    request.signal, byteBinding);
+  return new NextResponse(body, { headers: buildAssetResponseHeaders(mimeType) });
 });

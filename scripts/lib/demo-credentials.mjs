@@ -87,9 +87,9 @@ export async function assertDemoCredentialsScoped(prisma, workspaceId, userIds) 
   }
 }
 
-export async function revokeDemoCredentials(prisma, workspaceId, userIds) {
+export async function revokeDemoCredentials(prisma, workspaceId, userIds, options = {}) {
   const now = new Date();
-  await prisma.$transaction([
+  const operations = [
     prisma.session.deleteMany({ where: { userId: { in: userIds } } }),
     prisma.passwordResetToken.deleteMany({ where: { userId: { in: userIds } } }),
     prisma.oAuthAuthorizationCode.deleteMany({ where: { workspaceId, userId: { in: userIds } } }),
@@ -99,5 +99,7 @@ export async function revokeDemoCredentials(prisma, workspaceId, userIds) {
     prisma.appSession.updateMany({ where: { workspaceId, actorUserId: { in: userIds } }, data: { revokedAt: now } }),
     prisma.agentCredential.updateMany({ where: { workspaceId, createdByUserId: { in: userIds } }, data: { isActive: false } }),
     prisma.oAuthApp.updateMany({ where: { workspaceId }, data: { isActive: false } }),
-  ]);
+  ];
+  if (options.inTransaction) await Promise.all(operations);
+  else await prisma.$transaction(operations);
 }

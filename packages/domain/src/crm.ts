@@ -13,12 +13,21 @@ import { AppError, invariant } from "./errors";
 import { CrmDealStage, CrmActivityType } from "@prisma/client";
 import type { CustomerAccountStatus, CustomerDeploymentStatus, Prisma } from "@prisma/client";
 import { registerCustomerDeployment } from "./customer-lifecycle";
+import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
+import { assertArtifactInputWriteFence, sealArtifactInputActor, captureArtifactInputProof, captureImmutableArtifactInputProof, currentArtifactInputRoots, preserveUnknownArtifactInputSnapshot, readableArtifactIds, type LineageInput } from "./source-lineage";
+import { createCrmDirectReadSession, finalizeCrmDirectReadResult, renderCrmDirectAwareRow, captureCrmDirectReadContributors, isCrmDirectOriginalRow } from "./crm-direct-original-read";
+import { readCrmPage, readCrmCount, readCrmSample, readCrmRows, withCrmReadSnapshot, observeCrmReadRows } from "./crm-lineage";
+import { crmIngressActor, createFreshFormQualification, recordFreshDemoLeadLineage, recordFreshEmailQualificationLineage } from "./crm-ingress-lineage";
 
 const DEFAULT_DEMO_WORKSPACE = {
   slug: "corgtex",
   name: "Corgtex",
   description: "Internal company operating environment for Corgtex",
 };
+
+function crmInputWasCopied(actor: AppActor, source?: string | null) {
+  return actor.kind !== "user" || Boolean(source?.trim() && source.trim() !== "manual");
+}
 
 export const DEFAULT_CRM_RELATIONSHIP_TYPE = "PROSPECT";
 export const DEFAULT_CRM_LIFECYCLE_STAGE = "DISCOVERY";
@@ -246,7 +255,7 @@ async function ensureCrmAccount(tx: any, workspaceId: string, params: {
   relationshipType?: string | null;
   lifecycleStage?: string | null;
   tags?: string[];
-}, options: { lockedAccountIds?: readonly string[]; allocatedAccountId: string }) {
+}, options: { lockedAccountIds?: readonly string[]; allocatedAccountId: string; lineage?: { actor: AppActor; capture: ProducerLineageParams } }) {
   const candidate = crmAccountCandidate(params);
   if (!candidate) return null;
   const tags = normalizeCrmTags(params.tags);
@@ -272,10 +281,13 @@ async function ensureCrmAccount(tx: any, workspaceId: string, params: {
       data.tags = mergedTags;
     }
     if (Object.keys(data).length > 0) {
-      return tx.crmAccount.update({
-        where: { id: existing.id },
-        data,
-      });
+      const receipt = options.lineage ? await prepareProducerLineage({ tx, actor: options.lineage.actor, workspaceId,
+        artifact: { kind: "CrmAccount", id: existing.id }, before: existing, capture: options.lineage.capture,
+        copied: crmInputWasCopied(options.lineage.actor, params.source) }) : null;
+      const updated = await tx.crmAccount.update({ where: { id: existing.id }, data });
+      if (options.lineage && receipt) await finishProducerLineage({ tx, actor: options.lineage.actor, workspaceId,
+        artifact: { kind: "CrmAccount", id: updated.id }, content: updated, receipt });
+      return updated;
     }
     return existing;
   }
@@ -287,14 +299,12 @@ async function ensureCrmAccount(tx: any, workspaceId: string, params: {
     await lockCrmLinks(tx, { accountId: id });
   }
   invariant(!await findExistingCrmAccount(tx, workspaceId, candidate), 409, "CRM_LINK_CLOSURE_CHANGED", "CRM account match changed concurrently; retry the operation.");
-  return tx.crmAccount.create({
-    data: {
-      id,
-      workspaceId,
-      ...candidate,
-      tags,
-    },
-  });
+  const receipt = options.lineage ? await prepareProducerLineage({ tx, actor: options.lineage.actor, workspaceId,
+    capture: options.lineage.capture, copied: crmInputWasCopied(options.lineage.actor, params.source) }) : null;
+  const created = await tx.crmAccount.create({ data: { id, workspaceId, ...candidate, tags } });
+  if (options.lineage && receipt) await finishProducerLineage({ tx, actor: options.lineage.actor, workspaceId,
+    artifact: { kind: "CrmAccount", id: created.id }, content: created, receipt });
+  return created;
 }
 
 async function requireCrmAccount(tx: any, workspaceId: string, accountId: string) {
@@ -559,6 +569,7 @@ export async function captureDemoLead(params: {
 
     await requirePublicCrmWrites(tx, workspace.id);
 
+    const createdLeadId = randomUUID();
     const demoLead = await tx.demoLead.upsert({
       where: {
         workspaceId_email: {
@@ -571,12 +582,17 @@ export async function captureDemoLead(params: {
         visitCount: { increment: 1 },
       },
       create: {
+        id: createdLeadId,
         workspaceId: workspace.id,
         email,
         source,
         qualifyToken: randomUUID(),
       },
     });
+
+    const lineageRoots = await recordFreshDemoLeadLineage(tx, demoLead, { createdId: createdLeadId, email, source });
+    const lineageActor = crmIngressActor(workspace.id);
+    const capture = { lineageRoots };
 
     const contactLinks = await tx.crmContact.findUnique({ where: { workspaceId_email: { workspaceId: workspace.id, email } } });
     const candidate = crmAccountCandidate({ email, source });
@@ -597,9 +613,26 @@ export async function captureDemoLead(params: {
     const account = await ensureCrmAccount(tx, workspace.id, {
       email,
       source,
-    }, { allocatedAccountId, lockedAccountIds: [contactLinks?.accountId, matchedAccount?.id, allocatedAccountId]
+    }, { allocatedAccountId, lineage: { actor: lineageActor, capture }, lockedAccountIds: [contactLinks?.accountId, matchedAccount?.id, allocatedAccountId]
       .filter((id): id is string => Boolean(id)) });
 
+    let contactCapture = capture;
+    let accountProven = true;
+    if (account) {
+      try {
+        const accountRoots = await captureArtifactInputProof(lineageActor, workspace.id,
+          [{ kind: "CrmAccount", id: account.id, snapshot: account }], tx);
+        contactCapture = { lineageRoots: [...lineageRoots,
+          ...await captureImmutableArtifactInputProof(lineageActor, workspace.id, accountRoots, tx)] };
+      } catch (error) {
+        if (error instanceof AppError && error.code === "UNKNOWN_LINEAGE") accountProven = false;
+        else throw error;
+      }
+    }
+    const contactReceipt = accountProven ? await prepareProducerLineage({ tx, actor: lineageActor,
+      workspaceId: workspace.id, capture: contactCapture, copied: true,
+      ...(existingContact ? { artifact: { kind: "CrmContact" as const, id: existingContact.id }, before: existingContact } : {}) })
+      : { mode: "UNKNOWN" as const };
     const contact = existingContact
       ? await tx.crmContact.update({ where: { id: existingContact.id }, data: {
         lastSeenAt: new Date(),
@@ -613,6 +646,9 @@ export async function captureDemoLead(params: {
         company: domainPart,
         source,
       } });
+
+    await finishProducerLineage({ tx, actor: lineageActor, workspaceId: workspace.id,
+      artifact: { kind: "CrmContact", id: contact.id }, content: contact, receipt: contactReceipt });
 
     if (!demoLead.welcomeEmailSentAt) {
       await appendEvents(tx, [
@@ -1034,7 +1070,25 @@ function listFilterValues(values?: readonly (string | null | undefined)[] | null
   return [...new Set((values ?? []).map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
 }
 
-export async function listCrmAccounts(actor: AppActor, workspaceId: string, opts?: {
+async function visibleCrmRelated<T extends { id: string }>(actor: AppActor, workspaceId: string, kind: LineageInput["kind"], row: T | null | undefined) {
+  return row && (await observeCrmReadRows(actor, workspaceId, kind, [row])).length ? row : null;
+}
+
+async function crmAccountCounts(actor: AppActor, workspaceId: string, accountId: string) {
+  const [contacts, deals, activities, conversations] = await Promise.all([
+    readCrmCount(actor, workspaceId, "CrmContact", (page) => prisma.crmContact.findMany({ where: { workspaceId, accountId, archivedAt: null,
+      ...activeCrmParentWhere(["account"]) }, orderBy: { id: "asc" }, ...page })),
+    readCrmCount(actor, workspaceId, "CrmDeal", (page) => prisma.crmDeal.findMany({ where: { workspaceId, accountId, archivedAt: null,
+      ...activeCrmParentWhere(["account", "contact"], "active", ["contact"]) }, orderBy: { id: "asc" }, ...page })),
+    readCrmCount(actor, workspaceId, "CrmActivity", (page) => prisma.crmActivity.findMany({ where: { workspaceId, accountId, archivedAt: null,
+      ...activeCrmParentWhere(["account", "contact", "deal"]) }, orderBy: { id: "asc" }, ...page })),
+    readCrmCount(actor, workspaceId, "CrmConversation", (page) => prisma.crmConversation.findMany({ where: { workspaceId, accountId,
+      ...activeCrmParentWhere(["account", "contact", "deal"]) }, orderBy: { id: "asc" }, ...page })),
+  ]);
+  return { contacts: contacts, deals: deals, activities: activities, crmConversations: conversations };
+}
+
+type CrmAccountReadOptions = {
   take?: number;
   skip?: number;
   query?: string;
@@ -1043,7 +1097,15 @@ export async function listCrmAccounts(actor: AppActor, workspaceId: string, opts
   lifecycleStage?: string;
   lifecycleStages?: string[];
   archiveFilter?: ArchiveFilter;
-}) {
+};
+type CrmAccountActiveListRow = Prisma.CrmAccountGetPayload<{}> & { _count: Awaited<ReturnType<typeof crmAccountCounts>> };
+type CrmAccountDirectListRow = Prisma.CrmAccountGetPayload<{}> & { _count: null; countsWithheld: true };
+export function listCrmAccounts(actor: AppActor, workspaceId: string, opts?: Omit<CrmAccountReadOptions, "archiveFilter"> & {archiveFilter?: "active"}): Promise<{items: CrmAccountActiveListRow[]; total: number; take: number; skip: number}>;
+export function listCrmAccounts(actor: AppActor, workspaceId: string, opts?: CrmAccountReadOptions): Promise<{items: (CrmAccountActiveListRow | CrmAccountDirectListRow)[]; total: number; take: number; skip: number}>;
+export async function listCrmAccounts(actor: AppActor, workspaceId: string, opts?: CrmAccountReadOptions) {
+  return withCrmReadSnapshot(actor,workspaceId,async()=>{
+  opts = opts ? structuredClone(opts) : undefined;
+  const direct = opts?.archiveFilter && opts.archiveFilter !== "active" ? createCrmDirectReadSession(actor, workspaceId) : undefined;
   await requireWorkspaceMembership({ actor, workspaceId });
 
   const take = opts?.take ?? 50;
@@ -1074,110 +1136,82 @@ export async function listCrmAccounts(actor: AppActor, workspaceId: string, opts
     };
   }
 
-  const [items, total] = await Promise.all([
-    prisma.crmAccount.findMany({
-      where,
-      include: {
-        _count: {
-          select: {
-            contacts: { where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account"], opts?.archiveFilter) } },
-            deals: { where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact"], opts?.archiveFilter, ["contact"]) } },
-            activities: { where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact", "deal"], opts?.archiveFilter) } },
-            crmConversations: { where: activeCrmParentWhere(["account", "contact", "deal"], opts?.archiveFilter) },
-          },
-        },
-      },
-      orderBy: { updatedAt: "desc" },
-      take,
-      skip,
-    }),
-    prisma.crmAccount.count({ where }),
-  ]);
+  const result = await readCrmPage(actor, workspaceId, "CrmAccount", (page) => prisma.crmAccount.findMany({
+    where, orderBy: [{ updatedAt: "desc" }, { id: "asc" }], ...page,
+  }), {take,skip}, prisma, direct);
+  const output = { ...result, items: await Promise.all(result.items.map(async row => {
+    if (isCrmDirectOriginalRow(row)) return {...row, _count: null, countsWithheld: true as const};
+    return renderCrmDirectAwareRow(actor, workspaceId, direct, "CrmAccount", row, async () => ({...row,
+      _count: await crmAccountCounts(actor, workspaceId, row.id),
+    }));
+  })) };
+  return direct ? finalizeCrmDirectReadResult(direct, output) : output;
 
-  return { items, total, take, skip };
+  });
+}
+
+async function readAccountDetailDeals(actor: AppActor, workspaceId: string, accountId: string) {
+  // Detail relations are complete arrays. Fetch card metadata in bounded joins;
+  // only a denied first candidate needs the ordinary replenishing sample reader.
+  const deals = await readCrmRows(actor, workspaceId, "CrmDeal", page => prisma.crmDeal.findMany({
+    where: { workspaceId, accountId, archivedAt: null,
+      ...activeCrmParentWhere(["account", "contact"], "active", ["contact"]) },
+    orderBy: [{ updatedAt: "desc" }, { id: "asc" }], ...page,
+    include: { contact: true,
+      activities: { where: { workspaceId, type: CrmActivityType.TASK, completedAt: null, archivedAt: null,
+        ...activeCrmParentWhere(["account", "contact", "deal"]) },
+      orderBy: [{ dueAt: { sort: "asc", nulls: "last" } }, { createdAt: "desc" }, { id: "asc" }], take: 1 },
+      stageTransitions: { where: { workspaceId }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: 1 },
+    },
+  }));
+  const result: typeof deals = [];
+  for (let offset = 0; offset < deals.length; offset += 100) {
+    const page = deals.slice(offset, offset + 100);
+    const contacts = await observeCrmReadRows(actor, workspaceId, "CrmContact", page.map(row => row.contact));
+    const contactIds = new Set(contacts.map(row => row.id));
+    const admitted = page.filter(row => contactIds.has(row.contact.id));
+    const [tasks, transitions] = await Promise.all([
+      observeCrmReadRows(actor, workspaceId, "CrmActivity", admitted.flatMap(row => row.activities)),
+      observeCrmReadRows(actor, workspaceId, "CrmDealStageTransition", admitted.flatMap(row => row.stageTransitions)),
+    ]);
+    const taskIds = new Set(tasks.map(row => row.id)), transitionIds = new Set(transitions.map(row => row.id));
+    result.push(...await Promise.all(admitted.map(async row => ({ ...row,
+      activities: row.activities.every(task => taskIds.has(task.id)) ? row.activities
+        : await readCrmSample(actor, workspaceId, "CrmActivity", page => prisma.crmActivity.findMany({
+          where: { workspaceId, dealId: row.id, type: CrmActivityType.TASK, completedAt: null, archivedAt: null,
+            ...activeCrmParentWhere(["account", "contact", "deal"]) },
+          orderBy: [{ dueAt: { sort: "asc", nulls: "last" } }, { createdAt: "desc" }, { id: "asc" }], ...page,
+        }), 1),
+      stageTransitions: row.stageTransitions.every(transition => transitionIds.has(transition.id)) ? row.stageTransitions
+        : await readCrmSample(actor, workspaceId, "CrmDealStageTransition", page => prisma.crmDealStageTransition.findMany({
+          where: { workspaceId, dealId: row.id }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page,
+        }), 1),
+    }))));
+  }
+  return result;
 }
 
 export async function getCrmAccount(actor: AppActor, params: { workspaceId: string; accountId: string }) {
+  return withCrmReadSnapshot(actor,params.workspaceId,async()=>{
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const account = await prisma.crmAccount.findUnique({ where: { id: params.accountId } });
+  invariant(account && account.workspaceId === params.workspaceId && !account.archivedAt
+    && (await observeCrmReadRows(actor, params.workspaceId, "CrmAccount", [account])).length,
+    404, "NOT_FOUND", "Account not found.");
+  const [contacts, deals, activities, conversations, prospects] = await Promise.all([
+    readCrmRows(actor, params.workspaceId, "CrmContact", page => prisma.crmContact.findMany({
+      where: { workspaceId: params.workspaceId, accountId: account.id, archivedAt: null, ...activeCrmParentWhere(["account"]) },
+      orderBy: [{ lastSeenAt: "desc" }, { id: "asc" }], ...page,
+    })),
+    readAccountDetailDeals(actor, params.workspaceId, account.id),
+    listCrmActivities(actor, params.workspaceId, { accountId: account.id, take: 50 }),
+    listCrmConversations(actor, params.workspaceId, { accountId: account.id, take: 25 }),
+    listCrmProspectWorkspaces(actor, params.workspaceId, { accountId: account.id, take: 25 }),
+  ]);
+  return { ...account, contacts, deals, activities: activities.items,
+    crmConversations: conversations.items, prospectWorkspaces: prospects.items };
 
-  const account = await prisma.crmAccount.findUnique({
-    where: { id: params.accountId },
-    include: {
-      contacts: {
-        where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) },
-        orderBy: { lastSeenAt: "desc" },
-      },
-      deals: {
-        where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact"], "active", ["contact"]) },
-        orderBy: { updatedAt: "desc" },
-        include: {
-          contact: {
-            select: { id: true, name: true, email: true, avatarUrl: true },
-          },
-          activities: {
-            where: {
-              type: CrmActivityType.TASK,
-              completedAt: null,
-              ...archiveFilterWhere(),
-              ...activeCrmParentWhere(["account", "contact", "deal"]),
-            },
-            orderBy: [
-              { dueAt: { sort: "asc", nulls: "last" } },
-              { createdAt: "desc" },
-            ],
-            take: 1,
-            select: {
-              id: true,
-              title: true,
-              createdAt: true,
-              dueAt: true,
-              completedAt: true,
-              ownerUserId: true,
-              source: true,
-              type: true,
-            },
-          },
-          stageTransitions: {
-            orderBy: { createdAt: "desc" },
-            take: 1,
-            select: { id: true, fromStage: true, toStage: true, createdAt: true },
-          },
-        },
-      },
-      activities: {
-        where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact", "deal"]) },
-        orderBy: { createdAt: "desc" },
-        take: 50,
-        include: {
-          contact: {
-            select: { id: true, name: true, email: true, company: true },
-          },
-          deal: {
-            select: { id: true, title: true, stage: true, valueCents: true },
-          },
-        },
-      },
-      crmConversations: {
-        where: activeCrmParentWhere(["account", "contact", "deal"]),
-        orderBy: { updatedAt: "desc" },
-        take: 25,
-        include: {
-          messages: { orderBy: { createdAt: "desc" }, take: 1 },
-        },
-      },
-      prospectWorkspaces: {
-        where: activeCrmParentWhere(["account"]),
-        orderBy: { provisionedAt: "desc" },
-        take: 25,
-        include: {
-          targetWorkspace: { select: { id: true, slug: true, name: true } },
-        },
-      },
-    },
   });
-
-  invariant(account && account.workspaceId === params.workspaceId && !account.archivedAt, 404, "NOT_FOUND", "Account not found.");
-  return account;
 }
 
 export async function createCrmAccount(actor: AppActor, params: {
@@ -1190,7 +1224,7 @@ export async function createCrmAccount(actor: AppActor, params: {
   source?: string | null;
   tags?: string[];
   ownerUserId?: string | null;
-}) {
+} & ProducerLineageParams) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   const name = params.name.trim();
@@ -1204,6 +1238,9 @@ export async function createCrmAccount(actor: AppActor, params: {
     const duplicate = await findExistingCrmAccount(tx, params.workspaceId, { slug, domain });
     invariant(!duplicate, 409, "CONFLICT", "Account already exists.");
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, copied: crmInputWasCopied(actor, params.source), dependencies: [],
+    });
     const account = await tx.crmAccount.create({
       data: {
         workspaceId: params.workspaceId,
@@ -1218,6 +1255,8 @@ export async function createCrmAccount(actor: AppActor, params: {
         ownerUserId: params.ownerUserId || null,
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmAccount", id: account.id }, content: account, receipt });
 
     await tx.auditLog.create({
       data: {
@@ -1254,10 +1293,11 @@ export async function updateCrmAccount(actor: AppActor, params: {
   descriptionMd?: string | null;
   tags?: string[];
   ownerUserId?: string | null;
-}) {
+} & ProducerLineageParams) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   return prisma.$transaction(async (tx) => {
+    await lockCrmLinks(tx, { accountId: params.accountId });
     const account = await requireCrmAccount(tx, params.workspaceId, params.accountId);
     const data: any = {};
 
@@ -1285,10 +1325,16 @@ export async function updateCrmAccount(actor: AppActor, params: {
       invariant(!duplicate || duplicate.id === account.id, 409, "CONFLICT", "Account already exists.");
     }
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, copied: actor.kind !== "user", dependencies: [],
+      artifact: { kind: "CrmAccount", id: account.id }, before: account,
+    });
     const updated = await tx.crmAccount.update({
       where: { id: params.accountId },
       data,
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmAccount", id: updated.id }, content: updated, receipt });
 
     await tx.auditLog.create({
       data: {
@@ -1308,11 +1354,16 @@ export async function updateCrmAccount(actor: AppActor, params: {
 export async function convertCrmAccountToClient(actor: AppActor, params: {
   workspaceId: string;
   accountId: string;
-}) {
+} & ProducerLineageParams) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   return prisma.$transaction(async (tx) => {
+    await lockCrmLinks(tx, { accountId: params.accountId });
     const account = await requireCrmAccount(tx, params.workspaceId, params.accountId);
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, copied: actor.kind !== "user", dependencies: [],
+      artifact: { kind: "CrmAccount", id: account.id }, before: account,
+    });
     const updated = await tx.crmAccount.update({
       where: { id: account.id },
       data: {
@@ -1320,6 +1371,8 @@ export async function convertCrmAccountToClient(actor: AppActor, params: {
         lifecycleStage: "ACTIVE",
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmAccount", id: updated.id }, content: updated, receipt });
 
     await tx.auditLog.create({
       data: {
@@ -1443,7 +1496,15 @@ export async function backfillCrmAccountsForWorkspace(actor: AppActor, params: {
 
 // --- CONTACTS ---
 
-export async function listContacts(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; query?: string; accountId?: string; archiveFilter?: ArchiveFilter }) {
+type CrmContactReadOptions = { take?: number; skip?: number; query?: string; accountId?: string; archiveFilter?: ArchiveFilter };
+type CrmContactListRow = Prisma.CrmContactGetPayload<{include: {account: true}}>;
+type CrmContactActiveListRow = CrmContactListRow & {_count: {deals: number; activities: number}};
+export function listContacts(actor: AppActor, workspaceId: string, opts?: Omit<CrmContactReadOptions,"archiveFilter"> & {archiveFilter?: "active"}): Promise<{items: CrmContactActiveListRow[]; total: number; take: number; skip: number}>;
+export function listContacts(actor: AppActor, workspaceId: string, opts?: CrmContactReadOptions): Promise<{items: (CrmContactListRow | CrmContactActiveListRow)[]; total: number; take: number; skip: number}>;
+export async function listContacts(actor: AppActor, workspaceId: string, opts?: CrmContactReadOptions) {
+  return withCrmReadSnapshot(actor,workspaceId,async()=>{
+  opts = opts ? structuredClone(opts) : undefined;
+  const direct = opts?.archiveFilter && opts.archiveFilter !== "active" ? createCrmDirectReadSession(actor, workspaceId) : undefined;
   await requireWorkspaceMembership({ actor, workspaceId });
   
   const take = opts?.take ?? 50;
@@ -1468,56 +1529,48 @@ export async function listContacts(actor: AppActor, workspaceId: string, opts?: 
     };
   }
 
-  const [items, total] = await Promise.all([
-    prisma.crmContact.findMany({
-      where,
-      include: {
-        account: {
-          select: { id: true, name: true, slug: true, domain: true, relationshipType: true, lifecycleStage: true, archivedAt: true },
-        },
-        _count: {
-          select: {
-            deals: { where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact"], opts?.archiveFilter, ["contact"]) } },
-            activities: { where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact", "deal"], opts?.archiveFilter) } },
-          },
-        },
-      },
-      orderBy: { lastSeenAt: "desc" },
-      take,
-      skip,
-    }),
-    prisma.crmContact.count({ where }),
-  ]);
-  
-  return { items, total, take, skip };
+  const result = await readCrmPage(actor, workspaceId, "CrmContact", (page) => prisma.crmContact.findMany({
+    where, include: { account: true }, orderBy: [{ lastSeenAt: "desc" }, { id: "asc" }], ...page,
+  }), {take,skip}, prisma, direct);
+  const output = { ...result, items: await Promise.all(result.items.map(async (row) => {
+    if (isCrmDirectOriginalRow(row)) return row;
+    return renderCrmDirectAwareRow(actor, workspaceId, direct, "CrmContact", row, async () => {
+    const [account, deals, activities] = await Promise.all([
+      visibleCrmRelated(actor, workspaceId, "CrmAccount", row.account),
+      readCrmCount(actor, workspaceId, "CrmDeal", (page) => prisma.crmDeal.findMany({ where: { workspaceId, contactId: row.id, archivedAt: null,
+        ...activeCrmParentWhere(["account", "contact"], "active", ["contact"]) }, orderBy: { id: "asc" }, ...page })),
+      readCrmCount(actor, workspaceId, "CrmActivity", (page) => prisma.crmActivity.findMany({ where: { workspaceId, contactId: row.id, archivedAt: null,
+        ...activeCrmParentWhere(["account", "contact", "deal"]) }, orderBy: { id: "asc" }, ...page })),
+    ]);
+    return { ...row, account, _count: { deals, activities } };
+    });
+  })) };
+  return direct ? finalizeCrmDirectReadResult(direct, output) : output;
+
+  });
 }
 
 export async function getContact(actor: AppActor, params: { workspaceId: string; contactId: string }) {
+  return withCrmReadSnapshot(actor,params.workspaceId,async()=>{
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  
-  const contact = await prisma.crmContact.findUnique({
-    where: { id: params.contactId },
-    include: {
-      account: true,
-      deals: {
-        where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact"], "active", ["contact"]) },
-        orderBy: { updatedAt: "desc" },
-      },
-      activities: {
-        where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact", "deal"]) },
-        orderBy: { createdAt: "desc" },
-        take: 50,
-      },
-    },
+  const contact = await prisma.crmContact.findUnique({ where: { id: params.contactId }, include: { account: true } });
+  invariant(contact && contact.workspaceId === params.workspaceId && !contact.archivedAt && (!contact.accountId || !contact.account?.archivedAt)
+    && (await observeCrmReadRows(actor, params.workspaceId, "CrmContact", [contact])).length,
+    404, "NOT_FOUND", "Contact not found.");
+  const [account, deals, activities] = await Promise.all([
+    visibleCrmRelated(actor, params.workspaceId, "CrmAccount", contact.account),
+    readCrmRows(actor, params.workspaceId, "CrmDeal", page => prisma.crmDeal.findMany({
+      where: { workspaceId: params.workspaceId, contactId: contact.id, archivedAt: null,
+        ...activeCrmParentWhere(["account", "contact"], "active", ["contact"]) },
+      orderBy: [{ updatedAt: "desc" }, { id: "asc" }], ...page,
+    })),
+    listCrmActivities(actor, params.workspaceId, { contactId: contact.id, take: 50 }),
+  ]);
+  // The detail contact was admitted above, and every deal's proof includes its
+  // mandatory current contact and account closure in the shared release ledger.
+  return { ...contact, account, deals, activities: activities.items };
+
   });
-  
-  invariant(
-    contact && contact.workspaceId === params.workspaceId && !contact.archivedAt && (!contact.accountId || !contact.account?.archivedAt),
-    404,
-    "NOT_FOUND",
-    "Contact not found.",
-  );
-  return contact;
 }
 
 export async function createContact(actor: AppActor, params: {
@@ -1532,7 +1585,7 @@ export async function createContact(actor: AppActor, params: {
   accountId?: string | null;
   relationshipType?: string | null;
   lifecycleStage?: string | null;
-}) {
+} & ProducerLineageParams) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   const email = params.email.trim().toLowerCase();
@@ -1551,9 +1604,12 @@ export async function createContact(actor: AppActor, params: {
         source: params.source,
         relationshipType: params.relationshipType,
         lifecycleStage: params.lifecycleStage,
-      }, { allocatedAccountId });
+      }, { allocatedAccountId, lineage: { actor, capture: params } });
     }
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, copied: crmInputWasCopied(actor, params.source), dependencies: account ? [{ kind: "CrmAccount" as const, id: account.id, snapshot: account }] : [],
+    });
     const contact = await tx.crmContact.create({
       data: {
         workspaceId: params.workspaceId,
@@ -1567,6 +1623,8 @@ export async function createContact(actor: AppActor, params: {
         tags: params.tags || [],
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmContact", id: contact.id }, content: contact, receipt });
 
     await tx.auditLog.create({
       data: {
@@ -1603,7 +1661,7 @@ export async function updateContact(actor: AppActor, params: {
   phone?: string | null;
   tags?: string[];
   accountId?: string | null;
-}) {
+} & ProducerLineageParams) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   return withCrmLinkSyncRetry(async (tx) => {
@@ -1633,10 +1691,16 @@ export async function updateContact(actor: AppActor, params: {
       data.accountId = params.accountId ? (await requireCrmAccount(tx, params.workspaceId, params.accountId)).id : null;
     }
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, copied: actor.kind !== "user", dependencies: params.accountId ? [{ kind: "CrmAccount" as const, id: params.accountId }] : [],
+      artifact: { kind: "CrmContact", id: contact.id }, before: contact,
+    });
     const updated = await tx.crmContact.update({
       where: { id: params.contactId },
       data,
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmContact", id: updated.id }, content: updated, receipt });
 
     if (updated.accountId) {
       await syncCrmAccountLinksForContact(tx, {
@@ -1693,7 +1757,15 @@ export async function deleteContact(actor: AppActor, params: { workspaceId: stri
 
 // --- DEALS ---
 
-export async function listDeals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; stage?: CrmDealStage; stages?: CrmDealStage[]; accountId?: string; contactId?: string; archiveFilter?: ArchiveFilter }) {
+type CrmDealReadOptions = { take?: number; skip?: number; stage?: CrmDealStage; stages?: CrmDealStage[]; accountId?: string; contactId?: string; archiveFilter?: ArchiveFilter };
+type CrmDealActiveListRow = Prisma.CrmDealGetPayload<{include: {account: true; contact: true}}> & { activities: Prisma.CrmActivityGetPayload<{}>[]; stageTransitions: Prisma.CrmDealStageTransitionGetPayload<{}>[] };
+type CrmDealDirectListRow = Prisma.CrmDealGetPayload<{include: {account: true; contact: true}}>;
+export function listDeals(actor: AppActor, workspaceId: string, opts?: Omit<CrmDealReadOptions, "archiveFilter"> & {archiveFilter?: "active"}): Promise<{items: CrmDealActiveListRow[]; total: number; take: number; skip: number}>;
+export function listDeals(actor: AppActor, workspaceId: string, opts?: CrmDealReadOptions): Promise<{items: (CrmDealActiveListRow | CrmDealDirectListRow)[]; total: number; take: number; skip: number}>;
+export async function listDeals(actor: AppActor, workspaceId: string, opts?: CrmDealReadOptions) {
+  return withCrmReadSnapshot(actor,workspaceId,async()=>{
+  opts = opts ? structuredClone(opts) : undefined;
+  const direct = opts?.archiveFilter && opts.archiveFilter !== "active" ? createCrmDirectReadSession(actor, workspaceId) : undefined;
   await requireWorkspaceMembership({ actor, workspaceId });
   
   const take = opts?.take ?? 100;
@@ -1717,53 +1789,34 @@ export async function listDeals(actor: AppActor, workspaceId: string, opts?: { t
     where.stage = opts.stage;
   }
 
-  const [items, total] = await Promise.all([
-    prisma.crmDeal.findMany({
-      where,
-      include: {
-        account: {
-          select: { id: true, name: true, slug: true, domain: true, relationshipType: true, lifecycleStage: true, archivedAt: true },
-        },
-        contact: {
-          select: { id: true, name: true, company: true, email: true, avatarUrl: true, archivedAt: true },
-        },
-        activities: {
-          where: {
-            type: CrmActivityType.TASK,
-            completedAt: null,
-            ...archiveFilterWhere(),
-            ...activeCrmParentWhere(["account", "contact", "deal"]),
-          },
-          orderBy: [
-            { dueAt: { sort: "asc", nulls: "last" } },
-            { createdAt: "desc" },
-          ],
-          take: 1,
-          select: {
-            id: true,
-            title: true,
-            createdAt: true,
-            dueAt: true,
-            completedAt: true,
-            ownerUserId: true,
-            source: true,
-            type: true,
-          },
-        },
-        stageTransitions: {
-          orderBy: { createdAt: "desc" },
-          take: 1,
-          select: { id: true, fromStage: true, toStage: true, createdAt: true },
-        },
-      },
-      orderBy: { updatedAt: "desc" },
-      take,
-      skip,
-    }),
-    prisma.crmDeal.count({ where }),
-  ]);
-  
-  return { items, total, take, skip };
+  const result = await readCrmPage(actor, workspaceId, "CrmDeal", (page) => prisma.crmDeal.findMany({
+    where, include: { account: true, contact: true }, orderBy: [{ updatedAt: "desc" }, { id: "asc" }], ...page,
+  }), {take,skip,admit:async rows=>{
+    const contacts=rows.flatMap(row=>row.contact?[row.contact]:[]);
+    const permitted=await observeCrmReadRows(actor,workspaceId,"CrmContact",contacts);
+    const ids=new Set(permitted.map(row=>row.id));
+    if(direct&&permitted.length) await captureCrmDirectReadContributors(actor,workspaceId,direct,()=>
+      captureArtifactInputProof(actor,workspaceId,permitted.map(contact=>({kind:"CrmContact",id:contact.id,snapshot:contact}))));
+    return rows.filter(row=>isCrmDirectOriginalRow(row)||row.contact&&ids.has(row.contact.id));
+  }}, prisma, direct);
+  const output = { ...result, items: await Promise.all(result.items.map(async (row) => {
+    if (isCrmDirectOriginalRow(row)) return row;
+    return renderCrmDirectAwareRow(actor, workspaceId, direct, "CrmDeal", row, async () => {
+    const [account, contact, tasks, transitions] = await Promise.all([
+      visibleCrmRelated(actor, workspaceId, "CrmAccount", row.account),
+      Promise.resolve(row.contact!),
+      readCrmSample(actor, workspaceId, "CrmActivity", (page) => prisma.crmActivity.findMany({ where: { workspaceId, dealId: row.id,
+        type: CrmActivityType.TASK, completedAt: null, archivedAt: null, ...activeCrmParentWhere(["account", "contact", "deal"]) },
+      orderBy: [{ dueAt: { sort: "asc", nulls: "last" } }, { createdAt: "desc" }, { id: "asc" }], ...page }), 1),
+      readCrmSample(actor, workspaceId, "CrmDealStageTransition", (page) => prisma.crmDealStageTransition.findMany({
+        where: { workspaceId, dealId: row.id }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page }), 1),
+    ]);
+    return { ...row, account, contact, activities: tasks, stageTransitions: transitions };
+    });
+  })) };
+  return direct ? finalizeCrmDirectReadResult(direct, output) : output;
+
+  });
 }
 
 export async function createDeal(actor: AppActor, params: {
@@ -1775,7 +1828,7 @@ export async function createDeal(actor: AppActor, params: {
   currency?: string;
   ownerUserId?: string | null;
   accountId?: string | null;
-}) {
+} & ProducerLineageParams) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   const title = params.title.trim();
@@ -1792,6 +1845,9 @@ export async function createDeal(actor: AppActor, params: {
     }
     const stage = params.stage ?? CrmDealStage.LEAD;
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, copied: actor.kind !== "user", dependencies: [{ kind: "CrmContact" as const, id: contact.id, snapshot: contact }],
+    });
     const deal = await tx.crmDeal.create({
       data: {
         workspaceId: params.workspaceId,
@@ -1805,6 +1861,8 @@ export async function createDeal(actor: AppActor, params: {
         ownerUserId: params.ownerUserId || null,
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmDeal", id: deal.id }, content: deal, receipt });
 
     await recordDealStageTransition(tx, {
       workspaceId: params.workspaceId,
@@ -1850,7 +1908,7 @@ export async function updateDeal(actor: AppActor, params: {
   ownerUserId?: string | null;
   notes?: string | null;
   accountId?: string | null;
-}) {
+} & ProducerLineageParams) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   return prisma.$transaction(async (tx) => {
@@ -1889,10 +1947,16 @@ export async function updateDeal(actor: AppActor, params: {
       return deal;
     }
 
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, copied: actor.kind !== "user", dependencies: params.accountId ? [{ kind: "CrmAccount" as const, id: params.accountId }] : [],
+      artifact: { kind: "CrmDeal", id: deal.id }, before: deal,
+    });
     const updated = await tx.crmDeal.update({
       where: { id: params.dealId },
       data,
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmDeal", id: updated.id }, content: updated, receipt });
 
     if (stageChanged && params.stage) {
       await recordDealStageTransition(tx, {
@@ -1959,6 +2023,9 @@ export async function listCrmActivities(actor: AppActor, workspaceId: string, op
   skip?: number;
   archiveFilter?: ArchiveFilter;
 }) {
+  return withCrmReadSnapshot(actor,workspaceId,async()=>{
+  opts = opts ? structuredClone(opts) : undefined;
+  const direct = opts?.archiveFilter && opts.archiveFilter !== "active" ? createCrmDirectReadSession(actor, workspaceId) : undefined;
   await requireWorkspaceMembership({ actor, workspaceId });
 
   const take = opts?.take ?? 50;
@@ -1992,28 +2059,24 @@ export async function listCrmActivities(actor: AppActor, workspaceId: string, op
       ]
     : { createdAt: "desc" };
 
-  const [items, total] = await Promise.all([
-    prisma.crmActivity.findMany({
-      where,
-      include: {
-        account: {
-          select: { id: true, name: true, slug: true, relationshipType: true, lifecycleStage: true, archivedAt: true },
-        },
-        contact: {
-          select: { id: true, name: true, email: true, company: true, archivedAt: true },
-        },
-        deal: {
-          select: { id: true, title: true, stage: true, valueCents: true, archivedAt: true },
-        },
-      },
-      orderBy,
-      take,
-      skip,
-    }),
-    prisma.crmActivity.count({ where }),
-  ]);
+  const result = await readCrmPage(actor, workspaceId, "CrmActivity", (page) => prisma.crmActivity.findMany({
+    where, include: { account: true, contact: true, deal: true },
+    orderBy: [...(Array.isArray(orderBy) ? orderBy : [orderBy]), { id: "asc" }], ...page,
+  }), {take,skip}, prisma, direct);
+  const output = { ...result, items: await Promise.all(result.items.map(async (row) => {
+    if (isCrmDirectOriginalRow(row)) return row;
+    return renderCrmDirectAwareRow(actor, workspaceId, direct, "CrmActivity", row, async () => {
+    const [account, contact, deal] = await Promise.all([
+      visibleCrmRelated(actor, workspaceId, "CrmAccount", row.account),
+      visibleCrmRelated(actor, workspaceId, "CrmContact", row.contact),
+      visibleCrmRelated(actor, workspaceId, "CrmDeal", row.deal),
+    ]);
+    return { ...row, account, contact, deal };
+    });
+  })) };
+  return direct ? finalizeCrmDirectReadResult(direct, output) : output;
 
-  return { items, total, take, skip };
+  });
 }
 
 async function requireActiveCrmActivity(tx: any, workspaceId: string, activityId: string, replacements: CrmLinks = {}) {
@@ -2027,7 +2090,7 @@ async function requireActiveCrmActivity(tx: any, workspaceId: string, activityId
   return activity;
 }
 
-export async function createActivity(actor: AppActor, params: {
+export async function createActivity(actor: AppActor, submission: {
   workspaceId: string;
   title: string;
   type?: CrmActivityType;
@@ -2039,8 +2102,12 @@ export async function createActivity(actor: AppActor, params: {
   source?: string | null;
   dueAt?: Date | null;
   completedAt?: Date | null;
-}) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  /** Trusted server context only; never accepted from serialized tool arguments. */
+  tx?: Prisma.TransactionClient;
+} & ProducerLineageParams) {
+  sealArtifactInputActor(actor);
+  const { tx: callerTx, ...input } = submission;
+  const params = structuredClone(input);
 
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Activity title is required.");
@@ -2048,7 +2115,9 @@ export async function createActivity(actor: AppActor, params: {
   const completedAt = normalizeCrmActivityDate(params.completedAt, "Completed date");
   const ownerUserId = params.ownerUserId ?? null;
 
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
+    await assertArtifactInputWriteFence(tx);
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
     await requireCrmActivityOwner(tx, params.workspaceId, ownerUserId);
     const links = await resolveCrmActivityLinks(tx, {
       workspaceId: params.workspaceId,
@@ -2057,6 +2126,10 @@ export async function createActivity(actor: AppActor, params: {
       dealId: params.dealId ?? null,
     });
 
+    const linksForReceipt = links;
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, copied: crmInputWasCopied(actor, params.source), dependencies: [...(linksForReceipt.accountId ? [{ kind: "CrmAccount" as const, id: linksForReceipt.accountId }] : []), ...(linksForReceipt.contactId ? [{ kind: "CrmContact" as const, id: linksForReceipt.contactId }] : []), ...(linksForReceipt.dealId ? [{ kind: "CrmDeal" as const, id: linksForReceipt.dealId }] : [])],
+    });
     const activity = await tx.crmActivity.create({
       data: {
         workspaceId: params.workspaceId,
@@ -2074,9 +2147,13 @@ export async function createActivity(actor: AppActor, params: {
         completedByUserId: completedAt && actor.kind === "user" ? actor.user.id : null,
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmActivity", id: activity.id }, content: activity, receipt });
 
+    await assertArtifactInputWriteFence(tx);
     return activity;
-  });
+  };
+  return callerTx ? run(callerTx) : prisma.$transaction(run);
 }
 
 export async function recordDemoWelcomeCrmActivity(params: {
@@ -2137,7 +2214,7 @@ export async function updateActivity(actor: AppActor, params: {
   ownerUserId?: string | null;
   source?: string | null;
   dueAt?: Date | null;
-}) {
+} & ProducerLineageParams) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   return prisma.$transaction(async (tx) => {
@@ -2176,10 +2253,17 @@ export async function updateActivity(actor: AppActor, params: {
       data.dealId = links.dealId;
     }
 
+    const linksForReceipt = { ...activity, ...data };
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, copied: actor.kind !== "user", dependencies: [...(linksForReceipt.accountId ? [{ kind: "CrmAccount" as const, id: linksForReceipt.accountId }] : []), ...(linksForReceipt.contactId ? [{ kind: "CrmContact" as const, id: linksForReceipt.contactId }] : []), ...(linksForReceipt.dealId ? [{ kind: "CrmDeal" as const, id: linksForReceipt.dealId }] : [])],
+      artifact: { kind: "CrmActivity", id: activity.id }, before: activity,
+    });
     const updated = await tx.crmActivity.update({
       where: { id: params.activityId },
       data,
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmActivity", id: updated.id }, content: updated, receipt });
 
     await tx.auditLog.create({
       data: {
@@ -2196,18 +2280,31 @@ export async function updateActivity(actor: AppActor, params: {
   });
 }
 
-export async function completeActivity(actor: AppActor, params: {
+export async function completeActivity(actor: AppActor, submission: {
   workspaceId: string;
   activityId: string;
   completedAt?: Date | null;
-}) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  /** Trusted server context only; never accepted from serialized tool arguments. */
+  tx?: Prisma.TransactionClient;
+} & ProducerLineageParams) {
+  sealArtifactInputActor(actor);
+  const { tx: callerTx, ...input } = submission;
+  const params = structuredClone(input);
 
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
+    await assertArtifactInputWriteFence(tx);
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
     const activity = await requireActiveCrmActivity(tx, params.workspaceId, params.activityId);
-    if (activity.completedAt) return activity;
+    if (activity.completedAt) {
+      await assertArtifactInputWriteFence(tx);
+      return activity;
+    }
 
     const completedAt = normalizeCrmActivityDate(params.completedAt, "Completed date") ?? new Date();
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, allowSystemTransition: true, dependencies: [],
+      artifact: { kind: "CrmActivity", id: activity.id }, before: activity,
+    });
     const updated = await tx.crmActivity.update({
       where: { id: params.activityId },
       data: {
@@ -2215,6 +2312,8 @@ export async function completeActivity(actor: AppActor, params: {
         completedByUserId: actor.kind === "user" ? actor.user.id : null,
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmActivity", id: updated.id }, content: updated, receipt });
 
     await tx.auditLog.create({
       data: {
@@ -2227,8 +2326,10 @@ export async function completeActivity(actor: AppActor, params: {
       },
     });
 
+    await assertArtifactInputWriteFence(tx);
     return updated;
-  });
+  };
+  return callerTx ? run(callerTx) : prisma.$transaction(run);
 }
 
 export async function archiveCrmActivity(actor: AppActor, params: { workspaceId: string; activityId: string }) {
@@ -2275,6 +2376,7 @@ export async function lockActiveCommunicationSuggestion(tx: Prisma.TransactionCl
   expectedLinks?: CrmLinks;
   replacements?: CrmLinks;
 }) {
+  if (tx.$queryRaw) await tx.$queryRaw`SELECT "id" FROM "CrmCommunicationSuggestion" WHERE "id" = ${params.suggestionId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
   const links = await tx.crmCommunicationSuggestion.findUnique({ where: { id: params.suggestionId } });
   invariant(links && links.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Communication suggestion not found.");
   await lockCrmLinkClosure(tx, params.workspaceId, links, params.expectedLinks ?? {}, params.replacements ?? {});
@@ -2294,6 +2396,33 @@ async function requireCommunicationSuggestion(tx: Prisma.TransactionClient, work
   return lockActiveCommunicationSuggestion(tx, { workspaceId, suggestionId, replacements });
 }
 
+function communicationSuggestionInputs(links: CrmLinks) {
+  return [
+    ...(links.accountId ? [{ kind: "CrmAccount" as const, id: links.accountId }] : []),
+    ...(links.contactId ? [{ kind: "CrmContact" as const, id: links.contactId }] : []),
+    ...(links.dealId ? [{ kind: "CrmDeal" as const, id: links.dealId }] : []),
+    ...(links.activityId ? [{ kind: "CrmActivity" as const, id: links.activityId }] : []),
+  ];
+}
+
+async function communicationSuggestionResult<T extends { id: string; status: string; title: string; accountId: string | null }>(
+  tx: Prisma.TransactionClient, actor: AppActor, workspaceId: string, suggestion: T) {
+  const visible = await readableArtifactIds(actor, workspaceId, "CrmCommunicationSuggestion", [suggestion], tx);
+  if (!visible.has(suggestion.id)) return { id: suggestion.id, status: suggestion.status, title: null, accountId: null, contentWithheld: true as const };
+  const result: Record<string, unknown> = { ...suggestion };
+  for (const [field, kind] of [["account", "CrmAccount"], ["contact", "CrmContact"], ["deal", "CrmDeal"], ["activity", "CrmActivity"]] as const) {
+    const related = result[field];
+    if (!related || typeof related !== "object" || !("id" in related) || typeof related.id !== "string") continue;
+    try {
+      await captureArtifactInputProof(actor, workspaceId, [{ kind, id: related.id, snapshot: related as Record<string, unknown> }], tx);
+    } catch (error) {
+      if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
+      result[field] = null; result[`${field}Id`] = null;
+    }
+  }
+  return result as T;
+}
+
 export async function listCommunicationSuggestions(actor: AppActor, workspaceId: string, opts?: {
   accountId?: string;
   contactId?: string;
@@ -2305,6 +2434,7 @@ export async function listCommunicationSuggestions(actor: AppActor, workspaceId:
   take?: number;
   skip?: number;
 }) {
+  return withCrmReadSnapshot(actor,workspaceId,async()=>{
   await requireWorkspaceMembership({ actor, workspaceId });
 
   const where: any = { workspaceId, ...activeCrmParentWhere(["account", "contact", "deal", "activity"]) };
@@ -2320,21 +2450,21 @@ export async function listCommunicationSuggestions(actor: AppActor, workspaceId:
   const take = opts?.take ?? 50;
   const skip = opts?.skip ?? 0;
 
-  const [items, total] = await Promise.all([
-    prisma.crmCommunicationSuggestion.findMany({
-      where,
-      include: communicationSuggestionInclude,
-      orderBy: { updatedAt: "desc" },
-      take,
-      skip,
-    }),
-    prisma.crmCommunicationSuggestion.count({ where }),
-  ]);
+  const result = await readCrmPage(actor, workspaceId, "CrmCommunicationSuggestion", (page) => prisma.crmCommunicationSuggestion.findMany({
+    where, include: { account: true, contact: true, deal: true, activity: true },
+    orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page,
+  }), {take,skip});
+  return { ...result, items: await Promise.all(result.items.map(async (row) => ({ ...row,
+    account: await visibleCrmRelated(actor, workspaceId, "CrmAccount", row.account),
+    contact: await visibleCrmRelated(actor, workspaceId, "CrmContact", row.contact),
+    deal: await visibleCrmRelated(actor, workspaceId, "CrmDeal", row.deal),
+    activity: await visibleCrmRelated(actor, workspaceId, "CrmActivity", row.activity),
+  }))) };
 
-  return { items, total, take, skip };
+  });
 }
 
-export async function createCommunicationSuggestion(actor: AppActor, params: {
+export async function createCommunicationSuggestion(actor: AppActor, submission: {
   workspaceId: string;
   title: string;
   bodyMd: string;
@@ -2348,8 +2478,12 @@ export async function createCommunicationSuggestion(actor: AppActor, params: {
   contactId?: string | null;
   dealId?: string | null;
   activityId?: string | null;
-}) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  /** Trusted server context only; never accepted from serialized tool arguments. */
+  tx?: Prisma.TransactionClient;
+} & ProducerLineageParams) {
+  sealArtifactInputActor(actor);
+  const { tx: callerTx, ...input } = submission;
+  const params = structuredClone(input);
 
   const title = params.title.trim();
   const bodyMd = params.bodyMd.trim();
@@ -2357,7 +2491,9 @@ export async function createCommunicationSuggestion(actor: AppActor, params: {
   invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Suggestion body is required.");
   const ownerUserId = params.ownerUserId ?? null;
 
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
+    await assertArtifactInputWriteFence(tx);
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx });
     await requireCrmActivityOwner(tx, params.workspaceId, ownerUserId);
     await lockCrmLinkClosure(tx, params.workspaceId, params);
     const links = await resolveCommunicationSuggestionLinks(tx, {
@@ -2367,14 +2503,22 @@ export async function createCommunicationSuggestion(actor: AppActor, params: {
       dealId: params.dealId ?? null,
       activityId: params.activityId ?? null,
     });
+    const dependencies = communicationSuggestionInputs(links);
+    // These are current related sources, never a replacement for the model's full prompt receipt.
+    await captureArtifactInputProof(actor, params.workspaceId, dependencies, tx);
 
     let recipientEmail = params.recipientEmail?.trim().toLowerCase() || null;
     let recipientName = params.recipientName?.trim() || null;
     if (links.contactId && (!recipientEmail || !recipientName)) {
       const contact = await tx.crmContact.findUnique({ where: { id: links.contactId } });
+      invariant(contact, 404, "NOT_FOUND", "Contact not found.");
+      await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "CrmContact", id: contact.id, snapshot: contact }], tx);
       recipientEmail = recipientEmail || contact?.email || null;
       recipientName = recipientName || contact?.name || null;
     }
+
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, copied: crmInputWasCopied(actor, params.source), dependencies });
 
     const suggestion = await tx.crmCommunicationSuggestion.create({
       data: {
@@ -2393,6 +2537,8 @@ export async function createCommunicationSuggestion(actor: AppActor, params: {
       },
       include: communicationSuggestionInclude,
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmCommunicationSuggestion", id: suggestion.id }, content: suggestion, receipt });
 
     await tx.auditLog.create({
       data: {
@@ -2405,8 +2551,11 @@ export async function createCommunicationSuggestion(actor: AppActor, params: {
       },
     });
 
-    return suggestion;
-  });
+    const result = await communicationSuggestionResult(tx, actor, params.workspaceId, suggestion);
+    await assertArtifactInputWriteFence(tx);
+    return result;
+  };
+  return callerTx ? run(callerTx) : prisma.$transaction(run);
 }
 
 export async function updateCommunicationSuggestion(actor: AppActor, params: {
@@ -2424,7 +2573,7 @@ export async function updateCommunicationSuggestion(actor: AppActor, params: {
   contactId?: string | null;
   dealId?: string | null;
   activityId?: string | null;
-}) {
+} & ProducerLineageParams) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   return prisma.$transaction(async (tx) => {
@@ -2475,11 +2624,21 @@ export async function updateCommunicationSuggestion(actor: AppActor, params: {
       Object.assign(data, links);
     }
 
+    const dependencies = communicationSuggestionInputs({ ...suggestion, ...data });
+    await captureArtifactInputProof(actor, params.workspaceId, dependencies, tx);
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmCommunicationSuggestion", id: suggestion.id }, before: suggestion,
+      capture: params, copied: crmInputWasCopied(actor, params.source), dependencies });
+    if (!await currentArtifactInputRoots(tx, params.workspaceId, { kind: "CrmCommunicationSuggestion", id: suggestion.id }, suggestion)) {
+      await preserveUnknownArtifactInputSnapshot(tx, params.workspaceId, { kind: "CrmCommunicationSuggestion", id: suggestion.id }, suggestion);
+    }
     const updated = await tx.crmCommunicationSuggestion.update({
       where: { id: suggestion.id },
       data,
       include: communicationSuggestionInclude,
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmCommunicationSuggestion", id: updated.id }, content: updated, receipt });
 
     await tx.auditLog.create({
       data: {
@@ -2492,7 +2651,7 @@ export async function updateCommunicationSuggestion(actor: AppActor, params: {
       },
     });
 
-    return updated;
+    return communicationSuggestionResult(tx, actor, params.workspaceId, updated);
   });
 }
 
@@ -2506,6 +2665,8 @@ export async function requestCommunicationSuggestionExecution(actor: AppActor, p
   return prisma.$transaction(async (tx) => {
     const suggestion = await requireCommunicationSuggestion(tx, params.workspaceId, params.suggestionId);
     assertSuggestionEditable(suggestion);
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmCommunicationSuggestion", id: suggestion.id }, before: suggestion, allowSystemTransition: true });
     const updated = await tx.crmCommunicationSuggestion.update({
       where: { id: suggestion.id },
       data: {
@@ -2515,6 +2676,8 @@ export async function requestCommunicationSuggestionExecution(actor: AppActor, p
       },
       include: communicationSuggestionInclude,
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmCommunicationSuggestion", id: updated.id }, content: updated, receipt });
     await tx.auditLog.create({
       data: {
         workspaceId: params.workspaceId,
@@ -2525,27 +2688,37 @@ export async function requestCommunicationSuggestionExecution(actor: AppActor, p
         meta: { note: "External execution request tracked; no email sent by Corgtex." },
       },
     });
-    return updated;
+    return communicationSuggestionResult(tx, actor, params.workspaceId, updated);
   });
 }
 
-export async function markCommunicationSuggestionSent(actor: AppActor, params: {
+export async function markCommunicationSuggestionSent(actor: AppActor, params: ProducerLineageParams & {
   workspaceId: string;
   suggestionId: string;
   sentAt?: Date | null;
 }, transaction?: Prisma.TransactionClient) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx: transaction });
 
   const operation = async (tx: Prisma.TransactionClient) => {
     const suggestion = await requireCommunicationSuggestion(tx, params.workspaceId, params.suggestionId);
     if (suggestion.status === "SENT") {
-      return tx.crmCommunicationSuggestion.findUnique({
+      const current = await tx.crmCommunicationSuggestion.findUnique({
         where: { id: suggestion.id },
         include: communicationSuggestionInclude,
       });
+      return current ? communicationSuggestionResult(tx, actor, params.workspaceId, current) : null;
     }
     invariant(suggestion.status !== "DECLINED", 400, "INVALID_STATE", "Declined suggestions cannot be marked sent.");
     const sentAt = normalizeCrmActivityDate(params.sentAt, "Sent date") ?? new Date();
+    const dependencies = [{ kind: "CrmCommunicationSuggestion" as const, id: suggestion.id, snapshot: suggestion },
+      ...communicationSuggestionInputs(suggestion)];
+    await captureArtifactInputProof(actor, params.workspaceId, dependencies, tx);
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmCommunicationSuggestion", id: suggestion.id }, before: suggestion, capture: params, allowSystemTransition: true });
+    const activityReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      copied: true, completeCopy: true, capture: params, dependencies,
+      snapshotDependencies: [{ kind: "CrmCommunicationSuggestion", id: suggestion.id }],
+    });
     const updated = await tx.crmCommunicationSuggestion.update({
       where: { id: suggestion.id },
       data: {
@@ -2557,8 +2730,10 @@ export async function markCommunicationSuggestionSent(actor: AppActor, params: {
       },
       include: communicationSuggestionInclude,
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmCommunicationSuggestion", id: updated.id }, content: updated, receipt });
 
-    await tx.crmActivity.create({
+    const activity = await tx.crmActivity.create({
       data: {
         workspaceId: params.workspaceId,
         accountId: suggestion.accountId,
@@ -2572,6 +2747,8 @@ export async function markCommunicationSuggestionSent(actor: AppActor, params: {
         createdAt: sentAt,
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmActivity", id: activity.id }, content: activity, receipt: activityReceipt });
 
     await tx.auditLog.create({
       data: {
@@ -2584,7 +2761,7 @@ export async function markCommunicationSuggestionSent(actor: AppActor, params: {
       },
     });
 
-    return updated;
+    return communicationSuggestionResult(tx, actor, params.workspaceId, updated);
   };
   return transaction ? operation(transaction) : prisma.$transaction(operation);
 }
@@ -2598,12 +2775,15 @@ export async function declineCommunicationSuggestion(actor: AppActor, params: {
   return prisma.$transaction(async (tx) => {
     const suggestion = await requireCommunicationSuggestion(tx, params.workspaceId, params.suggestionId);
     if (suggestion.status === "DECLINED") {
-      return tx.crmCommunicationSuggestion.findUnique({
+      const current = await tx.crmCommunicationSuggestion.findUnique({
         where: { id: suggestion.id },
         include: communicationSuggestionInclude,
       });
+      return current ? communicationSuggestionResult(tx, actor, params.workspaceId, current) : null;
     }
     invariant(suggestion.status !== "SENT", 400, "INVALID_STATE", "Sent suggestions cannot be declined.");
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmCommunicationSuggestion", id: suggestion.id }, before: suggestion, allowSystemTransition: true });
     const updated = await tx.crmCommunicationSuggestion.update({
       where: { id: suggestion.id },
       data: {
@@ -2612,6 +2792,8 @@ export async function declineCommunicationSuggestion(actor: AppActor, params: {
       },
       include: communicationSuggestionInclude,
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmCommunicationSuggestion", id: updated.id }, content: updated, receipt });
     await tx.auditLog.create({
       data: {
         workspaceId: params.workspaceId,
@@ -2622,7 +2804,7 @@ export async function declineCommunicationSuggestion(actor: AppActor, params: {
         meta: {},
       },
     });
-    return updated;
+    return communicationSuggestionResult(tx, actor, params.workspaceId, updated);
   });
 }
 
@@ -2630,12 +2812,15 @@ export async function failCommunicationSuggestion(actor: AppActor, params: {
   workspaceId: string;
   suggestionId: string;
   failureReason?: string | null;
-}, transaction?: Prisma.TransactionClient) {
+} & ProducerLineageParams, transaction?: Prisma.TransactionClient) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   const operation = async (tx: Prisma.TransactionClient) => {
     const suggestion = await requireCommunicationSuggestion(tx, params.workspaceId, params.suggestionId);
     invariant(suggestion.status !== "SENT" && suggestion.status !== "DECLINED", 400, "INVALID_STATE", "Finalized suggestions cannot be failed.");
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmCommunicationSuggestion", id: suggestion.id }, before: suggestion,
+      capture: params, copied: actor.kind !== "user" && Boolean(params.failureReason), allowSystemTransition: !params.failureReason });
     const updated = await tx.crmCommunicationSuggestion.update({
       where: { id: suggestion.id },
       data: {
@@ -2644,6 +2829,8 @@ export async function failCommunicationSuggestion(actor: AppActor, params: {
       },
       include: communicationSuggestionInclude,
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmCommunicationSuggestion", id: updated.id }, content: updated, receipt });
     await tx.auditLog.create({
       data: {
         workspaceId: params.workspaceId,
@@ -2654,7 +2841,7 @@ export async function failCommunicationSuggestion(actor: AppActor, params: {
         meta: { failureReason: updated.failureReason },
       },
     });
-    return updated;
+    return communicationSuggestionResult(tx, actor, params.workspaceId, updated);
   };
   return transaction ? operation(transaction) : prisma.$transaction(operation);
 }
@@ -2686,18 +2873,8 @@ export async function submitQualification(params: {
 
   return prisma.$transaction(async (tx) => {
     await requirePublicCrmWrites(tx, lead.workspaceId);
-    const qualification = await tx.crmQualification.create({
-      data: {
-        workspaceId: lead.workspaceId,
-        demoLeadId: lead.id,
-        responseChannel: "form",
-        companyName: params.companyName.trim(),
-        website: params.website.trim(),
-        roleTitle: params.roleTitle?.trim() || null,
-        aiExperience: params.aiExperience.trim(),
-        helpNeeded: params.helpNeeded.trim(),
-        status: "PENDING_REVIEW",
-      },
+    const { qualification, lead: currentLead } = await createFreshFormQualification(tx, {
+      ...params, workspaceId: lead.workspaceId, demoLeadId: lead.id,
     });
 
     await appendEvents(tx, [
@@ -2706,7 +2883,7 @@ export async function submitQualification(params: {
         type: "crm.qualification.submitted",
         aggregateType: "CrmQualification",
         aggregateId: qualification.id,
-        payload: { qualificationId: qualification.id, email: lead.email },
+        payload: { qualificationId: qualification.id, email: currentLead.email },
       },
     ]);
 
@@ -2731,8 +2908,10 @@ export async function receiveEmailReply(params: {
 
   const operation = async (tx: Prisma.TransactionClient) => {
     await requirePublicCrmWrites(tx, lead.workspaceId);
+    const createdId = randomUUID();
     const qualification = await tx.crmQualification.create({
       data: {
+        id: createdId,
         workspaceId: lead.workspaceId,
         demoLeadId: lead.id,
         responseChannel: "email_reply",
@@ -2741,6 +2920,9 @@ export async function receiveEmailReply(params: {
         status: "PENDING_REVIEW",
       },
     });
+
+    await recordFreshEmailQualificationLineage(tx, qualification, { createdId, workspaceId: lead.workspaceId,
+      demoLeadId: lead.id, bodyText: params.bodyText.trim(), subject: params.subject.trim() });
 
     await appendEvents(tx, [
       {
@@ -2758,6 +2940,7 @@ export async function receiveEmailReply(params: {
 }
 
 export async function listQualifications(actor: AppActor, workspaceId: string, opts?: { status?: string; take?: number; skip?: number }) {
+  return withCrmReadSnapshot(actor,workspaceId,async()=>{
   await requireWorkspaceMembership({ actor, workspaceId });
   
   const take = opts?.take ?? 50;
@@ -2768,22 +2951,16 @@ export async function listQualifications(actor: AppActor, workspaceId: string, o
     where.status = opts.status;
   }
 
-  const [items, total] = await Promise.all([
-    prisma.crmQualification.findMany({
-      where,
-      include: {
-        demoLead: {
-          select: { email: true, source: true, createdAt: true },
-        },
-      },
-      orderBy: { createdAt: "desc" },
-      take,
-      skip,
-    }),
-    prisma.crmQualification.count({ where }),
-  ]);
-  
-  return { items, total, take, skip };
+  return readCrmPage(actor,workspaceId,"CrmQualification",page=>prisma.crmQualification.findMany({
+    where,include:{demoLead:{select:{id:true,workspaceId:true,email:true,source:true,createdAt:true}}},
+    orderBy:[{createdAt:"desc"},{id:"asc"}],...page,
+  }),{take,skip,admit:async rows=>{
+    const leads=await observeCrmReadRows(actor,workspaceId,"DemoLeadIntakeInput",rows.map(row=>row.demoLead));
+    const ids=new Set(leads.map(row=>row.id));
+    return rows.filter(row=>ids.has(row.demoLead.id));
+  }});
+
+  });
 }
 
 export async function approveQualification(actor: AppActor, params: { workspaceId: string; qualificationId: string }) {
@@ -2797,6 +2974,14 @@ export async function approveQualification(actor: AppActor, params: { workspaceI
   invariant(qual.status === "PENDING_REVIEW", 400, "INVALID_STATE", "Qualification is not pending review.");
 
   return withCrmLinkSyncRetry(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "CrmQualification" WHERE id = ${qual.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    const inputRoots = await captureArtifactInputProof(actor, params.workspaceId, [
+      { kind: "CrmQualification", id: qual.id, snapshot: qual },
+      { kind: "DemoLeadIntakeInput", id: qual.demoLead.id, snapshot: qual.demoLead },
+    ], tx);
+    const capture = { lineageRoots: await captureImmutableArtifactInputProof(actor, params.workspaceId, inputRoots, tx) };
+    const qualificationReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmQualification", id: qual.id }, before: qual, copied: actor.kind !== "user" });
     const accountParams = { email: qual.demoLead.email, company: qual.companyName,
       website: qual.website, source: "qualification" };
     const candidate = crmAccountCandidate(accountParams);
@@ -2805,13 +2990,12 @@ export async function approveQualification(actor: AppActor, params: { workspaceI
     const contacts = qual.companyName || candidate ? await tx.crmContact.findMany({
         where: { workspaceId: params.workspaceId, email: qual.demoLead.email,
           ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) },
-        select: { id: true, email: true, accountId: true },
       }) : [];
     const activityIds = await prepareCrmAccountLinkSync(tx, {
       workspaceId: params.workspaceId, contacts, accountIds: [beforeAccount?.id, allocatedAccountId],
     });
     const account = await ensureCrmAccount(tx, params.workspaceId, accountParams, {
-      allocatedAccountId, lockedAccountIds: [beforeAccount?.id, allocatedAccountId].filter((id): id is string => Boolean(id)),
+      allocatedAccountId, lineage: { actor, capture }, lockedAccountIds: [beforeAccount?.id, allocatedAccountId].filter((id): id is string => Boolean(id)),
     });
     const updated = await tx.crmQualification.update({
       where: { id: qual.id },
@@ -2822,15 +3006,20 @@ export async function approveQualification(actor: AppActor, params: { workspaceI
       },
     });
 
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmQualification", id: qual.id }, content: updated, receipt: qualificationReceipt });
+
     if (qual.companyName || account) {
       const contactData: any = {};
       if (qual.companyName) contactData.company = qual.companyName;
       if (account) contactData.accountId = account.id;
-      await tx.crmContact.updateMany({
-        where: { workspaceId: params.workspaceId, email: qual.demoLead.email,
-          ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) },
-        data: contactData,
-      });
+      for (const contact of contacts) {
+        const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "CrmContact", id: contact.id }, before: contact, capture, copied: true });
+        const revised = await tx.crmContact.update({ where: { id: contact.id }, data: contactData });
+        await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+          artifact: { kind: "CrmContact", id: contact.id }, content: revised, receipt });
+      }
 
       if (account) {
         await tx.crmConversation.updateMany({
@@ -2872,6 +3061,13 @@ export async function rejectQualification(actor: AppActor, params: { workspaceId
   invariant(qual && qual.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Qualification not found.");
 
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "CrmQualification" WHERE id = ${qual.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    await captureArtifactInputProof(actor, params.workspaceId, [
+      { kind: "CrmQualification", id: qual.id, snapshot: qual },
+      { kind: "DemoLeadIntakeInput", id: qual.demoLead.id, snapshot: qual.demoLead },
+    ], tx);
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmQualification", id: qual.id }, before: qual, copied: actor.kind !== "user" });
     const updated = await tx.crmQualification.update({
       where: { id: qual.id },
       data: {
@@ -2882,6 +3078,8 @@ export async function rejectQualification(actor: AppActor, params: { workspaceId
       },
     });
 
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmQualification", id: qual.id }, content: updated, receipt });
     await appendEvents(tx, [
       {
         workspaceId: params.workspaceId,
@@ -2896,19 +3094,20 @@ export async function rejectQualification(actor: AppActor, params: { workspaceId
   });
 }
 
-export async function sendSchedulingLinkEmail(qualificationId: string) {
-  const qual = await prisma.crmQualification.findUnique({
-    where: { id: qualificationId },
-    include: { demoLead: true },
-  });
-  invariant(qual, 404, "NOT_FOUND", "Qualification not found");
-  invariant(qual.status === "APPROVED", 400, "INVALID_STATE", "Qualification must be approved to send scheduling link.");
-  if (qual.schedulingEmailSentAt) return;
-
-  // assume valid usage
-  await prisma.crmQualification.update({
-    where: { id: qual.id },
-    data: { schedulingEmailSentAt: new Date() },
+export async function sendSchedulingLinkEmail(actor: AppActor, params: { workspaceId: string; qualificationId: string }) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  return prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "CrmQualification" WHERE id = ${params.qualificationId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+    const qual = await tx.crmQualification.findFirst({ where: { id: params.qualificationId, workspaceId: params.workspaceId } });
+    invariant(qual, 404, "NOT_FOUND", "Qualification not found");
+    await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "CrmQualification", id: qual.id, snapshot: qual }], tx);
+    invariant(qual.status === "APPROVED", 400, "INVALID_STATE", "Qualification must be approved to send scheduling link.");
+    if (qual.schedulingEmailSentAt) return;
+    const artifact = { kind: "CrmQualification" as const, id: qual.id };
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact, before: qual, allowSystemTransition: true });
+    const updated = await tx.crmQualification.update({ where: { id: qual.id }, data: { schedulingEmailSentAt: new Date() } });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId, artifact, content: updated, receipt });
   });
 }
 
@@ -2981,20 +3180,26 @@ export async function recordInboundEmailReply(params: {
   });
 }
 
-export async function createConversationMessage(actor: AppActor, params: {
+export async function createConversationMessage(actor: AppActor, params: ProducerLineageParams & {
+  copied?: boolean;
   workspaceId: string;
   conversationId: string;
   bodyMd: string;
   senderType: "LEAD" | "ADMIN" | "SYSTEM";
   senderEmail?: string;
 }, transaction?: Prisma.TransactionClient) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, tx: transaction });
 
   const operation = async (tx: Prisma.TransactionClient) => {
     const links = await tx.crmConversation.findUnique({ where: { id: params.conversationId } });
     invariant(links && links.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Conversation not found.");
     const conversation = await lockAndFindActiveCrmConversation(tx, params.workspaceId, links);
     invariant(conversation, 404, "NOT_FOUND", "Conversation not found.");
+    const receipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      capture: params, copied: params.copied || actor.kind === "agent", dependencies: [{ kind: "CrmConversation", id: conversation.id, snapshot: conversation }] });
+    invariant(receipt.mode !== "UNKNOWN", 409, "UNKNOWN_LINEAGE", "Conversation message requires its complete input receipt.");
+    const conversationReceipt = await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmConversation", id: conversation.id }, before: conversation, capture: params, allowSystemTransition: true });
     const message = await tx.crmConversationMessage.create({
       data: {
         conversationId: conversation.id,
@@ -3005,11 +3210,15 @@ export async function createConversationMessage(actor: AppActor, params: {
         isRead: params.senderType === "ADMIN",
       },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmConversationMessage", id: message.id }, content: message, receipt });
 
-    await tx.crmConversation.update({
+    const updated = await tx.crmConversation.update({
       where: { id: conversation.id },
       data: { updatedAt: new Date() },
     });
+    await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "CrmConversation", id: updated.id }, content: updated, receipt: conversationReceipt });
 
     return message;
   };
@@ -3017,31 +3226,28 @@ export async function createConversationMessage(actor: AppActor, params: {
 }
 
 export async function getCrmConversation(actor: AppActor, params: { workspaceId: string; conversationId: string }) {
+  return withCrmReadSnapshot(actor,params.workspaceId,async()=>{
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const conversation = await prisma.crmConversation.findFirst({ where: { id: params.conversationId, workspaceId: params.workspaceId,
+    ...activeCrmParentWhere(["account", "contact", "deal"]) }, include: { account: true, contact: true, deal: true } });
+  invariant(conversation && (await observeCrmReadRows(actor, params.workspaceId, "CrmConversation", [conversation])).length,
+    404, "NOT_FOUND", "Conversation not found.");
+  const [account, contact, deal, messages] = await Promise.all([
+    visibleCrmRelated(actor, params.workspaceId, "CrmAccount", conversation.account),
+    visibleCrmRelated(actor, params.workspaceId, "CrmContact", conversation.contact),
+    visibleCrmRelated(actor, params.workspaceId, "CrmDeal", conversation.deal),
+    readCrmRows(actor, params.workspaceId, "CrmConversationMessage", (page) => prisma.crmConversationMessage.findMany({
+      where: { conversationId: conversation.id, conversation: { workspaceId: params.workspaceId } },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }], ...page,
+    })),
+  ]);
+  return { ...conversation, account, contact, deal, demoLead: null as Prisma.DemoLeadGetPayload<{}> | null, messages };
 
-  const conversation = await prisma.crmConversation.findFirst({
-    where: {
-      id: params.conversationId,
-      workspaceId: params.workspaceId,
-      ...activeCrmParentWhere(["account", "contact", "deal"]),
-    },
-    include: {
-      account: true,
-      contact: true,
-      demoLead: true,
-      deal: true,
-      messages: {
-        orderBy: { createdAt: "asc" },
-        include: { senderUser: { select: { id: true, email: true } } },
-      },
-    },
   });
-  invariant(conversation, 404, "NOT_FOUND", "Conversation not found.");
-
-  return conversation;
 }
 
 export async function listCrmConversations(actor: AppActor, workspaceId: string, opts?: { accountId?: string; contactId?: string; demoLeadId?: string; take?: number; skip?: number }) {
+  return withCrmReadSnapshot(actor,workspaceId,async()=>{
   await requireWorkspaceMembership({ actor, workspaceId });
   
   const take = opts?.take ?? 50;
@@ -3052,26 +3258,23 @@ export async function listCrmConversations(actor: AppActor, workspaceId: string,
   if (opts?.contactId) where.contactId = opts.contactId;
   if (opts?.demoLeadId) where.demoLeadId = opts.demoLeadId;
 
-  const [items, total] = await Promise.all([
-    prisma.crmConversation.findMany({
-      where,
-      include: {
-        account: { select: { id: true, name: true, slug: true, relationshipType: true, lifecycleStage: true, archivedAt: true } },
-        contact: { select: { id: true, name: true, email: true, company: true, archivedAt: true } },
-        demoLead: { select: { id: true, email: true } },
-        messages: { orderBy: { createdAt: "desc" }, take: 1 },
-      },
-      orderBy: { updatedAt: "desc" },
-      take,
-      skip,
-    }),
-    prisma.crmConversation.count({ where }),
-  ]);
-  
-  return { items, total, take, skip };
-}
+  const result = await readCrmPage(actor, workspaceId, "CrmConversation", (page) => prisma.crmConversation.findMany({
+    where, include: { account: true, contact: true, deal: true }, orderBy: [{ updatedAt: "desc" }, { id: "asc" }], ...page,
+  }), {take,skip});
+  return { ...result, items: await Promise.all(result.items.map(async (row) => {
+    const [account, contact, deal, messages] = await Promise.all([
+      visibleCrmRelated(actor, workspaceId, "CrmAccount", row.account),
+      visibleCrmRelated(actor, workspaceId, "CrmContact", row.contact),
+      visibleCrmRelated(actor, workspaceId, "CrmDeal", row.deal),
+      readCrmSample(actor, workspaceId, "CrmConversationMessage", (page) => prisma.crmConversationMessage.findMany({
+        where: { conversationId: row.id, conversation: { workspaceId } }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], ...page,
+      }), 1),
+    ]);
+    return { ...row, account, contact, deal, demoLead: null as Prisma.DemoLeadGetPayload<{}> | null, messages };
+  })) };
 
-// --- PROVISIONING ---
+  });
+}
 
 export async function listCrmProspectWorkspaces(actor: AppActor, workspaceId: string, opts?: {
   accountId?: string;
@@ -3079,6 +3282,7 @@ export async function listCrmProspectWorkspaces(actor: AppActor, workspaceId: st
   take?: number;
   skip?: number;
 }) {
+  return withCrmReadSnapshot(actor,workspaceId,async()=>{
   await requireWorkspaceMembership({ actor, workspaceId });
 
   const take = opts?.take ?? 50;
@@ -3087,24 +3291,15 @@ export async function listCrmProspectWorkspaces(actor: AppActor, workspaceId: st
   if (opts?.accountId) where.accountId = opts.accountId;
   if (opts?.status) where.status = opts.status;
 
-  const [items, total] = await Promise.all([
-    prisma.crmProspectWorkspace.findMany({
-      where,
-      include: {
-        account: {
-          select: { id: true, name: true, slug: true, relationshipType: true, lifecycleStage: true, archivedAt: true },
-        },
-        demoLead: true,
-        targetWorkspace: { select: { id: true, slug: true, name: true } },
-      },
-      orderBy: { provisionedAt: "desc" },
-      take,
-      skip,
-    }),
-    prisma.crmProspectWorkspace.count({ where }),
-  ]);
+  const result = await readCrmPage(actor, workspaceId, "CrmProspectWorkspace", (page) => prisma.crmProspectWorkspace.findMany({
+    where, include: { account: true, targetWorkspace: { select: { id: true, slug: true, name: true } } },
+    orderBy: [{ provisionedAt: "desc" }, { id: "asc" }], ...page,
+  }), {take,skip});
+  return { ...result, items: await Promise.all(result.items.map(async (row) => ({ ...row, demoLead: null as Prisma.DemoLeadGetPayload<{}> | null,
+    account: await visibleCrmRelated(actor, workspaceId, "CrmAccount", row.account),
+  }))) };
 
-  return { items, total, take, skip };
+  });
 }
 
 export async function provisionProspectWorkspace(actor: AppActor, params: {

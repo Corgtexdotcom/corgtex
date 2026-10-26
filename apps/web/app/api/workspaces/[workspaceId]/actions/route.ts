@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import { actionRequestSource, createAction, getWorkspacePermanentPathForEntity, listActions } from "@corgtex/domain";
 import type { ArchiveFilter } from "@corgtex/domain";
 import type { ActionStatus } from "@prisma/client";
 import { searchParamValues } from "@/lib/filter-query";
+import { validateBody } from "@/lib/http";
 import { withWorkspaceRoute } from "@/lib/route-handler";
 import { loadActionWorkItemResponse, serializeActionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 import { normalizeWorkItemSort } from "@/lib/work-item-view";
@@ -10,6 +12,13 @@ import { env } from "@corgtex/shared";
 
 const ACTION_STATUSES: ActionStatus[] = ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"];
 const ARCHIVE_FILTERS: ArchiveFilter[] = ["active", "archived", "all"];
+const createActionSchema = z.object({
+  title: z.string().trim().min(1),
+  bodyMd: z.string().optional().nullable(),
+  assigneeMemberId: z.string().optional().nullable(),
+  priority: z.union([z.number().int(), z.string()]).optional().nullable(),
+  priorityLabel: z.string().optional().nullable(),
+}).strip();
 
 function parseActionStatus(value: string | null): ActionStatus | undefined {
   if (!value || value === "ALL") return undefined;
@@ -47,12 +56,12 @@ export const GET = withWorkspaceRoute(async (req, { actor, workspaceId }) => {
 });
 
 export const POST = withWorkspaceRoute(async (req, { actor, workspaceId, membership }) => {
-  const body = (await req.json()) as Record<string, unknown>;
+  const body = await validateBody(req, createActionSchema);
   const action = await createAction(actor, {
     workspaceId,
-    title: String(body.title ?? ""),
-    bodyMd: typeof body.bodyMd === "string" ? body.bodyMd : null,
-    assigneeMemberId: body.assigneeMemberId === null ? null : typeof body.assigneeMemberId === "string" ? body.assigneeMemberId : undefined,
+    title: body.title,
+    bodyMd: body.bodyMd ?? null,
+    assigneeMemberId: body.assigneeMemberId,
     priority: workItemPriorityFromBody(body),
     _membership: membership ?? undefined,
     source: req.headers.has("Idempotency-Key")
@@ -61,7 +70,7 @@ export const POST = withWorkspaceRoute(async (req, { actor, workspaceId, members
   });
   const origin = env.APP_URL.replace(/\/$/, "");
   const permanentPath = await getWorkspacePermanentPathForEntity({ workspaceId, entityType: "Action", entityId: action.id });
-  const actionForResponse = await loadActionWorkItemResponse(workspaceId, action.id) ?? action;
+  const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, action.id) ?? action;
   return NextResponse.json({
     action: serializeActionWorkItem(actionForResponse),
     webUrl: `${origin}/workspaces/${workspaceId}/actions/${action.id}`,

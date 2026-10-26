@@ -1,3 +1,4 @@
+import { boundedCountLabel } from "@/lib/bounded-count-label";
 import type { getFormatter } from "next-intl/server";
 import { CorgtexConnectorManager } from "../settings/CorgtexConnectorManager";
 import { DataSourcesManager } from "../settings/DataSourcesManager";
@@ -301,8 +302,11 @@ export function SlackConnectorPanel({ workspaceId, installation, canManage = tru
       {installation ? (
         <div className="stack" style={{ gap: 8 }}>
           <p className="nr-item-meta" style={{ fontSize: "0.82rem", margin: 0 }}>
-            {installation.externalTeamName || installation.externalWorkspaceId} · {installation._count.channels} channels · {installation._count.messages} captured messages
+            {installation.externalTeamName || installation.externalWorkspaceId} · {installation._count.channels} channels · {boundedCountLabel(installation.messageCount ?? {count:installation._count.messages,complete:typeof installation._count.messages === "number"})} captured messages
           </p>
+          {installation.messageCount?.complete === false && <p className="nr-item-meta" role="status">
+            {installation.messageCount.available === false ? "Captured message count is currently unavailable." : "Showing a limited count of messages you can access."}
+          </p>}
           <p className="nr-item-meta" style={{ fontSize: "0.82rem", margin: 0 }}>
             Public-channel messages are archived for aggregate briefings, work capture, and long-term context. Private channels and DMs are not ingested.
           </p>

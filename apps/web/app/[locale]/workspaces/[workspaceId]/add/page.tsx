@@ -1,3 +1,4 @@
+import { GoalWindowNotice } from "../goals/GoalWindowNotice";
 import type {
   AdviceRequestAudienceType,
   AdviceRequestPreferredChannel,
@@ -12,6 +13,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { notFound, redirect } from "next/navigation";
 import {
   AppError,
+  DigestReadRelease,
   actionRequestSource,
   AGREEMENT_BRAIN_ARTICLE_TYPES,
   classifyExternalResourceUrl,
@@ -33,7 +35,7 @@ import {
   ingestSource,
   listCircles,
   listContacts,
-  listGoals,
+  listGoalsPage,
   listHumanMembers,
   listProposals,
   listQualifications,
@@ -695,11 +697,12 @@ export default async function WorkspaceAddPage({
   const needsDeals = kind === "crm_activity" || kind === "communication_suggestion";
   const needsApprovedProspects = kind === "prospect_instance";
 
+  const goalReadRelease = new DigestReadRelease(actor, workspaceId);
   const [
     proposalsResult,
     members,
     circles,
-    goals,
+    goalWindow,
     contactsResult,
     accountsResult,
     dealsResult,
@@ -710,13 +713,13 @@ export default async function WorkspaceAddPage({
   ] = await Promise.all([
     needsProposals ? listProposals(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
     needsMembers ? listHumanMembers(workspaceId) : Promise.resolve([]),
-    needsCircles ? listCircles(workspaceId) : Promise.resolve([]),
-    needsGoals ? listGoals(actor, { workspaceId }) : Promise.resolve([]),
+    needsCircles ? listCircles(actor, workspaceId) : Promise.resolve([]),
+    needsGoals ? listGoalsPage(actor, { workspaceId, cursor:typeof search.goalCursor === "string" ? search.goalCursor : undefined }, goalReadRelease) : Promise.resolve({items:[],complete:true,nextCursor:null}),
     needsContacts ? listContacts(actor, workspaceId, { take: 100, accountId: contextAccountId ?? undefined }) : Promise.resolve({ items: [] }),
     needsAccounts ? listCrmAccounts(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
     needsDeals ? listDeals(actor, workspaceId, { take: 100, accountId: contextAccountId ?? undefined }) : Promise.resolve({ items: [] }),
     needsApprovedProspects ? listQualifications(actor, workspaceId, { status: "APPROVED" }) : Promise.resolve({ items: [] }),
-    needsRoles ? listRoles(workspaceId) : Promise.resolve([]),
+    needsRoles ? listRoles(actor, workspaceId) : Promise.resolve([]),
     needsProposalLinks ? listActions(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
     needsProposalLinks ? listTensions(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
   ]);
@@ -1180,6 +1183,7 @@ export default async function WorkspaceAddPage({
     redirect(returnTo);
   }
 
+  if (needsGoals) await goalReadRelease.finish(undefined);
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
@@ -1378,6 +1382,12 @@ export default async function WorkspaceAddPage({
           </DuplicateGuardForm>
         )}
 
+        {kind === "goal" && <GoalWindowNotice complete={goalWindow.complete}
+          nextHref={goalWindow.nextCursor ? `/workspaces/${workspaceId}/add?kind=goal&returnTo=${encodeURIComponent(returnTo)}&goalCursor=${encodeURIComponent(goalWindow.nextCursor)}` : null}
+          startHref={search.goalCursor ? `/workspaces/${workspaceId}/add?kind=goal&returnTo=${encodeURIComponent(returnTo)}` : undefined}
+          labels={{limited:"Parent choices cover a limited goal window. Choose a window before entering your new goal; changing windows reloads the form.",next:"More parent choices",start:"First parent choices"}} />}
+
+
         {kind === "goal" && (
           <DuplicateGuardForm action={createGoalAndReturn} className="stack nr-form-section">
             {hiddenWorkspace(workspaceId)}
@@ -1392,7 +1402,7 @@ export default async function WorkspaceAddPage({
               <label style={{ flex: 1 }}>Target date<input name="targetDate" type="date" /></label>
             </div>
             <div className="actions-inline">
-              <label style={{ flex: 1 }}>Parent goal<select name="parentGoalId" defaultValue=""><option value="">None</option>{goals.map((goal) => <option key={goal.id} value={goal.id}>{goal.title}</option>)}</select></label>
+              <label style={{ flex: 1 }}>Parent goal<select name="parentGoalId" defaultValue=""><option value="">None</option>{goalWindow.items.map((goal) => <option key={goal.id} value={goal.id}>{goal.title}</option>)}</select></label>
               <label style={{ flex: 1 }}>Circle<select name="circleId" defaultValue=""><option value="">None</option>{circles.map((circle) => <option key={circle.id} value={circle.id}>{circle.name}</option>)}</select></label>
               <label style={{ flex: 1 }}>Owner<select name="ownerMemberId" defaultValue=""><option value="">None</option>{members.map((member) => <option key={member.id} value={member.id}>{member.user.displayName ?? member.user.email}</option>)}</select></label>
             </div>

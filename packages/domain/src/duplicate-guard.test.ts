@@ -27,7 +27,7 @@ vi.mock("@corgtex/shared", () => ({
 
 describe("duplicate guard", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     prismaMock.action.findMany.mockResolvedValue([]);
     prismaMock.meeting.findMany.mockResolvedValue([]);
     prismaMock.proposal.findMany.mockResolvedValue([]);
@@ -102,7 +102,7 @@ describe("duplicate guard", () => {
     }, { candidateLimit: 500, resolution: "create_new" });
 
     expect(prismaMock.action.findMany).toHaveBeenLastCalledWith(expect.objectContaining({
-      take: 200,
+      take: 100,
     }));
   });
 
@@ -291,7 +291,7 @@ describe("duplicate guard", () => {
         archivedAt: null,
         OR: [{ externalId: "external-1" }],
       },
-      take: 5,
+      take: 50,
     }));
     expect(prismaMock.brainSource.findMany).toHaveBeenNthCalledWith(3, expect.objectContaining({
       where: {
@@ -299,7 +299,7 @@ describe("duplicate guard", () => {
         archivedAt: { not: null },
         OR: [{ externalId: "external-1" }],
       },
-      take: 5,
+      take: 50,
     }));
   });
 
@@ -389,7 +389,7 @@ describe("duplicate guard", () => {
           { metadata: { path: ["sourceUrl"], equals: "https://example.com/vendor-notes" } },
         ]),
       }),
-      take: 5,
+      take: 50,
     }));
   });
 
@@ -528,7 +528,100 @@ describe("duplicate guard", () => {
           { metadata: { path: ["contentHash"], equals: duplicateGuardContentHash(content) } },
         ]),
       }),
-      take: 5,
+      take: 50,
     }));
   });
+
+  function actionRow(id: string) {
+    return { id, title: "Renew maintenance agreement", bodyMd: "Renew maintenance agreement",
+      status: "OPEN", archivedAt: null,
+      createdAt: new Date("2026-09-26T10:00:00.000Z"),
+      updatedAt: new Date("2026-09-26T10:00:00.000Z") };
+  }
+
+  it("replenishes denied candidates before matching and captures stable scalar anchors", async () => {
+    const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
+    const hidden = Array.from({ length: 50 }, (_, index) => actionRow(`hidden-${index}`));
+    prismaMock.action.findMany.mockResolvedValueOnce(hidden).mockResolvedValueOnce([actionRow("allowed")]);
+    const filter = vi.fn(async (rows: unknown[]) => {
+      const records = rows as ReturnType<typeof actionRow>[];
+      for (const row of records) row.updatedAt.setFullYear(2000);
+      return records.filter((row) => row.id === "allowed");
+    });
+    const result = await checkWorkspaceDuplicateGuard({ workspaceId: "workspace-1", entityType: "Action",
+      title: "Renew maintenance agreement", body: "Renew maintenance agreement", actorUserId: "caller" },
+    { onExact: "use_existing" }, undefined, filter);
+    expect(result?.match.entityId).toBe("allowed");
+    expect(filter).toHaveBeenCalledTimes(2);
+    expect(prismaMock.action.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }, { id: "desc" }],
+      where: { AND: [expect.objectContaining({ OR: [{ isPrivate: false }, { isPrivate: true, authorUserId: "caller" }] }),
+        { OR: [
+          { updatedAt: { lt: new Date("2026-09-26T10:00:00.000Z") } },
+          { updatedAt: new Date("2026-09-26T10:00:00.000Z"), createdAt: { lt: new Date("2026-09-26T10:00:00.000Z") } },
+          { updatedAt: new Date("2026-09-26T10:00:00.000Z"), createdAt: new Date("2026-09-26T10:00:00.000Z"), id: { lt: "hidden-49" } },
+        ] }] }, take: 50,
+    }));
+  });
+
+  it("caps permitted candidates and never ranks a denied exact match", async () => {
+    const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
+    prismaMock.action.findMany.mockResolvedValueOnce([
+      actionRow("denied"), ...Array.from({ length: 9 }, (_, index) => ({ ...actionRow(`allowed-${index}`), title: `Unrelated task ${index}`, bodyMd: "Completely different" })),
+      actionRow("allowed-match"), actionRow("after-cap"),
+    ]);
+    const result = await checkWorkspaceDuplicateGuard({ workspaceId: "workspace-1", entityType: "Action", title: "Renew maintenance agreement", body: "Renew maintenance agreement" },
+      { onExact: "use_existing", candidateLimit: 10 }, undefined,
+      async (rows) => rows.filter((row) => (row as { id: string }).id !== "denied"));
+    expect(result?.match.entityId).toBe("allowed-match");
+    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses a permitted archived exact result when active exact rows are denied", async () => {
+    const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
+    const source = { id: "denied", title: "Hidden", content: "private", externalId: "external-1", createdAt: new Date("2026-09-26"), archivedAt: null };
+    prismaMock.brainSource.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([source])
+      .mockResolvedValueOnce([{ ...source, id: "allowed", title: "Permitted", archivedAt: new Date("2026-09-27") }]);
+    await expect(checkWorkspaceDuplicateGuard({ workspaceId: "workspace-1", entityType: "BrainSource", externalId: "external-1" }, {}, undefined,
+      async (rows) => rows.filter((row) => (row as { id: string }).id === "allowed")))
+      .rejects.toMatchObject({ code: "DUPLICATE_GUARD_MATCH", candidate: expect.objectContaining({ entityId: "allowed", title: "Permitted" }) });
+    expect(prismaMock.brainSource.findMany).toHaveBeenCalledTimes(3);
+  });
+
+  it("replenishes the same-meeting stream and filters canonical rows before decoration", async () => {
+    const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
+    prismaMock.action.findMany.mockResolvedValueOnce([])
+      .mockResolvedValueOnce(Array.from({ length: 100 }, (_, index) => actionRow(`hidden-${index}`)))
+      .mockResolvedValueOnce([{ ...actionRow("allowed"), status: "COMPLETED" }]);
+    const filter = vi.fn(async (rows: unknown[]) => {
+      expect(rows.every((row) => !("meetingId" in (row as object)))).toBe(true);
+      return rows.filter((row) => (row as { id: string }).id === "allowed");
+    });
+    await expect(checkWorkspaceDuplicateGuard({ workspaceId: "workspace-1", entityType: "Action", title: "Renew maintenance agreement", body: "Renew maintenance agreement", meetingId: "meeting-1" }, {}, undefined, filter))
+      .rejects.toMatchObject({ candidate: expect.objectContaining({ entityId: "allowed", status: "COMPLETED" }) });
+    expect(prismaMock.action.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ take: 100,
+      where: { AND: [expect.objectContaining({ creationSources: { some: { sourceType: "MEETING_INSIGHT", sourceGroupId: "meeting-1" } } }), expect.any(Object)] } }));
+  });
+
+  it("fails closed at the explicit scan budget without revealing hidden candidates", async () => {
+    const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
+    let next = 0;
+    prismaMock.action.findMany.mockImplementation(async ({ take }) => Array.from({ length: take }, () => actionRow(`hidden-${next++}`)));
+    await expect(checkWorkspaceDuplicateGuard({ workspaceId: "workspace-1", entityType: "Action", title: "Renew maintenance agreement" }, {}, undefined, async () => []))
+      .rejects.toMatchObject({ status: 503, code: "DUPLICATE_GUARD_SCAN_LIMIT" });
+    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(101);
+    expect(prismaMock.action.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ take: 1 }));
+  });
+
+  it("propagates the caller filter failure without a raw or privileged fallback", async () => {
+    const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
+    const findMany = vi.fn().mockResolvedValue([actionRow("hidden")]);
+    const tx = { action: { findMany } };
+    const denied = new Error("Current source permission changed");
+    await expect(checkWorkspaceDuplicateGuard({ workspaceId: "workspace-1", entityType: "Action", title: "Renew maintenance agreement" }, {}, tx as never,
+      async () => { throw denied; })).rejects.toBe(denied);
+    expect(findMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.action.findMany).not.toHaveBeenCalled();
+  });
+
 });

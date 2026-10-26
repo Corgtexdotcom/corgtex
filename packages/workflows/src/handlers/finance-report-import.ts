@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { claimFinanceReportImportExtraction, completeFinanceReportImportExtraction,
-  failFinanceReportImportExtraction, type FinanceReportExtractionFailureCode } from "@corgtex/domain";
+  assertFinanceReportImportExtractionCurrent, failFinanceReportImportExtraction, type FinanceReportExtractionFailureCode } from "@corgtex/domain";
 import { extractFinanceReportFile, FinanceFileExtractionError,
   type FinanceFileExtraction } from "@corgtex/knowledge";
 import { defaultStorage, type StorageProvider } from "@corgtex/storage";
@@ -12,7 +12,7 @@ export const FINANCE_REPORT_IMPORT_STORAGE_READ_TIMEOUT_MS = 2 * 60 * 1_000;
 const MAX_EXTRACTED_TEXT_CHARS = 2_000_000;
 type ExtractionStorage = Pick<StorageProvider, "get">;
 type ExtractionJob = { workspaceId: string; batchId: string; workflowJobId: string;
-  attempts: number; isFinalAttempt: boolean; storage?: ExtractionStorage; extract?: typeof extractFinanceReportFile };
+  attempts: number; isFinalAttempt: boolean; expectedLease?: { lockedBy: string; lockedAt: Date }; storage?: ExtractionStorage; extract?: typeof extractFinanceReportFile };
 
 async function readStoredReport(storage: ExtractionStorage, storageKey: string) {
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -56,10 +56,13 @@ function extractionCounts(extraction: FinanceFileExtraction) {
 
 export async function runFinanceReportImportExtractionJob(params: ExtractionJob) {
   const identity = { workspaceId: params.workspaceId, batchId: params.batchId, workflowJobId: params.workflowJobId };
-  const claim = await claimFinanceReportImportExtraction({ ...identity, retryCount: params.attempts });
+  const claim = await claimFinanceReportImportExtraction({ ...identity, retryCount: params.attempts, expectedLease: params.expectedLease });
   if (claim.skipped) return claim;
+  const proof = { ...identity, expectedVersion: claim.version, receipt: claim.receipt };
   try {
+    await assertFinanceReportImportExtractionCurrent(proof);
     const stored = await readStoredReport(params.storage ?? defaultStorage, claim.storageKey);
+    await assertFinanceReportImportExtractionCurrent(proof);
     if (!stored) throw new Error("Finance report source is unavailable.");
     const storedHash = createHash("sha256").update(stored.data).digest("hex");
     if (stored.data.byteLength !== claim.fileSizeBytes || storedHash !== claim.fileHash) {
@@ -68,7 +71,8 @@ export async function runFinanceReportImportExtractionJob(params: ExtractionJob)
     const extraction = await (params.extract ?? extractFinanceReportFile)({
       fileBuffer: stored.data, fileName: claim.fileName, mimeType: claim.mimeType,
     });
-    return completeFinanceReportImportExtraction({ ...identity, expectedVersion: claim.version,
+    await assertFinanceReportImportExtractionCurrent(proof);
+    return completeFinanceReportImportExtraction({ ...proof,
       extraction: {
         fileHash: extraction.fileHash, fileSizeBytes: extraction.fileSizeBytes,
         mimeType: extraction.mimeType, format: extraction.format,
@@ -80,7 +84,7 @@ export async function runFinanceReportImportExtractionJob(params: ExtractionJob)
     const failureCode: FinanceReportExtractionFailureCode | null = deterministic
       ? error.code : params.isFinalAttempt ? "FINANCE_REPORT_EXTRACTION_FAILED" : null;
     if (failureCode) {
-      await failFinanceReportImportExtraction({ ...identity, expectedVersion: claim.version, failureCode });
+      await failFinanceReportImportExtraction({ ...proof, failureCode });
       if (deterministic) return { failed: true as const, failureCode };
     }
     throw error;
@@ -88,6 +92,6 @@ export async function runFinanceReportImportExtractionJob(params: ExtractionJob)
 }
 
 export async function runFinanceReportImportProposalJob(params: { workspaceId: string; batchId: string; expectedVersion: number;
-  workflowJobId: string; attempts: number; isFinalAttempt: boolean }) {
+  workflowJobId: string; attempts: number; isFinalAttempt: boolean; expectedLease?: { lockedBy: string; lockedAt: Date } }) {
   return runFinanceReportImportAgentV1(params);
 }

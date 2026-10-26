@@ -2,6 +2,7 @@
 
 import { AppError, hasActiveWorkspaceSupport, isGlobalOperator, listActorWorkspaces, loginUserWithPassword } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
+import { newspaperClickContinuation } from "@/lib/newspaper-click-continuation";
 import { setSessionCookie } from "@/lib/auth";
 import { filterWorkspacesForDeploymentScope, hasDeploymentWorkspaceScope } from "@/lib/deployment-workspace-scope";
 import type { LoginActionState } from "./state";
@@ -49,6 +50,7 @@ export async function loginAction(
   _previousState: LoginActionState,
   formData: FormData,
 ): Promise<LoginActionState> {
+  const next = newspaperClickContinuation(formData.get("next"));
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
   const password = String(formData.get("password") ?? "");
   const locale = String(formData.get("locale") ?? "").trim().toLowerCase() === "es" ? "es" : "en";
@@ -74,7 +76,7 @@ export async function loginAction(
     return {
       email,
       error: null,
-      redirectTo: localizedRedirect("/control-plane", locale),
+      redirectTo: next ?? localizedRedirect("/control-plane", locale),
     };
   }
 
@@ -97,7 +99,7 @@ export async function loginAction(
   return {
     email,
     error: null,
-    redirectTo: localizedRedirect(
+    redirectTo: next ?? localizedRedirect(
       workspaces.length > 1
         ? "/find-account"
         : workspaces[0]

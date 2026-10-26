@@ -1,9 +1,15 @@
 import type { Meeting, MeetingTranscriptSourceProvider } from "@prisma/client";
+import { createVariantModelControls, type VariantGenerationControls } from "./variant-model-attempt";
+import { requireWorkspaceMembership } from "./auth";
 import { defaultModelGateway } from "@corgtex/models";
-import { prisma } from "@corgtex/shared";
-import type { AppActor } from "@corgtex/shared";
-import { createMeeting, uploadMeetingTranscript } from "./meetings";
+import { prisma, type AppActor } from "@corgtex/shared";
+import { createMeeting, getMeeting, uploadMeetingTranscript } from "./meetings";
 import type { DuplicateGuardOptions } from "./duplicate-guard";
+import { invariant } from "./errors";
+import { audioTranscriptIntakeRoots, directMemberTranscriptRoots, withMemberTranscriptReceipt,
+  type AudioTranscriptIntakeReceipt, type DirectMemberTranscriptReceipt } from "./native-transcript-input";
+import { getAudioTranscriptWorkerPurpose } from "./native-transcript-principal";
+import { captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifactInputProofReadable } from "./source-lineage";
 
 type IntakeStatus = "meeting_created" | "meeting_matched" | "needs_clarification";
 
@@ -132,13 +138,16 @@ export function classifyUploadedTextForMeeting(params: {
 }
 
 async function inferMetadataWithModel(params: {
+  modelControls?: VariantGenerationControls;
   workspaceId: string;
   transcript: string;
   fileName?: string | null;
   userMessage?: string | null;
 }) {
   try {
+    params.modelControls?.signal.throwIfAborted();
     const extraction = await defaultModelGateway.extract({
+      ...params.modelControls,
       workspaceId: params.workspaceId,
       instruction: "Extract meeting metadata from this uploaded meeting transcript. Return null for fields that are not explicitly present or strongly implied.",
       schemaHint: "{ title: string | null, recordedAt: string | null, participantEmails: string[] }",
@@ -148,6 +157,7 @@ async function inferMetadataWithModel(params: {
         transcriptPreview: params.transcript.slice(0, 12000),
       }),
     });
+    params.modelControls?.signal.throwIfAborted();
     const output = extraction.output as Record<string, unknown>;
     return {
       title: typeof output.title === "string" ? output.title : null,
@@ -157,11 +167,14 @@ async function inferMetadataWithModel(params: {
         : [],
     };
   } catch {
+    params.modelControls?.signal.throwIfAborted();
     return { title: null, recordedAt: null, participantEmails: [] };
   }
 }
 
 export async function inferMeetingTranscriptMetadata(params: {
+  /** Server-owned capability; never part of submitted transcript identity. */
+  modelControls?: VariantGenerationControls;
   workspaceId: string;
   transcript: string;
   fileName?: string | null;
@@ -232,19 +245,48 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
   participantEmails?: string[] | null;
   duplicateGuard?: DuplicateGuardOptions | null;
   now?: Date;
+  rawFileBase64?: string | null;
+  rawFileMimeType?: string | null;
+  nativeReceipt?: DirectMemberTranscriptReceipt | AudioTranscriptIntakeReceipt;
 }): Promise<MeetingTranscriptIntakeResult> {
+  // A source label or provider record id is not an authenticated receipt. In
+  // particular, model tool arguments can arrive with a human conversation actor.
+  const { nativeReceipt, ...submitted } = params;
+  return withMemberTranscriptReceipt(actor, params.workspaceId, submitted, nativeReceipt, async () => {
+  const audioWorker = actor.kind === "agent" ? getAudioTranscriptWorkerPurpose(actor, params.workspaceId) : null;
+  invariant(!params.sourceRecordId && !params.batchId && !params.allowTranscriptAppend && !params.replaceTranscript
+    && ((actor.kind === "user" && !params.provider) || (audioWorker && params.provider === "MANUAL_UPLOAD")),
+  409, "UNKNOWN_LINEAGE", "Transcript intake requires a verified native input receipt.");
+  const nativeRoots = audioWorker
+    ? await audioTranscriptIntakeRoots(actor, params.workspaceId, submitted, nativeReceipt)
+    : await directMemberTranscriptRoots(actor, params.workspaceId, submitted, nativeReceipt);
   const transcript = params.transcript.trim();
   const existingMeeting = params.meetingId
-    ? await prisma.meeting.findFirst({
-        where: { id: params.meetingId, workspaceId: params.workspaceId, archivedAt: null },
-        select: { recordedAt: true, title: true, participantEmails: true },
-      })
+    ? await getMeeting(actor, params.workspaceId, params.meetingId)
     : null;
-  const trustedProviderIngestion = Boolean(params.provider && params.sourceRecordId);
-  const canonicalRecordedAt = trustedProviderIngestion && params.recordedAt
-    ? params.recordedAt
-    : existingMeeting?.recordedAt ?? params.recordedAt ?? null;
+  if (params.meetingId) invariant(existingMeeting, 404, "NOT_FOUND", "Meeting not found.");
+  // Title, time and participants from a selected Meeting enter metadata
+  // inference. Preserve that exact authorized revision before the model call;
+  // the transcript writer may mutate the same Meeting later in this request.
+  const selectedMeetingRoots = existingMeeting ? await prisma.$transaction(async tx => {
+    const captured = await captureArtifactInputProof(actor, params.workspaceId, [{
+      kind: "Meeting", id: existingMeeting.id,
+      snapshot: { title: existingMeeting.title, recordedAt: existingMeeting.recordedAt,
+        participantEmails: existingMeeting.participantEmails },
+    }], tx);
+    const direct = captured.find(root => root.kind === "Meeting" && root.id === existingMeeting.id);
+    invariant(direct, 409, "UNKNOWN_LINEAGE", "Selected meeting metadata lacks an exact source receipt.");
+    return captureArtifactInputSnapshotProof(actor, params.workspaceId, direct, tx);
+  }) : [];
+  const completeRoots = structuredClone([...nativeRoots, ...selectedMeetingRoots]);
+  const modelAttempt = createVariantModelControls(async () => {
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, completeRoots),
+      409, "SOURCE_CHANGED", "Transcript metadata authority changed.");
+  });
+  const canonicalRecordedAt = existingMeeting?.recordedAt ?? params.recordedAt ?? null;
   const inferred = await inferMeetingTranscriptMetadata({
+    modelControls: modelAttempt.controls,
     workspaceId: params.workspaceId,
     transcript,
     fileName: params.fileName,
@@ -253,7 +295,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     source: params.source,
     recordedAt: canonicalRecordedAt,
     participantEmails: [...(params.participantEmails ?? []), ...(existingMeeting?.participantEmails ?? [])],
-    validateExplicitRecordedAt: Boolean(!trustedProviderIngestion && !existingMeeting),
+    validateExplicitRecordedAt: !existingMeeting,
     now: params.now,
   });
 
@@ -282,6 +324,8 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
       participantEmails: inferred.participantEmails,
       sourceRecordId: params.sourceRecordId ?? null,
       duplicateGuard: params.duplicateGuard,
+      copied: true,
+      lineageRoots: completeRoots,
     });
     const usedExisting = params.duplicateGuard?.resolution === "use_existing";
     return {
@@ -312,6 +356,8 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     replaceTranscript: params.replaceTranscript,
     allowTranscriptAppend: params.allowTranscriptAppend,
     duplicateGuard: params.duplicateGuard,
+    copied: true,
+    lineageRoots: completeRoots,
   });
 
   if (result.status === "needs_selection") {
@@ -337,4 +383,5 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
       ? existingMeetingMessage(result.meeting.title, inferred.title)
       : `Transcript saved as meeting "${result.meeting.title ?? inferred.title ?? "Untitled meeting"}". Summary and follow-up extraction are queued.`,
   };
+  });
 }

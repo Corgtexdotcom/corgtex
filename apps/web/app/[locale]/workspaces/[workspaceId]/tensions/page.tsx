@@ -1,4 +1,5 @@
-import { listAdviceRequests, listCircles, listDeliberationEntriesForParents, listHumanMembers, listTensions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AdviceRequestWindowNotice } from "@/lib/components/AdviceRequestWindowNotice";
+import { listAdviceRequestWindow, listCircles, listDeliberationEntriesForParents, listHumanMembers, listTensions, requireWorkspaceMembership } from "@corgtex/domain";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
 import {
@@ -74,12 +75,13 @@ export default async function TensionsPage({
     closedFrom: dateFilters.closedFrom ? startOfUtcDate(dateFilters.closedFrom) : undefined,
     closedTo: dateFilters.closedTo ? endOfUtcDate(dateFilters.closedTo) : undefined,
   };
-  const [{ items: tensions }, circles, members, activeInputRequests] = await Promise.all([
+  const [{ items: tensions }, circles, members, adviceWindow] = await Promise.all([
     listTensions(actor, workspaceId, { take: 200, circleIds, memberIds, sort, ...listDateFilters }),
-    listCircles(workspaceId),
+    listCircles(actor, workspaceId),
     listHumanMembers(workspaceId),
-    listAdviceRequests(actor, { workspaceId, subjectType: "TENSION", status: "ACTIVE", take: 500 }),
+    listAdviceRequestWindow(actor, { workspaceId, subjectType: "TENSION", status: "ACTIVE", take: 100, cursor: typeof resolvedSearch.adviceCursor === "string" ? resolvedSearch.adviceCursor : undefined }),
   ]);
+  const activeInputRequests = adviceWindow.items;
   const responses = await listDeliberationEntriesForParents(actor, {
     workspaceId,
     parentType: "TENSION",
@@ -343,7 +345,7 @@ export default async function TensionsPage({
     }
     if (inputRequestCount > 0) {
       cardBadges.push(
-        <WorkItemAttentionBadge key="input-request">{t("inputRequestedCount", { count: inputRequestCount })}</WorkItemAttentionBadge>,
+        <WorkItemAttentionBadge key="input-request">{t("inputRequestedCount", { count: inputRequestCount })}{(!adviceWindow.complete || Boolean(resolvedSearch.adviceCursor)) && ` (${tWork("adviceCountWindow")})`}</WorkItemAttentionBadge>,
       );
     }
 
@@ -482,7 +484,7 @@ export default async function TensionsPage({
               </WorkItemRelationshipTag>
             )}
             {inputRequestCount > 0 && (
-              <WorkItemAttentionBadge>{t("inputRequestedCount", { count: inputRequestCount })}</WorkItemAttentionBadge>
+              <WorkItemAttentionBadge>{t("inputRequestedCount", { count: inputRequestCount })}{(!adviceWindow.complete || Boolean(resolvedSearch.adviceCursor)) && ` (${tWork("adviceCountWindow")})`}</WorkItemAttentionBadge>
             )}
           </div>
         ),
@@ -555,6 +557,9 @@ export default async function TensionsPage({
 
   return (
     <>
+      <div id="advice-requests" />
+      <AdviceRequestWindowNotice page={adviceWindow} path={`/workspaces/${workspaceId}/tensions`} search={resolvedSearch}
+        labels={{ limited: tWork("adviceWindowLimited"), older: tWork("olderAdviceRequests"), newest: tWork("newestAdviceRequests") }} />
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <h1>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">

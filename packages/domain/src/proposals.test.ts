@@ -1,5 +1,11 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { prisma } from "@corgtex/shared";
+import { SOURCE_PERMISSION_POLICY_VERSION } from "./source-permission-epochs";
+
+const lineageReadMocks = vi.hoisted(() => ({
+  readable: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set<string>(records.map((row: {id: string}) => row.id))),
+  capture: vi.fn().mockResolvedValue([]),
+}));
 
 const makeTension = (id = "t-1", overrides = {}) => ({
   id, workspaceId: "ws-1", title: `Tension ${id}`, bodyMd: "Tension body", circleId: null, meetingId: null,
@@ -16,6 +22,8 @@ const makeProposal = (id = "p-1", overrides = {}) => ({
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
+    artifactInputLineage: { findFirst: vi.fn(async ({where}) => ({ origin: "HUMAN_ORIGINAL", contentHash: "a".repeat(64), rootsJson: [], inputsJson: [], epochProofVersion: 1,
+      permissionEpochsJson: { version: 1, policyVersion: SOURCE_PERMISSION_POLICY_VERSION, entries: [{ kind: "Proposal", id: where.artifactId, epoch: "1" }, { kind: "Workspace", id: where.workspaceId, epoch: "1" }] } })) },
     proposal: {
       count: vi.fn(),
       create: vi.fn(),
@@ -26,23 +34,27 @@ vi.mock("@corgtex/shared", () => ({
       findUniqueOrThrow: vi.fn(),
     },
     member: {
+      findMany: vi.fn().mockResolvedValue([]),
       findFirst: vi.fn(),
     },
     circle: {
       findUnique: vi.fn(),
     },
+    adviceRequest: {findMany: vi.fn().mockResolvedValue([])},
     action: {
-      findMany: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
       updateMany: vi.fn(),
       update: vi.fn(),
     },
     tension: {
+      findMany: vi.fn().mockResolvedValue([]),
       findFirst: vi.fn(),
       update: vi.fn(),
     },
     policyCorpus: {
+      findMany: vi.fn().mockResolvedValue([]),
       deleteMany: vi.fn(),
-      upsert: vi.fn(),
+      upsert: vi.fn().mockResolvedValue({ id: "policy-1" }),
     },
     document: {
       findMany: vi.fn(),
@@ -72,7 +84,7 @@ vi.mock("@corgtex/shared", () => ({
     },
     approvalFlow: {
       findUnique: vi.fn(),
-      update: vi.fn(),
+      update: vi.fn(async ({where, data}) => ({id: where.id, ...data})),
     },
     approvalDecision: {
       deleteMany: vi.fn(),
@@ -83,6 +95,44 @@ vi.mock("@corgtex/shared", () => ({
     $transaction: vi.fn(async (cb) => cb(prisma)),
     $executeRaw: vi.fn(),
   },
+}));
+
+vi.mock("./digest-lineage", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./digest-lineage")>(),
+  captureReadableDigestInputs: vi.fn(async ({actor, workspaceId, kind, records}) => {
+    const ids = await lineageReadMocks.readable(actor, workspaceId, kind, records);
+    const admitted = records.filter((row: {id: string}) => ids.has(row.id));
+    return {records: admitted, roots: await lineageReadMocks.capture(actor, workspaceId,
+      admitted.map((row: {id: string}) => ({kind, id: row.id, snapshot: row})))};
+  }),
+}));
+vi.mock("./source-lineage", async () => ({
+  collectWorkItemReadSnapshot: vi.fn(async (_workspaceId: string, read: (tx: typeof prisma) => Promise<unknown>) => read(prisma)),
+  currentArtifactInputRootsBatch: vi.fn(async (_db, _workspace, _kind, rows: Array<{id: string}>) => new Map(rows.map(row => [row.id, []]))),
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  captureReadableWorkItemInputs: vi.fn(async (actor, workspaceId, kind, records) => {
+    const ids = await lineageReadMocks.readable(actor, workspaceId, kind, records);
+    return {ids, roots: await lineageReadMocks.capture(actor, workspaceId,
+      records.filter((row: {id: string}) => ids.has(row.id)).map((row: {id: string}) => ({kind, id: row.id, snapshot: row}))), heads: new Map()};
+  }),
+  mergeLineageInputRoot: (previous: unknown, root: unknown) => previous ?? root,
+  sealArtifactInputActor: (await import("./artifact-input-actor")).sealArtifactInputActor,
+  isLineageKind: (value: unknown) => ["Proposal"].includes(String(value)),
+  assertArtifactInputWriteFence: vi.fn().mockResolvedValue(undefined),
+  advanceArchivedArtifactEnvelopeLineage: vi.fn().mockResolvedValue(false),
+  isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
+  withArtifactCountReleaseSnapshot: vi.fn(async (_actor, _workspaceId, _roots, _remote, finish) => finish({})),
+  advanceHumanArtifactInputLineage: vi.fn(),
+  captureHumanArtifactInputAdvance: vi.fn(),
+  captureArtifactInputProof: lineageReadMocks.capture,
+  captureArtifactInputSnapshotProof: vi.fn().mockResolvedValue([]),
+  captureImmutableArtifactInputProof: vi.fn(async (_actor, _workspaceId, roots) => roots),
+  invalidateArtifactInputLineage: vi.fn(),
+  lineageContentFingerprint: vi.fn().mockReturnValue("a".repeat(64)),
+  preserveUnknownArtifactInputSnapshot: vi.fn(),
+  recordArtifactInputLineage: vi.fn(),
+  currentArtifactInputRoots: vi.fn().mockResolvedValue([]),
+  readableArtifactIds: lineageReadMocks.readable,
 }));
 
 vi.mock("./auth", () => ({
@@ -103,6 +153,7 @@ vi.mock("./events", () => ({
 
 vi.mock("./approvals", () => ({
   ensureApprovalFlow: vi.fn().mockResolvedValue({ id: "flow-1" }),
+  preserveApprovalFlowHistory: vi.fn(),
   withdrawActiveApprovalFlowForSubject: vi.fn().mockResolvedValue(undefined),
   getApprovalPolicy: vi.fn().mockResolvedValue({
     mode: "CONSENT",
@@ -168,6 +219,22 @@ describe("proposal AI summaries", () => {
         summary: "Generated summary for the proposal.",
       }),
     }));
+  });
+
+  it("summarizes a human original without treating an empty inherited proof as an artifact", async () => {
+    const { isArtifactInputProofReadable } = await import("./source-lineage");
+    const { defaultModelGateway } = await import("@corgtex/models");
+    const { createProposal } = await import("./proposals");
+    vi.mocked(isArtifactInputProofReadable).mockImplementation(async (_actor, _workspaceId, roots) => roots.length > 0);
+    vi.mocked(defaultModelGateway.extract).mockImplementationOnce(async request => {
+      await request.authorizeAttempt?.({ signal: request.signal! });
+      return { output: { summary: "Human original summary" } } as never;
+    });
+    vi.mocked(prisma.proposal.create).mockResolvedValueOnce(makeProposal("p-human", { authorUserId: "u-1", bodyMd: words(130), summary: "Human original summary" }) as never);
+    try {
+      await expect(createProposal({ kind: "user", user: { id: "u-1" } } as never,
+        { workspaceId: "ws-1", title: "Human original", bodyMd: words(130), includeAiSummary: true })).resolves.toMatchObject({ summary: "Human original summary" });
+    } finally { vi.mocked(isArtifactInputProofReadable).mockResolvedValue(true); }
   });
 
   it("does not generate AI summaries for short proposals", async () => {
@@ -349,6 +416,29 @@ describe("proposal AI summaries", () => {
 });
 
 describe("proposal creation visibility", () => {
+  it("rejects private agent conversion before reading the source tension or generating a summary", async () => {
+    const {createProposalFromTension} = await import("./proposals");
+    await expect(createProposalFromTension({kind: "agent", workspaceIds: ["ws-1"]} as any,
+      {workspaceId: "ws-1", sourceTensionId: "private-parent"})).rejects.toMatchObject({code: "PRIVATE_AGENT_ARTIFACT_UNSUPPORTED"});
+    expect(prisma.tension.findFirst).not.toHaveBeenCalled();
+    expect(prisma.proposal.create).not.toHaveBeenCalled();
+  });
+  it.each(["credential-a", "credential-b"])("rejects private creation by %s before duplicate reads or writes", async credentialId => {
+    const {createProposal} = await import("./proposals");
+    const credential = {kind: "agent", authProvider: "credential", credentialId, workspaceIds: ["ws-1"], scopes: ["support:write"]} as any;
+    await expect(createProposal(credential, {workspaceId: "ws-1", title: "Private", bodyMd: "Private", authorMemberId: "member-owner"})).rejects.toMatchObject({code: "PRIVATE_AGENT_ARTIFACT_UNSUPPORTED"});
+    expect(prisma.proposal.create).not.toHaveBeenCalled();
+    expect(prisma.proposal.findMany).not.toHaveBeenCalled();
+    expect(prisma.proposal.findFirst).not.toHaveBeenCalled();
+  });
+  it("rejects public agent creation without complete inputs before looking for duplicates", async () => {
+    const {createProposal} = await import("./proposals");
+    await expect(createProposal({kind: "agent", workspaceIds: ["ws-1"]} as any, {...{workspaceId: "ws-1", title: "Private", bodyMd: "Private", authorMemberId: "member-owner"}, isPrivate: false}))
+      .rejects.toMatchObject({code: "UNKNOWN_LINEAGE"});
+    expect(prisma.proposal.create).not.toHaveBeenCalled();
+    expect(prisma.proposal.findMany).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => { vi.clearAllMocks(); });
 
   it("creates private draft proposals by default", async () => {
@@ -988,6 +1078,8 @@ describe("updateProposal AI-summary transaction scope", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    const { defaultModelGateway } = await import("@corgtex/models");
+    vi.mocked(defaultModelGateway.extract).mockReset();
     const { requireWorkspaceMembership } = await import("./auth");
     vi.mocked(requireWorkspaceMembership).mockReset().mockResolvedValue({
       id: "mem-1", workspaceId: "ws-1", userId: "u-1", role: "MEMBER", isActive: true,
@@ -1101,6 +1193,7 @@ describe("updateProposal AI-summary transaction scope", () => {
       drifted: Record<string, unknown>,
       admissionOverrides: Record<string, unknown> = {},
       expected: Record<string, unknown> = { status: 409, code: "VERSION_CONFLICT" },
+      afterStarted?: () => void,
     ) => {
       const { defaultModelGateway } = await import("@corgtex/models");
       const { updateProposal } = await import("./proposals");
@@ -1127,8 +1220,9 @@ describe("updateProposal AI-summary transaction scope", () => {
         ...params,
       } as any);
       const rejection = expect(promise).rejects.toMatchObject(expected);
-      await extractStarted;
+      await Promise.race([extractStarted, promise.then(() => { throw new Error("Update completed before model admission"); })]);
       expect(defaultModelGateway.extract).toHaveBeenCalledTimes(1);
+      afterStarted?.();
       releaseExtract({ output: { summary: "Drifted summary." } });
 
       await rejection;
@@ -1202,13 +1296,14 @@ describe("updateProposal AI-summary transaction scope", () => {
       ["demoted", { id: "mem-1", userId: "u-1", role: "MEMBER", isActive: true }, { status: 403, code: "FORBIDDEN" }],
     ])("rejects a %s member after inference before any write", async (_label, finalMembership, expected) => {
       const { requireWorkspaceMembership } = await import("./auth");
-      vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+      vi.mocked(requireWorkspaceMembership).mockResolvedValue({
         id: "mem-1", workspaceId: "ws-1", userId: "u-1", role: "ADMIN", isActive: true,
       } as any);
-      if (finalMembership) vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce(finalMembership as any);
-      else vi.mocked(requireWorkspaceMembership).mockRejectedValueOnce(expected);
-      await runDriftScenario({ bodyMd: words(140) }, {}, { authorUserId: "u-other" }, expected);
-      expect(requireWorkspaceMembership).toHaveBeenCalledTimes(2);
+      await runDriftScenario({ bodyMd: words(140) }, {}, { authorUserId: "u-other" }, expected, () => {
+        if (finalMembership) vi.mocked(requireWorkspaceMembership).mockResolvedValue(finalMembership as any);
+        else vi.mocked(requireWorkspaceMembership).mockRejectedValue(expected);
+      });
+      expect(requireWorkspaceMembership).toHaveBeenCalledTimes(3);
     });
   });
 
@@ -1419,6 +1514,18 @@ describe("updateProposal AI-summary transaction scope", () => {
     expect(appendEvents).not.toHaveBeenCalled();
   });
 
+  it("does not return a proposal whose input permissions were revoked through a no-op update", async () => {
+    const { updateProposal } = await import("./proposals");
+    const { readableArtifactIds } = await import("./source-lineage");
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal() as any);
+    vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set());
+
+    await expect(updateProposal(actor, {
+      workspaceId: "ws-1", proposalId: "p-scope", title: "Scope title", expectedVersion: 1,
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(prisma.proposal.update).not.toHaveBeenCalled();
+  });
+
   it("rejects missing versions for same-value content and summary intent without effects", async () => {
     const { appendEvents } = await import("./events");
     const { defaultModelGateway } = await import("@corgtex/models");
@@ -1459,47 +1566,18 @@ describe("listProposals", () => {
       where: expect.objectContaining({
         workspaceId: "ws-1",
         circleId: "circle-1",
-        AND: [
-          {
-            OR: [
-              { isPrivate: false },
-              { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
-            ],
-          },
-          expect.objectContaining({
-            OR: expect.arrayContaining([
-              expect.objectContaining({
-                author: expect.objectContaining({
-                  memberships: {
-                    some: {
-                      id: { in: ["mem-1"] },
-                      workspaceId: "ws-1",
-                      isActive: true,
-                    },
-                  },
-                }),
-              }),
-              { ownerMemberId: { in: ["mem-1"] } },
-              expect.objectContaining({ actions: expect.any(Object) }),
-              expect.objectContaining({ tensions: expect.any(Object) }),
-            ]),
-          }),
+        OR: [
+          { isPrivate: false },
+          { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
         ],
       }),
       orderBy: [
         { createdAt: "desc" },
         { id: "desc" },
       ],
-      include: expect.objectContaining({
-        adviceProcess: {
-          include: {
-            requests: {
-              select: { status: true },
-            },
-          },
-        },
-      }),
+      take: 100,
     }));
+    expect(prisma.proposal.count).not.toHaveBeenCalled();
   });
 });
 
@@ -1668,6 +1746,8 @@ describe("resolveProposal", () => {
       proposalId: "p-2",
       outcome: "NOT_ADOPTED",
       decisionMd: "Open objections changed the decision.",
+      lineageCopied: true,
+      lineageRoots: [{ kind: "ArtifactInputSnapshot", id: "full-model-inputs", fingerprint: "b".repeat(64) }],
     });
 
     expect(prisma.approvalFlow.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -1794,15 +1874,7 @@ describe("getProposal", () => {
           { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
         ],
       },
-      include: expect.objectContaining({
-        adviceProcess: {
-          include: {
-            requests: {
-              select: { status: true },
-            },
-          },
-        },
-      }),
+      include: expect.objectContaining({circle: true}),
     }));
   });
 
@@ -2052,7 +2124,7 @@ describe("createProposalFromTension", () => {
         tensions: [],
       } as any,
     ]);
-    vi.mocked(prisma.action.findMany).mockResolvedValueOnce([
+    vi.mocked(prisma.action.findMany).mockResolvedValue([
       { id: "a-1", proposalId: null },
       { id: "a-2", proposalId: null },
     ] as any);
@@ -2257,19 +2329,6 @@ describe("createProposalFromTension", () => {
           { isPrivate: false },
           { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
         ],
-      },
-      select: {
-        id: true,
-        workspaceId: true,
-        title: true,
-        bodyMd: true,
-        priority: true,
-        circleId: true,
-        assigneeMemberId: true,
-        dueAt: true,
-        proposalId: true,
-        status: true,
-        version: true,
       },
     }));
     expect(prisma.action.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -2746,8 +2805,8 @@ describe("submitProposal event payload", () => {
       vi.mocked(prisma.proposal.findMany).mockResolvedValueOnce([existingProposal as any]);
       vi.mocked(prisma.proposal.findFirst).mockResolvedValue(existingProposal as any);
       vi.mocked(prisma.proposal.findUnique).mockResolvedValue(existingProposal as any);
-      vi.mocked(prisma.tension.findFirst).mockResolvedValueOnce(makeTension("t-dup", { version: 2 }) as any);
-      vi.mocked(prisma.action.findMany).mockResolvedValueOnce([makeAction("a-dup", { version: 3 })] as any);
+      vi.mocked(prisma.tension.findFirst).mockResolvedValue(makeTension("t-dup", { version: 2 }) as any);
+      vi.mocked(prisma.action.findMany).mockResolvedValue([makeAction("a-dup", { version: 3 })] as any);
       vi.mocked(prisma.tension.update).mockResolvedValueOnce({ id: "t-dup", version: 3 } as any);
       vi.mocked(prisma.action.update).mockResolvedValueOnce({ id: "a-dup", version: 4 } as any);
 
@@ -3034,5 +3093,177 @@ describe("submitProposal event payload", () => {
       expect(orderA).toBeLessThan(orderM);
       expect(orderM).toBeLessThan(orderZ);
     });
+  });
+});
+
+
+describe("proposal lineage integration", () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+  const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+  it("keeps public agent input proof, duplicate scan, policy, authorship and native write on the supplied transaction", async () => {
+    const { createProposal } = await import("./proposals");
+    const { requireWorkspaceMembership, actorUserIdForWorkspace } = await import("./auth");
+    const { isArtifactInputProofReadable, recordArtifactInputLineage } = await import("./source-lineage");
+    const txFindMany = vi.fn().mockResolvedValue([]);
+    const txCreate = vi.fn().mockResolvedValue(makeProposal("tx-proposal", { title: "Native proposal", isPrivate: false, status: "OPEN" }));
+    const txMemberFindFirst = vi.fn(async ({ where }: any) => where.userId ? null : { userId: "system-user" });
+    const txPolicyFindUnique = vi.fn().mockResolvedValue({ mode: "CONSENT", decisionWindowHours: 168, requireProposalLink: false });
+    const tx = { ...prisma, proposal: { ...prisma.proposal, findMany: txFindMany, create: txCreate },
+      member: { ...prisma.member, findFirst: txMemberFindFirst }, approvalPolicy: { findUnique: txPolicyFindUnique } } as any;
+    const nativeActor = { kind: "agent", label: "system", authProvider: "bootstrap", workspaceIds: ["ws-1"] } as any;
+    const root = { kind: "ExecutionResult", id: "result-1", fingerprint: "a".repeat(64) } as any;
+    const result = await createProposal(nativeActor, { workspaceId: "ws-1", title: "Native proposal",
+      bodyMd: "Native proposal body", isPrivate: false, summary: "Native summary",
+      lineageRoots: [root], duplicateGuard: {} }, tx);
+    expect(result.id).toBe("tx-proposal");
+    expect(requireWorkspaceMembership).toHaveBeenCalledWith(expect.objectContaining({ tx }));
+    expect(isArtifactInputProofReadable).toHaveBeenCalledWith(nativeActor, "ws-1", [root], tx);
+    expect(txFindMany).toHaveBeenCalled();
+    expect(txPolicyFindUnique).toHaveBeenCalled();
+    expect(txCreate).toHaveBeenCalledWith({ data: expect.objectContaining({ authorUserId: "system-user" }) });
+    expect(recordArtifactInputLineage).toHaveBeenCalledWith(expect.objectContaining({ tx,
+      artifact: { kind: "Proposal", id: "tx-proposal" }, inheritedRoots: [root] }));
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.proposal.findMany).not.toHaveBeenCalled();
+    expect(prisma.proposal.create).not.toHaveBeenCalled();
+    expect(actorUserIdForWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate update in a supplied transaction before lookup or writes", async () => {
+    const { createProposal } = await import("./proposals");
+    const txFindMany = vi.fn();
+    const txCreate = vi.fn();
+    const tx = { ...prisma, proposal: { ...prisma.proposal, findMany: txFindMany, create: txCreate } } as any;
+    await expect(createProposal(actor, { workspaceId: "ws-1", title: "Duplicate", bodyMd: "Body",
+      duplicateGuard: { resolution: "update_existing", targetEntityId: "p-old" } }, tx))
+      .rejects.toMatchObject({ code: "DUPLICATE_GUARD_TRANSACTION_UNSUPPORTED" });
+    expect(txFindMany).not.toHaveBeenCalled();
+    expect(txCreate).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("withholds denied duplicate candidates before any title or snippet reaches the result", async () => {
+    const { createProposal } = await import("./proposals");
+    const { readableArtifactIds } = await import("./source-lineage");
+    const secret = makeProposal("secret-candidate", { title: "Governance update", bodyMd: "Restricted proposal body", updatedAt: new Date(), createdAt: new Date() });
+    vi.mocked(prisma.proposal.findMany).mockResolvedValueOnce([secret] as any);
+    vi.mocked(prisma.proposal.create).mockResolvedValueOnce(makeProposal("new-proposal", { title: "Governance update", bodyMd: "User draft" }) as any);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, kind, rows) => new Set(kind === "Proposal" ? [] : rows.map((row) => row.id)));
+    try {
+      const result = await createProposal(actor, { workspaceId: "ws-1", title: "Governance update", bodyMd: "User draft", duplicateGuard: {} });
+      expect(result.id).toBe("new-proposal");
+      expect(JSON.stringify(result)).not.toContain("Restricted proposal body");
+      expect(readableArtifactIds).toHaveBeenCalledWith(actor, "ws-1", "Proposal", [secret]);
+    } finally {
+      vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row) => row.id)));
+    }
+  });
+
+  it("filters full linked Actions, Tensions and advice requests before exposing nested counts or text", async () => {
+    const { getProposal } = await import("./proposals");
+    const { readableArtifactIds } = await import("./source-lineage");
+    vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce({ ...makeProposal("safe"),
+      tensions: [{ id: "secret-tension", title: "Hidden tension", bodyMd: "Secret tension body", status: "OPEN" }],
+      actions: [{ id: "public-action", title: "Allowed", bodyMd: "Permitted body", status: "OPEN" }],
+      adviceProcess: { id: "advice-process", requests: [{ id: "secret-request", status: "OPEN", messageMd: "Secret request body" }] },
+    } as any);
+    vi.mocked(prisma.tension.findMany).mockResolvedValueOnce([{id: "secret-tension", proposalId: "safe", title: "Hidden tension", bodyMd: "Secret tension body", status: "OPEN"}] as any);
+    vi.mocked(prisma.action.findMany).mockResolvedValueOnce([{id: "public-action", proposalId: "safe", title: "Allowed", bodyMd: "Permitted body", status: "OPEN"}] as any);
+    vi.mocked(prisma.adviceRequest.findMany).mockResolvedValueOnce([{id: "secret-request", process: {proposalId: "safe"}, status: "OPEN", messageMd: "Secret request body"}] as any);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, kind, rows) => new Set(["Tension", "AdviceRequest"].includes(kind) ? [] : rows.map((row) => row.id)));
+    try {
+      const result = await getProposal(actor, { workspaceId: "ws-1", proposalId: "safe" });
+      expect(result.tensions).toEqual([]);
+      expect(result.actions.map((row) => row.id)).toEqual(["public-action"]);
+      expect(result.adviceProcess?.requests).toEqual([]);
+      expect(JSON.stringify(result)).not.toContain("Secret");
+      expect(readableArtifactIds).toHaveBeenCalledWith(actor, "ws-1", "AdviceRequest", [expect.objectContaining({ messageMd: "Secret request body" })]);
+    } finally {
+      vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row) => row.id)));
+    }
+  });
+
+  it("rejects an incomplete exact detail after one bounded relation window", async () => {
+    const {getProposal} = await import("./proposals");
+    const rows = Array.from({length: 5101}, (_, i) => ({id: `r-${String(i).padStart(5, "0")}`, title: `Relation ${i}`, bodyMd: "Full canonical fixture", status: "OPEN"}));
+    const page = ({where, take}: any) => Promise.resolve(rows.filter(row => !where.id?.gt || row.id > where.id.gt).slice(0, take));
+    vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce(makeProposal("many-relations") as any);
+    const actions = vi.mocked(prisma.action.findMany).mockImplementation(page as typeof prisma.action.findMany);
+    const tensions = vi.mocked(prisma.tension.findMany).mockImplementation(page as typeof prisma.tension.findMany);
+    const requests = vi.mocked(prisma.adviceRequest.findMany).mockImplementation(page as unknown as typeof prisma.adviceRequest.findMany);
+    try {
+      await expect(getProposal(actor, {workspaceId: "ws-1", proposalId: "many-relations"})).rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+      for (const mock of [actions, tensions, requests]) expect(mock.mock.calls.at(-1)?.[0]?.take).toBe(200);
+    } finally {
+      actions.mockResolvedValue([]); tensions.mockResolvedValue([]); requests.mockResolvedValue([]);
+    }
+  });
+
+  it("records the complete adopted policy receipt atomically from the updated Proposal", async () => {
+    const { resolveProposal } = await import("./proposals");
+    const { recordArtifactInputLineage, captureImmutableArtifactInputProof } = await import("./source-lineage");
+    const outputSnapshot = { kind: "ArtifactInputSnapshot" as const, id: "resolved-proposal-output", fingerprint: "b".repeat(64) };
+    vi.mocked(captureImmutableArtifactInputProof).mockImplementationOnce(async (_actor, _workspaceId, roots) => [...roots])
+      .mockResolvedValueOnce([outputSnapshot]);
+    const before = makeProposal("policy-source", { status: "OPEN", isPrivate: false, publishedAt: new Date() });
+    const updated = { ...before, status: "RESOLVED", resolutionOutcome: "ADOPTED", decisionMd: "Adopt it", decidedAt: new Date() };
+    const policy = { id: "policy-copy", workspaceId: "ws-1", proposalId: before.id, title: updated.title, bodyMd: updated.bodyMd, circleId: null, acceptedAt: updated.decidedAt };
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(before as any);
+    vi.mocked(prisma.proposal.update).mockResolvedValueOnce(updated as any);
+    vi.mocked(prisma.approvalFlow.findUnique).mockResolvedValueOnce(null);
+    vi.mocked(prisma.policyCorpus.upsert).mockResolvedValueOnce(policy as any);
+    await resolveProposal(actor, { workspaceId: "ws-1", proposalId: before.id, outcome: "ADOPTED", decisionMd: "Adopt it" });
+    expect(recordArtifactInputLineage).toHaveBeenLastCalledWith(expect.objectContaining({ tx: prisma, actor,
+      artifact: { kind: "PolicyCorpus", id: policy.id }, content: policy, origin: "DERIVED", inputs: [], inheritedRoots: [outputSnapshot] }));
+    expect(vi.mocked(prisma.policyCorpus.upsert).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(recordArtifactInputLineage).mock.invocationCallOrder[1]);
+  });
+
+  it("rejects restricted decision evidence before any Proposal or policy write", async () => {
+    const { resolveProposal } = await import("./proposals");
+    const { captureArtifactInputProof } = await import("./source-lineage");
+    const { AppError } = await import("./errors");
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(makeProposal("evidence-source", { status: "OPEN" }) as any);
+    vi.mocked(prisma.approvalFlow.findUnique).mockResolvedValueOnce(null);
+    vi.mocked(captureArtifactInputProof).mockRejectedValueOnce(new AppError(409, "SOURCE_RESTRICTED", "Evidence revoked"));
+    await expect(resolveProposal(actor, { workspaceId: "ws-1", proposalId: "evidence-source", outcome: "ADOPTED", decisionMd: "Adopt it", evidenceDocumentIds: ["finance-evidence"] })).rejects.toMatchObject({ code: "SOURCE_RESTRICTED" });
+    expect(prisma.proposal.update).not.toHaveBeenCalled();
+    expect(prisma.policyCorpus.upsert).not.toHaveBeenCalled();
+  });
+
+  it("preserves the exact copied tension before linking and records derived Proposal proof", async () => {
+    const { createProposalFromTension } = await import("./proposals");
+    const { captureArtifactInputSnapshotProof, recordArtifactInputLineage } = await import("./source-lineage");
+    const tension = makeTension("copied-tension", { authorUserId: "u-1", isPrivate: false });
+    const root = { kind: "ArtifactInputSnapshot" as const, id: "tension-snapshot", fingerprint: "a".repeat(64) };
+    vi.mocked(prisma.tension.findFirst).mockResolvedValueOnce(tension as any);
+    vi.mocked(prisma.proposal.create).mockResolvedValueOnce(makeProposal("copied-proposal") as any);
+    vi.mocked(prisma.tension.update).mockResolvedValueOnce({ ...tension, proposalId: "copied-proposal", version: 2 } as any);
+    vi.mocked(captureArtifactInputSnapshotProof).mockResolvedValueOnce([root]);
+    await createProposalFromTension(actor, { workspaceId: "ws-1", sourceTensionId: tension.id });
+    expect(recordArtifactInputLineage).toHaveBeenCalledWith(expect.objectContaining({ artifact: { kind: "Proposal", id: "copied-proposal" }, origin: "DERIVED", inheritedRoots: [root], tx: prisma }));
+    expect(vi.mocked(captureArtifactInputSnapshotProof).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(prisma.tension.update).mock.invocationCallOrder[0]);
+  });
+
+  it("preserves reset history and returns only an id when prior decision roots cannot survive clearing", async () => {
+    const { returnProposalToDraft } = await import("./proposals");
+    const { preserveApprovalFlowHistory } = await import("./approvals");
+    const { advanceHumanArtifactInputLineage, invalidateArtifactInputLineage, captureArtifactInputSnapshotProof } = await import("./source-lineage");
+    const { AppError } = await import("./errors");
+    const before = makeProposal("reset-proposal", { status: "OPEN", isPrivate: false, authorUserId: "u-1", decisionMd: "Old generated outcome" });
+    const updated = { ...before, status: "DRAFT", isPrivate: true, decisionMd: null };
+    vi.mocked(prisma.policyCorpus.findMany).mockResolvedValueOnce([{ id: "old-policy", workspaceId: "ws-1", proposalId: before.id, title: before.title, bodyMd: before.bodyMd, acceptedAt: new Date() }] as any);
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(before as any);
+    vi.mocked(prisma.proposal.update).mockResolvedValueOnce(updated as any);
+    vi.mocked(prisma.approvalFlow.findUnique).mockResolvedValueOnce({ id: "reset-flow", workspaceId: "ws-1" } as any);
+    vi.mocked(advanceHumanArtifactInputLineage).mockRejectedValueOnce(new AppError(409, "SOURCE_RESTRICTED", "Old decision input cleared"));
+    const result = await returnProposalToDraft(actor, { workspaceId: "ws-1", proposalId: before.id });
+    expect(result).toEqual({ id: before.id, contentWithheld: true });
+    expect(captureArtifactInputSnapshotProof).toHaveBeenCalledWith(actor, "ws-1", expect.objectContaining({ kind: "Proposal", id: before.id, fingerprint: expect.any(String) }), prisma);
+    expect(captureArtifactInputSnapshotProof).toHaveBeenCalledWith(actor, "ws-1", expect.objectContaining({ kind: "PolicyCorpus", id: "old-policy", fingerprint: expect.any(String) }), prisma);
+    expect(vi.mocked(captureArtifactInputSnapshotProof).mock.invocationCallOrder.at(-1)).toBeLessThan(vi.mocked(prisma.policyCorpus.deleteMany).mock.invocationCallOrder[0]);
+    expect(preserveApprovalFlowHistory).toHaveBeenCalledWith(prisma, actor, "ws-1", expect.objectContaining({ id: "reset-flow" }));
+    expect(vi.mocked(preserveApprovalFlowHistory).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(prisma.approvalDecision.deleteMany).mock.invocationCallOrder[0]);
+    expect(invalidateArtifactInputLineage).toHaveBeenLastCalledWith({ tx: prisma, workspaceId: "ws-1", artifact: { kind: "Proposal", id: before.id }, content: updated });
   });
 });

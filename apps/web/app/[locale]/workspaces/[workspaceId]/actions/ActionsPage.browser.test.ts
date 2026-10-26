@@ -45,19 +45,22 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("Actions card
           onboardingByRoleMember: new Map(),
         };
         export async function listActions() { return { items: actions, total: actions.length }; }
-        export async function countActionsByStatus() { return { ALL: 5, OPEN: 2, DRAFT: 1, IN_PROGRESS: 1, COMPLETED: 1 }; }
+        export async function listActionsWithStatusCounts() { return { items: actions, total: actions.length,
+          statusCounts: { ALL: 5, OPEN: 2, DRAFT: 1, IN_PROGRESS: 1, COMPLETED: 1 }, page: 1, pageCount: 1 }; }
         export async function listCircles() { return []; }
         export async function listHumanMembers() { return [member]; }
         export async function requireWorkspaceMembership() { return member; }
         export async function getGoal() { return syntheticGoal; }
-        export async function getGoalTree() { return [syntheticGoal]; }
+        export class DigestReadRelease { async finish() {} }
+        export class ArchiveMetadataReadRelease { async finish() {} }
+        export const buildGoalTree = goals => goals;
+        export async function listGoalsPage() { return { items: [syntheticGoal], complete: true, nextCursor: null }; }
         export async function getWorkspaceArchiveRecord() { return null; }
-        export async function listGoals() { return [syntheticGoal]; }
-        export async function getMyGoalSlice() { return []; }
-        export async function listRecognitions() { return []; }
+        export async function getMyGoalSlicePage() { return { items: [], complete: true, nextCursor: null }; }
+        export async function listRecognitionsPage() { return { items: [], complete: true, nextCursor: null }; }
         export async function listTensions() { return { items: [{ ...actions[0], id: "synthetic-tension", upvotes: [], raisedByMember: member }] }; }
         export async function listProposals() { return { items: [{ ...actions[0], id: "synthetic-proposal", ownerMemberId: member.id, ownerMember: member }] }; }
-        export async function listAdviceRequests() { return []; }
+        export async function listAdviceRequestWindow() { return { items: [], complete: true, nextCursor: null }; }
         export async function listDeliberationEntriesForParents() { return new Map(); }
         export async function listProposalDecisionStates() { return new Map(); }
         export const humanMemberIdentityWhere = () => ({});
@@ -72,6 +75,12 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("Actions card
         return { kind: "user", user: { id: "synthetic-user", displayName: "Synthetic owner", email: "owner@example.invalid" } };
       }`,
       "@/lib/workspace-feature-flags": "export async function requireWorkspaceFeature() {}",
+      "next/navigation": `
+        const router = { replace: path => history.replaceState({}, "", path) };
+        export const useRouter = () => router;
+        export const usePathname = () => location.pathname;
+        export const useSearchParams = () => new URLSearchParams(location.search);
+      `,
       "next-intl/server": `import { createTranslator } from "next-intl";
         const messages = ${JSON.stringify(messages)};
         export async function getLocale() { return "en"; }
@@ -136,7 +145,7 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("Actions card
         import { syntheticRoleData } from "@corgtex/domain";
         window.fixture = { submissions: [], confirmations: 0 };
         window.confirm = () => { window.fixture.confirmations++; return false; };
-        document.addEventListener("click", event => { if (event.target.closest("a[href]")) event.preventDefault(); }, true);
+        document.addEventListener("click", event => { if (!new URLSearchParams(location.search).has("navigate") && event.target.closest("a[href]")) event.preventDefault(); }, true);
         (async () => {
           const query = new URLSearchParams(location.search), surface = query.get("surface") ?? "actions";
           const props = { params: Promise.resolve({ workspaceId: "synthetic-workspace" }),
@@ -362,5 +371,30 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("Actions card
     expect(await page.evaluate(() => (window as unknown as { fixture: { submissions: unknown[] } }).fixture.submissions.length)).toBe(1);
     expect(await panel.count()).toBe(0);
     expect(await opener.evaluate(node => document.activeElement === node)).toBe(true);
+  });
+  it("keeps the mobile menu reachable, supports repeated trigger clicks and navigates an explicit Edit selection", async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(origin + "/?navigate&view=list"); await page.locator("#after").waitFor(); await settled();
+    for (let cycle = 0; cycle < 3; cycle++) {
+      await trigger().click(); await settled();
+      expect(await page.getByRole("menu").count()).toBe(1);
+      await trigger().click(); await settled();
+      expect(await page.getByRole("menu").count()).toBe(0);
+    }
+    await open();
+    const bounds = await page.getByRole("menu").boundingBox();
+    if (!bounds) throw new Error("Missing mobile menu bounds");
+    expect(bounds.x).toBeGreaterThanOrEqual(0);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
+    expect(bounds.y).toBeGreaterThanOrEqual(0);
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(844);
+    await page.keyboard.press("End"); expect(await focusText()).toBe("Archive");
+    await page.keyboard.press("Home"); expect(await focusText()).toBe("Return to draft");
+    await page.screenshot({ path: fileURLToPath(new URL("actions-menu-mobile.png", artifactRoot)) });
+    const edit = page.getByRole("menuitem", { name: "Edit", exact: true });
+    const href = await edit.getAttribute("href");
+    await edit.click(); await page.waitForURL(origin + href); await page.locator("#after").waitFor();
+    expect(new URL(page.url()).pathname).toBe("/workspaces/synthetic-workspace/actions/synthetic-action-0/edit");
+    expect(await page.getByRole("menu").count()).toBe(0);
   });
 });

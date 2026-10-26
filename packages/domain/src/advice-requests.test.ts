@@ -1,5 +1,15 @@
+import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
+
+vi.mock("./source-lineage", () => ({
+  readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.map((row: { id: string }) => row.id))),
+}));
+
+vi.mock("./producer-lineage", () => ({
+  prepareProducerLineage: vi.fn().mockResolvedValue({ mode: "HUMAN_ORIGINAL", inputs: [], roots: [] }),
+  finishProducerLineage: vi.fn().mockResolvedValue(undefined),
+}));
 
 const { prismaMock, tx, requireWorkspaceMembershipMock } = vi.hoisted(() => {
   const txMock = {
@@ -56,7 +66,7 @@ const { prismaMock, tx, requireWorkspaceMembershipMock } = vi.hoisted(() => {
 });
 
 vi.mock("@corgtex/shared", () => ({
-  prisma: prismaMock,
+  prisma: prismaMock, env: { MODEL_REQUEST_TIMEOUT_MS: 60000 },
 }));
 
 vi.mock("./auth", () => ({
@@ -160,6 +170,8 @@ describe("advice requests", () => {
       ],
       skipDuplicates: true,
     });
+    expect(tx.adviceRequestRecipient.createMany.mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(finishProducerLineage).mock.invocationCallOrder[0]);
     expect(tx.workflowJob.upsert).toHaveBeenCalledWith({
       where: { dedupeKey: "advice.request.reminder:request-1:2026-06-25T12:00:00.000Z" },
       update: {},
@@ -422,4 +434,18 @@ describe("advice requests", () => {
       }),
     });
   });
+
+  it("captures the subject and all recipient identities before advice content is committed", async () => {
+    const { createAdviceRequest } = await import("./advice-requests");
+    await createAdviceRequest(actor, { workspaceId: "workspace-1", subjectType: "TENSION", subjectId: "tension-1",
+      audienceType: "MEMBERS", memberIds: ["member-a", "member-b"], messageMd: "Synthetic input request" });
+    expect(prepareProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx,
+      dependencies: [
+        { kind: "Tension", id: "tension-1" }, { kind: "Member", id: "member-owner" },
+        { kind: "Member", id: "member-a" }, { kind: "Member", id: "member-b" },
+      ] }));
+    expect(finishProducerLineage).toHaveBeenCalledWith(expect.objectContaining({ tx,
+      artifact: { kind: "AdviceRequest", id: "request-1" } }));
+  });
+
 });

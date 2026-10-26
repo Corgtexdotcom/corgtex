@@ -6,6 +6,7 @@ import type { Browser, Page } from "playwright";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 type FixtureProps = {
+  locale?: "en" | "es";
   defaultValue?: string;
   value?: string;
   resetKey?: string;
@@ -36,16 +37,22 @@ describe.runIf(process.env.MARKDOWN_EDITOR_BROWSER_QA === "1")("MarkdownEditor c
   let server: Server;
   let page: Page;
   let origin: string;
+  let axeSource: string;
   const errors: string[] = [];
   const measurements: unknown[] = [];
   const output = new URL("../../../../.artifacts/pun-94/", import.meta.url);
 
   beforeAll(async () => {
     await mkdir(output, { recursive: true });
+    const axePath = new URL("../../../../node_modules/axe-core/axe.min.js", import.meta.url);
+    if (!existsSync(axePath)) throw new Error("MARKDOWN_EDITOR_BROWSER_QA=1 requires axe-core for all four toolbar audits. Run npm ci before browser QA.");
+    axeSource = await readFile(axePath, "utf8");
     const { build } = await import("esbuild");
     const { chromium } = await import("playwright");
     const webRoot = new URL("../../", import.meta.url);
-    const messages = JSON.parse(await readFile(new URL("messages/en.json", webRoot), "utf8")).shared.markdownEditor;
+    const messages = Object.fromEntries(await Promise.all(["en", "es"].map(async (locale) => [
+      locale, { shared: { markdownEditor: JSON.parse(await readFile(new URL(`messages/${locale}.json`, webRoot), "utf8")).shared.markdownEditor } },
+    ])));
     const bundle = await build({
       stdin: {
         resolveDir: fileURLToPath(webRoot), loader: "tsx",
@@ -67,7 +74,8 @@ describe.runIf(process.env.MARKDOWN_EDITOR_BROWSER_QA === "1")("MarkdownEditor c
           function Fixture() {
             const [props, setProps] = useState({ defaultValue: "Synthetic default", resetKey: "one" });
             fixture.configure = patch => setProps(current => ({ ...current, ...patch }));
-            return <NextIntlClientProvider locale="en" timeZone="UTC" messages={${JSON.stringify({ shared: { markdownEditor: messages } })}}>
+            const locale = props.locale ?? "en";
+            return <NextIntlClientProvider locale={locale} timeZone="UTC" messages={(${JSON.stringify(messages)})[locale]}>
               <form onSubmit={event => { event.preventDefault(); fixture.submissions.push(new FormData(event.currentTarget).get("bodyMd")); }}>
                 {props.otherRequired && <label>Synthetic title<input name="title" required /></label>}
                 <label htmlFor="body">Synthetic body</label>
@@ -168,6 +176,44 @@ describe.runIf(process.env.MARKDOWN_EDITOR_BROWSER_QA === "1")("MarkdownEditor c
 
   async function write() {
     await page.getByRole("button", { name: "Compose", exact: true }).click();
+  }
+
+  for (const locale of ["en", "es"] as const) {
+    for (const viewport of [{ width: 1200, height: 800 }, { width: 390, height: 844 }]) {
+      it(`includes visible toolbar labels in ${locale} computed names at ${viewport.width}px`, async () => {
+        await page.setViewportSize(viewport);
+        try {
+          await configure({ locale });
+          measurements.push({ kind: "toolbar-accessibility-tree", locale, viewport, snapshot: await page.locator(".md-editor-toolbar").ariaSnapshot() });
+          const actions = locale === "en"
+            ? [["H1", "H1: Heading 1"], ["H2", "H2: Heading 2"], ["1.", "1. Numbered list"]]
+            : [["H1", "H1: Encabezado 1"], ["H2", "H2: Encabezado 2"], ["1.", "1. Lista numerada"]];
+          await page.addScriptTag({ content: axeSource });
+          const audit = await page.evaluate(async () => {
+            const axe = (window as unknown as { axe: { run: (context: string, options: unknown) => Promise<{ violations: unknown[]; passes: Array<{ id: string }>; incomplete: Array<{ id: string }> }> } }).axe;
+            return axe.run(".md-editor-toolbar", { runOnly: { type: "rule", values: ["button-name", "label-content-name-mismatch"] } });
+          });
+          measurements.push({ kind: "toolbar-axe", locale, viewport, violations: audit.violations, passes: audit.passes.map(({ id }) => id), incomplete: audit.incomplete.map(({ id }) => id) });
+          expect(audit.violations).toEqual([]);
+          const names = [];
+          for (const [label, name] of actions) {
+            const button = page.locator(".md-editor-toolbar button").filter({ hasText: new RegExp("^" + label.replace(".", "\\.") + "$") });
+            const snapshot = await button.ariaSnapshot();
+            measurements.push({ kind: "computed-name", locale, viewport, label, snapshot });
+            expect(snapshot).toContain(`button "${name}"`);
+            expect(await page.getByRole("button", { name, exact: true }).count()).toBe(1);
+            expect(await button.innerText()).toBe(label);
+            expect(await button.isVisible()).toBe(true);
+            names.push(await button.ariaSnapshot());
+          }
+          measurements.push({ kind: "accessible-names", locale, viewport, names });
+          await page.screenshot({ path: fileURLToPath(new URL(`toolbar-${locale}-${viewport.width}.png`, output)) });
+          expect(await takeCalls()).toEqual([]);
+        } finally {
+          await page.setViewportSize({ width: 1200, height: 800 });
+        }
+      });
+    }
   }
 
   for (const controlled of [false, true]) {
@@ -368,8 +414,8 @@ describe.runIf(process.env.MARKDOWN_EDITOR_BROWSER_QA === "1")("MarkdownEditor c
   it("preserves formatting selection, focus and fallback text without hidden parsing", async () => {
     const cases: Array<[string, string, number, number]> = [
       ["Bold", "**abc**", 2, 5], ["Italic", "_abc_", 1, 4],
-      ["Heading 1", "# abc", 2, 5], ["Heading 2", "## abc", 3, 6],
-      ["Bulleted list", "- abc", 5, 5], ["Numbered list", "1. abc", 6, 6],
+      ["H1: Heading 1", "# abc", 2, 5], ["H2: Heading 2", "## abc", 3, 6],
+      ["Bulleted list", "- abc", 5, 5], ["1. Numbered list", "1. abc", 6, 6],
       ["Quote", "> abc", 5, 5], ["Link", "[abc](https://)", 6, 14], ["Code", "`abc`", 1, 4],
     ];
     for (const [name, result, start, end] of cases) {

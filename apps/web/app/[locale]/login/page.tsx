@@ -1,3 +1,4 @@
+import { newspaperClickContinuation } from "@/lib/newspaper-click-continuation";
 import { LoginForm } from "./LoginForm";
 import { DemoButton } from "./DemoButton";
 import Link from "next/link";
@@ -65,7 +66,7 @@ export default async function LoginPage({
           </p>
         ) : null}
 
-        <LoginForm initialEmail={initialEmail} />
+        <LoginForm initialEmail={initialEmail} next={newspaperClickContinuation(singleSearchParam(resolvedSearchParams.next))} />
         <Link href={findAccountHref} className="muted" style={{ display: "inline-block", fontSize: 14, marginTop: 12 }}>
           {t("findEnterpriseAccount")}
         </Link>
