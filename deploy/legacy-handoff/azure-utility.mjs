@@ -47,10 +47,10 @@ export function frozenHandoffServer(decide, health, healthPaths) {
 // Offline only. Caller supplies the reviewed current Azure template and hashes.
 // Hash equality binds evidence bytes; it is not authorization to deploy.
 export function prepareAzureHandoff({ baseline, expectedTemplateSha256, expectedCommandSha256,
-  health, healthPaths, hostname, resourceId, observedAt, now = Date.now() }) {
+  health, healthPaths, hostname, resourceId, observedAt }) {
   need(LEGACY_HOSTS.includes(hostname), "HOST_NOT_REVIEWED");
   need(typeof resourceId === "string" && /^\/subscriptions\/[a-f0-9-]{36}\/resourceGroups\/[a-zA-Z0-9_.()-]+\/providers\/Microsoft\.App\/containerApps\/ca-corgtex-chirone-prod-web$/.test(resourceId), "AZURE_RESOURCE_BINDING_REQUIRED");
-  const age = now - Date.parse(observedAt);
+  const age = Date.now() - Date.parse(observedAt);
   need(Number.isFinite(age) && age >= 0 && age <= 3600000, "FRESH_BASELINE_REQUIRED");
   need(/^[a-f0-9]{64}$/.test(expectedTemplateSha256 || "") && digest(baseline) === expectedTemplateSha256, "TEMPLATE_CHANGED");
   need(baseline?.containers?.length === 1, "SINGLE_CONTAINER_REQUIRED");
@@ -73,6 +73,14 @@ export function prepareAzureHandoff({ baseline, expectedTemplateSha256, expected
     && (!Object.hasOwn(health, "proofSha256") || /^[a-f0-9]{64}$/.test(health.proofSha256)), "FROZEN_WEB_HEALTH_REQUIRED");
   need(Array.isArray(healthPaths) && healthPaths.length > 0 && new Set(healthPaths).size === healthPaths.length
     && healthPaths.every(path => ["/api/health", "/healthz"].includes(path)), "REVIEWED_HEALTH_PATHS_REQUIRED");
+  need(!Object.hasOwn(original, "probes") || Array.isArray(original.probes), "RETAINED_PROBE_PATH_NOT_SERVED");
+  for (const probe of original.probes ?? []) {
+    // An omitted HTTP path defaults to root, which must remain frozen. Never
+    // broaden reviewed health authorization or silently rewrite retained probes.
+    if (probe && Object.hasOwn(probe, "httpGet")) {
+      need(healthPaths.includes(probe.httpGet?.path), "RETAINED_PROBE_PATH_NOT_SERVED");
+    }
+  }
   const source = `const LEGACY_HOSTS=${JSON.stringify([hostname])};const DESTINATION=${JSON.stringify(DESTINATION)};`
     + `const decide=${legacyHandoffResponse.toString()};(${frozenHandoffServer.toString()})(decide,${JSON.stringify(health)},${JSON.stringify(healthPaths)});`;
   const candidate = structuredClone(baseline);

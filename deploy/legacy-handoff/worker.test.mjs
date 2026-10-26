@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readdir } from "node:fs/promises";
 import { legacyHandoffResponse as response, DESTINATION } from "./worker.mjs";
 const request = (path, options = {}) => new Request(`https://chirone.corgtex.com${path}`, {
   headers: { accept: "text/html" }, ...options,
@@ -15,6 +16,26 @@ test("browser entries and recognized deep links go to fixed selfserve, without s
       assert.equal(result.headers.get("cache-control"), "no-store");
       assert.equal(result.headers.get("referrer-policy"), "no-referrer");
     }
+  }
+});
+
+test("every application workspace page hands browser bookmarks to the fixed root", async () => {
+  const pages = await readdir(new URL("../../apps/web/app/[locale]/workspaces/[workspaceId]/", import.meta.url), { recursive: true });
+  for (const page of pages.filter(file => file === "page.tsx" || file.endsWith("/page.tsx"))) {
+    const suffix = page.replace(/page\.tsx$/, "").replace(/\[[^\]]+\]/g, "old-source-id");
+    for (const locale of ["", "/en", "/es"]) {
+      const path = `${locale}/workspaces/a928241f-39c9-43a3-8540-b4325d5ea068/${suffix}?token=secret#private`;
+      for (const method of ["GET", "HEAD"]) {
+        const result = response(request(path, { method }));
+        assert.equal(result.status, 302, `${method} ${path}`);
+        assert.equal(result.headers.get("location"), DESTINATION);
+      }
+      assert.equal(response(request(path, { method: "POST" })).status, 503);
+      assert.equal(response(request(path, { headers: { accept: "application/json" } })).status, 503);
+    }
+  }
+  for (const suffix of ["api/session", "mcp", "oauth/callback", "callback", "webhooks/provider", "unknown", "%63hat"]) {
+    assert.equal(response(request(`/workspaces/a928241f-39c9-43a3-8540-b4325d5ea068/${suffix}`)).status, 503, suffix);
   }
 });
 

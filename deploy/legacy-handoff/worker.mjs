@@ -18,7 +18,7 @@ export function legacyHandoffResponse(request) {
   const path = url.pathname.replace(/^\/(en|es)(?=\/|$)/, "") || "/";
   const browser = request.headers.get("accept")?.includes("text/html");
   const entry = /^\/(?:login|signup|find-account)?\/?$/.test(path);
-  const workspacePage = /^\/workspaces\/[a-f0-9-]{36}(?:\/(?:actions|tensions|proposals|goals|brain|meetings|circles|members|settings|operator|finance|items)(?:\/[a-zA-Z0-9_-]+)*)?\/?$/.test(path);
+  const workspacePage = /^\/workspaces\/[a-f0-9-]{36}(?:\/(?:actions|add|admin|agents|agreements|audit|brain|built|chat|circles|decisions|finance|goals|governance|items|leads|maps|meetings|members|notifications|operator|proposals|roles|settings|tensions|tools|versions)(?:\/[a-zA-Z0-9_-]+)*)?\/?$/.test(path);
   if (read && browser && (entry || workspacePage)) {
     return new Response(null, { status: 302, headers: { ...headers, Location: DESTINATION } });
   }

@@ -77,6 +77,13 @@ test("actual serialized Node utility redirects safely, preserves health and keep
     const redirect = await get("/en/workspaces/a928241f-39c9-43a3-8540-b4325d5ea068/actions/old?code=secret&next=https://evil.example");
     assert.equal(redirect.status, 302); assert.equal(redirect.headers.get("location"), "https://selfserve.corgtex.com/#");
     assert.equal(redirect.headers.get("referrer-policy"), "no-referrer");
+    for (const section of ["chat", "agents", "agents/old-agent", "decisions", "tools", "maps"]) {
+      for (const method of ["GET", "HEAD"]) {
+        const result = await get(`/es/workspaces/a928241f-39c9-43a3-8540-b4325d5ea068/${section}?token=secret`, method);
+        assert.equal(result.status, 302, `${method} ${section}`);
+        assert.equal(result.headers.get("location"), "https://selfserve.corgtex.com/#");
+      }
+    }
     assert.deepEqual(await (await get("/api/health", "GET", "internal-probe")).json(), health);
     assert.equal((await get("/api/health", "HEAD")).status, 200);
     assert.equal(await (await get("/", "HEAD")).text(), "");
@@ -87,6 +94,46 @@ test("actual serialized Node utility redirects safely, preserves health and keep
     }
     assert.equal((await get("/", "GET", "unverified.example.com")).status, 503);
   } finally { child.kill("SIGTERM"); if (child.exitCode === null) await once(child, "exit"); }
+});
+
+test("every retained HTTP probe must use a reviewed served health path", () => {
+  for (const type of ["Readiness", "Liveness", "Startup"]) {
+    for (const httpGet of [{ path: "/api/health", port: 3000 }, { port: 3000 }, { path: "/", port: 3000 }, null]) {
+      const value = input();
+      value.healthPaths = ["/healthz"];
+      value.baseline.containers[0].probes = [{ type, httpGet }];
+      value.expectedTemplateSha256 = digest(value.baseline);
+      assert.throws(() => prepareAzureHandoff(value), /HANDOFF_RETAINED_PROBE_PATH_NOT_SERVED/, `${type} ${JSON.stringify(httpGet)}`);
+    }
+  }
+  const value = input();
+  value.healthPaths = ["/api/health", "/healthz"];
+  value.baseline.containers[0].probes.push({ type: "Liveness", httpGet: { path: "/healthz", port: 3000 } },
+    { type: "Startup", tcpSocket: { port: 3000 } });
+  value.expectedTemplateSha256 = digest(value.baseline);
+  assert.deepEqual(prepareAzureHandoff(value).candidate.containers[0].probes, value.baseline.containers[0].probes);
+});
+
+test("evidence cannot override the preparation clock", () => {
+  const value = input();
+  value.observedAt = "2020-01-01T00:00:00.000Z";
+  value.now = Date.parse(value.observedAt);
+  assert.throws(() => prepareAzureHandoff(value), /HANDOFF_FRESH_BASELINE_REQUIRED/);
+});
+
+test("CLI refuses stale evidence even when it supplies a matching now field", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "handoff-stale-test-"));
+  const inputPath = path.join(directory, "input.json"), outputPath = path.join(directory, "plan.json");
+  try {
+    const value = input();
+    value.observedAt = "2020-01-01T00:00:00.000Z";
+    value.now = Date.parse(value.observedAt);
+    await writeFile(inputPath, JSON.stringify(value), { mode: 0o600 });
+    const cli = fileURLToPath(new URL("../../scripts/prepare-legacy-azure-handoff.mjs", import.meta.url));
+    assert.throws(() => execFileSync(process.execPath, [cli, inputPath, outputPath], { stdio: "pipe" }),
+      error => error.status === 1 && error.stderr.toString().trim() === "HANDOFF_FRESH_BASELINE_REQUIRED");
+    await assert.rejects(stat(outputPath), { code: "ENOENT" });
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 

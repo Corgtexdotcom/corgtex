@@ -57,6 +57,9 @@ must independently inspect the original command as an inert source utility and
 bind its hash; the generator does not infer that from a marker string. Health may
 contain only status, mode, applicationWrites, businessWorker, role and proofSha256.
 Only proven `/api/health` and/or `/healthz` paths may be supplied.
+Every retained HTTP probe must explicitly target one of those supplied paths;
+omitted paths, root probes and unreviewed paths block preparation. Probes are never
+rewritten. Freshness uses the process clock; input fields cannot override it.
 
 The CLI creates a new mode-0600 artifact with only command/args delta and hashes;
 it never prints or copies baseline environment values. It does not overwrite an
