@@ -41,6 +41,11 @@ the exact Chirone web resource ID, and reviewed frozen-web health/probe evidence
 Unknown topology, stale evidence, mutable images, worker targets and health with
 application writes are refused. Hashes bind evidence; they do not authorize a deploy.
 
+Preparation acceptance covers the offline candidate, regression boundaries and
+independent review. It does not establish production readiness. The provider,
+retained-image, customer-access and exact command/traffic approval gates below
+remain mandatory until the release coordinator independently verifies them.
+
 After obtaining that evidence through the existing authorized identity, prepare:
 
 ```sh
