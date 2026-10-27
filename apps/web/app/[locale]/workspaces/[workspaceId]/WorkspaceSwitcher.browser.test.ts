@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
+import path from "node:path";
 import { createServer, type Server } from "node:http";
 import { fileURLToPath } from "node:url";
 import type { Browser, Page } from "playwright";
@@ -32,7 +33,7 @@ describe.runIf(process.env.WORKSPACE_SWITCHER_BROWSER_QA === "1")("WorkspaceSwit
           import es from "./messages/es.json";
           import { WorkspaceSwitcher } from "./app/[locale]/workspaces/[workspaceId]/WorkspaceSwitcher";
           const locale = location.pathname.split("/")[1];
-          const workspaces = ["a", "b", "c"].map(id => ({
+          const workspaces = Array.from({ length: Number(new URLSearchParams(location.search).get("count") ?? 3) }, (_, index) => String.fromCharCode(97 + index)).map(id => ({
             // Keep slugs distinct so navigation by slug cannot satisfy ID URLs.
             id: "synthetic-" + id, slug: "synthetic-slug-" + id,
             name: "Synthetic " + id.toUpperCase(), primaryName: "Synthetic " + id.toUpperCase(),
@@ -40,8 +41,8 @@ describe.runIf(process.env.WORKSPACE_SWITCHER_BROWSER_QA === "1")("WorkspaceSwit
           }));
           createRoot(document.getElementById("root")).render(
             <NextIntlClientProvider locale={locale} timeZone="UTC" messages={locale === "es" ? es : en}>
-              <WorkspaceSwitcher workspaceId="synthetic-a" workspaces={workspaces}
-                mobile={new URLSearchParams(location.search).get("mobile") === "1"} />
+              <WorkspaceSwitcher workspaceId={location.pathname.split("/")[3]} workspaces={workspaces}
+                mobile={window.matchMedia("(max-width: 720px)").matches} />
               <label htmlFor="draft">Draft</label><textarea id="draft" defaultValue="Unsaved synthetic draft" />
               <label htmlFor="editor-selection">Editor selection</label><select id="editor-selection" defaultValue="mine"><option value="mine">Mine</option><option value="all">All</option></select>
             </NextIntlClientProvider>
@@ -60,7 +61,7 @@ describe.runIf(process.env.WORKSPACE_SWITCHER_BROWSER_QA === "1")("WorkspaceSwit
         return;
       }
       response.setHeader("Content-Type", "text/html; charset=utf-8");
-      response.end(`<!doctype html><html lang="${request.url?.startsWith("/es/") ? "es" : "en"}"><head><title>Synthetic workspace switcher</title><style>${styles.join("\n")}body{padding:24px}</style></head><body><div id="root"></div><script src="/fixture.js"></script></body></html>`);
+      response.end(`<!doctype html><html lang="${request.url?.startsWith("/es/") ? "es" : "en"}"><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Synthetic workspace switcher</title><style>${styles.join("\n")}body{padding:24px}</style></head><body><div id="root"></div><script src="/fixture.js"></script></body></html>`);
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
@@ -88,7 +89,7 @@ describe.runIf(process.env.WORKSPACE_SWITCHER_BROWSER_QA === "1")("WorkspaceSwit
         let source: string;
         let messages: Record<string, string>;
 
-        async function open(acceptWarning = false) {
+        async function open(acceptWarning = false, { retainDocument = true, count = 3 } = {}) {
           messages = JSON.parse(await readFile(new URL(`messages/${locale}.json`, webRoot), "utf8")).workspaceSwitcher;
           navigations = [];
           warnings = [];
@@ -107,7 +108,7 @@ describe.runIf(process.env.WORKSPACE_SWITCHER_BROWSER_QA === "1")("WorkspaceSwit
             if (acceptWarning) await dialog.accept();
             else await dialog.dismiss();
           });
-          source = `${origin}/${locale}/workspaces/synthetic-a/meetings/old-entity?filter=old-workspace&mobile=${Number(mobile)}#old-thread`;
+          source = `${origin}/${locale}/workspaces/synthetic-a/meetings/old-entity?filter=old-workspace&mobile=${Number(mobile)}&count=${count}#old-thread`;
           let departing = false;
           await context.route("**/*", async (route) => {
             const request = route.request();
@@ -116,6 +117,10 @@ describe.runIf(process.env.WORKSPACE_SWITCHER_BROWSER_QA === "1")("WorkspaceSwit
               await route.abort();
             } else if (request.isNavigationRequest() && departing) {
               navigations.push(request.url());
+              if (!retainDocument) {
+                await route.continue();
+                return;
+              }
               // Keep the departing document mounted so the click lock can be
               // exercised without replacing window.location or component code.
               await route.fulfill({ status: 204 });
@@ -128,6 +133,7 @@ describe.runIf(process.env.WORKSPACE_SWITCHER_BROWSER_QA === "1")("WorkspaceSwit
           await page.getByLabel("Editor selection", { exact: true }).selectOption("all");
           await page.locator(".workspace-switcher-trigger").click();
           await page.getByRole("dialog").waitFor();
+          expect(await page.locator(mobile ? "dialog.workspace-switcher-dialog[open]" : ".action-menu-panel").count()).toBe(1);
         }
 
         async function retained() {
@@ -136,6 +142,96 @@ describe.runIf(process.env.WORKSPACE_SWITCHER_BROWSER_QA === "1")("WorkspaceSwit
           expect(await page.getByLabel("Editor selection", { exact: true }).inputValue()).toBe("all");
           expect(navigations).toEqual([]);
         }
+
+        it("opens and dismisses by mouse and keyboard without choosing the default workspace", async () => {
+          await open();
+          const trigger = page.locator(".workspace-switcher-trigger");
+          expect(await trigger.getAttribute("aria-expanded")).toBe("true");
+          expect(await page.locator(".workspace-switcher-option").count()).toBe(3);
+          expect(await page.locator('.workspace-switcher-option[aria-current="true"]').textContent()).toContain("Synthetic A");
+          expect(warnings).toEqual([]);
+          await retained();
+          const proofDirectory = process.env.WORKSPACE_SWITCHER_PROOF_DIR;
+          if (proofDirectory) {
+            await mkdir(proofDirectory, { recursive: true });
+            await page.screenshot({ path: path.join(proofDirectory, `${locale}-${mobile ? "mobile" : "desktop"}-open.png`) });
+          }
+          await page.keyboard.press("Escape");
+          await expect.poll(() => trigger.getAttribute("aria-expanded")).toBe("false");
+          expect(await trigger.evaluate((element) => document.activeElement === element)).toBe(true);
+          for (const key of ["Enter", "Space"]) {
+            await trigger.press(key);
+            await page.getByRole("dialog").waitFor();
+            expect(await trigger.getAttribute("aria-expanded")).toBe("true");
+            await page.keyboard.press("Escape");
+            await expect.poll(() => trigger.getAttribute("aria-expanded")).toBe("false");
+          }
+          await trigger.click();
+          await page.getByRole("dialog").waitFor();
+          if (mobile) await page.getByRole("dialog").getByRole("button").first().click();
+          else await trigger.click();
+          await expect.poll(() => trigger.getAttribute("aria-expanded")).toBe("false");
+          await trigger.click();
+          await page.getByRole("dialog").waitFor();
+          await page.mouse.click(5, 5);
+          await expect.poll(() => trigger.getAttribute("aria-expanded")).toBe("false");
+          expect(warnings).toEqual([]);
+          await retained();
+        });
+
+        it("filters the authorized list and clears search after dismissal", async () => {
+          await open(false, { count: 10 });
+          const search = page.getByRole("searchbox");
+          await search.fill("Synthetic J");
+          await expect.poll(() => page.locator(".workspace-switcher-option").count()).toBe(1);
+          expect(await page.locator(".workspace-switcher-option").textContent()).toBe("Synthetic J");
+          await search.fill("unavailable-workspace");
+          expect(await page.getByRole("status").textContent()).toBe(messages.empty);
+          expect(await page.locator(".workspace-switcher-option").count()).toBe(0);
+          // A native search input consumes Escape to clear its value on mobile.
+          // The explicit dialog close control dismisses the picker regardless.
+          if (mobile) await page.locator(".dialog-close").click();
+          else await page.keyboard.press("Escape");
+          await expect.poll(() => page.locator(".workspace-switcher-trigger").getAttribute("aria-expanded")).toBe("false");
+          await page.locator(".workspace-switcher-trigger").click();
+          await page.getByRole("dialog").waitFor();
+          expect(await search.inputValue()).toBe("");
+          expect(await page.locator(".workspace-switcher-option").count()).toBe(10);
+          expect(warnings).toEqual([]);
+          await retained();
+        });
+
+        it("keeps the selected workspace across real fixture navigation, reload, back and forward", async () => {
+          await open(true, { retainDocument: false });
+          await page.getByRole("button", { name: "Synthetic B", exact: true }).click();
+          const destination = `${origin}/${locale}/workspaces/synthetic-b`;
+          await page.waitForURL(destination);
+          const trigger = page.locator(".workspace-switcher-trigger");
+          await expect.poll(() => trigger.textContent()).toContain("Synthetic B");
+          expect(await trigger.getAttribute("aria-expanded")).toBe("false");
+          expect(warnings).toEqual([messages.leaveWarning.replace("{name}", "Synthetic B")]);
+          expect(await page.getByLabel("Draft", { exact: true }).inputValue()).toBe("Unsaved synthetic draft");
+          await page.reload();
+          await expect.poll(() => trigger.textContent()).toContain("Synthetic B");
+          await trigger.click();
+          await page.getByRole("dialog").waitFor();
+          expect(await page.locator('.workspace-switcher-option[aria-current="true"]').textContent()).toContain("Synthetic B");
+          await page.keyboard.press("Escape");
+          await page.goBack();
+          await page.waitForURL(source);
+          await expect.poll(() => trigger.textContent()).toContain("Synthetic A");
+          await trigger.click();
+          await page.getByRole("dialog").waitFor();
+          expect(await page.locator(".workspace-switcher-option:disabled").count()).toBe(0);
+          await page.keyboard.press("Escape");
+          await page.goForward();
+          await page.waitForURL(destination);
+          await expect.poll(() => trigger.textContent()).toContain("Synthetic B");
+          await trigger.click();
+          await page.getByRole("dialog").waitFor();
+          expect(await page.locator('.workspace-switcher-option[aria-current="true"]').textContent()).toContain("Synthetic B");
+          expect(warnings).toHaveLength(1);
+        });
 
         it("cancels the localized leave warning and retains draft and current selection", async () => {
           await open();
@@ -168,6 +264,14 @@ describe.runIf(process.env.WORKSPACE_SWITCHER_BROWSER_QA === "1")("WorkspaceSwit
           await expect.poll(() => navigations.length).toBe(1);
           expect(navigations).toEqual([`${origin}/${locale}/workspaces/synthetic-b`]);
           expect(warnings).toEqual([messages.leaveWarning.replace("{name}", "Synthetic B")]);
+          // A full-document navigation can blur/close the departing popup in
+          // Chrome even when the 204 fixture retains the document. Reopen it to
+          // inspect the persistent navigation lock rather than popup focus.
+          const trigger = page.locator(".workspace-switcher-trigger");
+          if (await trigger.getAttribute("aria-expanded") !== "true") {
+            await trigger.click();
+            await page.getByRole("dialog").waitFor();
+          }
           await expect.poll(() => page.locator(".workspace-switcher-option:disabled").count()).toBe(3);
           expect(await page.getByRole("status").textContent()).toBe(messages.switching);
           await page.getByRole("button", { name: "Synthetic C", exact: true }).evaluate((button) => (button as HTMLButtonElement).click());
