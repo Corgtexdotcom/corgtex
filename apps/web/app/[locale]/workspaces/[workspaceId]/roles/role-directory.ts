@@ -39,7 +39,7 @@ export type RoleDirectoryMember = {
   email: string;
 };
 
-export type RoleDirectoryCircle = {
+type RoleDirectoryCircle = {
   id: string;
   name: string;
 };
