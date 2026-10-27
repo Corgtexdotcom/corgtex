@@ -1,7 +1,7 @@
 import type {OAuthConnection} from "@prisma/client";
-import {beforeEach, describe, expect, it, vi} from "vitest";
+import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 
-const {db, index, touchpoints} = vi.hoisted(() => ({db: {oAuthConnection: {findUnique: vi.fn(), findFirst: vi.fn(), update: vi.fn()}, $transaction: vi.fn()}, index: vi.fn(), touchpoints: vi.fn()}));
+const {db, index, touchpoints, recorder} = vi.hoisted(() => ({db: {oAuthConnection: {findUnique: vi.fn(), findFirst: vi.fn(), update: vi.fn()}, $transaction: vi.fn()}, index: vi.fn(), touchpoints: vi.fn(), recorder: vi.fn()}));
 vi.mock("@corgtex/shared", () => ({prisma: db, encryptSecret: (value: string) => `enc:${value}`,
   decryptSecret: (value: string) => value.replace(/^enc:/, "")}));
 vi.mock("../../../domain/src/auth", () => ({requireWorkspaceMembership: vi.fn(async () => ({}))}));
@@ -9,7 +9,7 @@ vi.mock("../../../domain/src/oauth-provider-native", () => ({beginOAuthKnowledge
 vi.mock("@corgtex/knowledge", () => ({syncKnowledgeForSource: index, syncDocumentKnowledge: vi.fn()}));
 vi.mock("@corgtex/domain", async () => ({
   fetchCalendarEvents: (await import("../../../domain/src/integrations")).fetchCalendarEvents,
-  syncCalendarEventRecorder: vi.fn(), materializeCrmCalendarTouchpoints: touchpoints,
+  syncCalendarEventRecorder: recorder, materializeCrmCalendarTouchpoints: touchpoints,
   externalResourceKnowledgeInput: vi.fn(), materializeCrmEmailTouchpoints: vi.fn(), syncExternalContentSource: vi.fn(),
 }));
 import {saveOAuthConnectionAndEnqueueCalendarSync} from "../../../domain/src/integrations";
@@ -39,6 +39,7 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request) => String(url).includes("token")
     ? Response.json({access_token: "synthetic-refreshed-access", refresh_token: "synthetic-refreshed-refresh", expires_in: 3600}) : events()));
 });
+afterEach(() => { vi.unstubAllGlobals(); });
 function events() {
   const event = {id: "event", summary: "Synthetic meeting", subject: "Synthetic meeting", start: {dateTime: "2026-01-01T12:00:00Z"},
     end: {dateTime: "2026-01-01T13:00:00Z"}, attendees: [], hangoutLink: "https://meet.google.com/aaa-bbbb-ccc", onlineMeeting: {joinUrl: "https://teams.microsoft.com/l/meetup-join/synthetic"}};
@@ -55,9 +56,9 @@ function expectReconnected() {
     status: "ACTIVE", lastSyncError: null, lastSyncAt: new Date(0), syncSettings: {calendar: {enabled: false}}});
 }
 const run = () => handleCalendarSync("job", {connectionId: "connection"}, "workspace");
-describe("calendar credential attempt fencing", () => {
-  it.each(["GOOGLE", "MICROSOFT"] as const)("keeps normal %s migration, refresh, indexing and checkpoint working", async provider => {
-    current.provider = provider;
+describe.each(["GOOGLE", "MICROSOFT"] as const)("%s calendar credential attempt fencing", provider => {
+  beforeEach(() => { current.provider = provider; });
+  it("keeps normal migration, refresh, indexing and checkpoint working", async () => {
     await run();
     expect(current).toMatchObject({status: "ACTIVE", accessToken: "enc:synthetic-refreshed-access", lastSyncError: null});
     expect(current.lastSyncAt!.getTime()).toBeGreaterThan(0);
@@ -91,9 +92,81 @@ describe("calendar credential attempt fencing", () => {
     await expect(run()).rejects.toMatchObject({code: "OAUTH_PROVIDER_INDETERMINATE"});
     expectReconnected();
   });
-  it("still records ordinary failure against the attempt's own refreshed state", async () => {
+  it("records a safe retry diagnostic while retaining the attempt's refreshed authority", async () => {
     touchpoints.mockRejectedValue(new Error("Synthetic calendar failure"));
     await expect(run()).rejects.toThrow("Synthetic calendar failure");
-    expect(current).toMatchObject({status: "ERROR", lastSyncError: "Synthetic calendar failure", lastSyncAt: new Date(0), accessToken: "enc:synthetic-refreshed-access"});
+    expect(current).toMatchObject({status: "ACTIVE", lastSyncError: "Calendar sync failed; retry after checking provider and processing availability.", lastSyncAt: new Date(0), accessToken: "enc:synthetic-refreshed-access"});
+  });
+});
+
+const diagnostic = "Calendar sync failed; retry after checking provider and processing availability.";
+describe.each(["GOOGLE", "MICROSOFT"] as const)("%s Calendar retry authority", provider => {
+  beforeEach(() => {
+    current.provider = provider;
+    current.tokenStorageVersion = "aes-256-gcm";
+    current.expiresAt = new Date(Date.now() + 3600_000);
+  });
+  it.each([429, 503, 401, 403, "network", "malformed"] as const)("retains a valid grant after Calendar %s and fetches again on retry", async failure => {
+    vi.mocked(fetch).mockImplementationOnce(async () => {
+      if (failure === "network") throw new TypeError("Synthetic private transport details");
+      return failure === "malformed" ? new Response("{bad-json") : new Response("Synthetic private provider payload", {status: failure});
+    });
+    await expect(run()).rejects.toThrow();
+    expect(current).toMatchObject({status: "ACTIVE", lastSyncAt: new Date(0), lastSyncError: diagnostic});
+    expect(index).not.toHaveBeenCalled();
+    await run();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(index).toHaveBeenCalledTimes(1);
+    expect(current.lastSyncError).toBeNull();
+    expect(current.lastSyncAt!.getTime()).toBeGreaterThan(0);
+  });
+  it.each([429, 503, "network", "malformed", "empty"] as const)("preserves expired encrypted credentials after refresh %s", async failure => {
+    current.expiresAt = new Date(0);
+    const before = {...current};
+    vi.mocked(fetch).mockImplementationOnce(async () => {
+      if (failure === "network") throw new TypeError("Synthetic refresh transport failure");
+      return failure === "malformed" ? new Response("{bad-json") : failure === "empty" ? new Response("")
+        : new Response("Synthetic unavailable refresh", {status: failure});
+    });
+    await expect(run()).rejects.toThrow();
+    expect(current).toMatchObject({...before, updatedAt: current.updatedAt, lastSyncError: diagnostic});
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(index).not.toHaveBeenCalled();
+    await run();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(index).toHaveBeenCalledTimes(1);
+    expect(current).toMatchObject({status: "ACTIVE", accessToken: "enc:synthetic-refreshed-access", lastSyncError: null});
+  });
+  it.each(["index", "recorder", "crm"] as const)("keeps authority through a downstream %s failure", async phase => {
+    const fail = phase === "index" ? index : phase === "recorder" ? recorder : touchpoints;
+    fail.mockRejectedValueOnce(new Error("Synthetic downstream private details"));
+    await expect(run()).rejects.toThrow("Synthetic downstream private details");
+    expect(current).toMatchObject({status: "ACTIVE", lastSyncAt: new Date(0), lastSyncError: diagnostic});
+    await run();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(current.lastSyncError).toBeNull();
+  });
+  it("keeps definitive invalid_grant fail closed at the authoritative refresh boundary", async () => {
+    current.expiresAt = new Date(0);
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json({error: "invalid_grant"}, {status: 400}));
+    await expect(run()).rejects.toMatchObject({code: "OAUTH_PROVIDER_AUTH_REVOKED"});
+    expect(current).toMatchObject({status: "ERROR", lastSyncAt: new Date(0), lastSyncError: diagnostic});
+    expect(index).not.toHaveBeenCalled();
+    await run();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it.each(["refresh", "fetch", "diagnostic", "checkpoint"] as const)("fences disconnect during %s", async phase => {
+    const disconnect = async () => { current = {...current, status: "DISCONNECTED", disconnectedAt: new Date(), updatedAt: new Date(++revision)}; };
+    if (phase === "refresh" || phase === "fetch") {
+      if (phase === "refresh") current.expiresAt = new Date(0);
+      vi.mocked(fetch).mockImplementationOnce(async () => { await disconnect(); return phase === "refresh"
+        ? Response.json({access_token: "stale", expires_in: 3600}) : events(); });
+    } else touchpoints.mockImplementationOnce(async () => {
+      beforeMutation = disconnect;
+      if (phase === "diagnostic") throw new Error("Synthetic CRM failure");
+    });
+    await expect(run()).rejects.toMatchObject({code: "OAUTH_PROVIDER_INDETERMINATE"});
+    expect(current).toMatchObject({status: "DISCONNECTED", lastSyncAt: new Date(0), lastSyncError: null});
+    if (phase === "refresh" || phase === "fetch") expect(index).not.toHaveBeenCalled();
   });
 });

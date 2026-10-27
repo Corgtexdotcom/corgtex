@@ -2,15 +2,18 @@ import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Keep real response/release orchestration; only the synthetic proof backend is mocked.
-const readBoundary = vi.hoisted(() => ({finish: vi.fn(async (_actor: unknown, _workspaceId: string, _roots: unknown,
-  remote: () => Promise<void>, finish: (tx: object) => Promise<unknown>) => {await remote(); return finish({});})}));
+const readBoundary = vi.hoisted(() => ({
+  admit: vi.fn(async (_actor: unknown, _workspaceId: string, kind: string, rows: Array<{id: string}>) => ({
+    ids: new Set(rows.map(row => row.id)), roots: rows.map(row => ({kind, id: row.id, fingerprint: JSON.stringify(row)})), heads: new Map(),
+  })),
+  finish: vi.fn(async (_actor: unknown, _workspaceId: string, _roots: unknown,
+    remote: () => Promise<void>, finish: (tx: object) => Promise<unknown>) => {await remote(); return finish({});}),
+}));
 vi.mock("../../../../../../../packages/domain/src/auth", () => ({requireWorkspaceMembership: vi.fn(async () => ({id: "member-1", role: "ADMIN"}))}));
 vi.mock("../../../../../../../packages/domain/src/source-lineage", () => ({
   captureArtifactInputProof: async (_actor: unknown, _workspaceId: string, inputs: Array<{kind: string; id: string; snapshot?: unknown}>) =>
     inputs.map(input => ({kind: input.kind, id: input.id, fingerprint: JSON.stringify(input.snapshot ?? input.id)})),
-  captureReadableWorkItemInputs: async (_actor: unknown, _workspaceId: string, kind: string, rows: Array<{id: string}>) => ({
-    ids: new Set(rows.map(row => row.id)), roots: rows.map(row => ({kind, id: row.id, fingerprint: JSON.stringify(row)})), heads: new Map(),
-  }),
+  captureReadableWorkItemInputs: (...args: Parameters<typeof readBoundary.admit>) => readBoundary.admit(...args),
   captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
   mergeLineageInputRoot: (_prior: unknown, root: unknown) => root,
   withArtifactCountReleaseSnapshot: (...args: Parameters<typeof readBoundary.finish>) => readBoundary.finish(...args),
@@ -19,14 +22,14 @@ vi.mock("../../../../../../../packages/domain/src/source-lineage", () => ({
 
 const {
   actor,
-  coerceWorkItemPriorityInput,
+  actionRequestSource,
   createAction,
   deleteAction,
-  formatWorkItemPriority,
   getWorkspacePermanentPathForEntity,
   loadAdviceRequestCountSummaries,
   listActions,
   prisma,
+  requireWorkspaceMembership,
   resolveRequestActor,
   updateAction,
 } = vi.hoisted(() => ({
@@ -39,21 +42,9 @@ const {
       globalRole: "USER" as const,
     },
   },
-  coerceWorkItemPriorityInput: vi.fn((input: unknown) => {
-    if (input === "Urgent" || input === 3) return 3;
-    if (input === "Important" || input === 2) return 2;
-    if (input === "Medium" || input === 1) return 1;
-    if (input === "Low" || input === 0) return 0;
-    return undefined;
-  }),
+  actionRequestSource: vi.fn(() => ({ type: "API_REQUEST", id: "request-source-1" })),
   createAction: vi.fn(),
   deleteAction: vi.fn(),
-  formatWorkItemPriority: vi.fn((priority: number | null | undefined) => {
-    if ((priority ?? 0) >= 3) return "Urgent";
-    if ((priority ?? 0) >= 2) return "Important";
-    if ((priority ?? 0) >= 1) return "Medium";
-    return "Low";
-  }),
   getWorkspacePermanentPathForEntity: vi.fn(),
   loadAdviceRequestCountSummaries: vi.fn(),
   listActions: vi.fn(),
@@ -63,12 +54,16 @@ const {
     },
   },
   resolveRequestActor: vi.fn(),
+  requireWorkspaceMembership: vi.fn(),
   updateAction: vi.fn(),
 }));
 
 resolveRequestActor.mockResolvedValue(actor);
+requireWorkspaceMembership.mockResolvedValue({ id: "member-1", role: "ADMIN" });
 
 vi.mock("@corgtex/domain", async () => {
+  const { AppError } = await import("../../../../../../../packages/domain/src/errors");
+  const { coerceWorkItemPriorityInput, formatWorkItemPriority } = await import("../../../../../../../packages/domain/src/work-item-priority");
   const {
     normalizeActionWorkItem,
     normalizeGoalWorkItem,
@@ -81,16 +76,8 @@ vi.mock("@corgtex/domain", async () => {
   return {
     ...await import("../../../../../../../packages/domain/src/work-item-readable-page"),
     ...await import("../../../../../../../packages/domain/src/digest-lineage"),
-    AppError: class AppError extends Error {
-      status: number;
-      code: string;
-
-      constructor(status: number, code: string, message: string) {
-        super(message);
-        this.status = status;
-        this.code = code;
-      }
-    },
+    AppError,
+    actionRequestSource,
     coerceWorkItemPriorityInput,
     createAction,
     deleteAction,
@@ -110,6 +97,7 @@ vi.mock("@corgtex/domain", async () => {
     normalizeGoalWorkItem,
     normalizeProposalWorkItem,
     normalizeTensionWorkItem,
+    requireWorkspaceMembership,
     updateAction,
     workItemMemberDisplayName,
     workItemUserDisplayName,
@@ -125,16 +113,8 @@ vi.mock("@corgtex/shared", () => ({
   prisma,
 }));
 
-vi.mock("@/lib/route-handler", () => ({
-  withWorkspaceRoute: (handler: any) => async (request: NextRequest, context: { params: Promise<Record<string, string>> }) => {
-    const params = await context.params;
-    return handler(request, {
-      actor,
-      membership: { id: "member-1", role: "ADMIN" },
-      workspaceId: params.workspaceId,
-      params,
-    });
-  },
+vi.mock("@corgtex/shared/telemetry-node", () => ({
+  captureErrorTelemetry: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -153,6 +133,14 @@ function actionPatchRequest(body: unknown) {
   return new NextRequest("http://localhost/api/workspaces/workspace-1/actions/action-1", {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function actionCreateRequest(body: unknown, headers: Record<string, string> = {}) {
+  return new NextRequest("http://localhost/api/workspaces/workspace-1/actions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
 }
@@ -291,6 +279,8 @@ describe("POST /api/workspaces/[workspaceId]/actions", () => {
         assigneeMemberName: "Assignee",
         assignee: "Assignee",
       },
+      webUrl: "https://app.corgtex.com/workspaces/workspace-1/actions/action-1",
+      permanentUrl: null,
     });
     expect(loadAdviceRequestCountSummaries).toHaveBeenCalledWith(actor, "workspace-1", "ACTION", ["action-1"], expect.any(Function));
     expect(readBoundary.finish).toHaveBeenCalledWith(actor, "workspace-1", expect.arrayContaining([
@@ -298,6 +288,211 @@ describe("POST /api/workspaces/[workspaceId]/actions", () => {
       expect.objectContaining({kind: "Member", id: "member-2"}),
       expect.objectContaining({kind: "User", id: "user-member-2"}),
     ]), expect.any(Function), expect.any(Function), expect.any(Map));
+  });
+
+  it("rejects malformed JSON before creation", async () => {
+    const { POST } = await import("./route");
+    const response = await POST(new NextRequest("http://localhost/api/workspaces/workspace-1/actions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": "invalid-create" },
+      body: "{",
+    }), context());
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "VALIDATION_ERROR", message: "Request body must be valid JSON." },
+    });
+    expect(createAction).not.toHaveBeenCalled();
+    expect(actionRequestSource).not.toHaveBeenCalled();
+    expect(prisma.action.findFirst).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["null JSON", null],
+    ["array JSON", []],
+    ["string JSON", "Follow up"],
+    ["missing title", {}],
+    ["null title", { title: null }],
+    ["empty title", { title: "" }],
+    ["blank title", { title: " \t\n " }],
+    ["object title", { title: { text: "Follow up" } }],
+    ["numeric title", { title: 42 }],
+    ["boolean title", { title: true }],
+    ["fractional priority", { title: "Follow up", priority: 1.8 }],
+    ["object priority", { title: "Follow up", priority: {} }],
+    ["numeric priorityLabel", { title: "Follow up", priorityLabel: 2 }],
+    ["numeric bodyMd", { title: "Follow up", bodyMd: 42 }],
+    ["object assigneeMemberId", { title: "Follow up", assigneeMemberId: {} }],
+  ])("rejects %s before creation", async (_label, body) => {
+    const { POST } = await import("./route");
+    const response = await POST(actionCreateRequest(body, { "Idempotency-Key": "invalid-create" }), context());
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+    expect(createAction).not.toHaveBeenCalled();
+    expect(actionRequestSource).not.toHaveBeenCalled();
+    expect(getWorkspacePermanentPathForEntity).not.toHaveBeenCalled();
+    expect(prisma.action.findFirst).not.toHaveBeenCalled();
+  });
+
+  it.each(["priority", "priorityLabel"])("rejects an unsupported %s with the production priority helper", async (field) => {
+    const { POST } = await import("./route");
+    const response = await POST(actionCreateRequest({ title: "Follow up", [field]: "Critical" }), context());
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "INVALID_INPUT",
+        message: `${field} must be Urgent, Important, Medium, Low, or an integer priority.`,
+      },
+    });
+    expect(createAction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ priorityLabel: "Low" }, 0],
+    [{ priorityLabel: "Medium" }, 1],
+    [{ priorityLabel: "Important" }, 2],
+    [{ priorityLabel: "Urgent" }, 3],
+    [{ priority: 0 }, 0],
+    [{ priority: 1 }, 1],
+    [{ priority: 2 }, 2],
+    [{ priority: 3 }, 3],
+    [{ priority: -1 }, 0],
+    [{ priority: 4 }, 3],
+    [{ priority: " Urgent " }, 3],
+    [{ priority: "2" }, 2],
+    [{ priority: "1.8" }, 1],
+    [{ priority: "0x2" }, 2],
+    [{ priority: "1e0" }, 1],
+    [{ priority: "" }, undefined],
+    [{ priority: null, priorityLabel: "Urgent" }, undefined],
+    [{ priorityLabel: null }, undefined],
+    [{ priority: 1, priorityLabel: "Urgent" }, 1],
+    [{}, undefined],
+  ])("preserves priority conversion for %j", async (fields, priority) => {
+    const { POST } = await import("./route");
+    const response = await POST(actionCreateRequest({ title: "Follow up", ...fields }), context());
+
+    expect(response.status).toBe(201);
+    expect(createAction).toHaveBeenCalledWith(actor, expect.objectContaining({ priority }));
+  });
+
+  it.each([
+    [{}, { bodyMd: null, assigneeMemberId: undefined }],
+    [{ bodyMd: null, assigneeMemberId: null }, { bodyMd: null, assigneeMemberId: null }],
+    [{ bodyMd: "", assigneeMemberId: "" }, { bodyMd: "", assigneeMemberId: "" }],
+  ])("preserves optional fields for %j and ignores unknown create fields", async (fields, expected) => {
+    const { POST } = await import("./route");
+    const response = await POST(actionCreateRequest({ title: "Follow up", ...fields, unexpected: true }), context());
+
+    expect(response.status).toBe(201);
+    expect(createAction).toHaveBeenCalledWith(actor, {
+      workspaceId: "workspace-1",
+      title: "Follow up",
+      ...expected,
+      priority: undefined,
+      _membership: { id: "member-1", role: "ADMIN" },
+      source: undefined,
+    });
+    expect(actionRequestSource).not.toHaveBeenCalled();
+  });
+
+  it("trims valid titles with the sibling schema convention", async () => {
+    const { POST } = await import("./route");
+    const response = await POST(actionCreateRequest({ title: "  Follow up  " }), context());
+
+    expect(response.status).toBe(201);
+    expect(createAction).toHaveBeenCalledWith(actor, expect.objectContaining({ title: "Follow up" }));
+  });
+
+  it.each([
+    [actor, "user-1"],
+    [{ kind: "agent", credentialId: "credential-1", agentIdentityId: "agent-1", label: "Agent" }, "credential-1"],
+    [{ kind: "agent", agentIdentityId: "agent-1", label: "Agent" }, "agent-1"],
+    [{ kind: "agent", label: "Agent" }, "Agent"],
+  ])("binds idempotency to the authenticated principal %j", async (requestActor, principalId) => {
+    resolveRequestActor.mockResolvedValueOnce(requestActor);
+    getWorkspacePermanentPathForEntity.mockResolvedValueOnce("/p/workspace-1/action-1");
+    const { POST } = await import("./route");
+    const response = await POST(actionCreateRequest({ title: "Follow up" }, { "Idempotency-Key": "create-action-1" }), context());
+
+    expect(response.status).toBe(201);
+    expect(actionRequestSource).toHaveBeenCalledWith("API_REQUEST", principalId, "create-action-1");
+    expect(createAction).toHaveBeenCalledWith(requestActor, expect.objectContaining({
+      source: { type: "API_REQUEST", id: "request-source-1" },
+    }));
+    expect(readBoundary.admit).toHaveBeenCalledWith(requestActor, "workspace-1", "Action", expect.any(Array), prisma);
+    expect(loadAdviceRequestCountSummaries).toHaveBeenCalledWith(requestActor, "workspace-1", "ACTION", ["action-1"], expect.any(Function));
+    expect(readBoundary.finish).toHaveBeenCalledWith(requestActor, "workspace-1", expect.any(Array), expect.any(Function), expect.any(Function), expect.any(Map));
+    await expect(response.json()).resolves.toMatchObject({
+      webUrl: "https://app.corgtex.com/workspaces/workspace-1/actions/action-1",
+      permanentUrl: "https://app.corgtex.com/p/workspace-1/action-1",
+    });
+  });
+
+  it("preserves workspace authorization before creation", async () => {
+    requireWorkspaceMembership.mockRejectedValueOnce(routeError(403, "FORBIDDEN", "Workspace membership required."));
+    const { POST } = await import("./route");
+    const response = await POST(actionCreateRequest({ title: "Follow up" }), context());
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ error: { code: "FORBIDDEN", message: "Workspace membership required." } });
+    expect(createAction).not.toHaveBeenCalled();
+  });
+
+  it("rejects unauthorized malformed JSON before parsing, source binding, or writes", async () => {
+    requireWorkspaceMembership.mockRejectedValueOnce(routeError(403, "FORBIDDEN", "Workspace membership required."));
+    const { POST } = await import("./route");
+    const req = new NextRequest("http://localhost/api/workspaces/workspace-1/actions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": "unauthorized-create" },
+      body: "{",
+    });
+    const parseBody = vi.spyOn(req, "json");
+    const response = await POST(req, context());
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ error: { code: "FORBIDDEN", message: "Workspace membership required." } });
+    expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor, workspaceId: "workspace-1" });
+    expect(parseBody).not.toHaveBeenCalled();
+    expect(actionRequestSource).not.toHaveBeenCalled();
+    expect(createAction).not.toHaveBeenCalled();
+    expect(getWorkspacePermanentPathForEntity).not.toHaveBeenCalled();
+    expect(prisma.action.findFirst).not.toHaveBeenCalled();
+    expect(readBoundary.admit).not.toHaveBeenCalled();
+  });
+
+  it("returns only the id and contentWithheld when the created action is unreadable", async () => {
+    readBoundary.admit.mockResolvedValueOnce({ ids: new Set(), roots: [], heads: new Map() });
+    const { POST } = await import("./route");
+    const response = await POST(actionCreateRequest({ title: "Follow up" }), context());
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toEqual({
+      action: { id: "action-1", contentWithheld: true },
+      webUrl: "https://app.corgtex.com/workspaces/workspace-1/actions/action-1",
+      permanentUrl: null,
+    });
+    expect(prisma.action.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "action-1", workspaceId: "workspace-1" },
+    }));
+    expect(readBoundary.admit).toHaveBeenCalledWith(actor, "workspace-1", "Action", expect.any(Array), prisma);
+    expect(loadAdviceRequestCountSummaries).not.toHaveBeenCalled();
+    expect(readBoundary.finish).not.toHaveBeenCalled();
+  });
+
+  it("returns a safe error without created content when final response release fails", async () => {
+    readBoundary.finish.mockRejectedValueOnce(new Error("Synthetic final release denied: private action content"));
+    const { POST } = await import("./route");
+    const response = await POST(actionCreateRequest({ title: "Follow up" }), context());
+
+    expect(createAction).toHaveBeenCalledOnce();
+    expect(readBoundary.finish).toHaveBeenCalledOnce();
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "INTERNAL_ERROR", message: "Unexpected server error." },
+    });
   });
 });
 

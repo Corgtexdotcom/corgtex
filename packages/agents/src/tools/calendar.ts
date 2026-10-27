@@ -1,5 +1,6 @@
-import { prisma } from "@corgtex/shared";
-import { refreshOAuthTokenIfNeeded } from "@corgtex/domain";
+import { prisma, type AppActor } from "@corgtex/shared";
+import { getCalendarAvailability, refreshOAuthTokenIfNeeded } from "@corgtex/domain";
+import type { OAuthProvider } from "@prisma/client";
 import type { ModelTool } from "@corgtex/models";
 
 export const checkCalendarAvailabilityTool: ModelTool = {
@@ -10,6 +11,11 @@ export const checkCalendarAvailabilityTool: ModelTool = {
     parameters: {
       type: "object",
       properties: {
+        provider: {
+          type: "string",
+          enum: ["GOOGLE", "MICROSOFT"],
+          description: "Explicit connected calendar provider to use in this workspace.",
+        },
         emails: {
           type: "array",
           items: { type: "string" },
@@ -24,7 +30,7 @@ export const checkCalendarAvailabilityTool: ModelTool = {
           description: "ISO 8601 end date-time string (e.g. 2026-04-10T17:00:00Z)",
         },
       },
-      required: ["emails", "timeMin", "timeMax"],
+      required: ["provider", "emails", "timeMin", "timeMax"],
     },
   },
 };
@@ -52,64 +58,8 @@ export const scheduleMeetingTool: ModelTool = {
   },
 };
 
-export async function checkCalendarAvailability(userId: string, workspaceId: string, emails: string[], timeMin: string, timeMax: string) {
-  const connection = await prisma.oAuthConnection.findFirst({
-    where: { userId },
-  });
-
-  if (!connection) {
-    return { error: "You must connect your Google or Microsoft calendar in Settings before querying availability." };
-  }
-
-  const validConnection = await refreshOAuthTokenIfNeeded(connection.id);
-
-  try {
-    if (validConnection.provider === "GOOGLE") {
-      const resp = await fetch("https://www.googleapis.com/calendar/v3/freeBusy", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${validConnection.accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          timeMin,
-          timeMax,
-          items: emails.map(email => ({ id: email })),
-        }),
-      });
-
-      if (!resp.ok) return { error: `Google API Error: ${await resp.text()}` };
-      const data = await resp.json();
-      return { provider: "GOOGLE", calendars: data.calendars };
-    }
-
-    if (validConnection.provider === "MICROSOFT") {
-      const resp = await fetch(`https://graph.microsoft.com/v1.0/me/calendar/getSchedule`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${validConnection.accessToken}`,
-          "Content-Type": "application/json",
-          Prefer: 'outlook.timezone="UTC"',
-        },
-        body: JSON.stringify({
-          schedules: emails,
-          startTime: { dateTime: timeMin, timeZone: "UTC" },
-          endTime: { dateTime: timeMax, timeZone: "UTC" },
-          availabilityViewInterval: 30,
-        }),
-      });
-
-      if (!resp.ok) return { error: `Microsoft API Error: ${await resp.text()}` };
-      const data = await resp.json();
-      const schedules: Record<string, any> = {};
-      for (const item of data.value || []) {
-        schedules[item.scheduleId] = item.scheduleItems;
-      }
-      return { provider: "MICROSOFT", schedules };
-    }
-  } catch (err: any) {
-    return { error: `Connection failed: ${err.message}` };
-  }
+export async function checkCalendarAvailability(actor: AppActor, workspaceId: string, provider: OAuthProvider, emails: string[], timeMin: string, timeMax: string) {
+  return getCalendarAvailability(actor, { workspaceId, provider, emails, timeMin, timeMax });
 }
 
 export async function scheduleMeeting(userId: string, workspaceId: string, title: string, description: string | undefined, startTime: string, endTime: string, attendeeEmails: string[]) {

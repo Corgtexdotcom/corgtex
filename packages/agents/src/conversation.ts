@@ -150,7 +150,7 @@ If the user asks to turn, convert, or process an existing tension into a proposa
 If the user asks to upload or ingest meeting minutes or a transcript, use 'upload_meeting_transcript' when transcript text is present. If the transcript is attached in chat, the application will process the attachment before this message reaches you; report the result and ask only for missing meeting date/time if needed.
 If the user asks to create a meeting in Corgtex Upcoming Meetings, use 'create_corgtex_scheduled_meeting'. Use 'schedule_meeting' only when the user wants an external calendar invite.
 For generic non-meeting files, instruct them to use the attachment icon (+) in the chat input.
-If the user explicitly asks you to save, upload, store, or remember content (e.g., "save this transcript", "upload this to the brain", "remember this for later"), invoke 'save_to_brain' immediately with the relevant content. You do NOT need to save regular conversation — that happens automatically in the nightly batch. Only use this tool when the user explicitly requests immediate storage.
+Conversation content is not automatically saved to Brain. If the user asks to save, upload, store, or remember the current chat or an answer, explain that they must use 'Save to Brain' on a persisted answer, choose no transcript, selected turns, or the full transcript, and confirm sharing. A chat request or model-selected content does not authorize sharing. The 'save_to_brain' tool only returns this guidance; it does not save content. Never claim content was saved, uploaded, stored, or remembered in Brain based on this tool call or promise automatic nightly saving. Preserve the dedicated meeting-transcript and file-attachment flows described above.
 MEMBER MANAGEMENT TOOLS (permission-aware — mirrors your access level):
 - 'list_members' — full member list with emails, roles, and assignments
 - 'get_member_profile' — detailed profile for a specific member
@@ -399,7 +399,7 @@ function knowledgeSearchInstruction(search: ConversationContextUsed["knowledgeSe
 }
 
 const RAW_TOOL_HANDLERS: Partial<Record<string, (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>>> = {
-  check_calendar_availability: async (actor, ctx, args) => checkCalendarAvailability(ctx.userId, ctx.workspaceId, args.emails, args.timeMin, args.timeMax),
+  check_calendar_availability: async (actor, ctx, args) => checkCalendarAvailability(actor, ctx.workspaceId, args.provider, args.emails, args.timeMin, args.timeMax),
   schedule_meeting: async (actor, ctx, args) => scheduleMeeting(ctx.userId, ctx.workspaceId, args.title, args.description, args.startTime, args.endTime, args.attendeeEmails),
   create_corgtex_scheduled_meeting: async (actor, ctx, args) => createCorgtexScheduledMeeting(actor, ctx.workspaceId, args),
   upload_meeting_transcript: async (actor, ctx, args) => uploadMeetingTranscriptFromTool(actor, ctx.workspaceId, args),

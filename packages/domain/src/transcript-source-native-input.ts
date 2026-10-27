@@ -190,7 +190,7 @@ async function archiveWires(state: Transport, wires: Wire[]): Promise<TransportA
   const promise = create(); state.archives.set(wires, promise); return promise;
 }
 
-export type ProviderTranscriptPayload = {
+type ProviderTranscriptPayload = {
   version: 1; connectionId: string; provider: string; externalId: string; workspaceId: string;
   recordId: string; meetingId: string; manifestId: string; configHash: string; epochs: PermissionEpochProof;
   archive: TransportArchiveHeader; artifact: NormalizedMeetingTranscriptSourceArtifact; record: Record<string, unknown>;

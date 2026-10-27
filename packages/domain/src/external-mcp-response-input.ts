@@ -26,7 +26,6 @@ export type ExternalMcpResponseInputRecord = { id: string; workspaceId: string; 
   requestJson: unknown; encryptedResponseJson: string; responseHash: string; connectionGrantHash: string;
   originalLocalEpochsJson: unknown; fetchedAt: Date; createdAt: Date };
 export type ExternalMcpCapturedResponse = Readonly<{ input: ExternalMcpResponseInputRecord; payload: unknown }>;
-const capturedReceipts = new WeakSet<object>();
 const outputReceipts = new WeakMap<object, { actor: AppActor; workspaceId: string; valueHash: string; roots: LineageRoot[] }>();
 const MAX_NATIVE_INPUTS = 128;
 const MAX_ROOTS = 10000;
@@ -154,7 +153,6 @@ export async function captureExternalMcpResponseInput(actor: AppActor, submitted
   assertPrincipal();
   const receipt = Object.freeze({ input: Object.freeze(structuredClone(input)) as ExternalMcpResponseInputRecord,
     payload: freezeJson(structuredClone(payload)) });
-  capturedReceipts.add(receipt);
   return receipt;
 }
 

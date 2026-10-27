@@ -671,6 +671,50 @@ describe("processConversationTurn", () => {
       return result;
     }
 
+    it("requires persisted-answer UI consent in current-chat saving guidance", async () => {
+      script([{ content: "Use Save to Brain on a persisted answer and confirm sharing." }]);
+      await run({ ...turnContext(), userMessage: "Remember this chat in Brain." });
+      const request = (streaming ? chatStreamMock : chatMock).mock.calls[0][0];
+      const prompt = request.messages.filter((message: any) => message.role === "system").map((message: any) => message.content).join("\n");
+      expect(prompt).toContain("Conversation content is not automatically saved to Brain");
+      expect(prompt).toContain("'Save to Brain' on a persisted answer");
+      expect(prompt).toContain("choose no transcript, selected turns, or the full transcript");
+      expect(prompt).toContain("confirm sharing");
+      expect(prompt).toContain("Never claim content was saved");
+      expect(prompt).not.toContain("that happens automatically in the nightly batch");
+      expect(prompt).not.toContain("invoke 'save_to_brain' immediately");
+      const { ingestConversationOnDemand } = await import("@corgtex/domain");
+      expect(ingestConversationOnDemand).not.toHaveBeenCalled();
+    });
+
+    it("never reports an unsuccessful save as completed when follow-up budget is exhausted", async () => {
+      checkBudgetMock.mockReset().mockResolvedValueOnce({ allowed: true }).mockResolvedValueOnce({ allowed: false });
+      script([{ content: "", tool_calls: [toolCall("save", "save_to_brain", { title: "Chat", content: "Remember this chat" })] }]);
+      const result = await run({ ...turnContext(), userMessage: "Save this chat to Brain." });
+      expect(result.assistantMessage).toContain("failed: save_to_brain");
+      expect(result.assistantMessage).not.toMatch(/(?:succeeded|completed): save_to_brain/);
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledOnce();
+      const { ingestConversationOnDemand } = await import("@corgtex/domain");
+      expect(ingestConversationOnDemand).not.toHaveBeenCalled();
+    });
+
+    it("passes legacy save calls back as unsuccessful UI guidance without ingesting content", async () => {
+      script([
+        { content: "", tool_calls: [toolCall("save", "save_to_brain", { title: "Chat", content: "Remember this chat" })] },
+        { content: "Use Save to Brain on a persisted answer and confirm sharing." },
+      ]);
+      const result = await run({ ...turnContext(), userMessage: "Save this chat to Brain." });
+      const request = (streaming ? chatStreamMock : chatMock).mock.calls[1][0];
+      const toolResult = JSON.parse(request.messages.find((message: any) => message.name === "save_to_brain" && message.role === "tool").content);
+      expect(toolResult.success).toBe(false);
+      expect(toolResult.message).toContain("Only your confirmation can share conversation content");
+      expect(toolResult.message).toContain("no transcript, selected turns, or the full transcript");
+      expect(toolResult).not.toHaveProperty("sourceId");
+      expect(result.assistantMessage).toContain("confirm sharing");
+      const { ingestConversationOnDemand } = await import("@corgtex/domain");
+      expect(ingestConversationOnDemand).not.toHaveBeenCalled();
+    });
+
     it("executes the second ordinary Brain read round and returns its final answer", async () => {
       script([
         { content: "", tool_calls: [toolCall("first", "search_brain", { query: "launch overview" })] },
