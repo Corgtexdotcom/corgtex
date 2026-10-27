@@ -1423,6 +1423,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
             rawArguments: call.function.arguments,
             handler,
           });
+          throwIfConversationCanceled(ctx);
           if (ctx.terminalOperation?.message) return { assistantMessage: ctx.terminalOperation.message, contextUsed: {} };
           if (outcome.mapGraphChanged) {
             mapGraphChanged = true;
@@ -1730,6 +1731,7 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
             rawArguments: call.function.arguments,
             handler,
           });
+          throwIfConversationCanceled(ctx);
           if (ctx.terminalOperation?.message) {
             yield ctx.terminalOperation.message;
             return { assistantMessage: ctx.terminalOperation.message, contextUsed: {} };
