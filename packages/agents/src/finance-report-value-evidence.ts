@@ -9,9 +9,9 @@ import {
 export const FINANCE_REPORT_VALUE_EVIDENCE_VERSION = 1 as const;
 export { FINANCE_REPORT_ISO_4217_CODES, FINANCE_REPORT_ISO_4217_VERSION };
 
-export type FinanceReportDecimalSeparator = "DOT" | "COMMA" | "NONE";
-export type FinanceReportGroupingSeparator = "COMMA" | "DOT" | "APOSTROPHE" | "SPACE" | "NBSP" | "NARROW_NBSP" | "NONE";
-export type FinanceReportAmountScale = 1 | 100 | 1_000 | 1_000_000 | 1_000_000_000;
+type FinanceReportDecimalSeparator = "DOT" | "COMMA" | "NONE";
+type FinanceReportGroupingSeparator = "COMMA" | "DOT" | "APOSTROPHE" | "SPACE" | "NBSP" | "NARROW_NBSP" | "NONE";
+type FinanceReportAmountScale = 1 | 100 | 1_000 | 1_000_000 | 1_000_000_000;
 export type FinanceReportNumericFormatV1 = {
   version: typeof FINANCE_REPORT_VALUE_EVIDENCE_VERSION;
   decimalSeparator: FinanceReportDecimalSeparator;
