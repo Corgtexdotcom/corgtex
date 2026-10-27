@@ -4,6 +4,7 @@ import { beforeEach, expect, it, vi, type Mock } from "vitest";
 
 const state = vi.hoisted(() => ({
   realTranslations: false,
+  realMarkdown: false,
   chunkSummary: {count: 3, complete: true},
   queries: new Map<string, Mock<(query: Query) => Promise<Row[]>>>(),
   readable: vi.fn(),
@@ -68,7 +69,12 @@ vi.mock("next-intl/server", () => ({
   },
   getFormatter: async () => ({ dateTime: () => "Synthetic date" }),
 }));
-vi.mock("@/lib/components/MarkdownRenderer", () => ({ MarkdownRenderer: ({ markdown, className }: { markdown: string; className?: string }) => React.createElement("div", { className }, markdown) }));
+vi.mock("@/lib/components/MarkdownRenderer", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/components/MarkdownRenderer")>();
+  return { MarkdownRenderer: (props: { markdown: string; className?: string }) => state.realMarkdown
+    ? React.createElement(actual.MarkdownRenderer, props)
+    : React.createElement("div", { className: props.className }, props.markdown) };
+});
 import WorkspaceDashboard from "./page";
 
 const time = new Date("2026-10-01T12:00:00Z");
@@ -93,6 +99,7 @@ function installRows(tables: Record<string, Row[]>) {
   }
 }
 beforeEach(() => {
+  state.realMarkdown = false;
   state.release.mockImplementation(async (_actor, _workspaceId, _roots, remote, finish) => {await remote(); return finish({});});
   state.chunkSummary = {count: 3, complete: true};
   vi.clearAllMocks(); state.unread.mockResolvedValue(0); state.edition.mockReturnValue(null);
@@ -108,6 +115,20 @@ async function renderDashboard() {
   try { return renderToStaticMarkup(await WorkspaceDashboard({ params: Promise.resolve({ workspaceId: "ws" }) })); }
   finally { vi.unstubAllGlobals(); }
 }
+
+it.each([
+  ["brainArticle", "&lt;script&gt;example&lt;/script&gt;", "&lt;script&gt;example&lt;/script&gt;"],
+  ["meeting", "`&amp; <b>literal</b>`", "&amp;amp; &lt;b&gt;literal&lt;/b&gt;"],
+  ["brainArticle", "J&amp;J &copy; &#x1D11E;", "J&amp;J © 𝄞"],
+  ["meeting", "&amp;lt;b&amp;gt; &unknown;", "&amp;lt;b&amp;gt; &amp;unknown;"],
+])("preserves %s summary text when composing newspaper Markdown", async (table, markdown, expected) => {
+  state.realMarkdown = true;
+  installRows({ [table]: [{ ...row("entry", "Synthetic update", true), bodyMd: markdown, summaryMd: markdown }] });
+  const html = await renderDashboard();
+
+  expect(html).toContain(`<strong>Synthetic update</strong>: ${expected}</p>`);
+  expect(html).not.toContain("<script");
+});
 
 // SSR wiring proof with a mocked permission boundary; real lineage/tenant rules
 // are covered by the independent domain PG suites. Ranking/scoring stay real.
