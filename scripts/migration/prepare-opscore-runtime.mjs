@@ -9,11 +9,9 @@ import { opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
 import { prepareOpsCoreRuntimeValues, retainOpsCoreRuntimeConfig } from "./ops-core-runtime-config.mjs";
 
 const execFile = promisify(execFileCallback);
-const SUBSCRIPTION = "227eb707-bc46-415e-a09b-7d2b69fb14b2";
-const GROUP = "rg-corgtex-opscore-hosting";
-const SERVER = "corgtex-opscore-pg18";
+import { OPSCORE_SUBSCRIPTION as SUBSCRIPTION, OPSCORE_GROUP as GROUP,
+  OPSCORE_SERVER as SERVER, OPSCORE_ENVIRONMENT as ENVIRONMENT } from "./ops-core-runtime-targets.mjs";
 const HOST = `${SERVER}.postgres.database.azure.com`;
-const ENVIRONMENT = `cae-corgtex-opscore`;
 const GUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const need = (condition, code) => { if (!condition) throw new Error(code); };
 const exactKeys = (value, names) => value && typeof value === "object" && !Array.isArray(value)
