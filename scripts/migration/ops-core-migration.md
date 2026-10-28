@@ -10,6 +10,14 @@ Migrate Core first, then Ops after Core acceptance. The operator keeps the full
 database, durable job state and bucket contents, with an independent Azure Blob
 lease and journal. Retain source services, archives and recovery evidence.
 
+## Read-only discovery before preparation
+
+Use [Read-only Azure Ops inventory](azure-ops-inventory.md) when the intended
+Ops Azure resources have no current ARM evidence. Its manual protected workflow
+captures sanitized metadata without a frozen inventory UUID, Ops API or Railway
+credentials. It does not call mutating qualification, establish cutover acceptance,
+or revive retired Core. Keep intended targets distinct from observed resources.
+
 ## Prepare
 
 Deploy the backing resources in `infra/azure/ops-core/` within the agreed cost
