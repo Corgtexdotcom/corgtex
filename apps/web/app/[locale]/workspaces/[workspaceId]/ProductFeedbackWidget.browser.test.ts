@@ -20,6 +20,8 @@ type CaptureRecord = {
   excludedDialogChild: boolean;
   includedContent: boolean;
 };
+type SubmitOutcome = "success" | "failure" | "network";
+type CommitChange = "Escape" | "X" | "backdrop" | "pathname" | "search" | "workspace" | "focused route" | "unmount";
 type Fixture = {
   pathname: string;
   search: string;
@@ -32,6 +34,11 @@ type Fixture = {
   resolvePreviousCapture: () => void;
   navigate: (pathname: string, search?: string, workspaceId?: string) => void;
   unmount: () => void;
+  holdPost: (outcome: SubmitOutcome) => void;
+  postReady: boolean;
+  postCount: number;
+  completePostDuringCommit: (change: CommitChange) => void;
+  postSettledBeforePassive: boolean | null;
   queuedFrames: Array<{ id: number; callback: FrameRequestCallback; canceled: boolean }>;
   holdFrames: () => void;
   runQueuedFrames: () => boolean[];
@@ -95,17 +102,75 @@ describe.runIf(process.env.PRODUCT_FEEDBACK_BROWSER_QA === "1")("ProductFeedback
     const component = fileURLToPath(new URL("./ProductFeedbackWidget.tsx", import.meta.url));
     const bundle = await build({
       stdin: {
-        contents: `import React from 'react'; import {createRoot} from 'react-dom/client';
+        contents: `import React, {startTransition, useEffect, useLayoutEffect} from 'react';
+          import {createRoot} from 'react-dom/client';
+          import {unstable_shouldYield as shouldYield} from 'scheduler';
           import {ProductFeedbackWidget} from ${JSON.stringify(component)};
           const fixture = window.__feedbackFixture = {
             pathname: '/en/workspaces/demo', search: '', workspaceId: 'demo', captures: [], toasts: [], mode: 'success',
           };
           const root = createRoot(document.getElementById('root'));
-          const render = () => root.render(<ProductFeedbackWidget locale="en" workspaceId={fixture.workspaceId} />);
+          let version = 0;
+          let widgetMounted = true;
+          function FixtureRoot({version}) {
+            useLayoutEffect(() => {
+              const finishPost = fixture.finishPostOnCommit;
+              if (!finishPost) return;
+              fixture.finishPostOnCommit = null;
+              queueMicrotask(async () => {
+                finishPost();
+                // Drain the fetch/json/await chain before checking the passive marker.
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+                fixture.postSettledBeforePassive = fixture.passiveVersion !== version;
+              });
+              // Make React yield after commit so the microtask runs before passive effects,
+              // rather than relying on network delivery or a fixed-duration timing race.
+              while (!shouldYield()) {}
+            }, [version]);
+            useEffect(() => { fixture.passiveVersion = version; }, [version]);
+            return widgetMounted ? <ProductFeedbackWidget locale="en" workspaceId={fixture.workspaceId} /> : null;
+          }
+          const render = () => root.render(<FixtureRoot version={++version} />);
           fixture.navigate = (pathname, search = '', workspaceId = 'demo') => {
             Object.assign(fixture, {pathname, search, workspaceId}); render();
           };
           fixture.unmount = () => root.unmount();
+          fixture.holdPost = outcome => {
+            const nativeFetch = window.fetch.bind(window);
+            fixture.postReady = false;
+            fixture.postCount = 0;
+            fixture.postSettledBeforePassive = null;
+            window.fetch = (url, options) => {
+              if (!String(url).endsWith('/product-feedback')) return nativeFetch(url, options);
+              fixture.postCount++;
+              if (outcome === 'network') return new Promise((resolve, reject) => {
+                fixture.finishPost = () => reject(new Error('Old network failure'));
+                fixture.postReady = true;
+              });
+              return Promise.resolve({ok: outcome === 'success', json: () => new Promise(resolve => {
+                fixture.finishPost = () => resolve({error: {message: 'Old request failed'}});
+                fixture.postReady = true;
+              })});
+            };
+          };
+          fixture.completePostDuringCommit = change => {
+            fixture.finishPostOnCommit = fixture.finishPost;
+            startTransition(() => {
+              const dialog = document.querySelector('dialog');
+              if (change === 'Escape') dialog.dispatchEvent(new Event('cancel', {bubbles: true, cancelable: true}));
+              else if (change === 'X') document.querySelector('.dialog-close').click();
+              else if (change === 'backdrop') dialog.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+              else if (change === 'unmount') widgetMounted = false;
+              else if (change === 'pathname') fixture.pathname = '/en/workspaces/demo/meetings';
+              else if (change === 'search') fixture.search = 'tab=other';
+              else if (change === 'workspace') fixture.workspaceId = 'other';
+              else {
+                fixture.pathname = '/en/workspaces/demo/add';
+                fixture.search = 'kind=action';
+              }
+              render();
+            });
+          };
           const nativeFrame = window.requestAnimationFrame.bind(window);
           const nativeCancelFrame = window.cancelAnimationFrame.bind(window);
           fixture.queuedFrames = [];
@@ -441,6 +506,36 @@ describe.runIf(process.env.PRODUCT_FEEDBACK_BROWSER_QA === "1")("ProductFeedback
         expect(await page.locator('[role="img"]').count()).toBe(0);
       });
     }
+  }
+
+  for (const change of ["Escape", "X", "backdrop", "pathname", "search", "workspace", "focused route", "unmount"] as const) {
+    it.each(["success", "failure", "network"] as const)(`ignores a %s POST between ${change} commit and passive effects`, async (outcome) => {
+      await open();
+      await releaseModule();
+      await expect.poll(() => page.getByRole("img").count()).toBe(1);
+      await page.getByRole("textbox").fill("Commit-boundary draft");
+      await page.evaluate((value) => window.__feedbackFixture.holdPost(value), outcome);
+      await page.getByRole("button", { name: "submit", exact: true }).click();
+      await expect.poll(() => page.evaluate(() => window.__feedbackFixture.postReady)).toBe(true);
+      await page.evaluate((value) => window.__feedbackFixture.completePostDuringCommit(value), change);
+      await expect.poll(() => page.evaluate(() => window.__feedbackFixture.postSettledBeforePassive)).toBe(true);
+      await settle();
+      expect(await page.evaluate(() => window.__feedbackFixture.postCount)).toBe(1);
+      expect(await page.evaluate(() => window.__feedbackFixture.toasts)).toEqual([]);
+      if (change === "unmount") {
+        expect(await page.locator("#root").textContent()).toBe("");
+        return;
+      }
+      if (["Escape", "X", "backdrop"].includes(change)) {
+        await page.getByRole("button", { name: "open", exact: true }).click();
+      } else if (change === "focused route") {
+        await page.evaluate(() => window.__feedbackFixture.navigate("/en/workspaces/demo"));
+      }
+      expect(await page.getByRole("textbox").inputValue()).toBe("Commit-boundary draft");
+      expect(await page.getByRole("img").count()).toBeGreaterThanOrEqual(1);
+      expect(await page.getByRole("alert").count()).toBe(0);
+      expect(await page.getByRole("button", { name: "submit", exact: true }).isEnabled()).toBe(true);
+    });
   }
 
   it.each(["pathname", "search", "workspace", "unmount"])("ignores POST completion after %s changes", async (change) => {

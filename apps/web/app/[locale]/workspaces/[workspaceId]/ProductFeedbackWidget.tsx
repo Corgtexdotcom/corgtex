@@ -3,7 +3,7 @@
 import { Camera, ImagePlus, MessageSquareText, Trash2 } from "lucide-react";
 import { usePathname, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Dialog } from "@/lib/components/Dialog";
 import { useToast } from "@/lib/components/Toast";
 import { shouldHideMobileBottomNavForWorkspacePath } from "./mobile-nav-model";
@@ -71,12 +71,13 @@ export function ProductFeedbackWidget({
     screenshotsRef.current = screenshots;
   }, [screenshots]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
 
-  useEffect(() => {
+  // Retire the previous session during commit, before a settled POST can resume.
+  useLayoutEffect(() => {
     dialogSessionRef.current = open ? {} : null;
     return () => { dialogSessionRef.current = null; };
   }, [open, pathname, search, workspaceId]);
