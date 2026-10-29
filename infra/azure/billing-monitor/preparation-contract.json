@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "state": "offline-preparation-not-authorized-to-deploy",
+  "subscriptionId": "227eb707-bc46-415e-a09b-7d2b69fb14b2",
+  "resourceGroup": "rg-corgtex-selfserve-production-wus3",
+  "location": "westus3",
+  "existingStorageAccount": "corgtexssyfi4c2fhwqzh2",
+  "newContainers": ["billing-exports", "billing-ledger"],
+  "existingEnvironment": "cae-corgtex-ss-prod",
+  "existingLogWorkspace": "log-corgtex-ss-prod",
+  "jobName": "caj-corgtex-billing-monitor-prod",
+  "identityName": "id-corgtex-billing-monitor-prod",
+  "exports": [
+    {"name": "corgtex-actualcost-mtd", "rootFolderPath": "mtd", "timeframe": "MonthToDate", "status": "Inactive"},
+    {"name": "corgtex-actualcost-prior-month", "rootFolderPath": "prior-month", "timeframe": "TheLastMonth", "status": "Inactive"}
+  ],
+  "alertRules": [
+    "corgtex-billing-monitor-heartbeat-missing",
+    "corgtex-billing-monitor-data-stale",
+    "corgtex-billing-monitor-policy-alert"
+  ],
+  "runtimeLimits": {"cpu": "0.25", "memory": "0.5Gi", "seconds": 600, "retries": 0, "parallelism": 1, "retainedBytes": 1073741824},
+  "grantProposalsOnly": [
+    {"principal": "each-export-system-identity-after-creation", "role": "Storage Blob Data Contributor", "scope": "billing-exports-container-only", "includesDelete": true},
+    {"principal": "monitor-user-assigned-identity-after-creation", "role": "Storage Blob Data Reader", "scope": "billing-exports-container-only"},
+    {"principal": "monitor-user-assigned-identity-after-creation", "role": "new-custom-ledger-read-write-without-delete", "scope": "billing-ledger-container-only"},
+    {"principal": "monitor-user-assigned-identity-after-creation", "role": "AcrPull", "scope": "existing-acrcorgtexssstgwus3-only"}
+  ],
+  "activationGates": [
+    "independent-cloud-source-tests-and-pinned-bicep-compilation",
+    "live-schema-and-immutable-source-version-profile-admission",
+    "provider-registration-and-export-create-side-effect-approval",
+    "Daily-TheLastMonth-provider-combination-validation",
+    "dedicated-image-digest-reviewed-and-published-by-separate-authorization",
+    "durable-store-CAS-and-idempotent-destination-acceptance",
+    "postcreation-principal-verification-and-exact-scoped-grant-approval",
+    "outside-job-log-summary-KQL-and-failure-reason-validation",
+    "new-export-prefix-capped-retention-policy-and-monitor-total-retention-enforcement",
+    "private-ChatGPT-delivery-contract-proven-no-placeholder-webhook",
+    "separate-runtime-wrapper-and-schedule-activation-approval"
+  ]
+}

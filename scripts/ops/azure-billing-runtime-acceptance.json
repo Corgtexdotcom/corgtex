@@ -1,0 +1,141 @@
+{
+  "schemaVersion": 1,
+  "scope": "synthetic mocked wire/runtime only",
+  "cases": [
+    {
+      "id": "SRC-01",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_wrong_scope_path_and_encoded_escape_rejected_before_credentials"
+    },
+    {
+      "id": "SRC-02",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_redirect_invalid_headers_and_partial_body_close_without_leaking"
+    },
+    {
+      "id": "SRC-03",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_short_page_opaque_marker_continues_and_cycles_fail"
+    },
+    {
+      "id": "SRC-04",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_xml_dtd_entities_utf16_and_malformed_payloads_fail_closed + test_listing_page_limit_and_policy_mapping_content_are_pinned"
+    },
+    {
+      "id": "SRC-05",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_if_match_drift_and_missing_parts_never_publish"
+    },
+    {
+      "id": "SRC-06",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_stable_source_is_not_provider_consistency_proof (gate tested; provider guarantee unresolved)"
+    },
+    {
+      "id": "SRC-07",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_timestamp_profile_preserves_raw_fraction_and_rejects_unknown_timezone"
+    },
+    {
+      "id": "SRC-08",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_automatic_previous_month_under_mtd_is_not_relabelled"
+    },
+    {
+      "id": "SRC-09",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_actual_wire_shapes_exact_scope_identity_and_no_unconditional_write + retained ingestion duplicate/refund tests"
+    },
+    {
+      "id": "SRC-10",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_redirect_invalid_headers_and_partial_body_close_without_leaking + test_deadline_and_stream_budget_stop_without_summary"
+    },
+    {
+      "id": "REV-01",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_concurrent_higher_authority_wins_atomically_and_stale_retry_is_rejected"
+    },
+    {
+      "id": "REV-02",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "single outer-object CAS; test_put_timeout_reconciles_entire_atomic_object; no separate admission write"
+    },
+    {
+      "id": "STORE-01",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_actual_wire_shapes_exact_scope_identity_and_no_unconditional_write"
+    },
+    {
+      "id": "STORE-02",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_default_absence_and_initialized_loss_do_not_bootstrap"
+    },
+    {
+      "id": "STORE-03",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_concurrent_higher_authority_wins_atomically_and_stale_retry_is_rejected"
+    },
+    {
+      "id": "STORE-04",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_put_timeout_reconciles_entire_atomic_object"
+    },
+    {
+      "id": "STORE-05",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_only_verified_condition_failure_is_clean_conflict + test_malformed_success_etag_requires_exact_readback"
+    },
+    {
+      "id": "STORE-06",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_uncertain_journal_write_cannot_match_commit_id_alone"
+    },
+    {
+      "id": "STORE-07",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_generation_floor_and_aggregate_capacity_gates + test_default_absence_and_initialized_loss_do_not_bootstrap (external restore floor still required)"
+    },
+    {
+      "id": "STORE-08",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_generation_floor_and_aggregate_capacity_gates + test_retention_attestation_must_still_be_fresh_at_publication (attestation is synthetic; real aggregate inventory unresolved)"
+    },
+    {
+      "id": "DELIVERY-01",
+      "status": "unexecuted_live_or_destination_gate",
+      "evidence": "No delivery adapter, scheduled infrastructure or live acceptance in this patch."
+    },
+    {
+      "id": "DELIVERY-02",
+      "status": "unexecuted_live_or_destination_gate",
+      "evidence": "No delivery adapter, scheduled infrastructure or live acceptance in this patch."
+    },
+    {
+      "id": "DELIVERY-03",
+      "status": "unexecuted_live_or_destination_gate",
+      "evidence": "No delivery adapter, scheduled infrastructure or live acceptance in this patch."
+    },
+    {
+      "id": "RUNTIME-01",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "test_fresh_runtime_clock_and_postcommit_output_crash"
+    },
+    {
+      "id": "RUNTIME-02",
+      "status": "mocked_or_retained_contract_test",
+      "evidence": "retained pipeline monotonic sequence/static query tests; live KQL acceptance pending"
+    },
+    {
+      "id": "RUNTIME-03",
+      "status": "unexecuted_live_or_destination_gate",
+      "evidence": "No delivery adapter, scheduled infrastructure or live acceptance in this patch."
+    },
+    {
+      "id": "RUNTIME-04",
+      "status": "unexecuted_live_or_destination_gate",
+      "evidence": "No delivery adapter, scheduled infrastructure or live acceptance in this patch."
+    }
+  ]
+}
