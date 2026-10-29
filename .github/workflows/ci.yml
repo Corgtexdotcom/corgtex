@@ -160,11 +160,15 @@ jobs:
   check-native:
     name: Lint, Typecheck & Native Checks
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_test?schema=public
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v5
         with:
@@ -232,6 +236,26 @@ jobs:
           chmod +x "$bicep_dir/bicep"
           BICEP_CLI_PATH="$bicep_dir/bicep" DOTNET_BUNDLE_EXTRACT_BASE_DIR="$bicep_dir/.net" \
             node --test infra/azure/hosting/monitor.node-test.mjs
+
+      # Unconditional on PRs and merge groups: billing sources, fixtures,
+      # templates, and this workflow cannot be excluded by a path filter.
+      - name: Test offline Azure billing ledger and runtime
+        timeout-minutes: 3
+        run: python3 -B -m unittest discover -s scripts/ops -p 'test_azure_billing_*.py' -v
+
+      - name: Exercise synthetic Azure billing runtime
+        timeout-minutes: 1
+        run: python3 -B scripts/ops/azure_billing_mock.py
+
+      - name: Compile inactive Azure billing templates with pinned Bicep
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          bicep_dir="$RUNNER_TEMP/bicep-v0.38.5"
+          DOTNET_BUNDLE_EXTRACT_BASE_DIR="$bicep_dir/.net" "$bicep_dir/bicep" build \
+            infra/azure/billing-monitor/main.bicep \
+            --outfile "$RUNNER_TEMP/billing-monitor.json"
 
       - name: Test Ops and Core migration custody, fences and retained restore
         timeout-minutes: 15
