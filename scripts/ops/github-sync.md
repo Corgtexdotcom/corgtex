@@ -40,6 +40,7 @@ Run the deterministic fixtures without real credentials or provider calls:
 npx vitest run --project unit scripts/ops/github-api.test.mjs scripts/ops/github-incident.test.mjs
 ```
 
-The required native CI job runs this command for pull requests and merge groups.
+The required native CI job runs these tests and the production-boundary workflow
+contract for pull requests and merge groups.
 No deployment, scheduler change or seven-day production recovery is implied by
 these tests. GitHub issue #1570 and PUN-43 remain open until separately verified.

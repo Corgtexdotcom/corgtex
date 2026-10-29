@@ -218,7 +218,7 @@ jobs:
 
       - name: Test bounded Ops GitHub synchronization
         timeout-minutes: 5
-        run: npx vitest run --project unit scripts/ops/github-api.test.mjs scripts/ops/github-incident.test.mjs
+        run: npx vitest run --project unit scripts/ops/github-api.test.mjs scripts/ops/github-incident.test.mjs scripts/ci-production-boundary.test.mjs
 
       - name: Test Azure site image release and read-only Ops receipt
         run: node --test scripts/azure-site-image-release.node-test.mjs scripts/release/ops-readiness-receipt.node-test.mjs
