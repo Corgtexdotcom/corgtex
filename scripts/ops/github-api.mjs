@@ -58,7 +58,8 @@ export function createGitHubClient(api, {
     } catch (error) {
       // Header evidence survives a truncated or timed-out body. In particular,
       // never turn an already received auth/rate response into a generic retry.
-      if (receivedResponse) return { response: receivedResponse, payload: null, malformed: true };
+      if (receivedResponse) return { response: receivedResponse, payload: null, malformed: true,
+        bodyFailure: error instanceof GitHubSyncError ? error.code : "transport_failed" };
       throw error;
     } finally { clearTimeout(timer); }
   }
@@ -108,7 +109,7 @@ export function createGitHubClient(api, {
           throw fail("authorization_failed", method, { status, attempts });
         }
         if (delay !== null) { code = "rate_limited"; waitMs = Math.max(waitMs, delay); }
-        else if (status >= 200 && status < 300) code = "invalid_response";
+        else if (status >= 200 && status < 300) code = result.bodyFailure ?? "invalid_response";
         else if (status === 408 || status >= 500) code = "server_failed";
         else throw fail("request_rejected", method, { status, attempts });
         if (!read) throw fail(code, method, { status, attempts, outcome: "unknown" });

@@ -67,7 +67,7 @@ describe("bounded GitHub synchronization transport", () => {
     expect(h.waits).toEqual([60_000]);
   });
   it("bounds a hanging response body and aborts it", async () => {
-    const h = harness(Array.from({ length: 3 }, () => () => ({ text: () => new Promise(() => {}) })), { requestTimeoutMs: 5 });
+    const h = harness(Array.from({ length: 3 }, () => () => ({ status: 200, headers: new Headers(), text: () => new Promise(() => {}) })), { requestTimeoutMs: 5 });
     await expect(h.request(issuePath)).rejects.toMatchObject({ code: "timeout", attempts: 3 });
     expect(h.calls.every((call) => call.signal.aborted)).toBe(true);
   });
