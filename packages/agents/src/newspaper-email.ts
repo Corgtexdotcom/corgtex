@@ -32,7 +32,7 @@ function asText(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-export type NewspaperRecipientItem = {
+type NewspaperRecipientItem = {
   text: string;
   href: string;
   deadline: { label: "Due" | "Deadline"; value: string } | null;

@@ -10,7 +10,7 @@ const DAY = 24 * 60 * 60 * 1000;
 const REFERENCE_BATCH = 25;
 const TARGET_OBSERVATIONS = 8;
 
-export type PreparedMaintenanceBatch = {
+type PreparedMaintenanceBatch = {
   report: MaintenanceBatchReport;
   lineageRoots: LineageRoot[];
   next: MaintenanceState;
