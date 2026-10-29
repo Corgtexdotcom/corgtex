@@ -282,6 +282,48 @@ describe("terminal archive facts using actual domain receipts and conversation c
     expect(fixture.delegates.get("workspaceToolLink").update).toHaveBeenCalledTimes(1);
   });
 
+  describe.each([false, true])("terminal archive cancellation (stream=%s)", (streaming) => {
+    it.each([false, true])("preserves cancellation after a committed terminal archive when aborted=%s", async (aborted) => {
+      await privateTool();
+      const controller = new AbortController();
+      const cancellation = new Error("synthetic terminal archive canceled");
+      fixture.commitHook.current = () => {
+        if (aborted && fixture.tables.get("conversationOperationOutcome")?.size) controller.abort(cancellation);
+      };
+      if (streaming) {
+        fixture.provider.value = "synthetic";
+        const route = routeArchive();
+        fixture.eventStream.mockImplementation(async function* () {
+          yield { type: "tool_call_delta", index: 0, idDelta: route.id, nameDelta: route.function.name, argumentsDelta: route.function.arguments };
+          return reply("", [route]);
+        });
+      } else {
+        fixture.chat.mockResolvedValueOnce(reply("", [archiveCall()]));
+      }
+      const chunks: string[] = [];
+      const ctx = { ...base, userMessage: "Archive the selected tool.", signal: controller.signal };
+      const turn = streaming ? (async () => {
+        const iterator = processConversationTurnStream(ctx);
+        while (true) {
+          const next = await iterator.next();
+          if (next.done) return next.value;
+          chunks.push(next.value);
+        }
+      })() : processConversationTurn(ctx);
+      if (aborted) {
+        await expect(turn).rejects.toBe(cancellation);
+        expect(chunks).toEqual([]);
+      } else {
+        expect((await turn).assistantMessage).toBe(acknowledgment.message);
+        expect(chunks).toEqual(streaming ? [acknowledgment.message] : []);
+      }
+      expect(fixture.tables.get("conversationOperationOutcome")?.size).toBe(1);
+      expect(fixture.tables.get("workspaceToolLink")!.get("private-tool").archivedAt).toBeInstanceOf(Date);
+      expect(streaming ? fixture.eventStream : fixture.chat).toHaveBeenCalledOnce();
+      expect(fixture.chatStream).not.toHaveBeenCalled();
+    });
+  });
+
   it("withholds the actual conversation after archive rollback and current private context revocation", async () => {
     await privateTool(); await mixedKnowledge();
     const create = tx.conversationOperationOutcome.create; const realCreate = create.getMockImplementation()!;

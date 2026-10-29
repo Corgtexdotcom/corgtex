@@ -70,8 +70,10 @@ function lastSentenceBoundary(value: string) {
 
 function narrativeLine(title: string | null | undefined, summary: string | null | undefined) {
   const normalizedTitle = title?.replace(/\s+/g, " ").trim() || "Workspace update";
+  // Summaries are plain text; preserve literal entities and tags in the Markdown document.
+  const escapedSummary = summary?.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   return summary && summary !== normalizedTitle
-    ? `**${normalizedTitle}**: ${summary}`
+    ? `**${normalizedTitle}**: ${escapedSummary}`
     : `**${normalizedTitle}**`;
 }
 

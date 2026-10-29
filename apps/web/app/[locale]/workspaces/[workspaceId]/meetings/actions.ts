@@ -49,7 +49,7 @@ import {
 
 const CREATE_NEW_MEETING_CHOICE = "__create_new_meeting__";
 
-export type MeetingTranscriptActionCandidate = {
+type MeetingTranscriptActionCandidate = {
   meetingId: string;
   title: string | null;
   recordedAt: string;
