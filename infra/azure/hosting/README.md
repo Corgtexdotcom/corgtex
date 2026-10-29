@@ -284,6 +284,19 @@ control-plane credentials only if the source actually uses them.
 
 ### Exclusive publisher handoff
 
+Before capturing the baseline, establish and verify a coordinator-owned external
+change freeze that prevents manual Railway source deployments/restarts and
+configuration changes outside the recorded handoff. Cover every human/API writer
+and retain the freeze's owner, enforcement and verification evidence privately.
+Keep it effective for the entire period Azure may publish, including uncertain
+drain or recovery. The source-fence adapter reports manual-deploy prevention as
+`UNPROVEN`; disabled automatic triggers, an empty drain check and periodic readback
+do not replace this freeze. If it cannot be established, verified or maintained,
+stop: keep Azure Manual and do not activate or accept an exclusive Azure publisher.
+If verification fails while Azure is scheduled, enter recovery: set Azure Manual
+and verify its drain without resuming Railway or lifting the freeze.
+This requirement does not authorize new access or permission changes.
+
 Retain a private recovery baseline before changing either provider: exact source
 project/environment/service and source link, effective/configured/file cron,
 autodeploy and image-update policies, current deployment/instance IDs, image digest,
@@ -345,7 +358,10 @@ then restore only the retained Railway trigger policies after proving no Azure
 publisher remains. Restore the idle baseline's triggers only; do not restart a
 completed scheduled deployment to satisfy recovery, because that would replay its
 monitor/incident work. If Azure drain is uncertain, do not restore Railway
-scheduling. Reconcile any uncertain issue write before resuming; never blindly
+scheduling or lift the external manual-deployment/configuration freeze. Release
+that freeze only after proving no Azure publisher remains and completing the
+recorded source recovery or an explicitly coordinated end to the publisher window.
+Reconcile any uncertain issue write before resuming; never blindly
 replay it.
 Preserve issue dedupe keys and evidence. Reapplying the monitor bootstrap template
 disables active monitoring and removes credentials, so use it only for preparation
