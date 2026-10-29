@@ -489,6 +489,7 @@ export async function RoleDirectorySurface({
     return (
       <ItemActions
         moreLabel={tCommon("moreActions")}
+        moreRole="dialog"
         more={moreItems}
       />
     );

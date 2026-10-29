@@ -372,11 +372,13 @@ export default async function ActionsPage({
     return <p className="muted">{t("noActionsFound")}</p>;
   }
 
-  function renderActionMove(action: ActionListItem, targetStatus: ActionColumnStatus, options: { hidden?: boolean; primary?: boolean } = {}) {
+  function renderActionMove(action: ActionListItem, targetStatus: ActionColumnStatus, options: { hidden?: boolean; primary?: boolean; menuItem?: boolean } = {}) {
     const key = `${options.hidden ? "hidden-" : ""}move-${targetStatus.toLowerCase()}`;
     const transition = `${action.id}:${targetStatus}`;
     const buttonClass = options.primary ? "primary small" : undefined;
-    const buttonProps = options.hidden ? { "aria-hidden": true, tabIndex: -1 } : {};
+    const buttonProps = options.hidden
+      ? { "aria-hidden": true, tabIndex: -1 }
+      : options.menuItem ? { role: "menuitem" as const, tabIndex: -1 } : {};
 
     if (targetStatus === "COMPLETED") {
       return (
@@ -397,6 +399,7 @@ export default async function ActionsPage({
             cancelLabel={tCommon("cancel")}
             fileLabel={tWork("evidence")}
             className={options.primary ? "primary small" : undefined}
+            menuItem={options.menuItem}
           />
         </span>
       );
@@ -407,6 +410,7 @@ export default async function ActionsPage({
         <form
           key={key}
           action={returnActionToDraftAction}
+          role={options.menuItem ? "none" : undefined}
           data-work-item-transition={transition}
           className={options.hidden ? "nr-hidden-transition-form" : undefined}
         >
@@ -422,6 +426,7 @@ export default async function ActionsPage({
       <form
         key={key}
         action={actionHandler}
+        role={options.menuItem ? "none" : undefined}
         data-work-item-transition={transition}
         className={options.hidden ? "nr-hidden-transition-form" : undefined}
       >
@@ -499,21 +504,21 @@ export default async function ActionsPage({
       .map((targetStatus) => renderActionMove(action, targetStatus, { hidden: true }));
     for (const targetStatus of actionColumnStatuses) {
       if (!canMoveToStatus(targetStatus) || targetStatus === primaryTarget) continue;
-      moreItems.push(renderActionMove(action, targetStatus));
+      moreItems.push(renderActionMove(action, targetStatus, { menuItem: true }));
     }
     if (canEditContent) {
       moreItems.push(
-        <a key="edit" className="secondary small" href={actionEditHref(action.id)}>
+        <a key="edit" role="menuitem" tabIndex={-1} className="secondary small" href={actionEditHref(action.id)}>
           {t("btnEdit")}
         </a>,
       );
     }
-    if (moreItems.length > 0) moreItems.push(<div key="divider" className="action-menu-divider" />);
+    if (moreItems.length > 0) moreItems.push(<div key="divider" role="separator" className="action-menu-divider" />);
     moreItems.push(
-      <form key="delete" action={deleteActionAction}>
+      <form key="delete" action={deleteActionAction} role="none">
         <input type="hidden" name="workspaceId" value={workspaceId} />
         <input type="hidden" name="actionId" value={action.id} />
-        <ConfirmSubmitButton className="danger" confirmMessage={t("confirmArchive")}>
+        <ConfirmSubmitButton className="danger" confirmMessage={t("confirmArchive")} menuItem>
           {t("btnDelete")}
         </ConfirmSubmitButton>
       </form>,
