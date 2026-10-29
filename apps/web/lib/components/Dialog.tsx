@@ -4,12 +4,14 @@ import React, { useEffect, useId, useRef, useCallback } from "react";
 import { useTranslations } from "next-intl";
 
 export function Dialog({
+  id,
   open,
   onClose,
   title,
   children,
   className = "",
 }: {
+  id?: string;
   open: boolean;
   onClose: () => void;
   title: string;
@@ -69,6 +71,7 @@ export function Dialog({
 
   return (
     <dialog
+      id={id}
       ref={dialogRef}
       className={`dialog ${className}`}
       aria-labelledby={titleId}
