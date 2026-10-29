@@ -24,6 +24,7 @@ export function createGitHubClient(api, {
   async function once(path, options, timeoutMs) {
     const controller = new AbortController();
     let timer;
+    let receivedResponse;
     const expired = new Promise((_, reject) => {
       timer = setTimeout(() => {
         controller.abort();
@@ -46,6 +47,7 @@ export function createGitHubClient(api, {
           },
           body: options.body ? JSON.stringify(options.body) : undefined,
         });
+        receivedResponse = response;
         // The same deadline covers headers AND the entire response body.
         const text = await response.text();
         let payload = null;
@@ -53,6 +55,11 @@ export function createGitHubClient(api, {
         try { payload = text && !malformed ? JSON.parse(text) : null; } catch { malformed = true; }
         return { response, payload, malformed };
       })()]);
+    } catch (error) {
+      // Header evidence survives a truncated or timed-out body. In particular,
+      // never turn an already received auth/rate response into a generic retry.
+      if (receivedResponse) return { response: receivedResponse, payload: null, malformed: true };
+      throw error;
     } finally { clearTimeout(timer); }
   }
 

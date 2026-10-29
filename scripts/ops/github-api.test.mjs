@@ -71,6 +71,38 @@ describe("bounded GitHub synchronization transport", () => {
     await expect(h.request(issuePath)).rejects.toMatchObject({ code: "timeout", attempts: 3 });
     expect(h.calls.every((call) => call.signal.aborted)).toBe(true);
   });
+  it.each(["throws", "hangs"])("preserves rate-limit headers when the body %s", async (mode) => {
+    for (const status of [403, 429]) {
+      const broken = { status, headers: new Headers({ "retry-after": "2" }),
+        text: () => mode === "throws" ? Promise.reject(new Error("truncated")) : new Promise(() => {}) };
+      const h = harness([broken, reply(200, [])], { requestTimeoutMs: 5 });
+      expect(await h.request(issuePath)).toEqual([]);
+      expect(h.waits).toEqual([2000]);
+      expect(h.calls).toHaveLength(2);
+    }
+  });
+  it.each(["throws", "hangs"])("does not reconcile a known rate-limited write when the body %s", async (mode) => {
+    for (const status of [403, 429]) {
+      const broken = { status, headers: new Headers({ "retry-after": "2" }),
+        text: () => mode === "throws" ? Promise.reject(new Error("truncated")) : new Promise(() => {}) };
+      const h = harness([broken], { requestTimeoutMs: 5 });
+      await expect(h.request(issuePath, { method: "POST", body: { title: "Signal", body: "Signal" } }))
+        .rejects.toMatchObject({ code: "rate_limited", status, outcome: "unknown" });
+      expect(h.calls.map((c) => c.method)).toEqual(["POST"]);
+      expect(h.waits).toEqual([]);
+    }
+  });
+  it.each(["throws", "hangs"])("preserves auth/reset decisions when the body %s", async (mode) => {
+    const text = () => mode === "throws" ? Promise.reject(new Error("truncated")) : new Promise(() => {});
+    const auth = harness([{ status: 401, headers: new Headers(), text }], { requestTimeoutMs: 5 });
+    await expect(auth.request(issuePath)).rejects.toMatchObject({ code: "authorization_failed", attempts: 1, status: 401 });
+    expect(auth.calls).toHaveLength(1);
+    expect(auth.waits).toEqual([]);
+    const limited = harness([{ status: 403, headers: new Headers({ "x-ratelimit-remaining": "0", "x-ratelimit-reset": "300" }), text }], { requestTimeoutMs: 5 });
+    await expect(limited.request(issuePath)).rejects.toMatchObject({ code: "rate_limited", attempts: 1 });
+    expect(limited.calls).toHaveLength(1);
+    expect(limited.waits).toEqual([]);
+  });
   it("keeps an uncertain write unknown after negative reconciliation, without resending", async () => {
     const h = harness([new Error("connection reset"), reply(200, [])]);
     await expect(h.request(issuePath, { method: "POST", body: { title: "Signal", body: "Signal" } }))
