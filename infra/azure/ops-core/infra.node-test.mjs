@@ -4,14 +4,15 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-// Compile locally only: no account, deployment, what-if or provider request.
-const main = JSON.parse(execFileSync("az", ["bicep", "build", "--file",
-  fileURLToPath(new URL("./main.bicep", import.meta.url)), "--stdout"], {
+// Run only on an authorized runner: no account, deployment, what-if or provider request.
+// Use a pinned/installed standalone compiler and never restore modules.
+const main = JSON.parse(execFileSync(process.env.BICEP_CLI_PATH || "bicep", ["build",
+  fileURLToPath(new URL("./main.bicep", import.meta.url)), "--stdout", "--no-restore"], {
   encoding: "utf8", timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
 }));
 const hosting = main.resources.hosting.properties.template;
-const sharedTarget = JSON.parse(execFileSync("az", ["bicep", "build", "--file",
-  fileURLToPath(new URL("./shared-postgres-target.bicep", import.meta.url)), "--stdout"], {
+const sharedTarget = JSON.parse(execFileSync(process.env.BICEP_CLI_PATH || "bicep", ["build",
+  fileURLToPath(new URL("./shared-postgres-target.bicep", import.meta.url)), "--stdout", "--no-restore"], {
   encoding: "utf8", timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
 }));
 const domains = ["opsDomain", "coreDomain"].map(name => hosting.resources[name].properties.template);
@@ -41,7 +42,8 @@ function condition(expression, parameters, variables) {
       assert.equal(text[offset++], ")");
       const functions = { parameters: key => { assert.ok(Object.hasOwn(parameters, key)); return parameters[key]; },
         variables: key => { assert.ok(Object.hasOwn(variables, key)); return condition(variables[key], parameters, variables); },
-        equals: (a, b) => a === b, and: (a, b) => a && b, not: a => !a, empty: a => a.length === 0 };
+        equals: (a, b) => a === b, and: (...args) => args.every(Boolean), or: (...args) => args.some(Boolean),
+        true: () => true, false: () => false, not: a => !a, empty: a => a.length === 0 };
       assert.ok(Object.hasOwn(functions, name), `Unsupported condition function ${name}`);
       value = functions[name](...args);
     }
@@ -52,7 +54,7 @@ function condition(expression, parameters, variables) {
 }
 
 for (const mode of ["dedicated", "existing-shared"]) test(`${mode} compiles the intended PostgreSQL ownership and endpoint count`, () => {
-  const hostParams = { postgresHosting: { mode } };
+  const hostParams = { postgresHosting: { mode }, enableCore: true };
   const hostResources = values(hosting).filter(r => r.type.includes("DBforPostgreSQL") || r.name?.includes("shared-pg"));
   const enabled = hostResources.filter(r => condition(r.condition, hostParams, hosting.variables));
   let servers = enabled.filter(r => r.type === "Microsoft.DBforPostgreSQL/flexibleServers" && r.existing !== true).length;
@@ -85,13 +87,15 @@ test("existing PostgreSQL is a same-subscription read-only reference with no lif
   assert.deepEqual(endpoint.properties.privateLinkServiceConnections[0].properties.groupIds, ["postgresqlServer"]);
   assert.match(endpoint.properties.privateLinkServiceConnections[0].properties.privateLinkServiceId, /subscription\(\)\.subscriptionId/);
   for (const name of ["opsDomain", "coreDomain"]) {
-    const binding = hosting.resources[name].properties.parameters.postgresBinding;
+    const binding = JSON.stringify(hosting.resources[name].properties.parameters.postgresBinding);
+    const bindingExpression = binding.includes("variables('domainPostgres')")
+      ? JSON.stringify(hosting.variables.domainPostgres) : binding;
     for (const property of ["fullyQualifiedDomainName", "administratorLogin", "network.publicNetworkAccess"]) {
-      assert.ok(binding.includes(`reference('existingPostgres').${property}`));
+      assert.ok(bindingExpression.includes(`reference('existingPostgres').${property}`));
     }
-    assert.match(binding, /shared-pg/);
+    assert.match(bindingExpression, /shared-pg/);
   }
-  assert.equal(hosting.resources.opsDomain.properties.parameters.postgresBinding, hosting.resources.coreDomain.properties.parameters.postgresBinding);
+  assert.deepEqual(hosting.resources.opsDomain.properties.parameters.postgresBinding, hosting.resources.coreDomain.properties.parameters.postgresBinding);
 });
 
 test("closed hosting input keeps dedicated default and permits existing mode without creation passwords", () => {
@@ -160,4 +164,96 @@ test("new shared target is one closed PG18 server with bounded storage and no ap
   assert.equal(example.parameters.administratorPassword.reference.secretName, "ops-core-shared-pg18-admin-password");
   assert.equal(example.parameters.administratorPassword.reference.secretVersion, "<reviewed-secret-version>");
   assert.equal(example.parameters.skuName.value, "Standard_D2ds_v5");
+});
+
+
+const parameterValue = (module, name) => module.properties.parameters[name].value;
+
+test("main and direct hosting default to Ops-only PostgreSQL with no Core secret input", () => {
+  for (const template of [main, hosting]) {
+    assert.equal(template.parameters.enableCore.defaultValue, false);
+    assert.equal(template.parameters.opsSharedStateBackend.defaultValue, "postgres");
+    assert.equal(template.parameters.coreSharedStateBackend.defaultValue, "postgres");
+    assert.equal(template.parameters.corePostgresAdministratorPassword.type, "securestring");
+    assert.equal(template.parameters.corePostgresAdministratorPassword.defaultValue, "");
+  }
+  for (const domain of domains) assert.equal(domain.parameters.sharedStateBackend.defaultValue, "postgres");
+  assert.equal(parameterValue(main.resources.hosting, "enableCore"), "[parameters('enableCore')]");
+  assert.equal(main.resources.hosting.properties.parameters.corePostgresAdministratorPassword,
+    "[if(parameters('enableCore'), createObject('value', parameters('corePostgresAdministratorPassword')), createObject('value', ''))]");
+  for (const name of ["opsSharedStateBackend", "coreSharedStateBackend"]) {
+    assert.equal(parameterValue(main.resources.hosting, name), `[parameters('${name}')]`);
+  }
+  for (const [name, parameter] of [["opsDomain", "opsSharedStateBackend"], ["coreDomain", "coreSharedStateBackend"]]) {
+    assert.equal(parameterValue(hosting.resources[name], "sharedStateBackend"), `[parameters('${parameter}')]`);
+  }
+  assert.equal(hosting.resources.coreDomain.condition, "[parameters('enableCore')]");
+  assert.match(hosting.outputs.core.value, /^\[if\(parameters\('enableCore'\), union\(/);
+  assert.match(hosting.outputs.core.value, /createObject\('enabled', true\(\)\)/);
+  assert.match(hosting.outputs.core.value, /, createObject\('enabled', false\(\)\)\)\]$/);
+  assert.match(main.outputs.core.value, /outputs\.core\.value/);
+});
+
+for (const mode of ["dedicated", "existing-shared"])
+for (const enableCore of [false, true])
+for (const opsBackend of ["postgres", "redis"])
+for (const coreBackend of ["postgres", "redis"])
+  test(`${mode}, Core ${enableCore}, Ops ${opsBackend}, Core backend ${coreBackend}: active resource matrix`, () => {
+    const hostParams = { postgresHosting: { mode }, enableCore,
+      opsSharedStateBackend: opsBackend, coreSharedStateBackend: coreBackend };
+    const needsRedis = opsBackend === "redis" || (enableCore && coreBackend === "redis");
+    for (const name of ["redisDns", "redisDnsLink"]) {
+      assert.equal(condition(hosting.resources[name].condition, hostParams, hosting.variables), needsRedis);
+    }
+    let servers = 0, redis = 0, domainCount = 0;
+    let pgEndpoints = condition(hosting.resources.sharedPostgresEndpoint.condition, hostParams, hosting.variables) ? 1 : 0;
+    for (const [name, backend] of [["opsDomain", opsBackend], ["coreDomain", coreBackend]]) {
+      const module = hosting.resources[name];
+      const active = condition(module.condition, hostParams, hosting.variables);
+      assert.equal(active, name === "opsDomain" || enableCore);
+      if (!active) continue; // Parent deployment condition gates all Core children and parameter evaluation.
+      domainCount++;
+      const domain = module.properties.template;
+      const params = { postgresBinding: { mode }, sharedStateBackend: backend };
+      for (const resourceName of ["postgres", "postgresEndpoint", "postgresEndpointDns"]) {
+        assert.equal(condition(domain.resources[resourceName].condition, params, domain.variables), mode === "dedicated");
+      }
+      if (mode === "dedicated") { servers++; pgEndpoints++; }
+      for (const resourceName of ["redis", "redisDatabase", "redisEndpoint", "redisEndpointDns"]) {
+        assert.equal(condition(domain.resources[resourceName].condition, params, domain.variables), backend === "redis");
+      }
+      if (backend === "redis") redis++;
+    }
+    assert.equal(domainCount, enableCore ? 2 : 1);
+    assert.equal(servers, mode === "dedicated" ? domainCount : 0);
+    assert.equal(pgEndpoints, mode === "dedicated" ? domainCount : 1);
+    assert.equal(redis, Number(opsBackend === "redis") + Number(enableCore && coreBackend === "redis"));
+  });
+
+test("Ops examples omit all Core inputs and legacy example explicitly opts in to Core and Redis", () => {
+  for (const filename of ["main.parameters.example.json", "existing-shared.parameters.example.json"]) {
+    const { parameters } = JSON.parse(readFileSync(new URL(`./${filename}`, import.meta.url), "utf8"));
+    assert.equal(parameters.enableCore.value, false);
+    assert.equal(parameters.opsSharedStateBackend.value, "postgres");
+    assert.ok(Object.keys(parameters).every(name => !name.startsWith("core")));
+  }
+  const { parameters } = JSON.parse(readFileSync(new URL("./legacy-core.parameters.example.json", import.meta.url), "utf8"));
+  assert.equal(parameters.enableCore.value, true);
+  assert.equal(parameters.opsSharedStateBackend.value, "redis");
+  assert.equal(parameters.coreSharedStateBackend.value, "redis");
+  assert.ok(parameters.corePostgresAdministratorPassword.reference);
+});
+
+test("every nested deployment is incremental and contains no cleanup deployment script", () => {
+  const walk = template => {
+    for (const resource of values(template)) {
+      assert.notEqual(resource.type.toLowerCase(), "microsoft.resources/deploymentscripts");
+      assert.notEqual(resource.type.toLowerCase(), "microsoft.resources/deploymentstacks");
+      if (resource.type === "Microsoft.Resources/deployments") {
+        assert.equal(resource.properties.mode, "Incremental");
+        walk(resource.properties.template);
+      }
+    }
+  };
+  walk(main);
 });

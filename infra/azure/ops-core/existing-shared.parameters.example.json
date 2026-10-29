@@ -24,9 +24,6 @@
     "opsSharedStateBackend": {
       "value": "postgres"
     },
-    "coreSharedStateBackend": {
-      "value": "postgres"
-    },
     "vnetAddressPrefix": {
       "value": "10.84.0.0/24"
     },
@@ -35,6 +32,9 @@
     },
     "privateEndpointsSubnetPrefix": {
       "value": "10.84.0.32/27"
+    },
+    "enableCore": {
+      "value": false
     }
   }
 }
