@@ -63,10 +63,12 @@ async function main() {
       incidents: controlPlaneIncidents.length,
     },
     incidents,
-    publishedIncidents: publishedIncidents.length,
+    plannedIncidents: publishedIncidents.length,
+    publishedIncidents: 0,
+    githubSync: { status: dryRun ? "dry-run" : "disabled" },
   };
 
-  console.log(JSON.stringify(output, null, 2));
+  let issueResult;
 
   if (!dryRun && createIssues) {
     const incidentArgs = [fileURLToPath(new URL("./github-incident.mjs", import.meta.url))];
@@ -76,19 +78,30 @@ async function main() {
         incidentArgs.push("--unhealthy-dedupe-prefixes", JSON.stringify(unhealthyDedupePrefixes));
       }
     }
-    const issueResult = spawnSync(
+    issueResult = spawnSync(
       process.execPath,
       incidentArgs,
       {
         input: JSON.stringify(publishedIncidents),
         encoding: "utf8",
-        stdio: ["pipe", "inherit", "inherit"],
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 180_000,
+        maxBuffer: 8 * 1024 * 1024,
       },
     );
-    if (issueResult.status !== 0) {
-      process.exit(issueResult.status ?? 1);
-    }
+    output.githubSync = {
+      status: issueResult.status === 0 ? "complete" : "degraded",
+      exitCode: issueResult.status,
+      signal: issueResult.signal,
+    };
+    // Partial or uncertain publication cannot be represented as a confirmed count.
+    output.publishedIncidents = issueResult.status === 0 ? publishedIncidents.length : null;
+    if (issueResult.status !== 0) process.exitCode = issueResult.status || 1;
   }
+
+  console.log(JSON.stringify(output, null, 2));
+  if (issueResult?.stdout) process.stdout.write(issueResult.stdout);
+  if (issueResult?.stderr) process.stderr.write(issueResult.stderr);
 
   // A detected outage is a successful monitor run once its incident is published.
   // Railway cron treats a nonzero exit as Deployment.crashed, obscuring real alerts.

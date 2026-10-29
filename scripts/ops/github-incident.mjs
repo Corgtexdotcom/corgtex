@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createGitHubClient, GitHubSyncError } from "./github-api.mjs";
 import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import {
@@ -42,7 +43,9 @@ async function main() {
 
   const api = githubApiConfig();
   if (api) {
+    api.client = createGitHubClient(api);
     await publishWithGitHubApi(api, plans, { syncResolved, syncDedupePrefixes, unhealthyDedupePrefixes });
+    console.error(JSON.stringify({ event: "github-sync", status: "complete", ...api.client.stats }));
     return;
   }
 
@@ -138,7 +141,8 @@ function findExistingIssueFromList(issues, searchToken) {
 function githubApiConfig() {
   const token = process.env.OPS_GITHUB_TOKEN ?? process.env.GITHUB_TOKEN;
   const repository = process.env.OPS_GITHUB_REPOSITORY ?? process.env.GITHUB_REPOSITORY;
-  if (!token || !repository) return null;
+  if (!token && !repository) return null;
+  if (!token || !repository) throw new Error("GitHub sync configuration requires both token and repository.");
 
   const parts = repository.split("/");
   if (parts.length !== 2 || !parts[0] || !parts[1]) {
@@ -154,26 +158,7 @@ function githubApiConfig() {
 }
 
 async function githubRequest(api, path, options = {}) {
-  const response = await fetch(`${api.baseUrl}${path}`, {
-    method: options.method ?? "GET",
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${api.token}`,
-      "Content-Type": "application/json",
-      "User-Agent": "corgtex-ops-monitor",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
-
-  const text = await response.text();
-  const payload = text ? JSON.parse(text) : null;
-  const okStatuses = options.okStatuses ?? [200, 201];
-  if (!okStatuses.includes(response.status)) {
-    const message = payload?.message ?? response.statusText;
-    throw new Error(`GitHub API ${options.method ?? "GET"} ${path} failed: ${message}`);
-  }
-  return payload;
+  return api.client.request(path, options);
 }
 
 async function listOpenIncidentIssuesWithApi(api) {
@@ -582,6 +567,10 @@ function ghEnv() {
 }
 
 main().catch((error) => {
+  console.error(JSON.stringify({ event: "github-sync", status: "degraded",
+    code: error instanceof GitHubSyncError ? error.code : "sync_failed",
+    outcome: error instanceof GitHubSyncError ? error.outcome : "failed",
+    attempts: error instanceof GitHubSyncError ? error.attempts : null }));
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 });
