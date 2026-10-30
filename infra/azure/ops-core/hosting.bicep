@@ -21,6 +21,9 @@ type existingSharedPostgres = {
 type postgresHostingConfig = dedicatedPostgres | existingSharedPostgres
 
 param postgresHosting postgresHostingConfig = { mode: 'dedicated' }
+
+@description('Core backing resources are opt-in. Use incremental deployments only; disabled Core resources are retained, not deleted.')
+param enableCore bool = false
 var useExistingPostgres = postgresHosting.mode == 'existing-shared'
 
 // The scope has no subscription override: reuse is explicitly same-subscription.
@@ -38,23 +41,23 @@ param postgresAdministratorLogin string
 @allowed(['Standard_D2ds_v5', 'Standard_B2s', 'Standard_B1ms'])
 param opsPostgresSkuName string
 @allowed(['Standard_D2ds_v5', 'Standard_B2s', 'Standard_B1ms'])
-param corePostgresSkuName string
+param corePostgresSkuName string = 'Standard_D2ds_v5'
 @allowed(['redis', 'postgres'])
-param opsSharedStateBackend string = 'redis'
+param opsSharedStateBackend string = 'postgres'
 @allowed(['redis', 'postgres'])
-param coreSharedStateBackend string = 'redis'
+param coreSharedStateBackend string = 'postgres'
 
-var provisionRedisDns = opsSharedStateBackend == 'redis' || coreSharedStateBackend == 'redis'
+var provisionRedisDns = opsSharedStateBackend == 'redis' || (enableCore && coreSharedStateBackend == 'redis')
 @secure()
 param opsPostgresAdministratorPassword string
 @secure()
-param corePostgresAdministratorPassword string
+param corePostgresAdministratorPassword string = ''
 @allowed(['Disabled', 'Enabled'])
 param opsPostgresPublicNetworkAccess string
 @allowed(['Disabled', 'Enabled'])
-param corePostgresPublicNetworkAccess string
+param corePostgresPublicNetworkAccess string = 'Disabled'
 param opsTemporaryRestoreIpv4 string
-param coreTemporaryRestoreIpv4 string
+param coreTemporaryRestoreIpv4 string = ''
 param vnetAddressPrefix string
 param containerAppsSubnetPrefix string
 param privateEndpointsSubnetPrefix string
@@ -116,7 +119,7 @@ resource postgresDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@
   }
 }
 
-// One endpoint serves both distinct domain databases on the retained server.
+// One endpoint serves Ops and, only when enabled, Core on the retained server.
 resource sharedPostgresEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = if (useExistingPostgres) {
   name: 'pe-${namePrefix}-shared-pg'
   location: location
@@ -202,7 +205,7 @@ module opsDomain './domain.bicep' = {
   }
 }
 
-module coreDomain './domain.bicep' = {
+module coreDomain './domain.bicep' = if (enableCore) {
   name: '${namePrefix}-core-backing'
   params: {
     location: location
@@ -234,4 +237,5 @@ output platform object = {
   applicationInsightsId: observability.outputs.applicationInsightsId
 }
 output ops object = opsDomain.outputs.resources
-output core object = coreDomain.outputs.resources
+// Keep enabled-domain resource fields compatible; disabled Core exposes no resource IDs.
+output core object = enableCore ? union(coreDomain!.outputs.resources, { enabled: true }) : { enabled: false }

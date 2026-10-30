@@ -45,7 +45,7 @@ npx vitest run packages/domain/src/runtime.test.ts
 ```
 
 `npm test` is an alias of `npm run test:unit`. Despite its name, `test:all`
-does not run the native suites or manual infrastructure checks listed below.
+does not run the native suites or infrastructure checks listed below.
 
 The Vitest `unit` project selects `packages/**/*.test.ts`, `apps/**/*.test.ts`,
 and `scripts/**/*.test.mjs`, excluding `*.integration.test.ts` and
@@ -137,7 +137,8 @@ Static inventory at
 [`b13afd77`](https://github.com/Corgtexdotcom/corgtex/tree/b13afd77fe8090bdcb33cf8f7aba8246d6ff658e)
 (2026-10-16): **703 tracked test-named TS/JS files = 622 Vitest unit + 31 Vitest
 integration + 50 outside Vitest**. The count includes `*.test.*` and
-`*.node-test.*` source files, not test cases or passing results.
+`*.node-test.*` source files, not test cases or passing results. The table tracks
+current registration of that historical file set; it is not a fresh count of newer tests.
 
 | Selection outside Vitest | Files | Registration |
 | --- | ---: | --- |
@@ -147,7 +148,7 @@ integration + 50 outside Vitest**. The count includes `*.test.*` and
 | Owner adoption | 1 | CI directly runs `scripts/adopt-validation-support-owner.integration.test.mjs` |
 | Schema privileges/catalog | 2 | CI directly runs `scripts/selfserve-validation-schema.integration.test.mjs` and `scripts/selfserve-schema-catalog.integration.test.mjs` |
 | Release/receipt | 2 | CI directly runs `scripts/azure-site-image-release.node-test.mjs` and `scripts/release/ops-readiness-receipt.node-test.mjs` |
-| Manual infrastructure | 1 | `infra/azure/ops-core/infra.node-test.mjs`; command and prerequisites below |
+| Infrastructure | 1 | CI directly runs `infra/azure/ops-core/infra.node-test.mjs` using pinned standalone Bicep; command and prerequisites below |
 
 The eight explicit files in the Ops/Core group are:
 
@@ -160,13 +161,15 @@ The eight explicit files in the Ops/Core group are:
 - `scripts/release/managed-azure-container-app-transport.node-test.mjs`
 - `scripts/migration/opscore-managed-pitr.node-test.mjs` (via the chained PITR command)
 
-Thus **49 files are selected by ordinary CI native commands and one is manual**.
+All **50 files in that historical outside-Vitest set are now selected by ordinary
+CI native commands**. The Ops infrastructure suite was formerly manual; CI now
+runs it alongside the newer monitor infrastructure suite.
 The chained PostgreSQL restore smoke adds executable coverage but is not a
 test-named file in this count. Selection means a command includes a file; it does
 not prove every case executed. Check that run's output for failures and skips.
 This is a reviewed documentation inventory, not an automated registration guard.
 When adding or renaming tests, reconcile the Vitest globs, native package/CI
-commands, and this manual/conditional list so every file has an intentional runner.
+commands, and the conditional list so every file has an intentional runner.
 
 ### Conditional native cases
 
@@ -203,20 +206,25 @@ node --test scripts/release/worker-demand.node-test.mjs
 Ordinary CI does not set either opt-in. Green CI with these files selected does
 not establish that their real database cases ran.
 
-### Intentional manual exclusion
+### Infrastructure checks
 
 [`infra/azure/ops-core/infra.node-test.mjs`](https://github.com/Corgtexdotcom/corgtex/blob/main/infra/azure/ops-core/infra.node-test.mjs)
-is outside Vitest and ordinary native CI selection at the inventory revision.
-Install Azure CLI with Bicep already available, then run the
-[documented local template check](https://github.com/Corgtexdotcom/corgtex/blob/main/infra/azure/ops-core/README.md):
+is outside Vitest and is selected directly by `.github/workflows/ci.yml` alongside
+`infra/azure/hosting/monitor.node-test.mjs`. CI uses the SHA-256-verified standalone
+Bicep v0.38.5 binary already pinned in that workflow. On an authorized local runner,
+install standalone Bicep first, then run the
+[documented template check](https://github.com/Corgtexdotcom/corgtex/blob/main/infra/azure/ops-core/README.md):
 
 ```bash
-node --test infra/azure/ops-core/infra.node-test.mjs
+BICEP_CLI_PATH=/path/to/bicep node --test infra/azure/ops-core/infra.node-test.mjs
 ```
 
-The test calls `az bicep build --stdout` locally for its templates. It does not
-require an Azure account, provider request, deployment, or database. Keep this
-explicit manual entry reviewed when infrastructure test registration changes.
+The test defaults to `bicep` on PATH when `BICEP_CLI_PATH` is omitted and calls
+`build <template> --stdout --no-restore`. It does not install a compiler, use Azure CLI,
+require an Azure account, contact providers, deploy resources, or use a database.
+It inspects compiled ARM, including the Ops-only/Core opt-in resource matrix and
+incremental nested deployment modes. A selected test is not passing evidence until
+its compilation and assertions succeed; respect any active execution pause.
 
 ## What QA expects
 

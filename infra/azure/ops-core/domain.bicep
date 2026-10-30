@@ -36,9 +36,9 @@ param postgresPublicNetworkAccess string = 'Disabled'
 param temporaryRestoreIpv4 string = ''
 param privateEndpointsSubnetId string
 param postgresDnsZoneId string
-param redisDnsZoneId string
+param redisDnsZoneId string = ''
 @allowed(['redis', 'postgres'])
-param sharedStateBackend string = 'redis'
+param sharedStateBackend string = 'postgres'
 
 var provisionRedis = sharedStateBackend == 'redis'
 

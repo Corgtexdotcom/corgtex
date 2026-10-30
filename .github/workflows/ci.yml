@@ -215,7 +215,7 @@ jobs:
       - name: Test Azure site image release and read-only Ops receipt
         run: node --test scripts/azure-site-image-release.node-test.mjs scripts/release/ops-readiness-receipt.node-test.mjs
 
-      - name: Test Azure monitor bootstrap defaults
+      - name: Test Azure monitor and Ops provisioning defaults
         timeout-minutes: 3
         shell: bash
         run: |
@@ -231,7 +231,7 @@ jobs:
             | sha256sum --check --strict
           chmod +x "$bicep_dir/bicep"
           BICEP_CLI_PATH="$bicep_dir/bicep" DOTNET_BUNDLE_EXTRACT_BASE_DIR="$bicep_dir/.net" \
-            node --test infra/azure/hosting/monitor.node-test.mjs
+            node --test infra/azure/hosting/monitor.node-test.mjs infra/azure/ops-core/infra.node-test.mjs
 
       - name: Test Ops and Core migration custody, fences and retained restore
         timeout-minutes: 15

@@ -1,4 +1,4 @@
-# Ops and Core backing resources
+# Ops backing resources with optional Core
 
 `main.bicep` is a subscription-scope deployment for new backing resources. It creates
 `rg-<prefix>-hosting` unless an existing-shared server is already in that exact group;
@@ -14,14 +14,58 @@ Its dedicated `/27` subnet is delegated to `Microsoft.App/environments`; a separ
 nondelegated `/27` subnet hosts private endpoints. Check address overlap before the
 first deployment. One workspace/Application Insights pair reuses the existing module.
 
-Each domain gets its own PG18 `Standard_D2ds_v5` General Purpose Flexible Server by
-default (32 GiB, storage autogrow,
-14-day backup/PITR retention, no HA), HA `Balanced_B0` Managed Redis (TLS 1.2, encrypted
-port 10000, EnterpriseCluster, NoEviction), identity, runtime Key Vault and object
-storage account. Both database services use private endpoints with VNet-linked DNS.
-Redis public access is disabled; Redis persistence is disabled, so HA is replication,
-not an archive. No `flexibleServers/databases` resource is created: full restore owns
-database names and promotion. Extension allowlisting is also a restore preflight step.
+By default only Ops is enabled, using PostgreSQL for shared state and no Redis.
+Ops gets a PG18 `Standard_D2ds_v5` General Purpose Flexible Server (32 GiB,
+storage autogrow, 14-day backup/PITR retention, no HA), identity, runtime Key Vault
+and object storage account. PostgreSQL uses a private endpoint with VNet-linked DNS.
+No `flexibleServers/databases` resource is created: full restore owns database names
+and promotion. Extension allowlisting is also a restore preflight step.
+
+## Ops-only default and explicit legacy opt-in
+
+`enableCore` defaults to `false` in both `main.bicep` and `hosting.bicep`.
+The entire Core domain module is skipped, including its PostgreSQL server/private
+endpoint, Redis, identity, runtime vault, writer grant and object store. The Core
+output is exactly `{ enabled: false }`, with no placeholder resource IDs or module
+output lookup. Enabled Core preserves the previous resource fields and adds
+`enabled: true`. Consumers must check this flag before using Core outputs. The Ops
+output shape is unchanged. These are provisioning outputs, not runtime activation
+instructions; the existing per-domain runtime/migration scripts require separately
+reviewed bindings and do not consume this template automatically.
+
+Use `main.parameters.example.json` for dedicated Ops, or
+`existing-shared.parameters.example.json` to reference a retained server. Neither
+contains Core inputs or a Core Key Vault secret reference. With Core disabled,
+**omit `corePostgresAdministratorPassword` and its Key Vault reference entirely**:
+ARM resolves caller-supplied secret references before evaluating conditional
+resources, so a false Core flag cannot suppress a reference in an external parameter
+file. No Core secret is needed for either Ops-only example. A dedicated Ops server
+still requires its own protected password input.
+
+Core requires explicit `enableCore: true`. Both domain shared-state defaults remain
+`postgres` even when Core is enabled. To reproduce the previous two-domain Redis
+profile, explicitly set `enableCore: true`, `opsSharedStateBackend: redis`, and
+`coreSharedStateBackend: redis`; see `legacy-core.parameters.example.json`.
+That legacy example requires both dedicated PostgreSQL password references. A stale
+`coreSharedStateBackend: redis` input with Core disabled does not create Redis DNS.
+Redis opt-in creates HA `Balanced_B0` Managed Redis (TLS 1.2, encrypted port 10000,
+EnterpriseCluster, NoEviction), a private endpoint and DNS; public access and
+persistence are disabled. HA is replication, not an archive.
+
+**Use incremental deployment only.** All generated nested deployments must retain
+`mode: Incremental`. For an authorized resource-group deployment (including direct
+`hosting.bicep` use), explicitly pass `--mode Incremental`; subscription-scope
+`main.bicep` has no complete-mode option. Never wrap these templates in a complete-mode
+resource-group deployment or a deployment stack that deletes unmanaged resources.
+Disabling Core or selecting PostgreSQL omits resources from management; it does not
+stop, delete, migrate or retire existing Core/Redis resources, revoke existing grants,
+or save their running costs. Retain all existing resources and recovery obligations.
+Do not run complete-mode cleanup or resource deletion as part of this change.
+
+Before reusing an existing deployment, review its prior Core/backend inputs and
+preserve them explicitly when continued management is intended. A new default does
+not authorize changing a live app's backend. Runtime configuration, data movement,
+activation, retirement and removal of restore firewall rules remain separate actions.
 
 ## Opt-in offline runtime configuration check
 
@@ -70,7 +114,7 @@ the bounded deployment:
 az deployment group what-if --resource-group "$TARGET_RG" \
   --template-file infra/azure/ops-core/shared-postgres-target.bicep \
   --parameters @"$PRIVATE_PARAMS"
-az deployment group create --resource-group "$TARGET_RG" \
+az deployment group create --mode Incremental --resource-group "$TARGET_RG" \
   --template-file infra/azure/ops-core/shared-postgres-target.bicep \
   --parameters @"$PRIVATE_PARAMS"
 ```
@@ -97,7 +141,8 @@ stopped target still incurs storage and backup charges. Do not deploy either
 configuration as a permanent addition until measured total Azure spend fits the
 approved monthly ceiling with headroom.
 
-`postgresHosting` defaults to `{ mode: 'dedicated' }`, preserving two new servers.
+`postgresHosting` defaults to `{ mode: 'dedicated' }`: one new Ops server by default,
+or two servers when Core is explicitly enabled.
 For explicit reuse set `{ mode: 'existing-shared', resourceGroupName: '<existing-group>',
 serverName: '<existing-pg18>' }`; see `existing-shared.parameters.example.json`.
 The discriminated, closed parameter type requires both names and accepts no subscription
@@ -111,10 +156,10 @@ SKU/login/network/restore-IP inputs have no effect on the retained server. Each 
 `temporaryRestoreFirewallName` output is null in this mode.
 
 Hosting creates one shared PostgreSQL private endpoint and DNS zone group in its new
-private-endpoint subnet. Both domain outputs bind that same endpoint/server and include
+private-endpoint subnet. Each enabled domain output binds that same endpoint/server and includes
 `postgresServerResourceGroupName`. Separate domain identities, runtime vaults, object
-stores and migration custody remain unchanged. Select PostgreSQL shared state separately
-for each domain if Redis is not wanted; server sharing does not implicitly change it.
+stores are created only for enabled domains; migration custody remains unchanged.
+Shared state defaults to PostgreSQL independently of server sharing.
 
 In each retained Azure target binding, set `postgres.resourceGroupName` to the
 existing server's group and bind its exact `resourceId`, `host`, `major: 18` and
@@ -133,7 +178,8 @@ server's serialized maintenance procedure; these templates deliberately cannot o
 close that window. The target guard must still prove public access Disabled and all
 firewall rules removed before activation.
 
-Full restore promotes separate `corgtex_ops` and `corgtex_core` databases only after
+For enabled domains, full restore promotes `corgtex_ops` and optional `corgtex_core`
+databases only after
 collision and OID/owner checks. Do not precreate these databases or overwrite retained
 foundation databases. Use distinct domain SQL credentials and verify cross-database
 isolation; separate vaults and managed identities do not grant SQL isolation automatically.
@@ -176,15 +222,16 @@ prove a monthly average or the whole-estate budget. Qualify representative runs,
 the pending resource retirements, shared PostgreSQL and production workload
 before enabling this profile or claiming savings.
 
-Local template checks (Bicep must already be installed):
+Template checks on an authorized runner (standalone Bicep must already be installed;
+no Azure account or provider request is used):
 
 ```sh
 node --test infra/azure/ops-core/infra.node-test.mjs
 ```
 
-## Optional PostgreSQL shared state
+## PostgreSQL shared state and optional Redis
 
-`opsSharedStateBackend` and `coreSharedStateBackend` accept `redis` (the unchanged default) or `postgres`, independently. A PostgreSQL domain provisions no Redis instance or Redis private endpoint; the shared Redis DNS zone is omitted when both domains choose PostgreSQL. Each domain still has its own database, identity, secrets and object store. This choice does not resize applications or change the PostgreSQL SKU automatically.
+`opsSharedStateBackend` and `coreSharedStateBackend` accept `postgres` (the default) or explicit `redis`, independently. The shared domain module also defaults to PostgreSQL. A PostgreSQL domain provisions no Redis instance or Redis private endpoint; shared Redis DNS exists only when an enabled domain selects Redis. Each enabled domain still has its own database binding, identity, secrets and object store. This choice does not resize applications or change the PostgreSQL SKU automatically.
 
 Incremental redeployment with PostgreSQL selected does not delete previously created Redis resources. Retire any existing Redis instance, endpoint and unused DNS only after an accepted state transition and recovery check; omission alone produces no saving on those existing resources.
 
@@ -215,8 +262,9 @@ Retained cache/upload ciphertext inherits database-backup retention. Pending upl
   access. Custody receives no user-delegation role.
 
 No secrets are created, returned, or embedded in examples. In dedicated mode, supply
-valid separate PostgreSQL admin passwords through protected deployment inputs. Empty
-defaults only allow existing-shared mode to omit these creation-only secrets; they are
+a valid PostgreSQL admin password for each enabled domain through protected deployment
+inputs. Empty defaults allow existing-shared mode or disabled Core to omit these
+creation-only secrets; they are
 not usable dedicated-server passwords. The example uses references to
 an existing bootstrap vault, which must support ARM secret references; it cannot
 reference the vaults being created in the same initial deployment. These templates
@@ -242,13 +290,14 @@ backing resources or compiling this template proves none of those live condition
 ## Local validation and handoff
 
 ```sh
-az bicep build --file infra/azure/ops-core/main.bicep --stdout > /dev/null
+bicep build infra/azure/ops-core/main.bicep --stdout --no-restore > /dev/null
 ```
 
 The checked-in example is intentionally not deployable until its identity/resource
 references are resolved. Deployment requires an independently authorized identity
 with resource creation and scoped role-assignment permissions. Outputs identify the
-environment, VNet/subnets/DNS, each domain's identity/vault/storage/PG/Redis endpoints,
+environment, VNet/subnets/DNS, each enabled domain's identity/vault/storage/PG endpoints,
+optional Redis endpoints, the explicit disabled-Core state,
 and the separate custody resources. They contain no passwords or Redis keys.
 
 Official schemas checked for this topology:

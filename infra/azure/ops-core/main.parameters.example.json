@@ -2,15 +2,24 @@
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
   "contentVersion": "1.0.0.0",
   "parameters": {
-    "location": { "value": "westus3" },
-    "namePrefix": { "value": "corgtex-prod" },
+    "location": {
+      "value": "westus3"
+    },
+    "namePrefix": {
+      "value": "corgtex-prod"
+    },
     "existingAcrResourceId": {
       "value": "/subscriptions/<subscription-id>/resourceGroups/<registry-group>/providers/Microsoft.ContainerRegistry/registries/<existing-registry>"
     },
-    "migrationOperatorPrincipalId": { "value": "<github-oidc-service-principal-object-id>" },
-    "postgresAdministratorLogin": { "value": "corgtexadmin" },
-    "opsPostgresSkuName": { "value": "Standard_D2ds_v5" },
-    "corePostgresSkuName": { "value": "Standard_D2ds_v5" },
+    "migrationOperatorPrincipalId": {
+      "value": "<github-oidc-service-principal-object-id>"
+    },
+    "postgresAdministratorLogin": {
+      "value": "corgtexadmin"
+    },
+    "opsPostgresSkuName": {
+      "value": "Standard_D2ds_v5"
+    },
     "opsPostgresAdministratorPassword": {
       "reference": {
         "keyVault": {
@@ -19,20 +28,26 @@
         "secretName": "ops-target-postgres-admin-password"
       }
     },
-    "corePostgresAdministratorPassword": {
-      "reference": {
-        "keyVault": {
-          "id": "/subscriptions/<subscription-id>/resourceGroups/<bootstrap-secrets-group>/providers/Microsoft.KeyVault/vaults/<bootstrap-vault>"
-        },
-        "secretName": "core-target-postgres-admin-password"
-      }
+    "opsPostgresPublicNetworkAccess": {
+      "value": "Disabled"
     },
-    "opsPostgresPublicNetworkAccess": { "value": "Disabled" },
-    "corePostgresPublicNetworkAccess": { "value": "Disabled" },
-    "opsTemporaryRestoreIpv4": { "value": "" },
-    "coreTemporaryRestoreIpv4": { "value": "" },
-    "vnetAddressPrefix": { "value": "10.84.0.0/24" },
-    "containerAppsSubnetPrefix": { "value": "10.84.0.0/27" },
-    "privateEndpointsSubnetPrefix": { "value": "10.84.0.32/27" }
+    "opsTemporaryRestoreIpv4": {
+      "value": ""
+    },
+    "vnetAddressPrefix": {
+      "value": "10.84.0.0/24"
+    },
+    "containerAppsSubnetPrefix": {
+      "value": "10.84.0.0/27"
+    },
+    "privateEndpointsSubnetPrefix": {
+      "value": "10.84.0.32/27"
+    },
+    "enableCore": {
+      "value": false
+    },
+    "opsSharedStateBackend": {
+      "value": "postgres"
+    }
   }
 }
