@@ -87,17 +87,3 @@ export async function loadRelevantMemories(params: {
   return listAgentMemories(params.actor, params.workspaceId, { agentKey: params.agentKey, take: params.limit ?? 10 });
 }
 
-export async function deleteAgentMemory(actor: AppActor, params: {
-  workspaceId: string;
-  memoryId: string;
-}) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-
-  const memory = await prisma.agentMemory.findUnique({
-    where: { id: params.memoryId },
-    select: { workspaceId: true },
-  });
-  invariant(memory && memory.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Memory not found.");
-
-  return prisma.agentMemory.delete({ where: { id: params.memoryId } });
-}
