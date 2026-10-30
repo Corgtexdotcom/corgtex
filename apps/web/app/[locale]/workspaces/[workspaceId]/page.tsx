@@ -583,16 +583,6 @@ export default async function WorkspaceDashboard({
               key={tile.href}
               href={tile.href}
               className="nr-home-attention-tile"
-              aria-label={hasPersonalCount
-                ? t("attentionTileAria", {
-                  label: tile.label,
-                  personal: personalLabel,
-                  total: totalLabel,
-                })
-                : t("attentionTileTotalAria", {
-                  label: tile.label,
-                  total: totalLabel,
-                })}
             >
               <span className="nr-home-attention-title">{tile.label}</span>
               <span className={`nr-home-attention-metrics ${hasPersonalCount ? "" : "nr-home-attention-metrics-single"}`}>
