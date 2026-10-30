@@ -282,19 +282,100 @@ GitHub token through Key Vault and `OPS_GITHUB_TOKEN` secretRef, preserve
 `OPS_GITHUB_REPOSITORY`, and set `OPS_CREATE_GITHUB_ISSUES=true`. Transfer existing
 control-plane credentials only if the source actually uses them.
 
-Fence the Railway `*/15 * * * *` schedule and wait for any running execution to
-finish before enabling Azure `Schedule` with `*/15 * * * *` (UTC), parallelism 1,
-completion count 1, retry limit 0 and timeout 600 seconds. Parallelism is per
-execution, not a global singleton; do not manually start overlapping runs. Do not
-leave both providers active. Prove target/result parity and authorized incident
-create/dedupe/resolve behavior, then observe two scheduled executions. Check health
-findings and incident publication separately: a published health incident can exit
-successfully, so exit status alone does not prove healthy targets.
+### Exclusive publisher handoff
 
-Recovery: set Azure back to Manual, stop/drain active executions, then restore
-Railway scheduling. Preserve issue dedupe keys and evidence. Reapplying the monitor
-bootstrap template disables active monitoring and removes credentials, so use it
-only for preparation or an intentional coordinated deactivation.
+Before capturing the baseline, establish and verify a coordinator-owned external
+change freeze that prevents manual Railway source deployments/restarts and
+configuration changes outside the recorded handoff. Cover every human/API writer
+and retain the freeze's owner, enforcement and verification evidence privately.
+Keep it effective for the entire period Azure may publish, including uncertain
+drain or recovery. The source-fence adapter reports manual-deploy prevention as
+`UNPROVEN`; disabled automatic triggers, an empty drain check and periodic readback
+do not replace this freeze. If it cannot be established, verified or maintained,
+stop: keep Azure Manual and do not activate or accept an exclusive Azure publisher.
+If verification fails while Azure is scheduled, enter recovery: set Azure Manual
+and verify its drain without resuming Railway or lifting the freeze.
+This requirement does not authorize new access or permission changes.
+
+Retain a private recovery baseline before changing either provider: exact source
+project/environment/service and source link, effective/configured/file cron,
+autodeploy and image-update policies, current deployment/instance IDs, image digest,
+command/arguments, target array, repository and credential bindings. Keep raw
+configuration and credentials out of Git, CLI arguments and public evidence.
+`deploy/railway.ops-monitor.toml` still declares the source cron; clearing a schedule
+alone is not a fence against a later source deployment or an inherited file setting.
+
+Use the existing `scripts/migration/railway-source-fence.mjs` adapter through the
+coordinator's durable operation journal, scoped to **only the monitor service**.
+Do not invoke the Ops/Core migration controller or activate a new Core runtime to
+move this job. Before effects, capture and validate the adapter's recovery baseline
+at an idle boundary: every baseline service must have empty `activeDeploymentIds`,
+and retained completed scheduled deployments must be proven stopped. Preserve the
+expected source-link digests. If the deployment inventory changes between capture
+and fencing, stop and reconcile; do not silently adopt a new baseline after effects.
+File-only cron without a proven exact restore path is a stop condition, not
+permission to guess a provider override.
+
+Fence source autodeploy, applicable source image updates, and the Railway
+`*/15 * * * *` schedule. Require fresh readback of null configured/effective cron
+and `nextCronRunAt`, disabled automatic deploy/update triggers, no unrelated staged
+or pending work, and a complete deployment/instance inventory. Wait for running
+executions to finish; stop/cancel them only within the authorized handoff. Require
+stopped deployments and no live instances or queued deployments before Azure
+activation. A `SUCCESS` deployment status alone does not establish this drain.
+Retain the source link and recovery configuration; do not delete the service.
+
+Then enable Azure `Schedule` with `*/15 * * * *` (UTC), parallelism 1, completion
+count 1, retry limit 0 and timeout 600 seconds. Read back that configuration,
+immutable image, command without `--dry-run`, issue-writing setting, repository,
+targets and approved secret references. Parallelism is per execution, not a global
+singleton. Incident lookup/create is not an atomic cross-provider lock: stable
+dedupe keys protect sequential checks, not concurrent publishers. Do not manually
+start overlapping runs, leave both providers active, or retry an uncertain start
+or incident publication before reconciling its actual provider/issue state.
+
+Keep a private acceptance ledger with these distinct results:
+
+- Approved probe parity for every source target, including expected status/JSON,
+  retry/timeout policy and any source control-plane coverage. A renamed target,
+  changed URL or missing coverage needs separate approval, not silent migration.
+- Authorized incident create and repeated-failure dedupe against the same issue,
+  followed by resolution after **three consecutive healthy checks**. A new failure
+  must reset recovery; preserve existing issue identities and recovery labels.
+- Two distinct **scheduled**, completed Azure execution IDs after the source fence,
+  with start/end times, accepted image/configuration, logs, each target's result and
+  incident-publication outcome. Exclude manual executions, duplicate log records,
+  overlaps and executions from an older configuration. Recheck the source fence.
+
+A published health incident can exit successfully, so a successful execution is
+not proof that targets are healthy. Two scheduled executions prove cadence and
+operation only; they do not replace incident recovery evidence or a separately
+required crash-free observation window. Missing/ambiguous provenance, target drift,
+unresolved publication errors or an overlapping publisher blocks acceptance.
+
+Recovery: set Azure back to Manual and verify it, stop/drain all active executions,
+then restore only the retained Railway trigger policies after proving no Azure
+publisher remains. Restore the idle baseline's triggers only; do not restart a
+completed scheduled deployment to satisfy recovery, because that would replay its
+monitor/incident work. If Azure drain is uncertain, do not restore Railway
+scheduling or lift the external manual-deployment/configuration freeze. Release
+that freeze only after proving no Azure publisher remains and completing the
+recorded source recovery or an explicitly coordinated end to the publisher window.
+Reconcile any uncertain issue write before resuming; never blindly
+replay it.
+Preserve issue dedupe keys and evidence. Reapplying the monitor bootstrap template
+disables active monitoring and removes credentials, so use it only for preparation
+or an intentional coordinated deactivation.
+
+The offline regression checks below use synthetic provider/HTTP fixtures; they do
+not disable a source schedule, provision Azure, publish real incidents or establish
+live cutover acceptance:
+
+```sh
+node --test scripts/migration/railway-source-fence.node-test.mjs
+node --test infra/azure/hosting/monitor.node-test.mjs
+npx vitest run --project unit scripts/ops/ops-core.test.mjs scripts/ops/github-incident.test.mjs scripts/ops/customer-readiness-sweep.test.mjs
+```
 
 Azure references: [jobs and scheduling](https://learn.microsoft.com/azure/container-apps/jobs)
 and [Consumption billing](https://learn.microsoft.com/azure/container-apps/billing).
