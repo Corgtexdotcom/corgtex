@@ -12,6 +12,112 @@ const githubIncidentPath = fileURLToPath(new URL("./github-incident.mjs", import
 const healthSweepPath = fileURLToPath(new URL("./health-sweep.mjs", import.meta.url));
 
 describe("github-incident resolved issue sync", () => {
+  it("reports recovered token-backed reads separately from healthy targets", async () => {
+    let lists = 0;
+    const server = createServer((request, response) => {
+      if (request.url.startsWith("/repos/")) {
+        lists += 1;
+        if (lists === 1) { request.socket.destroy(); return; }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end("[]");
+      } else {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end('{"status":"ok"}');
+      }
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const baseUrl = `http://127.0.0.1:${server.address().port}`;
+      const result = await runNodeScript(healthSweepPath, [], null, {
+        ...process.env,
+        OPS_CREATE_GITHUB_ISSUES: "true",
+        OPS_HEALTH_TARGETS_JSON: JSON.stringify([{ name: "site", url: `${baseUrl}/health`, attempts: 1 }]),
+        OPS_CONTROL_PLANE_CUSTOMERS_JSON: "[]",
+        GITHUB_API_URL: baseUrl,
+        OPS_GITHUB_TOKEN: "synthetic-token",
+        OPS_GITHUB_REPOSITORY: "test/repo",
+      });
+      expect(result.code, result.stderr).toBe(0);
+      expect(lists).toBe(3);
+      const output = JSON.parse(result.stdout);
+      expect(output.results[0].ok).toBe(true);
+      expect(output.githubSync).toMatchObject({ status: "complete", exitCode: 0 });
+      expect(output.publishedIncidents).toBe(0);
+      expect(result.stderr).toContain('"readRetries":1');
+    } finally { await new Promise((resolve) => server.close(resolve)); }
+  });
+
+  it.each([401, 403, 429, 503])("keeps healthy targets visible while API sync HTTP %s fails", async (status) => {
+    let lists = 0;
+    const server = createServer((request, response) => {
+      const github = request.url.startsWith("/repos/");
+      if (github) lists += 1;
+      response.writeHead(github ? status : 200, { "content-type": "application/json", ...(status === 429 ? { "retry-after": "300" } : {}) });
+      response.end(github ? '{"message":"synthetic failure"}' : '{"status":"ok"}');
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const baseUrl = `http://127.0.0.1:${server.address().port}`;
+      const result = await runNodeScript(healthSweepPath, [], null, {
+        ...process.env,
+        OPS_CREATE_GITHUB_ISSUES: "true", OPS_CONTROL_PLANE_CUSTOMERS_JSON: "[]",
+        OPS_HEALTH_TARGETS_JSON: JSON.stringify([{ name: "site", url: `${baseUrl}/health`, attempts: 1 }]),
+        GITHUB_API_URL: baseUrl, OPS_GITHUB_TOKEN: "synthetic-token", OPS_GITHUB_REPOSITORY: "test/repo",
+      });
+      expect(result.code).toBe(1);
+      const output = JSON.parse(result.stdout);
+      expect(output.results[0].ok).toBe(true);
+      expect(output.incidents).toEqual([]);
+      expect(output.githubSync).toMatchObject({ status: "degraded", exitCode: 1 });
+      expect(output.plannedIncidents).toBe(0);
+      expect(output.publishedIncidents).toBeNull();
+      expect(lists).toBe(status === 503 ? 3 : 1);
+      expect(result.stderr).toContain('"status":"degraded"');
+      expect(result.stderr).not.toContain("synthetic-token");
+    } finally { await new Promise((resolve) => server.close(resolve)); }
+  });
+
+  it.each([true, false])("never resends an uncertain issue creation (readback=%s)", async (visible) => {
+    let created;
+    let writes = 0;
+    const server = createServer(async (request, response) => {
+      const url = new URL(request.url, "http://localhost");
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+      if (request.method === "POST" && url.pathname.endsWith("/issues")) {
+        writes += 1;
+        created = { ...body, number: 42, html_url: "https://github.test/issues/42" };
+        request.socket.destroy(); return;
+      }
+      response.writeHead(request.method === "POST" ? 201 : 200, { "content-type": "application/json" });
+      if (url.pathname.endsWith("/labels")) response.end(JSON.stringify(body));
+      else response.end(JSON.stringify(visible && url.searchParams.get("state") === "all" ? [created] : []));
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const result = await runNodeScript(githubIncidentPath, [], [{ dedupeKey: "synthetic-unknown", severity: "P2", service: "ops", status: "failed", summary: "Synthetic incident" }], {
+        ...process.env, GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`,
+        OPS_GITHUB_TOKEN: "synthetic-token", OPS_GITHUB_REPOSITORY: "test/repo",
+      });
+      expect(writes).toBe(1);
+      expect(result.code, result.stderr).toBe(visible ? 0 : 1);
+      expect(created.body).toContain("corgtex-ops-operation:");
+      expect(result.stderr).toContain(visible ? '"reconciledWrites":1' : '"outcome":"unknown"');
+    } finally { await new Promise((resolve) => server.close(resolve)); }
+  });
+
+  it("does not fall back to gh on partially configured API credentials", async () => {
+    const result = await runNodeScript(githubIncidentPath, ["--sync-resolved"], [], {
+      ...process.env, OPS_GITHUB_TOKEN: "synthetic-token", GITHUB_TOKEN: "",
+      OPS_GITHUB_REPOSITORY: "", GITHUB_REPOSITORY: "", GH_BIN: "/nonexistent/gh",
+    });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("requires both token and repository");
+    expect(result.stderr).toContain('"status":"degraded"');
+    expect(result.stderr).not.toContain("synthetic-token");
+  });
+
   it("routes GitHub writes through the canonical Corgtex builder config", async () => {
     const incident = [{
       dedupeKey: "builder-config-routing",
@@ -113,14 +219,14 @@ describe("github-incident resolved issue sync", () => {
         const label = url.searchParams.get("labels");
         reply(200, record.closed || !labelNames(record).includes(label) ? [] : [record]);
       } else if (request.method === "POST" && url.pathname.endsWith("/labels")) {
-        reply(201, { name: body.name });
+        reply(201, { name: body.name, color: body.color });
       } else if (request.method === "PATCH" && url.pathname.endsWith("/issues/21")) {
         if (body.labels) record.labels = body.labels.map((name) => ({ name }));
-        if (body.state === "closed") record.closed = true;
+        if (body.state === "closed") { record.closed = true; record.state = body.state; record.state_reason = body.state_reason; }
         reply(200, record);
       } else if (request.method === "POST" && url.pathname.endsWith("/issues/21/comments")) {
         record.closeComment = body.body;
-        reply(201, { html_url: "http://github.test/comment" });
+        reply(201, { id: 777, body: body.body, html_url: "http://github.test/comment" });
       } else {
         reply(404, { message: "Unexpected request" });
       }
@@ -817,6 +923,10 @@ describe("github-incident resolved issue sync", () => {
 
       expect(result.code).toBe(1);
       expect(result.stderr).toContain("simulated issue list failure");
+      const output = JSON.parse(result.stdout);
+      expect(output.results.every((result) => result.ok)).toBe(true);
+      expect(output.githubSync).toMatchObject({ status: "degraded", exitCode: 1 });
+      expect(output.publishedIncidents).toBeNull();
     } finally {
       await server.close();
     }
