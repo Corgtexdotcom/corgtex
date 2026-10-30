@@ -10,7 +10,8 @@ describe("Goals page source", () => {
   });
 
   it("uses the shared versioned edit form only for Goal content edits", () => {
-    const editForms = source.match(/<WorkItemEditForm[\s\S]*?<\/WorkItemEditForm>/g) ?? [];
+    const editor = readFileSync(new URL("./GoalEditor.tsx", import.meta.url), "utf8");
+    const editForms = editor.match(/<WorkItemEditForm[\s\S]*?<\/WorkItemEditForm>/g) ?? [];
     const editForm = editForms.find((form) => form.includes('name="title"')) ?? "";
 
     expect(editForm).toContain("action={editGoalFormAction}");
