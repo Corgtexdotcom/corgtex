@@ -1668,10 +1668,78 @@ describe("Slack context jobs", () => {
     const { runSlackProactiveScan } = await import("./slack-context");
     await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" });
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.deleteMany).not.toHaveBeenCalled();
     expect(prismaMock.communicationEntityLink.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ action: "proactive_unanswered_nudge_pending", createdAt: new Date("2026-04-29T21:00:00Z") }),
       data: { action: "proactive_unanswered_nudge_sending" },
     }));
+  });
+
+  it.each(["proof", "suppression", "policy", "thread"])("releases an unsent claim after the final %s guard rejects and retries successfully", async (guard) => {
+    const source = candidate({ text: "Can someone confirm the launch date?" });
+    const claim = { id: "owned-claim", createdAt: new Date() };
+    const error = new Error("synthetic final guard failure");
+    let claimed = false;
+    prismaMock.communicationMessage.findMany.mockResolvedValue([source]);
+    prismaMock.communicationEntityLink.create.mockImplementation(async () => {
+      if (claimed) throw { code: "P2002" };
+      claimed = true;
+      return claim;
+    });
+    prismaMock.communicationEntityLink.updateMany.mockImplementationOnce(async () => {
+      const failingGuard = guard === "proof" ? proofReadableMock
+        : guard === "suppression" ? isSlackThreadFollowupSuppressedMock
+        : guard === "policy" ? prismaMock.workspaceAgentConfig.findUnique : threadEvidenceMock;
+      failingGuard.mockRejectedValueOnce(error);
+      return { count: 1 };
+    });
+    prismaMock.communicationEntityLink.deleteMany.mockImplementation(async (query) => {
+      expect(query).toEqual({ where: {
+        id: claim.id, workspaceId: "workspace-1", claimKey: "slack-proactive-first-nudge:install-1:message-1",
+        action: "proactive_unanswered_nudge_sending", createdAt: claim.createdAt,
+      } });
+      expect(sendSlackMessageMock).not.toHaveBeenCalled();
+      claimed = false;
+      return { count: 1 };
+    });
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" })).rejects.toThrow(error);
+    expect(prismaMock.communicationEntityLink.deleteMany).toHaveBeenCalledTimes(1);
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" })).resolves.toMatchObject({ nudges: 1 });
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledTimes(2);
+    expect(sendSlackMessageMock).toHaveBeenCalledTimes(1);
+    expect(prismaMock.communicationEntityLink.deleteMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases only the reclaimed generation when a final guard rejects", async () => {
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([candidate({ text: "Can someone confirm the launch date?" })]);
+    prismaMock.communicationEntityLink.create.mockRejectedValueOnce({ code: "P2002" });
+    prismaMock.communicationEntityLink.findUnique.mockResolvedValueOnce({
+      id: "reclaimed-claim", action: "proactive_unanswered_nudge_pending", createdAt: new Date("2026-04-29T20:00:00Z"),
+    });
+    prismaMock.communicationEntityLink.updateMany.mockResolvedValueOnce({ count: 1 }).mockImplementationOnce(async () => {
+      proofReadableMock.mockRejectedValueOnce(new Error("synthetic final guard failure"));
+      return { count: 1 };
+    });
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" })).rejects.toThrow("synthetic final guard failure");
+    expect(prismaMock.communicationEntityLink.deleteMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.communicationEntityLink.deleteMany).toHaveBeenCalledWith({ where: {
+      id: "reclaimed-claim", workspaceId: "workspace-1", claimKey: "slack-proactive-first-nudge:install-1:message-1",
+      action: "proactive_unanswered_nudge_sending", createdAt: new Date("2026-04-29T21:00:00Z"),
+    } });
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("does not release a sending claim when the transition outcome is unknown", async () => {
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([candidate({ text: "Can someone confirm the launch date?" })]);
+    prismaMock.communicationEntityLink.updateMany.mockRejectedValueOnce(new Error("synthetic transition failure"));
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1" })).rejects.toThrow("synthetic transition failure");
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.deleteMany).not.toHaveBeenCalled();
   });
 
   it("retains the sending claim after an ambiguous Slack send failure", async () => {

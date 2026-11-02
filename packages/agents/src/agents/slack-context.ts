@@ -1136,6 +1136,7 @@ export async function runSlackProactiveScan(params: {
       if (reclaimed.count !== 1) continue;
       claim = { id: existingClaim.id, createdAt: reclaimedAt };
     }
+    let ownsUnsentSendingClaim = false;
     try {
       const currentSource = await prisma.communicationMessage.findFirst({
         where: {
@@ -1162,6 +1163,7 @@ export async function runSlackProactiveScan(params: {
         data: { action: PROACTIVE_NUDGE_SENDING },
       });
       if (sendClaim.count !== 1) continue;
+      ownsUnsentSendingClaim = true;
       if (!responseStillUseful()) {
         // This worker just won the transition and has not initiated Slack. Only
         // its exact unsent claim can be released. Never do this after an API call.
@@ -1179,6 +1181,7 @@ export async function runSlackProactiveScan(params: {
         await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_SENDING, createdAt: claim.createdAt } });
         continue;
       }
+      ownsUnsentSendingClaim = false;
       await sendSlackMessage(params.installationId, {
         channel: candidate.externalChannelId,
         threadTs,
@@ -1188,6 +1191,12 @@ export async function runSlackProactiveScan(params: {
         text: { type: "mrkdwn", text: "Bringing this back into view in case it still needs attention." },
       }]);
     } catch (error) {
+      if (ownsUnsentSendingClaim) {
+        // A final guard failed before Slack was initiated. Release only this
+        // worker's exact claim so a later scan can retry the reviewed request.
+        await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey, action: PROACTIVE_NUDGE_SENDING, createdAt: claim.createdAt } });
+        throw error;
+      }
       // A timed-out Slack call may still be retried by the SDK or have succeeded.
       // Keep the sending claim until Slack history can prove its outcome.
       if (isSlackInvalidAuthError(error)) {
