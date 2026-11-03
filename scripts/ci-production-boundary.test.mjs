@@ -157,7 +157,13 @@ describe("automatic production CI boundary", () => {
     expect(tests.env.DATABASE_URL).toBe(jobs["check-native"].env.DATABASE_URL);
     expect(tests.steps.filter(step => step.run?.includes("vitest run")).map(step => step.run))
       .toEqual(["npx vitest run --project unit --project integration --shard ${{ matrix.shard }}/3"]);
-    expect(jobs["check-native"].steps.some(step => step.run?.includes("vitest run"))).toBe(false);
+    // A supplemental bounded regression check must not replace or duplicate the
+    // full projects above, and cannot opt out of normal failure propagation.
+    expect(jobs["check-native"].steps.filter(step => step.run?.includes("vitest run"))).toEqual([{
+      name: "Test bounded Ops GitHub synchronization",
+      "timeout-minutes": 5,
+      run: "npx vitest run --project unit scripts/ops/github-api.test.mjs scripts/ops/github-incident.test.mjs scripts/ci-production-boundary.test.mjs",
+    }]);
     expect(tests.steps.at(-1)).toMatchObject({if: "always()", run: "docker rm --force --volumes corgtex-ci-postgres || true"});
   });
 
