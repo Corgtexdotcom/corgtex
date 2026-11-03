@@ -24,10 +24,6 @@ const ACCESS_LEVEL_RANK: Record<ModuleAccessLevel, number> = {
   write: 2,
 };
 
-export function accessLevelRank(level: ModuleAccessLevel): number {
-  return ACCESS_LEVEL_RANK[level];
-}
-
 /** Returns the higher of two access levels. */
 export function maxAccessLevel(a: ModuleAccessLevel, b: ModuleAccessLevel): ModuleAccessLevel {
   return ACCESS_LEVEL_RANK[a] >= ACCESS_LEVEL_RANK[b] ? a : b;
@@ -38,7 +34,7 @@ export function isAtLeast(level: ModuleAccessLevel, required: ModuleAccessLevel)
 }
 
 /** Is the module available at the org level (its opt-in flag is on, or it has none)? */
-export function isModuleEnabled(mod: ModuleManifest, flags: Record<string, boolean>): boolean {
+function isModuleEnabled(mod: ModuleManifest, flags: Record<string, boolean>): boolean {
   if (!mod.featureFlag) return true;
   return Boolean(flags[mod.featureFlag.flag]);
 }
