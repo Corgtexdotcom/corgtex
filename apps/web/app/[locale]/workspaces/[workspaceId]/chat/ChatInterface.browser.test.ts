@@ -801,18 +801,23 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     expect(await error().count()).toBe(0);
   });
 
-  it("keeps uncertain-send recovery available after collapsing and reopening the actual rail", async () => {
-    await configure(page, { rail: true }); await load(); await startSend("Rail uncertain draft", 1);
-    await streamAction(page, 1, "stream"); await finishUncommitted(page, 1);
-    await requestAt(2); await reply(page, 2, { conversation: conversation("a") });
-    await page.getByRole("button", { name: "Collapse AI rail", exact: true }).click();
-    await page.getByRole("button", { name: "Open AI rail", exact: true }).click();
-    expect(await error().innerText()).toContain("may already be saved");
-    await restoreDraft(); expect(await input().inputValue()).toBe("Rail uncertain draft");
-    expect(await requests(page)).toHaveLength(3);
-    await mkdir(".artifacts/personal-chat", { recursive: true });
-    await page.screenshot({ path: ".artifacts/personal-chat/rail-uncertain-restored.png", fullPage: true });
-  });
+  for (const recovery of ["restore", "discard"] as const) {
+    it(`keeps uncertain-send recovery available after collapsing and reopening the actual rail to ${recovery}`, async () => {
+      await configure(page, { rail: true }); await load(); await startSend("Rail uncertain draft", 1);
+      await streamAction(page, 1, "stream"); await finishUncommitted(page, 1);
+      await requestAt(2); await reply(page, 2, { conversation: conversation("a") });
+      await page.getByRole("button", { name: "Collapse AI rail", exact: true }).click();
+      await page.getByRole("button", { name: "Open AI rail", exact: true }).click();
+      expect(await error().innerText()).toContain("may already be saved");
+      if (recovery === "restore") await restoreDraft();
+      else await page.getByRole("button", { name: "Discard draft", exact: true }).click();
+      expect(await input().isEnabled()).toBe(true);
+      expect(await input().inputValue()).toBe(recovery === "restore" ? "Rail uncertain draft" : "");
+      expect(await error().count()).toBe(0); expect(await requests(page)).toHaveLength(3);
+      await mkdir(".artifacts/personal-chat", { recursive: true });
+      await page.screenshot({ path: `.artifacts/personal-chat/rail-uncertain-${recovery}.png`, fullPage: true });
+    });
+  }
 
   it("does not let an empty-conversation starter overwrite an uncertain retained draft", async () => {
     const empty = { ...conversation("a"), turns: [] };

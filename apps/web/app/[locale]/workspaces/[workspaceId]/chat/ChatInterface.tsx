@@ -133,7 +133,7 @@ export function ChatInterface({
   const questionRevisionRef = useRef(0);
   const questionRefreshRef = useRef<string | null>(null);
   const [questionRefreshTick, setQuestionRefreshTick] = useState(0);
-  const [, updateCreationState] = useState(0);
+  const [, updateDraftState] = useState(0);
   const draftSessionRef = useRef(activeSessionId);
   const draftRef = useRef<ChatDraft>({ input: "", attachedFile: null });
   const workspaceRef = useRef(workspaceId);
@@ -189,6 +189,7 @@ export function ChatInterface({
     setInput(draft.uncertainSend ? "" : draft.input);
     setAttachedFile(draft.uncertainSend ? null : draft.attachedFile);
     if (fileInputRef.current) fileInputRef.current.value = "";
+    updateDraftState(value => value + 1);
   }, [initialCompanyQuestions]);
 
   const acknowledgeDraftRead = useCallback((id: string) => {
@@ -713,7 +714,7 @@ export function ChatInterface({
                   if (draftSessionRef.current === id) draftRef.current = next;
                 }
               } else attempt.uncertain = true;
-              if (workspaceRef.current === workspaceId && questionWritesRef.current === generation) updateCreationState(value => value + 1);
+              if (workspaceRef.current === workspaceId && questionWritesRef.current === generation) updateDraftState(value => value + 1);
               throw new Error(rejected && error instanceof Error ? error.message : UNCERTAIN_CREATION);
             }
           })();
