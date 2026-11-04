@@ -615,16 +615,6 @@ jobs:
               import { healthPayloadMismatch, healthReleaseValidationMismatch } from "./scripts/railway-smoke.mjs";
               const health = JSON.parse(fs.readFileSync(0, "utf8"));
               const expected = process.env.EXPECTED_BAKED_SHA;
-              if (!expected) {
-                const { opsHealthEvidence } = await import("./scripts/ops-public-health.mjs");
-                console.error(opsHealthEvidence({ ok: true }, health).reason);
-                // Report only observed metadata. Never substitute the CI SHA or
-                // synthesize release labels for an older Ops runtime.
-                console.log(health?.release?.gitSha ?? "");
-                console.log(health?.release?.imageTag ?? "");
-                console.log(health?.release?.version ?? "");
-                process.exit(0);
-              }
               if (expected && (!/^[a-f0-9]{40}$/.test(expected)
                 || healthPayloadMismatch({ ok: true }, health)
                 || healthReleaseValidationMismatch(health, expected, { requireConfiguredMatch: true })
@@ -650,7 +640,7 @@ jobs:
           } <<< "$selfserve_release"
           test "$selfserve_git_sha" = "$SELFSERVE_VALIDATION_EXPECTED_SHA"
 
-          ops_release="$(read_health_release "https://ops.corgtex.com/api/health")"
+          ops_release="$(node scripts/ops-public-health.mjs)"
           {
             read -r ops_git_sha || true
             read -r ops_image_tag || true
