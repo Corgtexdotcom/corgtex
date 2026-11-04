@@ -252,10 +252,47 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     await configure(page, { workspaceId: "beta" });
     await reply(page, 0, { message: "Synthetic attachment stored", webUrl: "/synthetic-file" });
     expect((await requests(page)).length).toBe(1);
-    expect((await requests(page))[0].aborted).toBe(true);
+    expect((await requests(page))[0].aborted).toBe(false);
     expect(await input().inputValue()).toBe("");
     expect(await page.locator(".chat-attachment-bar").count()).toBe(0);
     expect(await input().isEnabled()).toBe(true);
+  });
+
+  for (const responseWhileAway of [false, true]) {
+    it(`reuses an in-flight attachment when returning to its draft ${responseWhileAway ? "after" : "before"} its response`, async () => {
+      await load(); await input().fill("Upload once across navigation");
+      await page.locator('input[type="file"]').setInputFiles({ name: "once.txt", mimeType: "text/plain", buffer: Buffer.from("Synthetic once") });
+      await send().click(); await requestAt(1);
+      await load("b", 2);
+      expect((await requests(page))[1].aborted).toBe(false);
+      if (responseWhileAway) await reply(page, 1, { message: "Stored once", webUrl: "/synthetic-once" });
+      expect(await messages().innerText()).toContain("Answer b");
+      await load("a", 3); await send().click();
+      if (!responseWhileAway) {
+        await page.evaluate(() => window.__chatFixture.settle());
+        expect((await requests(page)).length).toBe(4);
+        await reply(page, 1, { message: "Stored once", webUrl: "/synthetic-once" });
+      }
+      const post = await requestAt(4);
+      expect(post.url).toBe("/api/workspaces/alpha/conversations/a");
+      expect(JSON.parse(post.body!).message).toContain("/synthetic-once");
+      expect((await requests(page)).filter(request => request.url.endsWith("/attachments"))).toHaveLength(1);
+      await streamAction(page, 4, "stream"); await streamAction(page, 4, "chunk", 'data: {"text":"Stored answer"}\n\n'); await streamAction(page, 4, "finish");
+    });
+  }
+
+  it("does not replay an attachment when the upload response is lost", async () => {
+    await input().fill("Keep this draft");
+    await page.locator('input[type="file"]').setInputFiles({ name: "uncertain.txt", mimeType: "text/plain", buffer: Buffer.from("Synthetic uncertain") });
+    await send().click(); await requestAt(0);
+    await page.evaluate(() => { window.__chatFixture.reject(0); return window.__chatFixture.settle(); });
+    expect(await error().innerText()).toContain("may already be saved");
+    expect(await input().inputValue()).toBe("Keep this draft");
+    expect(await page.locator(".chat-attachment-bar").innerText()).toContain("uncertain.txt");
+    await send().click(); await page.evaluate(() => window.__chatFixture.settle());
+    expect((await requests(page))).toHaveLength(1);
+    await page.getByRole("button", { name: "Remove attachment", exact: true }).click();
+    await send().click(); expect((await requestAt(1)).url).toBe("/api/workspaces/alpha/conversations");
   });
 
   for (const text of ["Use uploaded attachment", ""]) {
@@ -317,6 +354,30 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     await requestAt(4);
     await reply(page, 4, { conversation: conversation("q") });
     expect(await input().inputValue()).toBe("Company question draft");
+  });
+
+  it("preserves the selected transcript, export and draft when company-question loading fails", async () => {
+    await configure(page, { questions: true }); await load(); await input().fill("Existing draft");
+    await page.locator(".chat-unread-question-open").click(); await requestAt(1);
+    expect(await messages().innerText()).toContain("Answer a");
+    await reply(page, 1, { error: "Synthetic question load failed" }, 503);
+    expect(await messages().innerText()).toContain("Answer a");
+    expect(await input().inputValue()).toBe("Existing draft");
+    expect(await page.locator(".chat-session-item.active").innerText()).toContain("Synthetic a");
+    expect(new URL(page.url()).searchParams.get("session")).toBe("a");
+    expect(await page.getByText("Save to Brain", { exact: true }).count()).toBe(1);
+    expect(await error().innerText()).toContain("Failed to load conversation");
+  });
+
+  it("restores the draft and keeps committed history when question loading interrupts an uncommitted stream then fails", async () => {
+    await configure(page, { questions: true }); await load(); await startSend("Interrupted draft", 1);
+    await streamAction(page, 1, "stream"); await streamAction(page, 1, "chunk", 'data: {"text":"Uncommitted partial"}\n\n');
+    await page.locator(".chat-unread-question-open").click(); await requestAt(2);
+    await reply(page, 2, { error: "Synthetic question failure" }, 503);
+    expect(await input().inputValue()).toBe("Interrupted draft");
+    expect(await messages().innerText()).toContain("Answer a");
+    expect(await messages().innerText()).not.toContain("Uncommitted partial");
+    expect((await requests(page))[1].aborted).toBe(true);
   });
 
   it("ignores a company-question opening response after selecting a different chat", async () => {
@@ -603,11 +664,37 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     expect((await requests(page)).filter(request => request.url.endsWith("/chat/attachments"))).toHaveLength(1);
   });
 
-  it("removes the remapped answer and restores its draft if the stream fails after receipt", async () => {
+  it("reconciles the committed answer without restoring a resendable draft after stream failure", async () => {
     await load(); await startSend("Retry after receipt", 1); await committedSend(); await streamAction(page, 1, "fail");
-    expect(await input().inputValue()).toBe("Retry after receipt");
-    expect(await page.locator('[data-turn-id="persisted-a2"]').count()).toBe(0);
-    expect(await messages().innerText()).not.toContain("Streamed partial"); expect(await exports().count()).toBe(1);
+    expect((await requestAt(2)).method).toBe("GET"); await replyPersisted(2, persisted());
+    expect(await input().inputValue()).toBe(""); expect(await send().isDisabled()).toBe(true);
+    expect(await page.locator('[data-turn-id="persisted-a2"]').count()).toBe(1);
+    expect(await messages().innerText()).toContain("Persisted final answer");
+    expect(await messages().innerText()).not.toContain("Streamed partial"); expect(await exports().count()).toBe(2);
+    expect((await requests(page)).filter(request => request.method === "POST")).toHaveLength(1);
+  });
+
+  it("keeps a known committed attachment send from being reposted when canonical loading fails", async () => {
+    await load(); await input().fill("Committed attachment");
+    await page.locator('input[type="file"]').setInputFiles({ name: "committed.txt", mimeType: "text/plain", buffer: Buffer.from("Synthetic committed") });
+    await send().click(); await requestAt(1); await reply(page, 1, { message: "Stored file", webUrl: "/synthetic-committed" }); await requestAt(2);
+    await committedSend(2); await streamAction(page, 2, "fail"); await requestAt(3);
+    await reply(page, 3, { error: "Synthetic canonical read failed" }, 503);
+    expect(await input().inputValue()).toBe(""); expect(await send().isDisabled()).toBe(true);
+    expect(await page.locator(".chat-attachment-bar").count()).toBe(0);
+    expect(await exports().count()).toBe(1);
+    expect(await page.locator('[data-turn-id="persisted-a2"]').count()).toBe(1);
+    await select("a"); await requestAt(4); await replyPersisted(4, persisted());
+    expect(await messages().innerText()).toContain("Persisted final answer");
+    expect((await requests(page)).filter(request => request.method === "POST")).toHaveLength(2);
+  });
+
+  it("does not restore a known committed prompt when navigating away during canonical loading", async () => {
+    await load(); await startSend("Already committed", 1); await committedSend(); await streamAction(page, 1, "finish"); await requestAt(2);
+    await load("b", 3); await select("a"); await requestAt(4); await replyPersisted(4, persisted());
+    await reply(page, 2, { conversation: persisted() });
+    expect(await input().inputValue()).toBe(""); expect(await send().isDisabled()).toBe(true);
+    expect((await requests(page)).filter(request => request.method === "POST")).toHaveLength(1);
   });
 
   it("rejects a current load or commit read whose conversation identity does not match its route", async () => {
@@ -615,7 +702,8 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     expect(await exports().count()).toBe(0); expect(await messages().innerText()).not.toContain("Answer b");
     await load("a", 1); await startSend("Mismatched commit read", 2); await committedSend(2); await streamAction(page, 2, "finish"); await requestAt(3);
     await reply(page, 3, { conversation: conversation("b") });
-    expect(await input().inputValue()).toBe("Mismatched commit read"); expect(await messages().innerText()).not.toContain("Answer b");
+    expect(await input().inputValue()).toBe(""); expect(await send().isDisabled()).toBe(true);
+    expect(await messages().innerText()).not.toContain("Answer b");
     expect(await exports().count()).toBe(1);
   });
 });

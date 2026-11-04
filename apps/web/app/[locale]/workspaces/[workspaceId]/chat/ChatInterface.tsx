@@ -47,6 +47,7 @@ type ChatRequest = {
 };
 
 type ChatDraft = { input: string; attachedFile: File | null; uploadedMessage?: string };
+type UploadResult = { status?: string; message?: string; webUrl?: string | null };
 
 function renderAssistantMarkdown(markdown: string) {
   const escaped = markdown
@@ -104,6 +105,7 @@ export function ChatInterface({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const requestRef = useRef<ChatRequest | null>(null);
   const draftsRef = useRef(new Map<string | null, ChatDraft>());
+  const uploadsRef = useRef(new WeakMap<File, Promise<UploadResult>>());
   const draftSessionRef = useRef(activeSessionId);
   const draftRef = useRef<ChatDraft>({ input: "", attachedFile: null });
   const workspaceRef = useRef(workspaceId);
@@ -152,6 +154,7 @@ export function ChatInterface({
     if (workspaceRef.current === workspaceId) return;
     workspaceRef.current = workspaceId;
     draftsRef.current.clear();
+    uploadsRef.current = new WeakMap();
     selectDraft(activeSessionId);
     setConversations(initialConversations);
     setCompanyQuestions(initialCompanyQuestions);
@@ -305,11 +308,11 @@ export function ChatInterface({
 
   async function openCompanyQuestion(question: CompanyQuestionSummary) {
     const request = beginRequest();
+    selectDraft(sessionId);
+    setTurns(previous => previous.filter(turn => !turn.id.startsWith("pending-")));
     setLoading(true);
     setError(null);
     setErrorAction(null);
-    setTurns([]);
-    setExportContext(null);
     setShowMobileHistory(false);
     setEditingTopic(false);
     try {
@@ -460,27 +463,41 @@ export function ChatInterface({
 
       if (attachedFile && draftRef.current.uploadedMessage === undefined) {
         try {
-          const formData = new FormData();
-          formData.append("file", attachedFile);
-          formData.append("title", attachedFile.name);
-          formData.append("source", "chat-upload");
-          if (userMessage) formData.append("message", userMessage);
-          const uploadRes = await fetch(`/api/workspaces/${workspaceId}/chat/attachments`, {
-            method: "POST",
-            body: formData,
-            signal: request.controller.signal,
-          });
-          if (!isCurrentRequest(request)) return;
-          const uploadData = await uploadRes.json().catch(() => ({})) as {
-            status?: string;
-            message?: string;
-            webUrl?: string | null;
-          };
-          if (!isCurrentRequest(request)) return;
-          if (!uploadRes.ok) {
-            throw new Error(uploadData.message || t("errorFailedToSend"));
+          const file = attachedFile;
+          const uploads = uploadsRef.current;
+          let upload = uploads.get(file);
+          if (!upload) {
+            // An upload can already be ingested when chat navigation occurs.
+            // Keep its outcome independently of the cancelled chat request;
+            // revisiting this File must await/reuse that same upload.
+            upload = (async () => {
+              const formData = new FormData();
+              formData.append("file", file);
+              formData.append("title", file.name);
+              formData.append("source", "chat-upload");
+              if (userMessage) formData.append("message", userMessage);
+              const uncertain = () => new Error("The upload may already be saved. Check Brain before attaching the file again.");
+              let response: Response;
+              try {
+                response = await fetch(`/api/workspaces/${workspaceId}/chat/attachments`, { method: "POST", body: formData });
+              } catch {
+                // Retain this rejected attempt rather than silently replaying a
+                // write whose response was lost. Reattaching is explicit.
+                throw uncertain();
+              }
+              const data = await response.json().catch(() => { throw uncertain(); }) as UploadResult;
+              if (!response.ok) {
+                uploads.delete(file);
+                throw new Error(data.message || t("errorFailedToSend"));
+              }
+              return data;
+            })();
+            uploads.set(file, upload);
           }
+          const uploadData = await upload;
+          if (!isCurrentRequest(request)) return;
           if (uploadData.status === "needs_clarification" || uploadData.status === "needs_meeting_details") {
+            uploads.delete(file);
             const uploadMessage = uploadData.message || "Please add the missing meeting details and send again.";
             setError(uploadMessage);
             setErrorAction(uploadData.webUrl
@@ -586,6 +603,30 @@ export function ChatInterface({
       setTurns((prev) => [...prev, optimisticTurn]);
       let displayedTurnId = optimisticTurn.id;
       let committedTurnId: string | null = null;
+      let reconciliationStarted = false;
+      let shouldRefreshCurrentRoute = false;
+
+      const reconcileCommittedTurn = async () => {
+        reconciliationStarted = true;
+        const committedResponse = await fetch(`/api/workspaces/${workspaceId}/conversations/${currentSessionId}`, { signal: request.controller.signal });
+        if (!isCurrentRequest(request)) return;
+        if (!committedResponse.ok) throw new Error(t("errorFailedToLoad"));
+        const committedData = await committedResponse.json();
+        if (!isCurrentRequest(request)) return;
+        const persistedTurns = committedData.conversation?.turns as Turn[] | undefined;
+        const persistedTurn = Array.isArray(persistedTurns)
+          ? persistedTurns.find(turn => turn.id === committedTurnId && turn.assistantMessage) : undefined;
+        if (committedData.conversation?.id !== currentSessionId || !Array.isArray(persistedTurns) || !persistedTurn) {
+          throw new Error(t("errorFailedToLoad"));
+        }
+        setTurns(persistedTurns);
+        setExportContext({ workspaceId, conversationId: currentSessionId, turns: persistedTurns });
+        setConversations(previous => previous.map(conversation => conversation.id === currentSessionId
+          ? { ...conversation, lastMessage: persistedTurn.assistantMessage.slice(0, 100),
+            topic: conversation.topic || userMessage.slice(0, 60), updatedAt: new Date().toISOString() }
+          : conversation));
+        if (shouldRefreshCurrentRoute || answeredQuestionId) router.refresh();
+      };
 
       try {
         const res = await fetch(`/api/workspaces/${workspaceId}/conversations/${currentSessionId}`, {
@@ -613,7 +654,6 @@ export function ChatInterface({
         const decoder = new TextDecoder();
         let assistantMessage = "";
         let buffer = "";
-        let shouldRefreshCurrentRoute = false;
 
         const updatePendingTurn = (nextMessage: string) => {
           if (!isCurrentRequest(request)) return;
@@ -643,6 +683,11 @@ export function ChatInterface({
                   displayedTurnId = committed.id;
                   committedTurnId = committed.id;
                   setTurns(previous => previous.map(turn => turn.id === pendingId ? { ...turn, ...committed } : turn));
+                  // This prompt is now persisted, including its upload reference.
+                  // It must not become a resendable draft after navigation or a
+                  // later stream/read failure.
+                  updateInput("");
+                  removeAttachment();
                 }
                 if (payload.topic) {
                   setConversations((prev) =>
@@ -679,46 +724,28 @@ export function ChatInterface({
         consumeBuffer();
 
         if (committedTurnId) {
-          // The receipt carries identity only. Read the persisted answer and
-          // transcript through the existing authorized route before exporting.
-          const committedResponse = await fetch(`/api/workspaces/${workspaceId}/conversations/${currentSessionId}`, { signal: request.controller.signal });
-          if (!isCurrentRequest(request)) return;
-          if (!committedResponse.ok) throw new Error(t("errorFailedToLoad"));
-          const committedData = await committedResponse.json();
-          if (!isCurrentRequest(request)) return;
-          const persistedTurns = committedData.conversation?.turns as Turn[] | undefined;
-          if (committedData.conversation?.id !== currentSessionId || !Array.isArray(persistedTurns)
-            || !persistedTurns.some(turn => turn.id === committedTurnId && turn.assistantMessage)) {
-            throw new Error(t("errorFailedToLoad"));
-          }
-          setTurns(persistedTurns);
-          setExportContext({ workspaceId, conversationId: currentSessionId, turns: persistedTurns });
-          assistantMessage = persistedTurns.find(turn => turn.id === committedTurnId)!.assistantMessage;
+          await reconcileCommittedTurn();
         } else {
           throw new Error(t("errorStreamUnavailable"));
         }
 
-        updateInput("");
-        removeAttachment();
-        setConversations((prev) =>
-          prev.map((conversation) =>
-            conversation.id === currentSessionId
-              ? {
-                  ...conversation,
-                  lastMessage: assistantMessage.slice(0, 100) || null,
-                  topic: conversation.topic || userMessage.slice(0, 60),
-                  updatedAt: new Date().toISOString(),
-                }
-              : conversation
-          )
-        );
-        if (shouldRefreshCurrentRoute) {
-          router.refresh();
-        } else if (answeredQuestionId) {
-          router.refresh();
-        }
       } catch (err) {
         if (!isCurrentRequest(request)) return;
+        if (committedTurnId) {
+          if (!reconciliationStarted) {
+            try {
+              await reconcileCommittedTurn();
+              return;
+            } catch { /* Keep the committed row and reload without reposting. */ }
+          }
+          if (isCurrentRequest(request)) {
+            setError(t("errorFailedToLoad"));
+            setErrorAction({ message: t("errorFailedToLoad"),
+              href: `/workspaces/${workspaceId}/chat?session=${encodeURIComponent(currentSessionId)}`,
+              label: t("conversationsTitle") });
+          }
+          return;
+        }
         setError(err instanceof Error ? err.message : t("errorFailedToSend"));
         updateInput(submittedDraft.input);
         setTurns((prev) => prev.filter((turn) => turn.id !== displayedTurnId));

@@ -20,6 +20,7 @@ export type ChatFixture = {
   refreshes: number;
   configure: (patch: { workspaceId?: string; activeSessionId?: string | null; rail?: boolean; mobileMode?: boolean; questions?: boolean }) => void;
   reply: (id: number, value: unknown, status?: number) => void;
+  reject: (id: number) => void;
   stream: (id: number) => void;
   chunk: (id: number, text: string) => void;
   bytes: (id: number, bytes: number[]) => void;
@@ -63,6 +64,7 @@ export async function startChatBrowserFixture(options: {
       import {WorkspaceChatRail} from ${JSON.stringify(rail)};
       const fixture = window.__chatFixture = {requests: [], canonicalReads: [], refreshes: 0};
       const pending = new Map();
+      const rejected = new Map();
       const streams = new Map();
       const conversations = new Map();
       const completions = new Map();
@@ -87,18 +89,19 @@ export async function startChatBrowserFixture(options: {
         options.signal?.addEventListener('abort', () => {request.aborted = true;}, {once: true});
         // Deliberately allow responses after abort: the UI must also reject stale
         // completions even if a transport or an already queued callback ignores it.
-        return new Promise(resolve => pending.set(request.id, resolve));
+        return new Promise((resolve, reject) => { pending.set(request.id, resolve); rejected.set(request.id, reject); });
       };
+      fixture.reject = id => { const reject = rejected.get(id); rejected.delete(id); pending.delete(id); reject(new TypeError('Synthetic network failure')); };
       fixture.reply = (id, value, status = 200) => {
         if (status === 200 && value.conversation) conversations.set(fixture.requests[id].url, value.conversation);
-        const resolve = pending.get(id); pending.delete(id);
+        const resolve = pending.get(id); pending.delete(id); rejected.delete(id);
         resolve(new Response(JSON.stringify(value), {status, headers: {'Content-Type': 'application/json'}}));
       };
       fixture.stream = id => {
         streamText.set(id, {text: '', decoder: new TextDecoder()});
         const stream = new ReadableStream({start(controller) {streams.set(id, controller);},
           cancel() {fixture.requests[id].canceled = true; streams.delete(id);}});
-        const resolve = pending.get(id); pending.delete(id);
+        const resolve = pending.get(id); pending.delete(id); rejected.delete(id);
         resolve(new Response(stream, {headers: {'Content-Type': 'text/event-stream'}}));
       };
       fixture.chunk = (id, text) => { const state = streamText.get(id); if (state) state.text += text; streams.get(id)?.enqueue(new TextEncoder().encode(text)); };
