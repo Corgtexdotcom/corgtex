@@ -208,7 +208,7 @@ describe.runIf(process.env.GOAL_EDITOR_BROWSER_QA === "1")("Goal editor browser 
   it("preserves an out-of-window parent on title edits and reset, while allowing an explicit unlink or replacement", async () => {
     await page.goto(origin + "/?limited=1");
     await openEdit("Goal A");
-    const parent = form().getByLabel("Parent goal", { exact: true });
+    const parent = form().getByLabel("Parent goal");
     expect(await parent.inputValue()).toBe("goal-parent");
     expect(await parent.locator("option:checked").textContent()).toBe("Unknown");
     await form().locator("input[name=title]").fill("Title-only edit");
