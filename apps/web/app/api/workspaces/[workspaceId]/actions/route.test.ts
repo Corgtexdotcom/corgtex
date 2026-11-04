@@ -463,6 +463,26 @@ describe("POST /api/workspaces/[workspaceId]/actions", () => {
     expect(readBoundary.admit).not.toHaveBeenCalled();
   });
 
+  it("withholds the created action when its canonical read is missing", async () => {
+    prisma.action.findFirst.mockResolvedValueOnce(null);
+    const { POST } = await import("./route");
+    const response = await POST(actionCreateRequest({ title: "Follow up" }), context());
+
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body).toEqual({
+      action: { id: "action-1", contentWithheld: true },
+      webUrl: "https://app.corgtex.com/workspaces/workspace-1/actions/action-1",
+      permanentUrl: null,
+    });
+    for (const field of ["title", "bodyMd", "status", "priority", "assigneeMemberId"]) {
+      expect(body.action).not.toHaveProperty(field);
+    }
+    expect(readBoundary.admit).not.toHaveBeenCalled();
+    expect(loadAdviceRequestCountSummaries).not.toHaveBeenCalled();
+    expect(readBoundary.finish).not.toHaveBeenCalled();
+  });
+
   it("returns only the id and contentWithheld when the created action is unreadable", async () => {
     readBoundary.admit.mockResolvedValueOnce({ ids: new Set(), roots: [], heads: new Map() });
     const { POST } = await import("./route");
@@ -555,6 +575,23 @@ describe("PATCH /api/workspaces/[workspaceId]/actions/[actionId]", () => {
         version: 3,
       },
     });
+  });
+
+  it.each(["missing", "denied"] as const)("characterizes a %s canonical read after action update", async outcome => {
+    if (outcome === "missing") prisma.action.findFirst.mockResolvedValueOnce(null);
+    else readBoundary.admit.mockResolvedValueOnce({ ids: new Set(), roots: [], heads: new Map() });
+    const { PATCH } = await import("./[actionId]/route");
+    const response = await PATCH(actionPatchRequest({ priority: 3, expectedVersion: 2 }), {
+      params: Promise.resolve({ workspaceId: "workspace-1", actionId: "action-1" }),
+    });
+
+    expect(updateAction).toHaveBeenCalledOnce();
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toEqual({ action: { id: "action-1", contentWithheld: true } });
+    if (outcome === "missing") expect(readBoundary.admit).not.toHaveBeenCalled();
+    expect(loadAdviceRequestCountSummaries).not.toHaveBeenCalled();
+    expect(readBoundary.finish).not.toHaveBeenCalled();
   });
 
   it("preserves date-only due date updates", async () => {
