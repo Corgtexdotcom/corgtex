@@ -1230,7 +1230,7 @@ export function ChatInterface({
             <div ref={messagesEndRef} />
           </div>
 
-          {(error || uncertainDraft) && (
+          {(error || (!loading && uncertainDraft)) && (
             <div className="form-message form-message-error" style={{ margin: "0 16px 8px" }}>
               <span>{error ?? (uncertainDraft?.kind === "question" ? UNCERTAIN_QUESTION : UNCERTAIN_SEND)}</span>
               {errorAction?.message === error ? (
