@@ -46,8 +46,23 @@ type ChatRequest = {
   reader: ReadableStreamDefaultReader<Uint8Array> | null;
 };
 
-type ChatDraft = { input: string; attachedFile: File | null; uploadedMessage?: string };
-type UploadResult = { status?: string; message?: string; webUrl?: string | null };
+type ChatDraft = {
+  input: string; attachedFile: File | null; uploadedMessage?: string;
+  uncertainSend?: {
+    kind: "send" | "question"; token: object; reconciled: boolean;
+    questionId?: string; questionPending?: boolean; questionsRevision?: number;
+  };
+};
+type UploadResult = { status?: string; message?: string; webUrl?: string | null; error?: { code?: string; message?: string } };
+
+const UNCERTAIN_SEND = "Your previous send may already be saved. Review this conversation before restoring the draft; sending it again may create a duplicate.";
+const UNCERTAIN_QUESTION = "Your answer may already be saved. Reload questions and review this conversation before restoring the draft.";
+
+function knownApplicationRejection(status: number, body: unknown) {
+  const error = body && typeof body === "object" ? (body as { error?: unknown }).error : null;
+  return [400, 401, 403, 404, 409, 413, 415, 422].includes(status)
+    && error !== null && typeof error === "object" && typeof (error as { code?: unknown }).code === "string";
+}
 
 function renderAssistantMarkdown(markdown: string) {
   const escaped = markdown
@@ -106,6 +121,11 @@ export function ChatInterface({
   const requestRef = useRef<ChatRequest | null>(null);
   const draftsRef = useRef(new Map<string | null, ChatDraft>());
   const uploadsRef = useRef(new WeakMap<File, Promise<UploadResult>>());
+  const questionWritesRef = useRef(new Set<string>());
+  const questionSnapshotRef = useRef(initialCompanyQuestions);
+  const questionRevisionRef = useRef(0);
+  const questionRefreshRef = useRef<string | null>(null);
+  const [questionRefreshTick, setQuestionRefreshTick] = useState(0);
   const draftSessionRef = useRef(activeSessionId);
   const draftRef = useRef<ChatDraft>({ input: "", attachedFile: null });
   const workspaceRef = useRef(workspaceId);
@@ -143,10 +163,57 @@ export function ChatInterface({
     draftSessionRef.current = id;
     const draft = draftsRef.current.get(id) ?? { input: "", attachedFile: null };
     draftRef.current = draft;
-    setInput(draft.input);
-    setAttachedFile(draft.attachedFile);
+    setInput(draft.uncertainSend ? "" : draft.input);
+    setAttachedFile(draft.uncertainSend ? null : draft.attachedFile);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }, []);
+
+  const acknowledgeDraftRead = useCallback((id: string) => {
+    const draft = draftsRef.current.get(id);
+    if (!draft?.uncertainSend) return undefined;
+    if (draft.uncertainSend.kind === "question") return "question";
+    const reconciled = { ...draft, uncertainSend: { ...draft.uncertainSend, reconciled: true } };
+    draftsRef.current.set(id, reconciled);
+    if (draftSessionRef.current === id) draftRef.current = reconciled;
+    return "send";
+  }, []);
+
+  function restoreDraft() {
+    if (!draftRef.current.uncertainSend?.reconciled) return;
+    const questionId = draftRef.current.uncertainSend.questionId;
+    if (questionId) {
+      const stillOffered = initialCompanyQuestions.some(question => question.id === questionId);
+      if (stillOffered) questionWritesRef.current.delete(questionId);
+      setCompanyQuestions(initialCompanyQuestions.filter(question => !questionWritesRef.current.has(question.id)));
+      setActiveQuestionId(stillOffered ? questionId : null);
+    }
+    const restored = { ...draftRef.current, uncertainSend: undefined };
+    draftsRef.current.set(draftSessionRef.current, restored);
+    selectDraft(draftSessionRef.current);
+    setError(null);
+    setErrorAction(null);
+  }
+
+  function discardDraft() {
+    const questionId = draftRef.current.uncertainSend?.questionId;
+    if (questionId) setActiveQuestionId(previous => previous === questionId ? null : previous);
+    draftsRef.current.set(draftSessionRef.current, { input: "", attachedFile: null });
+    selectDraft(draftSessionRef.current);
+    setError(null);
+    setErrorAction(null);
+  }
+
+  function refreshQuestionsWhenIdle() {
+    if (workspaceRef.current !== workspaceId) return;
+    questionRefreshRef.current = workspaceId;
+    setQuestionRefreshTick(previous => previous + 1);
+  }
+
+  useEffect(() => {
+    if (loading || requestRef.current || questionRefreshRef.current !== workspaceId) return;
+    questionRefreshRef.current = null;
+    router.refresh();
+  }, [loading, questionRefreshTick, router, workspaceId]);
 
   useEffect(() => () => cancelRequest(), [workspaceId, cancelRequest]);
 
@@ -155,6 +222,10 @@ export function ChatInterface({
     workspaceRef.current = workspaceId;
     draftsRef.current.clear();
     uploadsRef.current = new WeakMap();
+    questionWritesRef.current = new Set();
+    questionSnapshotRef.current = initialCompanyQuestions;
+    questionRevisionRef.current = 0;
+    questionRefreshRef.current = null;
     selectDraft(activeSessionId);
     setConversations(initialConversations);
     setCompanyQuestions(initialCompanyQuestions);
@@ -236,7 +307,8 @@ export function ChatInterface({
         );
       });
       setSessionId(id);
-      setError(null);
+      const uncertain = acknowledgeDraftRead(id);
+      setError(uncertain === "question" ? UNCERTAIN_QUESTION : uncertain ? UNCERTAIN_SEND : null);
     } catch {
       if (!isCurrentRequest(request)) return;
       setError(t("errorFailedToLoad"));
@@ -246,7 +318,7 @@ export function ChatInterface({
         setLoading(false);
       }
     }
-  }, [t, workspaceId, beginRequest, isCurrentRequest, selectDraft]);
+  }, [t, workspaceId, beginRequest, isCurrentRequest, selectDraft, acknowledgeDraftRead]);
 
   useEffect(() => {
     if (activeSessionId) {
@@ -262,8 +334,23 @@ export function ChatInterface({
   }, [activeSessionId, loadConversation, cancelRequest, selectDraft]);
 
   useEffect(() => {
-    setCompanyQuestions(initialCompanyQuestions);
-  }, [initialCompanyQuestions]);
+    if (questionSnapshotRef.current !== initialCompanyQuestions) {
+      questionSnapshotRef.current = initialCompanyQuestions;
+      questionRevisionRef.current++;
+      for (const [id, draft] of draftsRef.current) {
+        const uncertain = draft.uncertainSend;
+        if (uncertain?.kind === "question" && !uncertain.questionPending
+          && (uncertain.questionsRevision ?? 0) < questionRevisionRef.current) {
+          const reconciled = { ...draft, uncertainSend: { ...uncertain, reconciled: true } };
+          draftsRef.current.set(id, reconciled);
+          if (draftSessionRef.current === id) draftRef.current = reconciled;
+        }
+      }
+    }
+    setCompanyQuestions(initialCompanyQuestions.filter(question => !questionWritesRef.current.has(question.id)));
+    if (activeQuestionId && !questionWritesRef.current.has(activeQuestionId)
+      && !initialCompanyQuestions.some(question => question.id === activeQuestionId)) setActiveQuestionId(null);
+  }, [initialCompanyQuestions, activeQuestionId]);
 
   function openNewConversation() {
     cancelRequest();
@@ -444,10 +531,10 @@ export function ChatInterface({
   }
 
   async function sendMessage() {
-    if ((!input.trim() && !attachedFile) || loading || requestRef.current) return;
+    if ((!input.trim() && !attachedFile) || loading || requestRef.current || draftRef.current.uncertainSend
+      || (activeQuestionId && questionWritesRef.current.has(activeQuestionId))) return;
 
     const request = beginRequest();
-    const submittedDraft = draftRef.current;
     setLoading(true);
     setError(null);
     setErrorAction(null);
@@ -487,8 +574,11 @@ export function ChatInterface({
               }
               const data = await response.json().catch(() => { throw uncertain(); }) as UploadResult;
               if (!response.ok) {
-                uploads.delete(file);
-                throw new Error(data.message || t("errorFailedToSend"));
+                if (knownApplicationRejection(response.status, data)) {
+                  uploads.delete(file);
+                  throw new Error(data.message || data.error?.message || t("errorFailedToSend"));
+                }
+                throw uncertain();
               }
               return data;
             })();
@@ -563,7 +653,39 @@ export function ChatInterface({
 
       const answeredQuestionId = activeQuestionId;
       if (answeredQuestionId) {
+        const questionWrites = questionWritesRef.current;
+        const questionToken = {};
+        questionWrites.add(answeredQuestionId);
+        setCompanyQuestions(previous => previous.filter(question => question.id !== answeredQuestionId));
+        draftRef.current = { ...draftRef.current, uncertainSend: {
+          kind: "question", token: questionToken, questionId: answeredQuestionId,
+          questionPending: true, questionsRevision: questionRevisionRef.current, reconciled: false,
+        } };
+        draftsRef.current.set(currentSessionId, draftRef.current);
+        const settleQuestionDraft = (uncertain: boolean) => {
+          if (questionWritesRef.current !== questionWrites || workspaceRef.current !== workspaceId) return;
+          const draft = draftsRef.current.get(currentSessionId);
+          if (!draft || !draft.uncertainSend || draft.uncertainSend.token !== questionToken) return;
+          const next = { ...draft, uncertainSend: uncertain ? {
+            ...draft.uncertainSend, questionPending: false,
+            questionsRevision: questionRevisionRef.current, reconciled: false,
+          } : undefined };
+          draftsRef.current.set(currentSessionId, next);
+          if (draftSessionRef.current === currentSessionId) {
+            draftRef.current = next;
+            setInput(uncertain ? "" : next.input);
+            setAttachedFile(uncertain ? null : next.attachedFile);
+            if (!uncertain) {
+              setError(previous => previous === UNCERTAIN_QUESTION ? null : previous);
+              setErrorAction(previous => previous?.message === UNCERTAIN_QUESTION ? null : previous);
+            }
+          }
+        };
+        let rejected = false;
         try {
+          // The answer write cannot be rolled back by changing chats. Track its
+          // receipt independently, while the canceled chain must stop before
+          // starting a conversation send or touching a different workspace.
           const response = await fetch(`/api/workspaces/${workspaceId}/check-ins`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -572,19 +694,29 @@ export function ChatInterface({
               responseMd: userMessage,
               relatedConversationId: currentSessionId,
             }),
-            signal: request.controller.signal,
           });
-          if (!isCurrentRequest(request)) return;
+          const data = await response.json().catch(() => null);
           if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            if (!isCurrentRequest(request)) return;
-            throw new Error(errorData.error || t("errorFailedToSend"));
+            rejected = knownApplicationRejection(response.status, data);
+            if (rejected) questionWrites.delete(answeredQuestionId);
+            throw new Error(data?.error?.message || t("errorFailedToSend"));
           }
-          setCompanyQuestions((prev) => prev.filter((question) => question.id !== answeredQuestionId));
-          setActiveQuestionId(null);
+          if (data?.checkIn?.id !== answeredQuestionId) throw new Error(t("errorFailedToSend"));
+          settleQuestionDraft(false);
+          if (!isCurrentRequest(request)) {
+            refreshQuestionsWhenIdle();
+            return;
+          }
+          setActiveQuestionId(previous => previous === answeredQuestionId ? null : previous);
         } catch (err) {
+          settleQuestionDraft(!rejected);
+          refreshQuestionsWhenIdle();
           if (!isCurrentRequest(request)) return;
-          setError(err instanceof Error ? err.message : t("errorFailedToSend"));
+          if (rejected) setError(err instanceof Error ? err.message : t("errorFailedToSend"));
+          else {
+            setError(UNCERTAIN_QUESTION);
+            setErrorAction(null);
+          }
           setLoading(false);
           return;
         }
@@ -605,6 +737,13 @@ export function ChatInterface({
       let committedTurnId: string | null = null;
       let reconciliationStarted = false;
       let shouldRefreshCurrentRoute = false;
+      let definitelyRejected = false;
+
+      // A canceled POST can commit without delivering its receipt. Preserve the
+      // draft but gate its recovery before issuing the write, not in stale UI
+      // cleanup. A read can show current history; it cannot prove non-commit.
+      draftRef.current = { ...draftRef.current, uncertainSend: { kind: "send", token: {}, reconciled: false } };
+      draftsRef.current.set(currentSessionId, draftRef.current);
 
       const reconcileCommittedTurn = async () => {
         reconciliationStarted = true;
@@ -616,16 +755,22 @@ export function ChatInterface({
         const persistedTurns = committedData.conversation?.turns as Turn[] | undefined;
         const persistedTurn = Array.isArray(persistedTurns)
           ? persistedTurns.find(turn => turn.id === committedTurnId && turn.assistantMessage) : undefined;
-        if (committedData.conversation?.id !== currentSessionId || !Array.isArray(persistedTurns) || !persistedTurn) {
+        if (committedData.conversation?.id !== currentSessionId || !Array.isArray(persistedTurns)
+          || (committedTurnId && !persistedTurn)) {
           throw new Error(t("errorFailedToLoad"));
         }
         setTurns(persistedTurns);
         setExportContext({ workspaceId, conversationId: currentSessionId, turns: persistedTurns });
+        acknowledgeDraftRead(currentSessionId);
+        const lastTurn = persistedTurn ?? persistedTurns.at(-1);
         setConversations(previous => previous.map(conversation => conversation.id === currentSessionId
-          ? { ...conversation, lastMessage: persistedTurn.assistantMessage.slice(0, 100),
+          ? { ...conversation, lastMessage: lastTurn?.assistantMessage?.slice(0, 100) || lastTurn?.userMessage?.slice(0, 100) || null,
             topic: conversation.topic || userMessage.slice(0, 60), updatedAt: new Date().toISOString() }
           : conversation));
-        if (shouldRefreshCurrentRoute || answeredQuestionId) router.refresh();
+        if (shouldRefreshCurrentRoute || answeredQuestionId) {
+          questionRefreshRef.current = null;
+          router.refresh();
+        }
       };
 
       try {
@@ -643,7 +788,8 @@ export function ChatInterface({
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
           if (!isCurrentRequest(request)) return;
-          throw new Error(errData.error || t("errorFailedToSend"));
+          definitelyRejected = knownApplicationRejection(res.status, errData);
+          throw new Error(errData.error?.message || (typeof errData.error === "string" ? errData.error : t("errorFailedToSend")));
         }
         if (!res.body) {
           throw new Error(t("errorStreamUnavailable"));
@@ -686,6 +832,7 @@ export function ChatInterface({
                   // This prompt is now persisted, including its upload reference.
                   // It must not become a resendable draft after navigation or a
                   // later stream/read failure.
+                  draftRef.current = { ...draftRef.current, uncertainSend: undefined };
                   updateInput("");
                   removeAttachment();
                 }
@@ -746,9 +893,19 @@ export function ChatInterface({
           }
           return;
         }
-        setError(err instanceof Error ? err.message : t("errorFailedToSend"));
-        updateInput(submittedDraft.input);
         setTurns((prev) => prev.filter((turn) => turn.id !== displayedTurnId));
+        if (definitelyRejected) {
+          draftRef.current = { ...draftRef.current, uncertainSend: undefined };
+          draftsRef.current.set(currentSessionId, draftRef.current);
+          selectDraft(currentSessionId);
+          setError(err instanceof Error ? err.message : t("errorFailedToSend"));
+        } else {
+          selectDraft(currentSessionId);
+          setError(UNCERTAIN_SEND);
+          try {
+            await reconcileCommittedTurn();
+          } catch { /* Retain uncertainty; canonical reload remains explicit. */ }
+        }
       }
     } finally {
       request.reader?.releaseLock();
@@ -838,6 +995,9 @@ export function ChatInterface({
 
   const activeConversation = conversations.find((conversation) => conversation.id === sessionId) ?? null;
   const activeRoleOnboarding = activeConversation?.roleOnboarding ?? null;
+  const uncertainDraft = workspaceRef.current === workspaceId && draftSessionRef.current === sessionId
+    ? draftRef.current.uncertainSend : undefined;
+  const questionWritePending = Boolean(activeQuestionId && questionWritesRef.current.has(activeQuestionId));
 
   return (
     <div className={`${isFullScreen ? "chat-fullscreen" : "chat-layout"} ${mobileMode ? "chat-mobile-mode" : ""}`}>
@@ -1068,6 +1228,17 @@ export function ChatInterface({
                   <a href={errorAction.href}>{errorAction.label}</a>
                 </>
               ) : null}
+              {uncertainDraft && error !== (uncertainDraft.kind === "question" ? UNCERTAIN_QUESTION : UNCERTAIN_SEND)
+                && <p>{uncertainDraft.kind === "question" ? UNCERTAIN_QUESTION : UNCERTAIN_SEND}</p>}
+              {uncertainDraft && <div className="actions-inline" style={{ flexWrap: "wrap" }}>
+                <button type="button" className="secondary small" disabled={loading || Boolean(uncertainDraft.questionPending)} onClick={() => {
+                  if (uncertainDraft.kind === "question") refreshQuestionsWhenIdle();
+                  else if (sessionId) void loadConversation(sessionId);
+                }}>{uncertainDraft.kind === "question" ? "Reload questions" : "Reload conversation"}</button>
+                <button type="button" className="secondary small" disabled={loading || !uncertainDraft.reconciled
+                  || exportContext?.workspaceId !== workspaceId || exportContext?.conversationId !== sessionId} onClick={restoreDraft}>Restore draft</button>
+                <button type="button" className="secondary small" disabled={loading} onClick={discardDraft}>Discard draft</button>
+              </div>}
             </div>
           )}
 
@@ -1101,7 +1272,7 @@ export function ChatInterface({
               className="chat-upload-btn"
               title={t("titleAttachFile")}
               type="button"
-              disabled={loading}
+              disabled={loading || Boolean(uncertainDraft) || questionWritePending}
             >
               {t("btnAttach")}
             </button>
@@ -1113,7 +1284,7 @@ export function ChatInterface({
                 onKeyDown={handleKeyDown}
                 placeholder={t("placeholderTypeMessage")}
                 rows={1}
-                disabled={loading}
+                disabled={loading || Boolean(uncertainDraft) || questionWritePending}
                 className="chat-input"
                 style={{ width: "100%" }}
               />
@@ -1125,7 +1296,7 @@ export function ChatInterface({
             </div>
             <button
               onClick={() => void sendMessage()}
-              disabled={loading || (!input.trim() && !attachedFile)}
+              disabled={loading || Boolean(uncertainDraft) || questionWritePending || (!input.trim() && !attachedFile)}
               className="chat-send-btn"
               type="button"
             >

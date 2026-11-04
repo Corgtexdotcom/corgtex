@@ -83,6 +83,11 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     return request;
   }
 
+  async function restoreDraft() {
+    expect(await send().isDisabled()).toBe(true);
+    await page.getByRole("button", { name: "Restore draft", exact: true }).click();
+  }
+
   for (const staleFails of [false, true]) {
     it(`keeps the latest selection after an older load ${staleFails ? "fails" : "succeeds"}`, async () => {
       await select("a");
@@ -143,16 +148,19 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
         await streamAction(page, 1, "stream");
         await streamAction(page, 1, "chunk", 'data: {"text":"Partial answer"}\n\n');
         await streamAction(page, 1, "fail");
-      } else await reply(page, 1, { error: "Synthetic send failure" }, 503);
+        await requestAt(2); await replyPersisted(2, conversation("a"));
+        await restoreDraft();
+      } else await reply(page, 1, { error: { code: "INVALID_INPUT", message: "Synthetic send failure" } }, 400);
       expect(await input().isEnabled()).toBe(true);
       expect(await input().inputValue()).toBe("  Keep my\n  draft  ");
       expect(await page.locator(".chat-turn").count()).toBe(1);
-      expect(await error().count()).toBe(1);
+      expect(await error().count()).toBe(interruption === "stream" ? 0 : 1);
       await send().click();
-      expect((await requestAt(2)).url).toBe("/api/workspaces/alpha/conversations/a");
-      await streamAction(page, 2, "stream");
-      await streamAction(page, 2, "chunk", 'data: {"text":"Recovered"}\n\ndata: [DONE]\n\n');
-      await streamAction(page, 2, "finish");
+      const retry = interruption === "stream" ? 3 : 2;
+      expect((await requestAt(retry)).url).toBe("/api/workspaces/alpha/conversations/a");
+      await streamAction(page, retry, "stream");
+      await streamAction(page, retry, "chunk", 'data: {"text":"Recovered"}\n\ndata: [DONE]\n\n');
+      await streamAction(page, retry, "finish");
       expect(await error().count()).toBe(0);
       expect(await messages().innerText()).toContain("Recovered");
       expect(await page.locator(".chat-turn").count()).toBe(2);
@@ -229,12 +237,69 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     expect(await input().isEnabled()).toBe(true);
   });
 
+  for (const phase of ["post", "stream"] as const) {
+    it(`reconciles a canceled ${phase} without automatically restoring a duplicate-retry draft`, async () => {
+      await load(); await startSend("Possibly saved", 1);
+      if (phase === "stream") { await streamAction(page, 1, "stream"); await streamAction(page, 1, "chunk", 'data: {"text":"Partial"}\n\n'); }
+      await load("b", 2); await input().fill("B stays separate");
+      if (phase === "post") await streamAction(page, 1, "stream");
+      await finishUncommitted(page, 1);
+      expect(await input().inputValue()).toBe("B stays separate");
+      await select("a"); await requestAt(3);
+      const data = conversation("a"); data.turns.push({ id: "canonical-canceled", sequenceNumber: 2,
+        userMessage: "Possibly saved", assistantMessage: "Already persisted", createdAt: "2026-01-02T00:00:00.000Z" });
+      await replyPersisted(3, data);
+      expect(await messages().innerText()).toContain("Already persisted");
+      expect(await input().inputValue()).toBe(""); expect(await input().isDisabled()).toBe(true);
+      expect(await send().isDisabled()).toBe(true);
+      expect(await error().innerText()).toContain("may create a duplicate");
+      expect((await requests(page)).filter(request => request.method === "POST")).toHaveLength(1);
+      await mkdir(".artifacts/personal-chat", { recursive: true });
+      await page.screenshot({ path: `.artifacts/personal-chat/canceled-${phase}-recovery.png`, fullPage: true });
+      await page.getByRole("button", { name: "Discard draft", exact: true }).click();
+      expect(await input().isEnabled()).toBe(true); expect(await input().inputValue()).toBe("");
+      expect((await requests(page)).filter(request => request.method === "POST")).toHaveLength(1);
+    });
+  }
+
+  it("does not treat an unchanged canonical read as proof that a canceled send cannot commit later", async () => {
+    await load(); await startSend("Still uncertain", 1); await load("b", 2); await load("a", 3);
+    expect(await input().isDisabled()).toBe(true); expect(await send().isDisabled()).toBe(true);
+    await streamAction(page, 1, "stream"); await finishUncommitted(page, 1);
+    expect(await send().isDisabled()).toBe(true);
+    await restoreDraft(); expect(await input().inputValue()).toBe("Still uncertain");
+    expect((await requests(page)).filter(request => request.method === "POST")).toHaveLength(1);
+  });
+
+  it("requires explicit recovery after a gateway failure even when it carries an application-shaped error", async () => {
+    await load(); await startSend("Gateway outcome", 1);
+    await reply(page, 1, { error: { code: "SERVICE_UNAVAILABLE", message: "Synthetic gateway failure" } }, 503);
+    await requestAt(2); await replyPersisted(2, conversation("a"));
+    expect(await input().isDisabled()).toBe(true); expect(await send().isDisabled()).toBe(true);
+    await restoreDraft(); expect(await input().inputValue()).toBe("Gateway outcome");
+    expect((await requests(page)).filter(request => request.method === "POST")).toHaveLength(1);
+  });
+
+  it("retains the exact file and uploaded reference behind explicit canceled-send draft recovery", async () => {
+    await load(); await input().fill("  Exact canceled\n draft  ");
+    await page.locator('input[type="file"]').setInputFiles({ name: "canceled.txt", mimeType: "text/plain", buffer: Buffer.from("Synthetic canceled") });
+    await send().click(); await requestAt(1); await reply(page, 1, { message: "Uploaded once", webUrl: "/synthetic-canceled" }); await requestAt(2);
+    await load("b", 3); await load("a", 4);
+    expect(await input().isDisabled()).toBe(true); await restoreDraft();
+    expect(await input().inputValue()).toBe("  Exact canceled\n draft  ");
+    expect(await page.locator(".chat-attachment-bar").innerText()).toContain("canceled.txt");
+    await send().click(); const retry = await requestAt(5);
+    expect(retry.url).toBe("/api/workspaces/alpha/conversations/a");
+    expect(JSON.parse(retry.body!).message).toContain("/synthetic-canceled");
+    expect((await requests(page)).filter(request => request.url.endsWith("/attachments"))).toHaveLength(1);
+  });
+
   it("preserves text and the selected attachment when upload fails, without sending an incomplete prompt", async () => {
     await input().fill("Use this synthetic attachment");
     await page.locator('input[type="file"]').setInputFiles({ name: "draft.txt", mimeType: "text/plain", buffer: Buffer.from("Synthetic file") });
     await send().click();
     expect((await requestAt(0)).url).toBe("/api/workspaces/alpha/chat/attachments");
-    await reply(page, 0, { message: "Synthetic upload failed" }, 503);
+    await reply(page, 0, { error: { code: "VALIDATION_ERROR", message: "Synthetic upload failed" } }, 400);
     expect(await input().isEnabled()).toBe(true);
     expect(await input().inputValue()).toBe("Use this synthetic attachment");
     expect(await page.locator(".chat-attachment-bar").innerText()).toContain("draft.txt");
@@ -279,11 +344,13 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     });
   }
 
-  it("does not replay an attachment when the upload response is lost", async () => {
+  for (const failure of ["network", "gateway", "malformed"] as const) {
+  it(`does not replay an attachment after an ambiguous ${failure} outcome`, async () => {
     await input().fill("Keep this draft");
     await page.locator('input[type="file"]').setInputFiles({ name: "uncertain.txt", mimeType: "text/plain", buffer: Buffer.from("Synthetic uncertain") });
     await send().click(); await requestAt(0);
-    await page.evaluate(() => { window.__chatFixture.reject(0); return window.__chatFixture.settle(); });
+    if (failure === "network") await page.evaluate(() => { window.__chatFixture.reject(0); return window.__chatFixture.settle(); });
+    else await reply(page, 0, failure === "gateway" ? { message: "Synthetic gateway failure" } : undefined, failure === "gateway" ? 503 : 200);
     expect(await error().innerText()).toContain("may already be saved");
     expect(await input().inputValue()).toBe("Keep this draft");
     expect(await page.locator(".chat-attachment-bar").innerText()).toContain("uncertain.txt");
@@ -292,6 +359,7 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     await page.getByRole("button", { name: "Remove attachment", exact: true }).click();
     await send().click(); expect((await requestAt(1)).url).toBe("/api/workspaces/alpha/conversations");
   });
+  }
 
   for (const text of ["Use uploaded attachment", ""]) {
     it(`retains an uploaded reference after send failure for ${text ? "text and file" : "attachment-only"} retry`, async () => {
@@ -302,7 +370,7 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
       expect((await requestAt(1)).url).toBe("/api/workspaces/alpha/chat/attachments");
       await reply(page, 1, { message: "Synthetic upload ready", webUrl: "/synthetic-file" });
       const first = await requestAt(2);
-      await reply(page, 2, { error: "Synthetic post-upload failure" }, 503);
+      await reply(page, 2, { error: { code: "INVALID_INPUT", message: "Synthetic post-upload failure" } }, 400);
       expect(await input().inputValue()).toBe(text);
       expect(await send().isEnabled()).toBe(true);
       expect(await page.locator(".chat-attachment-bar").innerText()).toContain("retry.txt");
@@ -372,10 +440,67 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     await streamAction(page, 1, "stream"); await streamAction(page, 1, "chunk", 'data: {"text":"Uncommitted partial"}\n\n');
     await page.locator(".chat-unread-question-open").click(); await requestAt(2);
     await reply(page, 2, { error: "Synthetic question failure" }, 503);
-    expect(await input().inputValue()).toBe("Interrupted draft");
     expect(await messages().innerText()).toContain("Answer a");
     expect(await messages().innerText()).not.toContain("Uncommitted partial");
     expect((await requests(page))[1].aborted).toBe(true);
+    expect(await input().isDisabled()).toBe(true);
+    await load("a", 3); await restoreDraft();
+    expect(await input().inputValue()).toBe("Interrupted draft");
+  });
+
+  it("removes a persisted question answer after navigation without sending into or changing the new chat", async () => {
+    await configure(page, { questions: true }); await page.locator(".chat-unread-question-open").click(); await requestAt(0);
+    await reply(page, 0, { conversation: conversation("q") }); await input().fill("Saved company answer"); await send().click();
+    expect((await requestAt(1)).url).toBe("/api/workspaces/alpha/check-ins");
+    await load("b", 2); await input().fill("Unrelated B draft");
+    await reply(page, 1, { checkIn: { id: "question", status: "ANSWERED" } });
+    expect(await page.locator(".chat-unread-question-open").count()).toBe(0);
+    expect(await input().inputValue()).toBe("Unrelated B draft");
+    expect(await messages().innerText()).toContain("Answer b"); expect((await requests(page))).toHaveLength(3);
+    expect(await refreshes(page)).toBe(1);
+    await configure(page, { questions: false }); await configure(page, { questions: true });
+    expect(await page.locator(".chat-unread-question-open").count()).toBe(0);
+    await select("q"); await requestAt(3); await reply(page, 3, { conversation: conversation("q") });
+    expect(await input().inputValue()).toBe("Saved company answer");
+  });
+
+  it("does not apply an old answer receipt to another workspace's question list or draft", async () => {
+    await configure(page, { questions: true }); await page.locator(".chat-unread-question-open").click(); await requestAt(0);
+    await reply(page, 0, { conversation: conversation("q") }); await input().fill("Alpha answer"); await send().click(); await requestAt(1);
+    await configure(page, { workspaceId: "beta", activeSessionId: "c" }); await requestAt(2); await reply(page, 2, { conversation: conversation("c") });
+    await input().fill("Beta draft"); await reply(page, 1, { checkIn: { id: "question", status: "ANSWERED" } });
+    expect(await page.locator(".chat-unread-question-open").count()).toBe(1);
+    expect(await input().inputValue()).toBe("Beta draft"); expect(await refreshes(page)).toBe(0);
+    expect(await messages().innerText()).toContain("Answer c");
+  });
+
+  for (const stillOpen of [false, true]) {
+    it(`reconciles questions before explicit recovery of an uncertain answer when the question is ${stillOpen ? "open" : "absent"}`, async () => {
+      await configure(page, { questions: true }); await page.locator(".chat-unread-question-open").click(); await requestAt(0);
+      await reply(page, 0, { conversation: conversation("q") }); await input().fill("Uncertain company answer"); await send().click(); await requestAt(1);
+      await reply(page, 1, { message: "Synthetic gateway timeout" }, 503);
+      expect(await input().isDisabled()).toBe(true); expect(await send().isDisabled()).toBe(true);
+      expect(await page.getByRole("button", { name: "Restore draft", exact: true }).isDisabled()).toBe(true);
+      expect(await page.locator(".chat-unread-question-open").count()).toBe(0);
+      await mkdir(".artifacts/personal-chat", { recursive: true });
+      await page.screenshot({ path: `.artifacts/personal-chat/uncertain-question-${stillOpen}.png`, fullPage: true });
+      // A fresh server-prop snapshot after router.refresh; absence does not
+      // establish whether this request committed, so recovery stays explicit.
+      await configure(page, { questions: false }); if (stillOpen) await configure(page, { questions: true });
+      await restoreDraft(); expect(await input().inputValue()).toBe("Uncertain company answer");
+      expect((await requests(page))).toHaveLength(2); await send().click();
+      expect((await requestAt(2)).url).toBe(stillOpen ? "/api/workspaces/alpha/check-ins" : "/api/workspaces/alpha/conversations/q");
+    });
+  }
+
+  it("retains a question draft after a known pre-write rejection and refreshes its actionable list", async () => {
+    await configure(page, { questions: true }); await page.locator(".chat-unread-question-open").click(); await requestAt(0);
+    await reply(page, 0, { conversation: conversation("q") }); await input().fill("Rejected answer"); await send().click(); await requestAt(1);
+    await reply(page, 1, { error: { code: "INVALID_INPUT", message: "Synthetic validation rejection" } }, 400);
+    expect(await input().isEnabled()).toBe(true); expect(await input().inputValue()).toBe("Rejected answer");
+    expect(await refreshes(page)).toBe(1);
+    await configure(page, { questions: false }); await configure(page, { questions: true });
+    expect(await page.locator(".chat-unread-question-open").count()).toBe(1);
   });
 
   it("ignores a company-question opening response after selecting a different chat", async () => {
@@ -652,12 +777,13 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     await send().click(); await requestAt(1); await reply(page, 1, { message: "Uploaded once", webUrl: "/synthetic/uploaded" }); await requestAt(2);
     await streamAction(page, 2, "stream"); await streamAction(page, 2, "chunk", 'data: {"text":"Uncommitted answer"}\n\n');
     await finishUncommitted(page, 2);
+    await requestAt(3); await replyPersisted(3, conversation("a")); await restoreDraft();
     expect(await input().inputValue()).toBe("  Retry exact\n draft  ");
     expect(await page.locator(".chat-attachment-bar").innerText()).toContain("native.txt");
     expect(await messages().innerText()).not.toContain("Uncommitted answer"); expect(await exports().count()).toBe(1);
-    await send().click(); expect(await requestAt(3)).toMatchObject({ url: "/api/workspaces/alpha/conversations/a" });
-    expect(JSON.parse((await requests(page))[3].body!).message).toContain("/synthetic/uploaded");
-    await committedSend(3); await streamAction(page, 3, "finish"); await requestAt(4); await replyPersisted(4, persisted());
+    await send().click(); expect(await requestAt(4)).toMatchObject({ url: "/api/workspaces/alpha/conversations/a" });
+    expect(JSON.parse((await requests(page))[4].body!).message).toContain("/synthetic/uploaded");
+    await committedSend(4); await streamAction(page, 4, "finish"); await requestAt(5); await replyPersisted(5, persisted());
     expect(await input().inputValue()).toBe(""); expect(await page.locator(".chat-attachment-bar").count()).toBe(0);
     expect((await requests(page)).filter(request => request.url.endsWith("/chat/attachments"))).toHaveLength(1);
   });
