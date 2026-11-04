@@ -60,7 +60,7 @@ describe("Actions page observed-version forms", () => {
       ],
       editActionAction: ["[locale]/workspaces/[workspaceId]/actions/[actionId]/edit/page.tsx"],
       updateGoalFormAction: ["[locale]/workspaces/[workspaceId]/goals/page.tsx"],
-      editGoalFormAction: ["[locale]/workspaces/[workspaceId]/goals/page.tsx"],
+      editGoalFormAction: ["[locale]/workspaces/[workspaceId]/goals/GoalEditor.tsx"],
       updateProposalAction: [],
       editProposalAction: [
         "[locale]/workspaces/[workspaceId]/proposals/[proposalId]/page.tsx",
