@@ -200,8 +200,15 @@ export function ChatInterface({
   }
 
   function discardDraft() {
-    const questionId = draftRef.current.uncertainSend?.questionId;
-    if (questionId) setActiveQuestionId(previous => previous === questionId ? null : previous);
+    const uncertain = draftRef.current.uncertainSend;
+    if (uncertain?.kind === "question" && (uncertain.questionPending || !uncertain.reconciled)) return;
+    const questionId = uncertain?.questionId;
+    if (questionId) {
+      if (initialCompanyQuestions.some(question => question.id === questionId)) questionWritesRef.current.delete(questionId);
+      setCompanyQuestions(initialCompanyQuestions.filter(question => !questionWritesRef.current.has(question.id)));
+      setActiveQuestionId(previous => previous === questionId ? null : previous);
+      refreshQuestionsWhenIdle();
+    }
     draftsRef.current.set(draftSessionRef.current, { input: "", attachedFile: null });
     selectDraft(draftSessionRef.current);
     setError(null);
@@ -1248,7 +1255,8 @@ export function ChatInterface({
                 }}>{uncertainDraft.kind === "question" ? "Reload questions" : "Reload conversation"}</button>
                 <button type="button" className="secondary small" disabled={loading || !uncertainDraft.reconciled
                   || exportContext?.workspaceId !== workspaceId || exportContext?.conversationId !== sessionId} onClick={restoreDraft}>Restore draft</button>
-                <button type="button" className="secondary small" disabled={loading} onClick={discardDraft}>Discard draft</button>
+                <button type="button" className="secondary small" disabled={loading || (uncertainDraft.kind === "question"
+                  && (Boolean(uncertainDraft.questionPending) || !uncertainDraft.reconciled))} onClick={discardDraft}>Discard draft</button>
               </div>}
             </div>
           )}

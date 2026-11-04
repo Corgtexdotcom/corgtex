@@ -532,6 +532,51 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     });
   }
 
+  for (const stillOpen of [false, true]) {
+    it(`reconciles the question list when discarding an uncertain draft and the question is ${stillOpen ? "open" : "absent"}`, async () => {
+      await configure(page, { questions: true }); await page.locator(".chat-unread-question-open").click(); await requestAt(0);
+      await reply(page, 0, { conversation: conversation("q") }); await input().fill("Discarded company answer"); await send().click(); await requestAt(1);
+      await reply(page, 1, { message: "Synthetic lost answer receipt" }, 503);
+      const discard = page.getByRole("button", { name: "Discard draft", exact: true });
+      await configure(page, { questions: false }); if (stillOpen) await configure(page, { questions: true });
+      await discard.click(); expect(await input().isEnabled()).toBe(true); expect(await input().inputValue()).toBe("");
+      expect(await page.getByRole("button", { name: "Restore draft", exact: true }).count()).toBe(0);
+      expect(await page.locator(".chat-question-policy").count()).toBe(0);
+      expect(await page.locator(".chat-unread-question-open").count()).toBe(stillOpen ? 1 : 0);
+      expect(await requests(page)).toHaveLength(2);
+      if (stillOpen) {
+        await mkdir(".artifacts/personal-chat", { recursive: true });
+        await page.screenshot({ path: ".artifacts/personal-chat/question-discard-open.png", fullPage: true });
+        await page.locator(".chat-unread-question-open").click(); await requestAt(2);
+        await reply(page, 2, { conversation: conversation("q") }); await startSend("Replacement answer", 3);
+        expect(JSON.parse((await requests(page))[3].body!)).toMatchObject({ checkInId: "question", responseMd: "Replacement answer" });
+      }
+    });
+  }
+
+  it("keeps a pending and then unknown question outcome recoverable when its draft is reselected", async () => {
+    await configure(page, { questions: true }); await page.locator(".chat-unread-question-open").click(); await requestAt(0);
+    await reply(page, 0, { conversation: conversation("q") });
+    await page.locator('input[type="file"]').setInputFiles({ name: "question-draft.txt", mimeType: "text/plain", buffer: Buffer.from("Synthetic question attachment") });
+    await input().fill("Pending company answer"); await send().click(); await requestAt(1);
+    await reply(page, 1, { status: "success", message: "Uploaded synthetic question file", webUrl: "/synthetic-question-file" }); await requestAt(2);
+    await load("b", 3); await select("q"); await requestAt(4); await reply(page, 4, { conversation: conversation("q") });
+    const discard = page.getByRole("button", { name: "Discard draft", exact: true });
+    expect(await discard.isDisabled()).toBe(true); await discard.dispatchEvent("click");
+    await reply(page, 2, { message: "Synthetic unknown answer outcome" }, 503);
+    expect(await discard.isDisabled()).toBe(true); await discard.dispatchEvent("click");
+    expect(await input().isDisabled()).toBe(true);
+    await configure(page, { questions: false }); await configure(page, { questions: true });
+    await restoreDraft(); expect(await input().inputValue()).toBe("Pending company answer");
+    expect(await page.locator(".chat-attachment-bar").innerText()).toContain("question-draft.txt");
+    expect(await page.locator(".chat-unread-question-open").count()).toBe(1);
+    expect(await requests(page)).toHaveLength(5);
+    await send().click(); const retried = await requestAt(5);
+    expect(retried.url).toBe("/api/workspaces/alpha/check-ins");
+    expect(JSON.parse(retried.body!).responseMd).toBe("Uploaded synthetic question file\n/synthetic-question-file\n\nPending company answer");
+    expect((await requests(page)).filter(request => request.url.endsWith("/chat/attachments"))).toHaveLength(1);
+  });
+
   it("retains a question draft after a known pre-write rejection and refreshes its actionable list", async () => {
     await configure(page, { questions: true }); await page.locator(".chat-unread-question-open").click(); await requestAt(0);
     await reply(page, 0, { conversation: conversation("q") }); await input().fill("Rejected answer"); await send().click(); await requestAt(1);
