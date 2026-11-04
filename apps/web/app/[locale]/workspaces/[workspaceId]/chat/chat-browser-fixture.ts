@@ -18,7 +18,7 @@ export type ChatFixture = {
   requests: ChatRequest[];
   canonicalReads: ChatRequest[];
   refreshes: number;
-  configure: (patch: { workspaceId?: string; activeSessionId?: string | null; rail?: boolean; mobileMode?: boolean; questions?: boolean; omitQuestions?: boolean; secondQuestion?: boolean }) => void;
+  configure: (patch: { workspaceId?: string; activeSessionId?: string | null; rail?: boolean; mobileMode?: boolean; questions?: boolean; omitQuestions?: boolean; secondQuestion?: boolean; relatedQuestion?: boolean }) => void;
   reply: (id: number, value: unknown, status?: number) => void;
   reject: (id: number) => void;
   stream: (id: number) => void;
@@ -49,6 +49,7 @@ export function conversation(id: string) {
 // and the unrelated launch panel are replaced. The optional Brain handler runs
 // the actual route with synthetic auth/service boundaries, never a database/provider.
 export async function startChatBrowserFixture(options: {
+  development?: boolean;
   brainRoute?: (request: Request, params: { workspaceId: string; conversationId: string }) => Promise<Response>;
 } = {}) {
   const webRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
@@ -136,15 +137,15 @@ export async function startChatBrowserFixture(options: {
       const root = createRoot(document.getElementById('root'));
       fixture.unmount = () => root.unmount();
       function Fixture() {
-        const [props, setProps] = useState({workspaceId: 'alpha', activeSessionId: null, rail: false, mobileMode: false, questions: false, omitQuestions: false, secondQuestion: false});
+        const [props, setProps] = useState({workspaceId: 'alpha', activeSessionId: new URLSearchParams(window.location.search).get('session'), rail: false, mobileMode: false, questions: false, omitQuestions: false, secondQuestion: false, relatedQuestion: false});
         fixture.configure = patch => setProps(previous => ({...previous, ...patch}));
         fixture.pathname = '/en/workspaces/' + props.workspaceId;
         const conversations = React.useMemo(() => (props.workspaceId === 'alpha' ? ['a', 'b'] : ['c']).map(id => ({
           id, topic: 'Synthetic ' + id, agentKey: 'assistant', status: 'ACTIVE', updatedAt: '2026-01-01T00:00:00.000Z', lastMessage: 'Preview ' + id,
         })), [props.workspaceId]);
         const questions = React.useMemo(() => props.questions ? [{id: 'question', questionText: 'Synthetic company question',
-          confidence: null, priority: 1, relatedConversationId: null, createdAt: '2026-01-01T00:00:00.000Z'}, ...(props.secondQuestion ? [{id: 'question2', questionText: 'Synthetic second question',
-          confidence: null, priority: 2, relatedConversationId: null, createdAt: '2026-01-01T00:00:00.000Z'}] : [])] : [], [props.questions, props.secondQuestion]);
+          confidence: null, priority: 1, relatedConversationId: props.relatedQuestion ? 'q' : null, createdAt: '2026-01-01T00:00:00.000Z'}, ...(props.secondQuestion ? [{id: 'question2', questionText: 'Synthetic second question',
+          confidence: null, priority: 2, relatedConversationId: null, createdAt: '2026-01-01T00:00:00.000Z'}] : [])] : [], [props.questions, props.secondQuestion, props.relatedQuestion]);
         return <NextIntlClientProvider locale="en" timeZone="UTC" messages={${JSON.stringify({ chat: messages.chat, demo: messages.demo })}}>
           <div className="ws-layout">
           {props.rail ? <WorkspaceChatRail workspaceId={props.workspaceId} conversations={conversations} companyQuestions={questions} aiWorkspaceState={{}} />
@@ -152,9 +153,9 @@ export async function startChatBrowserFixture(options: {
           </div>
         </NextIntlClientProvider>;
       }
-      root.render(<Fixture />);
+      root.render(new URLSearchParams(window.location.search).has('strict') ? <React.StrictMode><Fixture /></React.StrictMode> : <Fixture />);
     ` },
-    bundle: true, write: false, jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' },
+    bundle: true, write: false, jsx: "automatic", define: { "process.env.NODE_ENV": JSON.stringify(options.development ? "development" : "production") },
     plugins: [{ name: "chat-browser-fixture", setup(api) {
       api.onResolve({ filter: /^next\/navigation$/ }, () => ({ path: "navigation", namespace: "fixture" }));
       api.onResolve({ filter: /AiWorkspaceLaunchPanel$/ }, () => ({ path: "launch", namespace: "fixture" }));
@@ -204,11 +205,14 @@ export async function startChatBrowserFixture(options: {
     ?? (existsSync("/usr/lib/chromium/chromium") ? "/usr/lib/chromium/chromium" : undefined) });
   return {
     origin,
-    async newPage() {
+    async newPage(options: { strictMode?: boolean; activeSessionId?: string } = {}) {
       const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
       page.setDefaultTimeout(5_000);
       await page.route("**/*", (route) => route.request().url().startsWith(`${origin}/`) ? route.continue() : route.abort());
-      await page.goto(origin);
+      const location = new URL(origin);
+      if (options.strictMode) location.searchParams.set("strict", "1");
+      if (options.activeSessionId) location.searchParams.set("session", options.activeSessionId);
+      await page.goto(location.href);
       await page.locator("textarea").waitFor();
       return page;
     },

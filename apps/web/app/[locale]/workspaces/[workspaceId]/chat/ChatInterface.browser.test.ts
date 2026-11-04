@@ -34,7 +34,7 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
   beforeAll(async () => {
     const { POST } = await import("@/app/api/workspaces/[workspaceId]/conversations/[conversationId]/brain/route");
     nativeRead = (await import("@/app/api/workspaces/[workspaceId]/conversations/[conversationId]/route")).GET;
-    fixture = await startChatBrowserFixture({ brainRoute: async (request, params) => {
+    fixture = await startChatBrowserFixture({ development: true, brainRoute: async (request, params) => {
       const response = await POST(new NextRequest(request), { params: Promise.resolve(params) });
       if (loseExportResponse && response.ok) {
         loseExportResponse = false;
@@ -123,6 +123,16 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     expect(await page.locator(".chat-unread-question-open").count()).toBe(0);
   });
 
+  it("restarts the selected conversation load during real development Strict Mode replay", async () => {
+    await page.close(); page = await fixture.newPage({ strictMode: true, activeSessionId: "a" });
+    page.on("pageerror", (error) => errors.push(error.message));
+    await expect.poll(async () => (await requests(page))[0]?.aborted).toBe(true);
+    await requestAt(1);
+    await reply(page, 1, { conversation: conversation("a") }); await reply(page, 0, { conversation: conversation("b") });
+    expect(await messages().innerText()).toContain("Answer a");
+    expect(await messages().innerText()).not.toContain("Answer b"); expect(await input().isEnabled()).toBe(true);
+  });
+
   it("clears old turns and prevents a send while the next conversation is loading", async () => {
     await load();
     await input().fill("Draft a");
@@ -141,7 +151,7 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
 
   it("unlocks a failed conversation creation and retries the same draft", async () => {
     await startSend("Synthetic create retry", 0);
-    await reply(page, 0, {}, 503);
+    await reply(page, 0, { error: { code: "INVALID_INPUT" } }, 400);
     expect(await error().innerText()).toContain("Failed to create conversation");
     expect(await input().isEnabled()).toBe(true);
     expect(await input().inputValue()).toBe("Synthetic create retry");
@@ -232,13 +242,80 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     await load("b", 1);
     await reply(page, 0, { session: { id: "abandoned" } });
     expect((await requests(page)).length).toBe(2);
-    expect((await requests(page))[0].aborted).toBe(true);
+    expect((await requests(page))[0].aborted).toBe(false);
     expect(await messages().innerText()).toContain("Answer b");
     expect(await input().inputValue()).toBe("");
     expect(new URL(page.url()).searchParams.get("session")).toBe("b");
     await page.getByRole("button", { name: "New Conversation", exact: true }).click();
     expect(await input().inputValue()).toBe("Prompt for abandoned new chat");
   });
+
+  it("retains an initial created session after navigation and reuses it for the original draft", async () => {
+    await startSend("Original unassigned prompt", 0); await load("b", 1); await input().fill("B draft");
+    await reply(page, 0, { session: { id: "created-late" } }, 201);
+    expect(await messages().innerText()).toContain("Answer b"); expect(await input().inputValue()).toBe("B draft");
+    await page.getByRole("button", { name: "New Conversation", exact: true }).click();
+    expect(await input().inputValue()).toBe("Original unassigned prompt"); await send().click();
+    const post = await requestAt(2); expect(post.url).toBe("/api/workspaces/alpha/conversations/created-late");
+    expect(JSON.parse(post.body!).message).toBe("Original unassigned prompt");
+    expect((await requests(page)).filter(request => request.method === "POST" && request.url.endsWith("/conversations"))).toHaveLength(1);
+  });
+
+  it("retains an in-flight initial creation when the unassigned draft is resumed before its receipt", async () => {
+    await startSend("Pending unassigned prompt", 0); await load("b", 1);
+    await page.getByRole("button", { name: "New Conversation", exact: true }).click();
+    await input().fill("Edited unassigned prompt"); await send().click();
+    await page.evaluate(() => window.__chatFixture.settle()); expect(await requests(page)).toHaveLength(2);
+    await reply(page, 0, { session: { id: "created-pending" } }, 201);
+    const post = await requestAt(2); expect(post.url).toBe("/api/workspaces/alpha/conversations/created-pending");
+    expect(JSON.parse(post.body!).message).toBe("Edited unassigned prompt");
+  });
+
+  it("retains an initial created session's draft when explicitly selecting its history entry", async () => {
+    await startSend("History-adopted prompt", 0); await load("b", 1);
+    await reply(page, 0, { session: { id: "created-history" } }, 201);
+    await page.locator(".chat-session-item").first().click();
+    expect((await requestAt(2)).url).toBe("/api/workspaces/alpha/conversations/created-history");
+    await reply(page, 2, { conversation: conversation("created-history") });
+    expect(await input().inputValue()).toBe("History-adopted prompt");
+    await page.getByRole("button", { name: "New Conversation", exact: true }).click();
+    expect(await input().inputValue()).toBe("");
+  });
+
+  it("keeps a late initial creation receipt out of another workspace", async () => {
+    await startSend("Alpha unassigned prompt", 0);
+    await configure(page, { workspaceId: "beta", activeSessionId: "c" }); await requestAt(1);
+    await reply(page, 1, { conversation: conversation("c") }); await input().fill("Beta draft");
+    await reply(page, 0, { session: { id: "alpha-created" } }, 201);
+    expect(await input().inputValue()).toBe("Beta draft"); expect(await messages().innerText()).toContain("Answer c");
+    expect(await page.locator(".chat-session-item").count()).toBe(1); expect(await requests(page)).toHaveLength(2);
+  });
+
+  for (const failure of ["network", "gateway", "malformed"] as const) {
+    it(`retains an ambiguous initial creation after ${failure} failure until explicit warned retry`, async () => {
+      await page.locator('input[type="file"]').setInputFiles({ name: "new-draft.txt", mimeType: "text/plain", buffer: Buffer.from("Synthetic new draft") });
+      await input().fill("Retained creation prompt"); await send().click(); await requestAt(0);
+      await reply(page, 0, { status: "success", message: "Uploaded creation file", webUrl: "/synthetic-creation-file" }); await requestAt(1);
+      if (failure === "network") await page.evaluate(async () => { window.__chatFixture.reject(1); await window.__chatFixture.settle(); });
+      else await reply(page, 1, failure === "gateway" ? { message: "Synthetic creation gateway failure" } : undefined, failure === "gateway" ? 503 : 201);
+      expect(await input().isDisabled()).toBe(true); expect(await send().isDisabled()).toBe(true);
+      await load("b", 2); await page.getByRole("button", { name: "New Conversation", exact: true }).click();
+      expect(await input().isDisabled()).toBe(true); expect(await error().innerText()).toContain("may already have been created");
+      expect(await requests(page)).toHaveLength(3);
+      if (failure === "gateway") {
+        await mkdir(".artifacts/personal-chat", { recursive: true });
+        await page.screenshot({ path: ".artifacts/personal-chat/uncertain-creation.png", fullPage: true });
+      }
+      await page.getByRole("button", { name: "Retry creating conversation", exact: true }).click();
+      expect(await input().inputValue()).toBe("Retained creation prompt");
+      expect(await page.locator(".chat-attachment-bar").innerText()).toContain("new-draft.txt");
+      expect(await requests(page)).toHaveLength(3); await send().click(); await requestAt(3);
+      await reply(page, 3, { session: { id: "manual-created" } }, 201);
+      const post = await requestAt(4); expect(post.url).toBe("/api/workspaces/alpha/conversations/manual-created");
+      expect(JSON.parse(post.body!).message).toBe("Uploaded creation file\n/synthetic-creation-file\n\nRetained creation prompt");
+      expect((await requests(page)).filter(request => request.url.endsWith("/chat/attachments"))).toHaveLength(1);
+    });
+  }
 
   it("keeps a newer send busy when an abandoned POST fails late", async () => {
     await load();
@@ -464,6 +541,42 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     expect(await input().isDisabled()).toBe(true);
     await load("a", 3); await restoreDraft();
     expect(await input().inputValue()).toBe("Interrupted draft");
+  });
+
+  for (const omitQuestions of [false, true]) {
+    it(`preserves the linked question when restoring an unsent draft through history with ${omitQuestions ? "omitted" : "available"} question props`, async () => {
+      await configure(page, { questions: true }); await page.locator(".chat-unread-question-open").click(); await requestAt(0);
+      await reply(page, 0, { conversation: conversation("q") }); await input().fill("Unsent linked answer");
+      await page.locator('input[type="file"]').setInputFiles({ name: "linked.txt", mimeType: "text/plain", buffer: Buffer.from("Synthetic linked question file") });
+      await load("b", 1); await select("q"); await requestAt(2); await reply(page, 2, { conversation: conversation("q") });
+      if (omitQuestions) await configure(page, { omitQuestions: true });
+      expect(await input().inputValue()).toBe("Unsent linked answer");
+      if (omitQuestions) {
+        await mkdir(".artifacts/personal-chat", { recursive: true });
+        await page.screenshot({ path: ".artifacts/personal-chat/linked-question-draft.png", fullPage: true });
+      }
+      await send().click(); await requestAt(3);
+      await reply(page, 3, { status: "success", message: "Uploaded linked file" });
+      const answer = await requestAt(4); expect(answer.url).toBe("/api/workspaces/alpha/check-ins");
+      expect(JSON.parse(answer.body!)).toMatchObject({ checkInId: "question", responseMd: "Uploaded linked file\n\nUnsent linked answer", relatedConversationId: "q" });
+    });
+  }
+
+  it("does not relink a draft to a question after a known skip receipt", async () => {
+    await configure(page, { questions: true }); await page.locator(".chat-unread-question-open").click(); await requestAt(0);
+    await reply(page, 0, { conversation: conversation("q") }); await input().fill("Retained ordinary chat prompt");
+    await page.locator(".chat-unread-skip").click(); await requestAt(1); await reply(page, 1, {});
+    await load("b", 2); await select("q"); await requestAt(3); await reply(page, 3, { conversation: conversation("q") });
+    await configure(page, { questions: false }); await configure(page, { questions: true });
+    expect(await page.locator(".chat-unread-question-open").count()).toBe(0);
+    expect((await startSend("Retained ordinary chat prompt", 4)).url).toBe("/api/workspaces/alpha/conversations/q");
+  });
+
+  it("restores the exact related question on a direct conversation selection", async () => {
+    await configure(page, { questions: true, relatedQuestion: true, activeSessionId: "q" }); await requestAt(0);
+    await reply(page, 0, { conversation: conversation("q") });
+    const answer = await startSend("Direct linked answer", 1); expect(answer.url).toBe("/api/workspaces/alpha/check-ins");
+    expect(JSON.parse(answer.body!)).toMatchObject({ checkInId: "question", relatedConversationId: "q" });
   });
 
   it("removes a persisted question answer after navigation without sending into or changing the new chat", async () => {

@@ -46,7 +46,11 @@ type ChatRequest = {
   reader: ReadableStreamDefaultReader<Uint8Array> | null;
 };
 
+type ConversationCreation = { promise: Promise<string>; sessionId?: string; uncertain: boolean };
+
 type ChatDraft = {
+  questionId?: string | null;
+  creation?: ConversationCreation;
   input: string; attachedFile: File | null; uploadedMessage?: string;
   uncertainSend?: {
     kind: "send" | "question"; token: object; reconciled: boolean;
@@ -57,6 +61,7 @@ type UploadResult = { status?: string; message?: string; webUrl?: string | null;
 
 const EMPTY_COMPANY_QUESTIONS: CompanyQuestionSummary[] = [];
 
+const UNCERTAIN_CREATION = "A conversation may already have been created. Check your history before trying again; trying again may create another empty conversation.";
 const UNCERTAIN_SEND = "Your previous send may already be saved. Review this conversation before restoring the draft; sending it again may create a duplicate.";
 const UNCERTAIN_QUESTION = "Your answer may already be saved. Reload questions and review this conversation before restoring the draft.";
 
@@ -128,6 +133,7 @@ export function ChatInterface({
   const questionRevisionRef = useRef(0);
   const questionRefreshRef = useRef<string | null>(null);
   const [questionRefreshTick, setQuestionRefreshTick] = useState(0);
+  const [, updateCreationState] = useState(0);
   const draftSessionRef = useRef(activeSessionId);
   const draftRef = useRef<ChatDraft>({ input: "", attachedFile: null });
   const workspaceRef = useRef(workspaceId);
@@ -151,14 +157,14 @@ export function ChatInterface({
     requestRef.current === request && !request.controller.signal.aborted, []);
 
   function updateInput(value: string) {
-    if (draftRef.current.uncertainSend) return;
+    if (draftRef.current.uncertainSend || draftRef.current.creation?.uncertain) return;
     draftRef.current = { ...draftRef.current, input: value };
     draftsRef.current.set(draftSessionRef.current, draftRef.current);
     setInput(value);
   }
 
   function updateAttachment(file: File | null) {
-    if (draftRef.current.uncertainSend) return;
+    if (draftRef.current.uncertainSend || draftRef.current.creation?.uncertain) return;
     draftRef.current = { ...draftRef.current, attachedFile: file, uploadedMessage: undefined };
     draftsRef.current.set(draftSessionRef.current, draftRef.current);
     setAttachedFile(file);
@@ -166,12 +172,24 @@ export function ChatInterface({
 
   const selectDraft = useCallback((id: string | null) => {
     draftSessionRef.current = id;
-    const draft = draftsRef.current.get(id) ?? { input: "", attachedFile: null };
+    let draft = draftsRef.current.get(id);
+    const unassigned = draftsRef.current.get(null);
+    if (id && unassigned?.creation?.sessionId === id && !draft?.input && !draft?.attachedFile && !draft?.uncertainSend) {
+      draft = { ...unassigned, creation: undefined };
+      draftsRef.current.delete(null);
+    }
+    draft ??= { input: "", attachedFile: null };
+    const questionId = draft.questionId === undefined
+      ? (id ? initialCompanyQuestions.find(question => question.relatedConversationId === id && !questionWritesRef.current.has(question.id))?.id ?? null : null)
+      : draft.questionId;
+    draft = { ...draft, questionId };
+    draftsRef.current.set(id, draft);
     draftRef.current = draft;
+    setActiveQuestionId(questionId);
     setInput(draft.uncertainSend ? "" : draft.input);
     setAttachedFile(draft.uncertainSend ? null : draft.attachedFile);
     if (fileInputRef.current) fileInputRef.current.value = "";
-  }, []);
+  }, [initialCompanyQuestions]);
 
   const acknowledgeDraftRead = useCallback((id: string) => {
     const draft = draftsRef.current.get(id);
@@ -186,13 +204,14 @@ export function ChatInterface({
   function restoreDraft() {
     if (!draftRef.current.uncertainSend?.reconciled) return;
     const questionId = draftRef.current.uncertainSend.questionId;
+    let restoredQuestionId = draftRef.current.questionId;
     if (questionId) {
       const stillOffered = initialCompanyQuestions.some(question => question.id === questionId);
       if (stillOffered) questionWritesRef.current.delete(questionId);
       setCompanyQuestions(initialCompanyQuestions.filter(question => !questionWritesRef.current.has(question.id)));
-      setActiveQuestionId(stillOffered ? questionId : null);
+      restoredQuestionId = stillOffered ? questionId : null;
     }
-    const restored = { ...draftRef.current, uncertainSend: undefined };
+    const restored = { ...draftRef.current, questionId: restoredQuestionId, uncertainSend: undefined };
     draftsRef.current.set(draftSessionRef.current, restored);
     selectDraft(draftSessionRef.current);
     setError(null);
@@ -209,7 +228,16 @@ export function ChatInterface({
       setActiveQuestionId(previous => previous === questionId ? null : previous);
       refreshQuestionsWhenIdle();
     }
-    draftsRef.current.set(draftSessionRef.current, { input: "", attachedFile: null });
+    draftsRef.current.set(draftSessionRef.current, { input: "", attachedFile: null, questionId: null });
+    selectDraft(draftSessionRef.current);
+    setError(null);
+    setErrorAction(null);
+  }
+
+  function retryConversationCreation() {
+    if (!draftRef.current.creation?.uncertain) return;
+    draftRef.current = { ...draftRef.current, creation: undefined };
+    draftsRef.current.set(draftSessionRef.current, draftRef.current);
     selectDraft(draftSessionRef.current);
     setError(null);
     setErrorAction(null);
@@ -227,7 +255,10 @@ export function ChatInterface({
     router.refresh();
   }, [loading, questionRefreshTick, router, workspaceId]);
 
-  useEffect(() => () => cancelRequest(), [workspaceId, cancelRequest]);
+  useEffect(() => () => {
+    controlledSelectionRef.current = null;
+    cancelRequest();
+  }, [workspaceId, cancelRequest]);
 
   useEffect(() => {
     if (workspaceRef.current === workspaceId) return;
@@ -363,7 +394,7 @@ export function ChatInterface({
       }
     }
     setCompanyQuestions(initialCompanyQuestions.filter(question => !questionWritesRef.current.has(question.id)));
-    if (activeQuestionId && !questionWritesRef.current.has(activeQuestionId)
+    if (activeQuestionId && draftRef.current.questionId !== activeQuestionId && !questionWritesRef.current.has(activeQuestionId)
       && !initialCompanyQuestions.some(question => question.id === activeQuestionId)) setActiveQuestionId(null);
   }, [initialCompanyQuestions, activeQuestionId]);
 
@@ -437,7 +468,11 @@ export function ChatInterface({
       setTurns(loadedTurns);
       setExportContext({ workspaceId, conversationId: conversation.id, turns: loadedTurns });
       setSessionId(conversation.id);
-      setActiveQuestionId(question.id);
+      const linkedQuestionId = (draftRef.current.input || draftRef.current.attachedFile) && draftRef.current.questionId
+        ? draftRef.current.questionId : question.id;
+      draftRef.current = { ...draftRef.current, questionId: linkedQuestionId };
+      draftsRef.current.set(conversation.id, draftRef.current);
+      setActiveQuestionId(linkedQuestionId);
       setShowNewChat(false);
       setConversations((prev) => {
         const summary = {
@@ -470,6 +505,7 @@ export function ChatInterface({
   }
 
   async function skipCompanyQuestion(questionId: string) {
+    const generation = questionWritesRef.current;
     setError(null);
     try {
       const response = await fetch(`/api/workspaces/${workspaceId}/check-ins`, {
@@ -480,11 +516,20 @@ export function ChatInterface({
           checkInId: questionId,
         }),
       });
+      if (workspaceRef.current !== workspaceId || questionWritesRef.current !== generation) return;
       if (!response.ok) throw new Error(t("errorFailedToSend"));
+      generation.add(questionId);
+      for (const [id, draft] of draftsRef.current) {
+        if (draft.questionId !== questionId) continue;
+        const next = { ...draft, questionId: null };
+        draftsRef.current.set(id, next);
+        if (draftSessionRef.current === id) draftRef.current = next;
+      }
       setCompanyQuestions((prev) => prev.filter((question) => question.id !== questionId));
-      if (activeQuestionId === questionId) setActiveQuestionId(null);
+      setActiveQuestionId(previous => previous === questionId ? null : previous);
       router.refresh();
     } catch (err) {
+      if (workspaceRef.current !== workspaceId || questionWritesRef.current !== generation) return;
       setError(err instanceof Error ? err.message : t("errorFailedToSend"));
     }
   }
@@ -546,7 +591,7 @@ export function ChatInterface({
   }
 
   async function sendMessage() {
-    if ((!input.trim() && !attachedFile) || loading || requestRef.current || draftRef.current.uncertainSend
+    if ((!input.trim() && !attachedFile) || loading || requestRef.current || draftRef.current.uncertainSend || draftRef.current.creation?.uncertain
       || (activeQuestionId && questionWritesRef.current.has(activeQuestionId))) return;
 
     const request = beginRequest();
@@ -630,38 +675,61 @@ export function ChatInterface({
 
       let currentSessionId = sessionId;
       if (!currentSessionId) {
+        let creation = draftRef.current.creation;
+        if (!creation) {
+          const generation = questionWritesRef.current;
+          const attempt: ConversationCreation = { promise: Promise.resolve(""), uncertain: false };
+          creation = attempt;
+          draftRef.current = { ...draftRef.current, creation: attempt };
+          draftsRef.current.set(null, draftRef.current);
+          attempt.promise = (async () => {
+            let rejected = false;
+            try {
+              // Creation is a write. View cancellation cannot undo it, so keep
+              // its receipt attached to this draft independently of selection.
+              const response = await fetch(`/api/workspaces/${workspaceId}/conversations`, {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ agentKey: "assistant" }),
+              });
+              const data = await response.json().catch(() => null);
+              if (!response.ok) {
+                rejected = knownApplicationRejection(response.status, data);
+                throw new Error(data?.error?.message || t("errorFailedToCreate"));
+              }
+              if (typeof data?.session?.id !== "string" || !data.session.id) throw new Error(UNCERTAIN_CREATION);
+              attempt.sessionId = data.session.id;
+              if (workspaceRef.current === workspaceId && questionWritesRef.current === generation) {
+                const summary: ConversationSummary = { id: data.session.id, topic: null, agentKey: "assistant", status: "ACTIVE",
+                  updatedAt: new Date().toISOString(), lastMessage: null };
+                setConversations(previous => previous.some(item => item.id === summary.id) ? previous : [summary, ...previous]);
+              }
+              return data.session.id as string;
+            } catch (error) {
+              if (rejected) {
+                for (const [id, draft] of draftsRef.current) {
+                  if (draft.creation !== attempt) continue;
+                  const next = { ...draft, creation: undefined };
+                  draftsRef.current.set(id, next);
+                  if (draftSessionRef.current === id) draftRef.current = next;
+                }
+              } else attempt.uncertain = true;
+              if (workspaceRef.current === workspaceId && questionWritesRef.current === generation) updateCreationState(value => value + 1);
+              throw new Error(rejected && error instanceof Error ? error.message : UNCERTAIN_CREATION);
+            }
+          })();
+        }
         try {
-          const res = await fetch(`/api/workspaces/${workspaceId}/conversations`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ agentKey: "assistant" }),
-            signal: request.controller.signal,
-          });
+          currentSessionId = await creation.promise;
           if (!isCurrentRequest(request)) return;
-          if (!res.ok) throw new Error(t("errorFailedToCreate"));
-          const data = await res.json();
-          if (!isCurrentRequest(request)) return;
-          currentSessionId = data.session.id as string;
-          const newSession: ConversationSummary = {
-            id: currentSessionId,
-            topic: null,
-            agentKey: "assistant",
-            status: "ACTIVE",
-            updatedAt: new Date().toISOString(),
-            lastMessage: null,
-          };
-          draftsRef.current.set(currentSessionId, draftRef.current);
+          draftsRef.current.set(currentSessionId, { ...draftRef.current, creation: undefined });
           draftsRef.current.delete(null);
           selectDraft(currentSessionId);
-          setConversations((prev) => [newSession, ...prev]);
           setSessionId(currentSessionId);
           setShowNewChat(false);
-          if (!compact) {
-            window.history.pushState({}, "", `/workspaces/${workspaceId}/chat?session=${currentSessionId}`);
-          }
-        } catch {
+          if (!compact) window.history.pushState({}, "", `/workspaces/${workspaceId}/chat?session=${currentSessionId}`);
+        } catch (error) {
           if (!isCurrentRequest(request)) return;
-          setError(t("errorFailedToCreate"));
+          setError(error instanceof Error ? error.message : t("errorFailedToCreate"));
           return;
         }
       }
@@ -681,7 +749,7 @@ export function ChatInterface({
           if (questionWritesRef.current !== questionWrites || workspaceRef.current !== workspaceId) return;
           const draft = draftsRef.current.get(currentSessionId);
           if (!draft || !draft.uncertainSend || draft.uncertainSend.token !== questionToken) return;
-          const next = { ...draft, uncertainSend: uncertain ? {
+          const next = { ...draft, questionId: uncertain ? draft.questionId : null, uncertainSend: uncertain ? {
             ...draft.uncertainSend, questionPending: false,
             questionsRevision: questionRevisionRef.current, reconciled: false,
           } : undefined };
@@ -1014,6 +1082,9 @@ export function ChatInterface({
   const activeRoleOnboarding = activeConversation?.roleOnboarding ?? null;
   const uncertainDraft = workspaceRef.current === workspaceId && draftSessionRef.current === sessionId
     ? draftRef.current.uncertainSend : undefined;
+  const uncertainCreation = workspaceRef.current === workspaceId && draftSessionRef.current === sessionId
+    && draftRef.current.creation?.uncertain;
+  const draftBlocked = Boolean(uncertainDraft || uncertainCreation);
   const questionWritePending = Boolean(activeQuestionId && questionWritesRef.current.has(activeQuestionId));
 
   return (
@@ -1196,7 +1267,7 @@ export function ChatInterface({
                   ].map((starter) => (
                     <button
                       key={starter}
-                      disabled={loading || Boolean(uncertainDraft) || questionWritePending}
+                      disabled={loading || draftBlocked || questionWritePending}
                       onClick={() => {
                         updateInput(starter);
                         inputRef.current?.focus();
@@ -1237,9 +1308,9 @@ export function ChatInterface({
             <div ref={messagesEndRef} />
           </div>
 
-          {(error || (!loading && uncertainDraft)) && (
+          {(error || (!loading && (uncertainDraft || uncertainCreation))) && (
             <div className="form-message form-message-error" style={{ margin: "0 16px 8px" }}>
-              <span>{error ?? (uncertainDraft?.kind === "question" ? UNCERTAIN_QUESTION : UNCERTAIN_SEND)}</span>
+              <span>{error ?? (uncertainCreation ? UNCERTAIN_CREATION : uncertainDraft?.kind === "question" ? UNCERTAIN_QUESTION : UNCERTAIN_SEND)}</span>
               {errorAction?.message === error ? (
                 <>
                   {" "}
@@ -1248,6 +1319,10 @@ export function ChatInterface({
               ) : null}
               {uncertainDraft && error && error !== (uncertainDraft.kind === "question" ? UNCERTAIN_QUESTION : UNCERTAIN_SEND)
                 && <p>{uncertainDraft.kind === "question" ? UNCERTAIN_QUESTION : UNCERTAIN_SEND}</p>}
+              {uncertainCreation && <div className="actions-inline">
+                {error && error !== UNCERTAIN_CREATION && <p>{UNCERTAIN_CREATION}</p>}
+                <button type="button" className="secondary small" disabled={loading} onClick={retryConversationCreation}>Retry creating conversation</button>
+              </div>}
               {uncertainDraft && <div className="actions-inline" style={{ flexWrap: "wrap" }}>
                 <button type="button" className="secondary small" disabled={loading || Boolean(uncertainDraft.questionPending)} onClick={() => {
                   if (uncertainDraft.kind === "question") refreshQuestionsWhenIdle();
@@ -1266,7 +1341,7 @@ export function ChatInterface({
               <span className="chat-attachment-name">{attachedFile.name}</span>
               <button
                 aria-label={t("titleRemoveAttachment")}
-                disabled={loading || Boolean(uncertainDraft) || questionWritePending}
+                disabled={loading || draftBlocked || questionWritePending}
                 onClick={removeAttachment}
                 className="chat-attachment-remove"
                 type="button"
@@ -1292,7 +1367,7 @@ export function ChatInterface({
               className="chat-upload-btn"
               title={t("titleAttachFile")}
               type="button"
-              disabled={loading || Boolean(uncertainDraft) || questionWritePending}
+              disabled={loading || draftBlocked || questionWritePending}
             >
               {t("btnAttach")}
             </button>
@@ -1304,7 +1379,7 @@ export function ChatInterface({
                 onKeyDown={handleKeyDown}
                 placeholder={t("placeholderTypeMessage")}
                 rows={1}
-                disabled={loading || Boolean(uncertainDraft) || questionWritePending}
+                disabled={loading || draftBlocked || questionWritePending}
                 className="chat-input"
                 style={{ width: "100%" }}
               />
@@ -1316,7 +1391,7 @@ export function ChatInterface({
             </div>
             <button
               onClick={() => void sendMessage()}
-              disabled={loading || Boolean(uncertainDraft) || questionWritePending || (!input.trim() && !attachedFile)}
+              disabled={loading || draftBlocked || questionWritePending || (!input.trim() && !attachedFile)}
               className="chat-send-btn"
               type="button"
             >
