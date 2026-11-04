@@ -150,7 +150,7 @@ If the user asks to turn, convert, or process an existing tension into a proposa
 If the user asks to upload or ingest meeting minutes or a transcript, use 'upload_meeting_transcript' when transcript text is present. If the transcript is attached in chat, the application will process the attachment before this message reaches you; report the result and ask only for missing meeting date/time if needed.
 If the user asks to create a meeting in Corgtex Upcoming Meetings, use 'create_corgtex_scheduled_meeting'. Use 'schedule_meeting' only when the user wants an external calendar invite.
 For generic non-meeting files, instruct them to use the attachment icon (+) in the chat input.
-If the user explicitly asks you to save, upload, store, or remember content (e.g., "save this transcript", "upload this to the brain", "remember this for later"), invoke 'save_to_brain' immediately with the relevant content. You do NOT need to save regular conversation — that happens automatically in the nightly batch. Only use this tool when the user explicitly requests immediate storage.
+Conversation content is not automatically saved to Brain. If the user asks to save, upload, store, or remember the current chat or an answer, explain that they must use 'Save to Brain' on a persisted answer, choose no transcript, selected turns, or the full transcript, and confirm sharing. A chat request or model-selected content does not authorize sharing. The 'save_to_brain' tool only returns this guidance; it does not save content. Never claim content was saved, uploaded, stored, or remembered in Brain based on this tool call or promise automatic nightly saving. Preserve the dedicated meeting-transcript and file-attachment flows described above.
 MEMBER MANAGEMENT TOOLS (permission-aware — mirrors your access level):
 - 'list_members' — full member list with emails, roles, and assignments
 - 'get_member_profile' — detailed profile for a specific member
@@ -399,7 +399,7 @@ function knowledgeSearchInstruction(search: ConversationContextUsed["knowledgeSe
 }
 
 const RAW_TOOL_HANDLERS: Partial<Record<string, (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>>> = {
-  check_calendar_availability: async (actor, ctx, args) => checkCalendarAvailability(ctx.userId, ctx.workspaceId, args.emails, args.timeMin, args.timeMax),
+  check_calendar_availability: async (actor, ctx, args) => checkCalendarAvailability(actor, ctx.workspaceId, args.provider, args.emails, args.timeMin, args.timeMax),
   schedule_meeting: async (actor, ctx, args) => scheduleMeeting(ctx.userId, ctx.workspaceId, args.title, args.description, args.startTime, args.endTime, args.attendeeEmails),
   create_corgtex_scheduled_meeting: async (actor, ctx, args) => createCorgtexScheduledMeeting(actor, ctx.workspaceId, args),
   upload_meeting_transcript: async (actor, ctx, args) => uploadMeetingTranscriptFromTool(actor, ctx.workspaceId, args),
@@ -510,15 +510,26 @@ const TOOL_HANDLERS = guardConversationToolHandlers<ConversationContext>(Object.
   }
 ])) as typeof RAW_TOOL_HANDLERS);
 
+export function conversationAttemptRequest(ctx: ConversationContext, request: Parameters<typeof defaultModelGateway.chat>[0]) {
+  const collector = conversationCollector(ctx);
+  const authorizeAttempt = request.authorizeAttempt;
+  return { ...request, authorizeAttempt: async (context: Parameters<NonNullable<typeof request.authorizeAttempt>>[0]) => {
+    // Credential resolution and retry waits occur inside the gateway. Recheck
+    // the original collector after any existing asynchronous attempt guard.
+    await authorizeAttempt?.(context);
+    await collector.assertReadable();
+  } };
+}
+
 async function conversationChat(ctx: ConversationContext, request: Parameters<typeof defaultModelGateway.chat>[0]) {
   await conversationCollector(ctx).assertReadable();
-  const response = await defaultModelGateway.chat(request);
+  const response = await defaultModelGateway.chat(conversationAttemptRequest(ctx, request));
   await conversationCollector(ctx).assertReadable();
   return response;
 }
 async function* conversationChatStream(ctx: ConversationContext, request: Parameters<typeof defaultModelGateway.chatStream>[0]) {
   await conversationCollector(ctx).assertReadable();
-  const iterator = defaultModelGateway.chatStream(request);
+  const iterator = defaultModelGateway.chatStream(conversationAttemptRequest(ctx, request));
   try {
     while (true) {
       const result = await iterator.next();
@@ -530,7 +541,7 @@ async function* conversationChatStream(ctx: ConversationContext, request: Parame
 }
 async function* conversationChatEventStream(ctx: ConversationContext, request: Parameters<typeof defaultModelGateway.chatEventStream>[0]) {
   await conversationCollector(ctx).assertReadable();
-  const iterator = defaultModelGateway.chatEventStream(request);
+  const iterator = defaultModelGateway.chatEventStream(conversationAttemptRequest(ctx, request));
   try {
     while (true) {
       const result = await iterator.next();
@@ -961,6 +972,7 @@ async function executeConversationToolCall({
 }) {
   const args = rawArguments ? JSON.parse(rawArguments) : {};
   await authorizeConversationTool(actor, ctx.workspaceId, toolName, args, ctx.operationScopes);
+  throwIfConversationCanceled(ctx);
   if (isVersionedUpdateTool(toolName)) throw new Error("Versioned updates require a preceding query result from this turn.");
   if (isCrmWriteTool(toolName)) {
     const normalizedArgs = normalizeCrmWriteToolArgs(toolName, ctx, args);
@@ -992,8 +1004,22 @@ async function executeVersionedFollowupTools(response: import("@corgtex/models")
   if (!executed.some(({ toolName }) => toolName === "update_action" || toolName === "update_tension")) for (const read of executed) { const updateName = read.toolName === "query_actions" ? "update_action" : read.toolName === "query_tensions" ? "update_tension" : null; for (const item of Array.isArray(read.result) ? read.result : []) if (updateName && typeof item?.id === "string" && Number.isInteger(item.version) && item.version > 0) observed.set(`${updateName}:${item.id}`, item.version); }
   const offered = new Map(offeredTools.map(({ function: tool }) => [tool.name, tool])); const valid = calls.every(({ function: tool }) => { const args = parseToolArgs(tool.arguments); const id = tool.name === "update_action" ? args.actionId : tool.name === "update_tension" ? args.tensionId : null; return isVersionedUpdateTool(tool.name) && matchesJsonSchema(args, offered.get(tool.name)?.parameters) && typeof id === "string" && observed.get(`${tool.name}:${id}`) === args.expectedVersion; });
   if (!valid || observed.size === 0) return "rejected" as const; messages.push({ role: "assistant", content: response.content || "", tool_calls: calls });
-  for (const call of calls) { const toolName = call.function.name; const args = effectiveToolArgs(toolName, ctx, call.function.arguments);
-    try { const result = await TOOL_HANDLERS[toolName]!(actor, ctx, args); executed.push({ toolName, args, result }); messages.push({ role: "tool", content: JSON.stringify(result), name: toolName, tool_call_id: call.id }); } catch (err) { const error = conversationToolError(err); failed.push({ toolName, args, error: err instanceof AppError && err.status === 400 ? error : "" }); messages.push({ role: "tool", content: JSON.stringify({ error }), name: toolName, tool_call_id: call.id }); } }
+  for (const call of calls) {
+    throwIfConversationCanceled(ctx);
+    const toolName = call.function.name;
+    const args = effectiveToolArgs(toolName, ctx, call.function.arguments);
+    try {
+      const result = await TOOL_HANDLERS[toolName]!(actor, ctx, args);
+      executed.push({ toolName, args, result });
+      messages.push({ role: "tool", content: JSON.stringify(result), name: toolName, tool_call_id: call.id });
+    } catch (err) {
+      throwIfConversationCanceled(ctx, err);
+      const error = conversationToolError(err);
+      failed.push({ toolName, args, error: err instanceof AppError && err.status === 400 ? error : "" });
+      messages.push({ role: "tool", content: JSON.stringify({ error }), name: toolName, tool_call_id: call.id });
+    }
+    throwIfConversationCanceled(ctx);
+  }
   return "executed" as const;
 }
 
@@ -1384,6 +1410,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
     const authorizeBrainRead = validBrainReadBatch(response.tool_calls) ? await createBrainReadAuthorization(actor, ctx, loadedKnowledge.accessDomains) : null;
 
     for (const call of response.tool_calls) {
+      throwIfConversationCanceled(ctx);
       await authorizeBrainRead?.();
       const handler = TOOL_HANDLERS[call.function.name];
       const toolArgs = effectiveToolArgs(call.function.name, ctx, call.function.arguments);
@@ -1396,6 +1423,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
             rawArguments: call.function.arguments,
             handler,
           });
+          throwIfConversationCanceled(ctx);
           if (ctx.terminalOperation?.message) return { assistantMessage: ctx.terminalOperation.message, contextUsed: {} };
           if (outcome.mapGraphChanged) {
             mapGraphChanged = true;
@@ -1415,6 +1443,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
         failedToolResults.push({ toolName: call.function.name, args: toolArgs, error: "Unknown capability" });
         messages.push({ role: "tool", content: JSON.stringify({ error: "Unknown capability" }), name: call.function.name, tool_call_id: call.id });
       }
+      throwIfConversationCanceled(ctx);
       await authorizeBrainRead?.();
     }
 
@@ -1689,6 +1718,7 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
     const authorizeBrainRead = validBrainReadBatch(initialCalls) ? await createBrainReadAuthorization(actor, ctx, loadedKnowledge.accessDomains) : null;
 
     for (const call of initialCalls) {
+      throwIfConversationCanceled(ctx);
       await authorizeBrainRead?.();
       const handler = TOOL_HANDLERS[call.function.name];
       const toolArgs = effectiveToolArgs(call.function.name, ctx, call.function.arguments);
@@ -1701,6 +1731,7 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
             rawArguments: call.function.arguments,
             handler,
           });
+          throwIfConversationCanceled(ctx);
           if (ctx.terminalOperation?.message) {
             yield ctx.terminalOperation.message;
             return { assistantMessage: ctx.terminalOperation.message, contextUsed: {} };
@@ -1723,6 +1754,7 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
         failedToolResults.push({ toolName: call.function.name, args: toolArgs, error: "Unknown capability" });
         messages.push({ role: "tool", content: JSON.stringify({ error: "Unknown capability" }), name: call.function.name, tool_call_id: call.id });
       }
+      throwIfConversationCanceled(ctx);
       await authorizeBrainRead?.();
     }
 

@@ -78,8 +78,9 @@ export interface SqlKnowledgePublicationPort {
   prepareSqlKnowledgeAttempt(input: {attempt: SqlIngestionAttempt;
     receipt: AuthenticatedSqlRunReceipt}): Promise<PreparedSqlKnowledgeAttempt>;
   publishPreparedSqlKnowledgeAttempt(input: {attempt: SqlIngestionAttempt; prepared: PreparedSqlKnowledgeAttempt;
-    /** Stops/awaits caller heartbeat, before the private driver's mandatory DDL
-     * recheck/close. This hook cannot replace native authority or run inside SQL. */
+    /** Stops/awaits caller heartbeats AFTER mandatory native DDL/access
+     * revalidation and immediately before the publication transaction. This hook
+     * cannot replace native authority or run inside SQL. */
     beforePublication?: () => Promise<void>;
     /** Same real TX after chunks/lineage/cache/receipt writes, before final owner
      * and source proof checks. Cursor and own success log only. Reject rolls back. */

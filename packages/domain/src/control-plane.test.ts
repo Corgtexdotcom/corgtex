@@ -7587,14 +7587,14 @@ describe("control plane domain", () => {
     if (hosted) expect(prismaMock.customerAccount.update).not.toHaveBeenCalled();
   });
 
-  it("rejects protected hosted recording after target, selection, lease, authority or primary drift", async () => {
+  it.each([false, true])("rejects protected recording after target, selection, lease, authority or primary drift (selfserve=%s)", async (selfserve) => {
     const { recordVerifiedControlPlaneRelease } = await import("./control-plane");
-    const deploymentId = "123e4567-e89b-42d3-a456-426614174001";
+    const deploymentId = selfserve ? "e0d34b24-bd86-4cb2-8ccb-f2f84309ca16" : "123e4567-e89b-42d3-a456-426614174001";
     const customerAccountId = "123e4567-e89b-42d3-a456-426614174011";
     const oldSha = "1".repeat(40); const newSha = "2".repeat(40);
     const target = { subscriptionId: "123e4567-e89b-42d3-a456-426614174010", resourceGroup: "rg-managed",
       acrName: "acr12", acrServer: "acr12.azurecr.io", webAppName: "web-a", workerAppName: "worker-b" };
-    const protectedConfig = { deploymentId, customerAccountId, deploymentKind: "HOSTED_DEDICATED", origin: "https://customer.test",
+    const protectedConfig = { deploymentId, customerAccountId, deploymentKind: selfserve ? "REMOTE_MANAGED" : "HOSTED_DEDICATED", origin: selfserve ? "https://selfserve.corgtex.com" : "https://customer.test",
       ...target, acrResourceGroup: "rg-acr", evidenceSha256: "a".repeat(64), activationPolicy: "EXCLUSIVE",
       releaseApproval: { gitSha: newSha, schemaApprovalDigest: "b".repeat(64) },
       recovery: { gitSha: oldSha, releaseVersion: "main-recovery", schemaCompatibilityApprovalDigest: "c".repeat(64) } };
@@ -7603,7 +7603,7 @@ describe("control plane domain", () => {
       releaseVersion: "main-old", lastHealthStatus: "ok", lastHealthError: null, lastHealthCheck: new Date(),
       lastWorkerHealthStatus: "ok", lastWorkerHealthCheck: new Date(), lastReleaseCheck: new Date(),
       provisioningStatus: "active", bootstrapStatus: "completed", lastProvisioningError: null,
-      deploymentKind: "HOSTED_DEDICATED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE",
+      deploymentKind: protectedConfig.deploymentKind, cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE",
       providerSubscriptionId: target.subscriptionId, providerResourceGroup: target.resourceGroup,
       providerWebServiceId: target.webAppName, providerWorkerServiceId: target.workerAppName, releaseLeaseId: null };
     const liveHealth = { database: "up", schema: "ready", runtime: { redis: "configured", storage: "configured" },
@@ -7620,7 +7620,7 @@ describe("control plane domain", () => {
     for (const scenario of scenarios) {
       vi.clearAllMocks();
       vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", scenario.selected === false ? "" : deploymentId);
-      vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", JSON.stringify({ schemaVersion: 1, targets: [protectedConfig] }));
+      vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", selfserve && scenario.selected === false ? "" : JSON.stringify({ schemaVersion: 1, targets: [protectedConfig] }));
       prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(baseDeployment);
       prismaMock.$queryRaw
         .mockResolvedValueOnce([{ ...baseDeployment, ...scenario.row }])
@@ -9520,6 +9520,22 @@ describe("managed Azure release control-plane boundary", () => {
       _count: { members: 0 },
     });
   }
+
+  it.each(["7", "8"])("binds the server selfserve profile and target digest into frozen inventory (%s)", async (digest) => {
+    const hostId = "e0d34b24-bd86-4cb2-8ccb-f2f84309ca16";
+    const preflight = { ...canaryPreflight, deploymentId: hostId, writeIntentProtocolVersion: 2,
+      origin: "https://selfserve.corgtex.com", protectedReleaseProfile: "SELF_SERVE_IMPORTER_FENCE_V1", targetDigest: digest.repeat(64),
+      deployment: { deploymentId: hostId, deploymentKind: "REMOTE_MANAGED", workloadClass: "ACTIVE_CLIENT_PRIMARY", releaseEligible: true, group: "managed-customers" } };
+    leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValueOnce(preflight);
+    mockOperationalInventoryWorkspace();
+    inventoryEvaluatorMock.mockReturnValueOnce({ ok: true, artifactStatus: "VALID", canonicalDigest: `sha256:${"b".repeat(64)}`,
+      validUntil: "2026-09-08T00:00:00.000Z", selection: { status: "SELECTED", opaqueTargetId: createHash("sha256").update(`ACTIVE_CLIENT_PRIMARY:${hostId}`).digest("hex").slice(0, 32) } });
+    const { freezeControlPlaneManagedReleaseInventory } = await import("./control-plane");
+    await freezeControlPlaneManagedReleaseInventory(actor, { deploymentId: hostId, workloadClass: "ACTIVE_CLIENT_PRIMARY", acrName: "acr12", acrServer: "acr12.azurecr.io", reason: "Freeze protected selfserve host." });
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      meta: expect.objectContaining({ preflightDigest: `sha256:${createHash("sha256").update(canonicalJson(preflight)).digest("hex")}` }),
+    }) }));
+  });
 
   it.each([1, 2])("freezes a private Ops inventory using runner protocol %i without requiring a target workspace", async (writeIntentProtocolVersion) => {
     const preflight = { ...canaryPreflight, writeIntentProtocolVersion };

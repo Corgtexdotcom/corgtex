@@ -4,8 +4,8 @@ import type {
   ApprovalFlowStatus,
   ApprovalMode,
   ApprovalPolicy,
-  Prisma,
 } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
@@ -15,7 +15,9 @@ import { acquireWorkItemAdvisoryLock } from "./work-item-versions";
 import { acquireConstitutionCorpusAdvisoryLock } from "./constitutions";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { advanceHumanArtifactInputLineage, captureArtifactInputProof, captureArtifactInputSnapshotProof, currentArtifactInputRoots,
-  invalidateArtifactInputLineage, lineageContentFingerprint, preserveUnknownArtifactInputSnapshot, readableArtifactIds, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
+  invalidateArtifactInputLineage, lineageContentFingerprint, preserveUnknownArtifactInputSnapshot, readableArtifactIds, recordArtifactInputLineage, captureArtifactPermissionEpochs, captureArtifactReadHeadObservation, captureReadableWorkItemInputs,
+  mergeLineageInputRoot, withArtifactCountReleaseSnapshot, type LineageKind, type LineageRoot } from "./source-lineage";
+import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent } from "./source-permission-epochs";
 
 export type DecisionSummary = {
   approve: number;
@@ -536,6 +538,86 @@ async function activeApprovalFlowsForWorkspace(workspaceId: string) {
   });
 }
 
+type ApprovalReadRow = { id: string; [key: string]: unknown };
+type ApprovalReadGroup = { kind: LineageKind; rows: ApprovalReadRow[]; roots: LineageRoot[] };
+
+/** Retain original snapshots and caller epochs before admitting later groups.
+ * Collection is once per kind, and admission/replay is bounded to 100 roots. */
+async function captureApprovalRead(actor: AppActor, workspaceId: string,
+  proposals: ApprovalReadRow[], flows: LoadedFlow[], members: ApprovalReadRow[] = []) {
+  const proposalKeys = new Set(proposals.map(row => row.id));
+  flows = flows.filter(flow => proposalKeys.has(flow.subjectId));
+  const groups: ApprovalReadGroup[] = [
+    { kind: "Member", rows: members, roots: [] },
+    { kind: "ApprovalFlow", rows: flows, roots: [] },
+    { kind: "ApprovalDecision", rows: flows.flatMap(flow => flow.decisions), roots: [] },
+    { kind: "Objection", rows: flows.flatMap(flow => flow.objections), roots: [] },
+  ];
+  for (const group of groups) for (let offset = 0; offset < group.rows.length; offset += 100) {
+    const roots = group.rows.slice(offset, offset + 100).map(row => ({kind: group.kind, id: row.id,
+      fingerprint: lineageContentFingerprint(group.kind, row)}));
+    const permissionEpochs = await prisma.$transaction(tx => captureArtifactPermissionEpochs(actor, workspaceId, roots, tx));
+    group.roots.push(...roots.map(root => ({...root, permissionEpochs})));
+  }
+  const roots = new Map<string, LineageRoot>(), heads = new Map<string, string>();
+  const add = (proof: readonly LineageRoot[], observed: ReadonlyMap<string, string>) => {
+    for (const root of proof) {
+      const key = `${root.kind}:${root.id}`;
+      roots.set(key, mergeLineageInputRoot(roots.get(key), root));
+    }
+    for (const [key, stamp] of observed) {
+      invariant(!heads.has(key) || heads.get(key) === stamp, 409, "SOURCE_CHANGED", "Approval lineage changed during collection.");
+      heads.set(key, stamp);
+    }
+  };
+  const admitted = new Map<LineageKind, Set<string>>();
+  const proposalIds = new Set<string>();
+  for (let offset = 0; offset < proposals.length; offset += 100) {
+    const captured = await captureReadableWorkItemInputs(actor, workspaceId, "Proposal", proposals.slice(offset, offset + 100));
+    captured.ids.forEach(id => proposalIds.add(id));
+    add(captured.roots, captured.heads);
+  }
+  admitted.set("Proposal", proposalIds);
+  for (const group of groups) {
+    const ids = new Set<string>();
+    const pageSize = group.kind === "ApprovalDecision" || group.kind === "Objection" ? 75 : 100;
+    for (let offset = 0; offset < group.rows.length; offset += pageSize) {
+      const observed = await captureArtifactReadHeadObservation(() => readableArtifactIds(actor, workspaceId,
+        group.kind, group.rows.slice(offset, offset + pageSize)));
+      observed.value.forEach(id => ids.add(id));
+      add(group.roots.slice(offset, offset + pageSize).filter(root => ids.has(root.id)), observed.heads);
+    }
+    invariant(group.kind !== "Member" || ids.size === group.rows.length, 409, "SOURCE_CHANGED", "Approval reviewers are unavailable.");
+    admitted.set(group.kind, ids);
+  }
+  const readableFlow = (flow: LoadedFlow) => proposalIds.has(flow.subjectId)
+    && admitted.get("ApprovalFlow")!.has(flow.id)
+    && flow.decisions.every(row => admitted.get("ApprovalDecision")!.has(row.id))
+    && flow.objections.every(row => admitted.get("Objection")!.has(row.id));
+  return { proposalIds, readableFlow, finish: <T>(value: T, validate?: (tx: Prisma.TransactionClient) => Promise<void>) =>
+    withArtifactCountReleaseSnapshot(actor, workspaceId, [...roots.values()], async () => {}, async tx => {
+      await requireWorkspaceMembership({actor, workspaceId, tx});
+      await validate?.(tx);
+      return value;
+    }, heads) };
+}
+
+const approvalMemberSnapshot = (member: Prisma.MemberGetPayload<{include: {user: true}}>) => ({...member,
+  user: member.user ? {id: member.user.id, email: member.user.email, displayName: member.user.displayName} : null});
+
+// A historical objection author need not still be an active member. Its label
+// remains governed by the objection proof; retain its own policy/head continuity
+// without changing that existing admission contract.
+async function approvalUserHeads(db: Prisma.TransactionClient, workspaceId: string, ids: string[]) {
+  const heads: unknown[] = [];
+  for (let offset = 0; offset < ids.length; offset += 100) {
+    heads.push(...await db.$queryRaw<unknown[]>(Prisma.sql`SELECT manifest.* FROM unnest(ARRAY[${Prisma.join(ids.slice(offset, offset + 100))}]::text[]) AS selected(id)
+      CROSS JOIN LATERAL (SELECT * FROM "ArtifactInputLineage" WHERE "workspaceId"=${workspaceId}
+        AND "artifactType"='User' AND "artifactId"=selected.id ORDER BY revision DESC LIMIT 1) AS manifest ORDER BY manifest."artifactId"`));
+  }
+  return JSON.stringify(heads);
+}
+
 export async function listActionableApprovalFlows(
   actor: AppActor,
   workspaceId: string,
@@ -549,17 +631,18 @@ export async function listActionableApprovalFlows(
     .map((flow) => flow.subjectId);
   const proposals = proposalIds.length > 0
     ? await prisma.proposal.findMany({
-      where: { id: { in: proposalIds } },
+      where: { workspaceId, id: { in: proposalIds } },
 
     })
     : [];
 
-  const permittedProposalIds = await readableArtifactIds(actor, workspaceId, "Proposal", proposals);
+  const release = await captureApprovalRead(actor, workspaceId, proposals, flows);
+  const permittedProposalIds = release.proposalIds;
   const proposalById = new Map(proposals.filter((row) => permittedProposalIds.has(row.id)).map((proposal) => [proposal.id, proposal]));
   const actionable: ActionableApprovalFlow[] = [];
 
   for (const flow of flows) {
-    if (!await approvalInputsReadable(actor, workspaceId, flow)) continue;
+    if (!release.readableFlow(flow)) continue;
     if (flow.subjectType === "PROPOSAL") {
       const proposal = proposalById.get(flow.subjectId);
       if (!proposal || proposal.archivedAt || proposal.status !== "OPEN" || proposal.isPrivate) {
@@ -572,12 +655,12 @@ export async function listActionableApprovalFlows(
   const skip = opts?.skip ?? 0;
   const take = opts?.take ?? 20;
 
-  return {
+  return release.finish({
     items: actionable.slice(skip, skip + take),
     total: actionable.length,
     take,
     skip,
-  };
+  });
 }
 
 export async function listProposalDecisionStates(
@@ -636,13 +719,23 @@ export async function listProposalDecisionStates(
     }),
   ]);
 
+  const members = eligibleMembers.map(approvalMemberSnapshot);
+  const userLabels = new Map(eligibleMembers.filter(member => member.user).map(member =>
+    [member.user!.id, {id: member.user!.id, displayName: member.user!.displayName, email: member.user!.email}]));
+  for (const flow of flows) for (const objection of flow.objections) userLabels.set(objection.userId,
+    {id: objection.userId, displayName: objection.user.displayName, email: objection.user.email});
+  const userIds = [...userLabels.keys()].sort();
+  const userEpochs = userIds.length ? await prisma.$transaction(tx => capturePermissionEpochs(tx, params.workspaceId,
+    userIds.flatMap(id => [{kind: "User", id}, {kind: "MemberUserPolicy", id}]))) : null;
+  const userHeads = await approvalUserHeads(prisma, params.workspaceId, userIds);
+  const release = await captureApprovalRead(actor, params.workspaceId, proposals, flows, members);
   const states = new Map<string, ProposalDecisionState>();
-  const permittedIds = await readableArtifactIds(actor, params.workspaceId, "Proposal", proposals);
+  const permittedIds = release.proposalIds;
   const proposalAuthorById = new Map(proposals.filter((row) => permittedIds.has(row.id)).map((proposal) => [proposal.id, proposal.authorUserId]));
   const actorUserId = actor.kind === "user" ? actor.user.id : null;
 
   for (const flow of flows) {
-    if (!permittedIds.has(flow.subjectId) || !await approvalInputsReadable(actor, params.workspaceId, flow)) continue;
+    if (!release.readableFlow(flow)) continue;
     const authorUserId = proposalAuthorById.get(flow.subjectId);
     const reviewers = eligibleMembers
       .filter((member) => !authorUserId || member.userId !== authorUserId)
@@ -701,7 +794,21 @@ export async function listProposalDecisionStates(
     });
   }
 
-  return states;
+  return release.finish(states, async tx => {
+    const currentMembers = await tx.member.findMany({
+      where: {workspaceId: params.workspaceId, isActive: true, ...humanMemberIdentityWhere()},
+      include: {user: true}, orderBy: {joinedAt: "asc"},
+    });
+    invariant(JSON.stringify(currentMembers.map(approvalMemberSnapshot)) === JSON.stringify(members),
+      409, "SOURCE_CHANGED", "Approval reviewers changed during collection.");
+    const currentUsers = userIds.length ? await tx.user.findMany({where: {id: {in: userIds}},
+      select: {id: true, displayName: true, email: true}}) : [];
+    invariant(currentUsers.length === userIds.length && currentUsers.every(user =>
+      JSON.stringify(user) === JSON.stringify(userLabels.get(user.id)))
+      && (!userEpochs || await isArtifactPermissionEpochProofCurrent(params.workspaceId, userEpochs, tx))
+      && await approvalUserHeads(tx, params.workspaceId, userIds) === userHeads,
+    409, "SOURCE_CHANGED", "Approval reviewer labels changed during collection.");
+  });
 }
 
 /** Keep immutable history before a workflow reset clears its live review rows. */

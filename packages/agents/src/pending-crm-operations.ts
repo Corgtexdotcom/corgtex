@@ -160,7 +160,9 @@ export function crmPendingOperationIntent(message: string): PendingOperationInte
   }
 
   const confirmPattern = new RegExp(
-    `^(?:confirm|approve)\\s+(?:pending\\s+operation\\s+)?${idPattern}\\b`,
+    // The whole message must be the approval: trailing text (negations, conditions,
+    // questions, extra IDs or argument changes) makes it ambiguous, so it is not a confirm.
+    `^(?:confirm|approve)\\s+(?:pending\\s+operation\\s+)?${idPattern}\\s*[.!]?$`,
     "i"
   );
   if (confirmPattern.test(trimmed)) {

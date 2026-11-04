@@ -191,7 +191,8 @@ describe("Document parser and index boundaries with real source receipts", () =>
     expect(health.unchunkedArticles).toEqual([{ id: article.id, title: article.title, slug: article.slug }]);
     expect(health.recentErrors).toHaveLength(1); expect(health.recentErrors[0]).toContain("Indexing failed.");
     expect(JSON.stringify(health)).not.toMatch(/Restricted|private-path|provider response/);
-    expect(fixture.prisma.workflowJob.findMany.mock.calls.some(([args]: any[]) => args.where.id?.gt)).toBe(true);
+    expect(fixture.prisma.workflowJob.findMany.mock.calls).toHaveLength(1);
+    expect(fixture.prisma.workflowJob.findMany.mock.calls[0][0]).toMatchObject({ take: 10001, orderBy: { id: "asc" } });
     expect(fixture.prisma.workflowJob.findMany.mock.calls.every(([args]: any[]) => args.select.error === undefined)).toBe(true);
     fixture.tables.document.find(row => row.id === original.id).metadata = { changed: true };
     const changed = await getWorkspaceIndexingHealth(ws, general);
@@ -230,7 +231,7 @@ describe("Document parser and index boundaries with real source receipts", () =>
         accessDomain: "WORKSPACE", content: "New private body", metadata: { sourceContentHash: "unproven" } }];
       return { skipped: false };
     });
-    await expect(syncDocumentKnowledge({ workspaceId: ws, documentId: row.id })).rejects.toThrow("Document inputs changed during Azure indexing");
+    await expect(syncDocumentKnowledge({ workspaceId: ws, documentId: row.id })).rejects.toMatchObject({code: "SOURCE_CHANGED"});
     expect(remote.azure).toHaveBeenCalledTimes(1);
     expect(remote.azure.mock.calls[0][0].chunks[0].content).toBe("Synthetic document\n\nSynthetic current source");
   });

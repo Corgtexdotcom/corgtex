@@ -45,6 +45,41 @@ afterEach(() => {
 });
 
 describe("loginAction", () => {
+  it.each(["en", "es"])("resumes the authenticated click after login in %s without localizing the API", async (locale) => {
+    const { loginAction } = await import("./actions");
+    const { initialLoginActionState } = await import("./state");
+    loginUserWithPassword.mockResolvedValue({ user: { id: "reader", email: "reader@example.test" }, token: "synthetic", expiresAt: new Date() });
+    listActorWorkspaces.mockResolvedValue([{ id: "workspace-1" }]);
+    const form = buildFormData("reader@example.test", "password123", locale);
+    form.set("next", "/api/newspaper/click/Ab0_-token");
+    await expect(loginAction(initialLoginActionState, form)).resolves.toMatchObject({ redirectTo: "/api/newspaper/click/Ab0_-token", error: null });
+    expect(setSessionCookie).toHaveBeenCalled();
+  });
+
+  it("keeps a failed login on the form and resumes its continuation on retry", async () => {
+    const { loginAction } = await import("./actions");
+    const { initialLoginActionState } = await import("./state");
+    const form = buildFormData("reader@example.test", "password123");
+    form.set("next", "/api/newspaper/click/token");
+    loginUserWithPassword.mockRejectedValueOnce(new MockAppError(401, "UNAUTHENTICATED", "Invalid credentials"));
+    const failed = await loginAction(initialLoginActionState, form);
+    expect(failed.redirectTo).toBeNull();
+    expect(setSessionCookie).not.toHaveBeenCalled();
+    loginUserWithPassword.mockResolvedValueOnce({ user: { id: "reader", email: "reader@example.test" }, token: "synthetic", expiresAt: new Date() });
+    listActorWorkspaces.mockResolvedValue([{ id: "workspace-1" }]);
+    await expect(loginAction(failed, form)).resolves.toMatchObject({ redirectTo: "/api/newspaper/click/token", error: null });
+  });
+
+  it("rejects an attacker-supplied continuation at the server action", async () => {
+    const { loginAction } = await import("./actions");
+    const { initialLoginActionState } = await import("./state");
+    loginUserWithPassword.mockResolvedValue({ user: { id: "reader", email: "reader@example.test" }, token: "synthetic", expiresAt: new Date() });
+    listActorWorkspaces.mockResolvedValue([{ id: "workspace-1" }]);
+    const form = buildFormData("reader@example.test", "password123");
+    form.set("next", "//evil.test/api/newspaper/click/token");
+    await expect(loginAction(initialLoginActionState, form)).resolves.toMatchObject({ redirectTo: "/workspaces/workspace-1" });
+  });
+
   it("routes Setup-only users to support while preserving the locale", async () => {
     const { loginAction } = await import("./actions");
     const { initialLoginActionState } = await import("./state");

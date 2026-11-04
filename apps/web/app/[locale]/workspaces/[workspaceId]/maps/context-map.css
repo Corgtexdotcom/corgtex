@@ -870,18 +870,120 @@
     justify-content: flex-start;
   }
 
-  .context-map-canvas,
   .context-map-stage {
-    min-height: 620px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
   }
 
-  .context-map-inspector {
-    top: auto;
-    right: 10px;
-    bottom: 10px;
-    left: 10px;
-    width: auto;
-    max-height: 46%;
+  .context-map-canvas {
+    height: clamp(320px, 55dvh, 560px);
+    min-height: 320px;
+    flex: none;
+  }
+
+  .context-map-card-navigation {
+    display: grid;
+    gap: 6px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-alt);
+    font-size: 0.78rem;
+  }
+
+  .context-map-card-navigation label {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    font-weight: 700;
+  }
+
+  .context-map-card-navigation label span {
+    flex: none;
+  }
+
+  .context-map-card-navigation select {
+    min-width: 0;
+    width: 100%;
+    min-height: 40px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+  }
+
+  .context-map-card-navigation > span {
+    color: var(--muted);
+  }
+
+  .context-map-node-topline,
+  .context-map-node-meta,
+  .context-map-status,
+  .context-map-flow-edge-label {
+    font-size: 0.75rem;
+  }
+
+  .context-map-shell .context-map-inspector {
+    position: relative;
+    inset: auto;
+    display: flex;
+    flex-direction: column;
+    flex: none;
+    width: 100%;
+    max-height: 380px;
+    border: 0;
+    border-top: 1px solid var(--line);
+    border-radius: 0;
+    background: var(--surface-strong);
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+
+  .context-map-inspector-header {
+    flex: none;
+  }
+
+  .context-map-inspector-scroll[hidden] {
+    display: none;
+  }
+
+  .context-map-shell--fullscreen {
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .context-map-shell--fullscreen > .context-map-toolbar,
+  .context-map-shell--fullscreen > .context-map-card-navigation,
+  .context-map-shell--fullscreen > .context-map-filter-bar {
+    flex: none;
+  }
+
+  .context-map-shell--fullscreen .context-map-stage {
+    flex: 1;
+    height: auto;
+    min-height: 230px;
+  }
+
+  .context-map-shell--fullscreen .context-map-canvas {
+    flex: 1;
+    height: auto;
+    min-height: 160px;
+  }
+
+  .context-map-shell--fullscreen .context-map-inspector {
+    max-height: min(34dvh, 280px);
+  }
+}
+
+@media (max-width: 920px) and (max-height: 500px) {
+  .context-map-shell--fullscreen .context-map-title-block,
+  .context-map-shell--fullscreen .context-map-card-navigation > span {
+    display: none;
   }
 }
 
@@ -898,10 +1000,6 @@
 
   .context-map-toolbar-actions .secondary.small {
     min-height: 34px;
-  }
-
-  .context-map-inspector {
-    max-height: 50%;
   }
 
   .context-map-diff-compare {

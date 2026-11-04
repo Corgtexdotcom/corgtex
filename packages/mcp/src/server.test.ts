@@ -106,6 +106,18 @@ const postDeliberationEntryMock = vi.fn();
 const resolveDeliberationEntryMock = vi.fn();
 const getWorkspacePermanentPathForEntityMock = vi.fn();
 
+const { evidenceCapture, evidenceRelease } = vi.hoisted(() => ({evidenceCapture: vi.fn(), evidenceRelease: vi.fn()}));
+vi.mock("../../domain/src/auth", () => ({requireWorkspaceMembership: async () => ({id:"member"})}));
+vi.mock("../../domain/src/source-lineage", () => ({
+  captureArtifactInputProof: evidenceCapture,
+  captureReadableWorkItemInputs: async (actor: unknown, workspaceId: string, kind: string, rows: Array<{id: string}>) => ({
+    ids: new Set(rows.map(row => row.id)), roots: await evidenceCapture(actor, workspaceId, rows.map(row => ({kind, id: row.id, snapshot: row}))), heads: new Map(),
+  }),
+  captureArtifactReadHeadObservation: async (read:()=>Promise<unknown>)=>({value:await read(),heads:new Map()}),
+  mergeLineageInputRoot: (_previous:unknown,root:unknown)=>root,
+  withArtifactCountReleaseSnapshot: async (_a:unknown,_w:string,roots:unknown,_r:unknown,finish:(tx:unknown)=>Promise<unknown>)=>{await evidenceRelease(roots);return finish({});},
+}));
+
 vi.mock("@corgtex/domain", async () => {
   const { releaseDiagnosticDispatchSchema, releaseDiagnosticRequestSchema } = await import("../../domain/src/release-diagnostics");
   const { MCP_TOOL_CAPABILITIES } = await import("../../domain/src/mcp-tool-capabilities");
@@ -118,6 +130,8 @@ vi.mock("@corgtex/domain", async () => {
   } = await import("../../domain/src/work-item-normalization");
 
   return {
+  ...await import("../../domain/src/digest-lineage"),
+  ...await import("../../domain/src/work-item-readable-page"),
   // This routing fixture verifies handler wiring; native permission/encryption behavior is exercised by mcp-tool-input.test.ts.
   withMcpToolInput: vi.fn(async (_actor, params, work) => work(structuredClone(params.args))),
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, rows) => new Set(rows.map((row: {id: string}) => row.id))),
@@ -313,7 +327,8 @@ vi.mock("@corgtex/shared", async () => {
       return kind === "McpOAuthGrantPolicy" && row?.workspaceId === workspaceId && row.grantEpoch !== undefined
         ? [{ epoch: row.grantEpoch }] : [];
     }),
-    contextGraphObject: {findMany: vi.fn()},
+    contextGraphObject: {findMany: vi.fn(), findFirst: vi.fn()},
+    contextGraphEvidenceRef: {findMany: vi.fn()},
     contextGraphRelationship: {findMany: vi.fn()},
     action: {
       findFirst: vi.fn(),
@@ -390,6 +405,8 @@ describe("createCorgtexMcpServer", () => {
   });
 
   beforeEach(async () => {
+    evidenceCapture.mockReset().mockImplementation(async (_actor, _workspaceId, inputs) => inputs.map((input: {kind: string; id: string}) => ({kind: input.kind, id: input.id, fingerprint: "fixture"})));
+    evidenceRelease.mockReset().mockResolvedValue(undefined);
     vi.unstubAllEnvs();
     vi.stubEnv("MICROSOFT_CLIENT_ID", "microsoft-client-id");
     vi.stubEnv("MICROSOFT_CLIENT_SECRET", "microsoft-client-secret");
@@ -2481,7 +2498,7 @@ describe("createCorgtexMcpServer", () => {
         version: 1,
         priority: 2,
         assigneeMemberId: "member-assignee",
-        assigneeMember: { id: "member-assignee", user: { displayName: "Assignee", email: "assignee@example.test" } },
+        assigneeMember: { id: "member-assignee", userId: "user-assignee", isActive: true, user: { displayName: "Assignee", email: "assignee@example.test" } },
       } as never)
       .mockResolvedValueOnce({
         id: "action-1",
@@ -2489,7 +2506,7 @@ describe("createCorgtexMcpServer", () => {
         version: 2,
         priority: 3,
         assigneeMemberId: "member-assignee",
-        assigneeMember: { id: "member-assignee", user: { displayName: "Assignee", email: "assignee@example.test" } },
+        assigneeMember: { id: "member-assignee", userId: "user-assignee", isActive: true, user: { displayName: "Assignee", email: "assignee@example.test" } },
       } as never);
     vi.mocked(prisma.tension.findFirst)
       .mockResolvedValueOnce({
@@ -2499,8 +2516,9 @@ describe("createCorgtexMcpServer", () => {
         priority: 1,
         assigneeMemberId: "member-responsible",
         raisedByMemberId: "member-raiser",
-        assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
-        raisedByMember: { id: "member-raiser", user: { displayName: "Raiser", email: "raiser@example.test" } },
+        upvotes: [],
+        assigneeMember: { id: "member-responsible", userId: "user-responsible", isActive: true, user: { displayName: "Responsible", email: "responsible@example.test" } },
+        raisedByMember: { id: "member-raiser", userId: "user-raiser", isActive: true, user: { displayName: "Raiser", email: "raiser@example.test" } },
       } as never)
       .mockResolvedValueOnce({
         id: "tension-1",
@@ -2509,8 +2527,9 @@ describe("createCorgtexMcpServer", () => {
         priority: 2,
         assigneeMemberId: "member-responsible",
         raisedByMemberId: "member-raiser",
-        assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
-        raisedByMember: { id: "member-raiser", user: { displayName: "Raiser", email: "raiser@example.test" } },
+        upvotes: [],
+        assigneeMember: { id: "member-responsible", userId: "user-responsible", isActive: true, user: { displayName: "Responsible", email: "responsible@example.test" } },
+        raisedByMember: { id: "member-raiser", userId: "user-raiser", isActive: true, user: { displayName: "Raiser", email: "raiser@example.test" } },
       } as never);
     getProposalMock
       .mockResolvedValueOnce({
@@ -2917,6 +2936,28 @@ describe("createCorgtexMcpServer", () => {
       ownerMemberName: "Default Owner",
       owner: "Default Owner",
     });
+  });
+
+  it.each([403, 409, 503, 0])("preserves get_proposal non-404 failure %i", async status => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { AppError } = await import("@corgtex/domain");
+    const failure = status ? new AppError(status, "SOURCE_CHANGED", "Synthetic failure") : new Error("Synthetic database outage");
+    getProposalMock.mockRejectedValueOnce(failure);
+    const server = createTestServer(createCorgtexMcpServer, {
+      actor: { kind: "agent", authProvider: "bootstrap" } as any, workspaceId: "ws-1", authKind: "agent",
+    });
+    await expect((server as any)._registeredTools.get_proposal.handler({ proposalId: "proposal-1" })).rejects.toBe(failure);
+  });
+
+  it("keeps the get_proposal missing-record response for expected 404", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { AppError } = await import("@corgtex/domain");
+    getProposalMock.mockRejectedValueOnce(new AppError(404, "NOT_FOUND", "Missing"));
+    const server = createTestServer(createCorgtexMcpServer, {
+      actor: { kind: "agent", authProvider: "bootstrap" } as any, workspaceId: "ws-1", authKind: "agent",
+    });
+    const response = await (server as any)._registeredTools.get_proposal.handler({ proposalId: "proposal-1" });
+    expect(JSON.parse(response.content[0].text)).toEqual({ error: "Not found" });
   });
 
   it("keeps MCP get_proposal advice counts aligned with list responses", async () => {
@@ -3574,6 +3615,9 @@ describe("createCorgtexMcpServer", () => {
       }
       testCase.domainFn.mockClear().mockResolvedValueOnce({ id: "id-1", version: 3 });
       if (testCase.name === "update_proposal") getProposalMock.mockResolvedValueOnce({ id: "id-1", version: 3 });
+      const { prisma } = await import("@corgtex/shared");
+      if (testCase.name === "update_action") vi.mocked(prisma.action.findFirst).mockResolvedValueOnce({ id: "id-1", version: 3, assigneeMember: null } as any);
+      if (testCase.name === "update_tension") vi.mocked(prisma.tension.findFirst).mockResolvedValueOnce({ id: "id-1", version: 3, assigneeMember: null, raisedByMember: null, upvotes: [] } as any);
       recordAuditMock.mockClear();
       const success = await tool.handler(testCase.args);
       expect(testCase.domainFn).toHaveBeenCalledWith(expect.anything(), expect.objectContaining(testCase.args));
@@ -3605,40 +3649,99 @@ describe("context graph bounded permission scan", () => {
     const {prisma} = await import("@corgtex/shared");
     const {readableArtifactIds} = await import("@corgtex/domain");
     const {createCorgtexMcpServer} = await import("./server");
-    const objects = Array.from({length: 260}, (_, index) => ({id: `object-${index}`, visible: index >= 100}));
-    const relationships = Array.from({length: 260}, (_, index) => ({id: `relationship-${index}`, visible: index >= 100}));
-    const page = (rows: typeof objects) => async ({take, cursor, skip = 0}: {take: number; cursor?: {id: string}; skip?: number}) => {
-      const offset = cursor ? rows.findIndex(row => row.id === cursor.id) + skip : 0;
+    const objects = Array.from({length: 260}, (_, index) => ({id: `object-${String(index).padStart(3,"0")}`, objectType: "Task", updatedAt: new Date(0), visible: index >= 100}));
+    const relationships = Array.from({length: 260}, (_, index) => ({id: `relationship-${String(index).padStart(3,"0")}`, objectType: "Task", updatedAt: new Date(0), visible: index >= 100}));
+    const page = (rows: typeof objects) => async ({take, where}: any) => {
+      const after = where?.AND?.[1]?.OR?.[2]?.id?.gt ?? where?.id?.gt;
+      const offset = after ? rows.findIndex(row => row.id === after) + 1 : 0;
       return rows.slice(offset, offset + take);
     };
     vi.mocked(prisma.contextGraphObject.findMany).mockImplementation(page(objects) as any);
     vi.mocked(prisma.contextGraphRelationship.findMany).mockImplementation(page(relationships) as any);
     vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspace, _kind, rows) =>
       new Set(rows.filter(row => (row as {visible?: boolean}).visible).map(row => row.id)));
+    const {AppError} = await import("../../domain/src/errors");
+    evidenceCapture.mockImplementation(async (_a, _w, inputs) => {
+      if (!inputs[0].snapshot.visible) throw new AppError(409, "UNKNOWN_LINEAGE", "Unproved");
+      return [{kind: inputs[0].kind, id: inputs[0].id, fingerprint: "a".repeat(64)}];
+    });
+    evidenceRelease.mockResolvedValue(undefined);
     try {
       const server = createTestServer(createCorgtexMcpServer, {workspaceId: "ws-1", authKind: "oauth", actor: {kind: "user", user: {id: "u-1"}}});
       const response = await (server as any)._registeredTools.query_context_graph.handler({take: 3});
       const result = response.structuredContent;
       expect(result.objects.map((row: {id: string}) => row.id)).toEqual(["object-100", "object-101", "object-102"]);
       expect(result.relationships).toHaveLength(6);
-      expect(prisma.contextGraphObject.findMany).toHaveBeenLastCalledWith(expect.objectContaining({take: 100, cursor: {id: "object-99"}, skip: 1}));
+      expect(prisma.contextGraphObject.findMany).toHaveBeenLastCalledWith(expect.objectContaining({take: 100, where: {AND: [expect.objectContaining({workspaceId: "ws-1"}), {OR: expect.arrayContaining([{objectType: "Task", updatedAt: new Date(0), id: {gt: "object-099"}}])}]}}));
       expect(prisma.contextGraphRelationship.findMany).toHaveBeenLastCalledWith(expect.objectContaining({take: 100,
         where: expect.objectContaining({workspaceId: "ws-1", sourceObjectId: {in: ["object-100", "object-101", "object-102"]}})}));
     } finally {vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspace, _kind, rows) => new Set(rows.map(row => row.id)));}
   });
-  it("stops an over-budget denied graph at a one-row sentinel", async () => {
+  it.each([100, 5_001])("bounds canonical discovery after %s denied objects and releases only a reachable original", async (denied) => {
     const {prisma} = await import("@corgtex/shared");
     const {readableArtifactIds} = await import("@corgtex/domain");
+    const {AppError} = await import("../../domain/src/errors");
     const {createCorgtexMcpServer} = await import("./server");
-    let offset = 0;
-    vi.mocked(prisma.contextGraphObject.findMany).mockReset().mockImplementation(({take} = {}) =>
-      Promise.resolve(Array.from({length: take ?? 0}, () => ({id: `denied-${offset++}`}))) as ReturnType<typeof prisma.contextGraphObject.findMany>);
-    vi.mocked(readableArtifactIds).mockImplementation(async () => new Set());
+    const readableId = String(denied).padStart(5, "0");
+    const rows = Array.from({length: denied + 1}, (_, index) => ({id: String(index).padStart(5, "0"), objectType: "Task", updatedAt: new Date(0)}));
+    vi.mocked(prisma.contextGraphObject.findMany).mockReset().mockImplementation((async ({take, cursor, where}: any) => {
+      const after = cursor?.id ?? where?.AND?.[1]?.OR?.[2]?.id?.gt;
+      return rows.filter(row => !after || row.id > after).slice(0, take);
+    }) as any);
+    vi.mocked(prisma.contextGraphRelationship.findMany).mockReset().mockResolvedValue([]);
+    vi.mocked(readableArtifactIds).mockImplementation(async (_a, _w, _k, candidates) => new Set(candidates.filter(row => row.id === readableId).map(row => row.id)));
+    evidenceCapture.mockReset().mockImplementation(async (_a, _w, inputs) => {
+      if (inputs[0].id !== readableId) throw new AppError(409, "UNKNOWN_LINEAGE", "Unproved");
+      return [{kind: inputs[0].kind, id: inputs[0].id, fingerprint: "a".repeat(64)}];
+    });
+    evidenceRelease.mockReset().mockResolvedValue(undefined);
     try {
       const server = createTestServer(createCorgtexMcpServer, {workspaceId: "ws-1", authKind: "oauth", actor: {kind: "user", user: {id: "u-1"}}});
-      await expect((server as any)._registeredTools.query_context_graph.handler({take: 1})).rejects.toMatchObject({code: "CONTEXT_GRAPH_SCAN_LIMIT"});
-      expect(prisma.contextGraphObject.findMany).toHaveBeenCalledTimes(51);
-      expect(prisma.contextGraphObject.findMany).toHaveBeenLastCalledWith(expect.objectContaining({take: 1}));
-    } finally {vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspace, _kind, rows) => new Set(rows.map(row => row.id)));}
+      if (denied > 200) {
+        await expect((server as any)._registeredTools.query_context_graph.handler({take: 1}))
+          .rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+        expect(prisma.contextGraphObject.findMany).toHaveBeenCalledTimes(2);
+        expect(vi.mocked(prisma.contextGraphObject.findMany).mock.calls.every(([args]: any) => args.take === 100)).toBe(true);
+        expect(evidenceCapture).toHaveBeenCalledTimes(200);
+        expect(prisma.contextGraphRelationship.findMany).not.toHaveBeenCalled();
+        expect(evidenceRelease).not.toHaveBeenCalled();
+        return;
+      }
+      const result = await (server as any)._registeredTools.query_context_graph.handler({take: 1});
+      expect(result.structuredContent.objects.map((row: {id: string}) => row.id)).toEqual([readableId]);
+      expect(prisma.contextGraphObject.findMany).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(prisma.contextGraphObject.findMany).mock.calls.every(([args]: any) => args.take === 100)).toBe(true);
+      expect(evidenceRelease.mock.calls.at(-1)?.[0].map((root: any) => root.id)).toEqual([readableId]);
+      evidenceRelease.mockRejectedValueOnce(new AppError(409, "SOURCE_CHANGED", "Original authority changed"));
+      await expect((server as any)._registeredTools.query_context_graph.handler({take: 1})).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    } finally {vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspace, _kind, candidates) => new Set(candidates.map(row => row.id)));}
   });
+});
+
+
+it("pages context evidence after owner admission and releases original owner plus selected refs", async () => {
+  const { AppError }=await import("../../domain/src/errors");
+  const { prisma }=await import("@corgtex/shared");
+  const { createCorgtexMcpServer }=await import("./server");
+  const now=new Date("2026-01-01");
+  const rows=Array.from({length:150},(_,index)=>({id:String(index).padStart(3,"0"),createdAt:now,knowledgeChunkId:null}));
+  vi.mocked(prisma.contextGraphObject.findFirst).mockResolvedValue({id:"owner"} as never);
+  // This handler awaits the delegate; its fixture returns the same resolved rows.
+  vi.mocked(prisma.contextGraphEvidenceRef.findMany).mockImplementation((async args=>{
+    expect(args?.take).toBe(100);expect(args?.where?.knowledgeChunkId).toBeNull();
+    const after=(args?.where?.OR as any)?.[1]?.id?.gt;
+    return rows.filter(row=>!after||row.id>after).slice(0,args?.take ?? 0) as never;
+  }) as typeof prisma.contextGraphEvidenceRef.findMany);
+  evidenceCapture.mockImplementation(async (_a,_w,inputs)=>{
+    if(inputs[0].id!=="owner"&&Number(inputs[0].id)<100)throw new AppError(409,"UNKNOWN_LINEAGE","Unproved");
+    return [{kind:inputs[0].kind,id:inputs[0].id,fingerprint:"a".repeat(64)}];
+  });
+  evidenceRelease.mockResolvedValue(undefined);
+  const server=createTestServer(createCorgtexMcpServer,{actor:{kind:"agent",authProvider:"bootstrap"} as any,workspaceId:"ws-1",authKind:"agent"});
+  const result=await (server as any)._registeredTools.get_context_evidence.handler({objectId:"owner",take:2});
+  expect(JSON.parse(result.content[0].text).evidenceRefs.map((row:any)=>row.id)).toEqual(["100","101"]);
+  expect(evidenceRelease.mock.calls.at(-1)![0].map((root:any)=>root.id)).toEqual(["owner","100","101"]);
+  expect(prisma.contextGraphEvidenceRef.findMany).toHaveBeenCalledTimes(2);
+  evidenceRelease.mockRejectedValueOnce(new AppError(409,"SOURCE_CHANGED","Owner changed"));
+  await expect((server as any)._registeredTools.get_context_evidence.handler({objectId:"owner",take:2})).rejects.toMatchObject({code:"SOURCE_CHANGED"});
 });

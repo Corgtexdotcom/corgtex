@@ -1,7 +1,9 @@
 import type { AppActor } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
 import { Prisma, type FinanceImportBatch, type FinanceImportCandidate, type FinanceImportCandidateReviewState } from "@prisma/client";
-import { captureArtifactInputProof, captureImmutableArtifactInputProof, recordArtifactInputLineage, readableArtifactIds, type LineageRoot } from "./source-lineage";
+import { captureArtifactInputProof, captureImmutableArtifactInputProof, recordArtifactInputLineage, currentArtifactInputRootsBatch, collectWorkItemReadSnapshot, type LineageRoot } from "./source-lineage";
+import { createArtifactSampleBudget } from "./digest-lineage";
+import { WorkItemReadRelease } from "./work-item-readable-page";
 import { AppError, invariant } from "./errors";
 import { requireFinanceReportImportHumanWriteAccess, requireFinanceReportImportReadAccess } from "./finance";
 import { parseFinanceImportInterpretationV1 } from "./finance-import-interpretation";
@@ -36,40 +38,66 @@ function present<T extends Pick<FinanceImportCandidate, "action" | "periodEnd" |
 }
 function reportWarnings(value: Prisma.JsonValue | null) { return value ? parseFinanceImportInterpretationV1(value).exceptions.filter(({ severity }) => severity === "WARNING") : []; }
 const FINANCE_READ_BUDGET = 5_000;
-async function readableCandidates(actor: AppActor, workspaceId: string, batchIds: string[]) {
-  if (!batchIds.length) return [];
-  const rows = await prisma.financeImportCandidate.findMany({ where: { workspaceId, batchId: { in: batchIds } },
-    orderBy: [{ sourceKey: "asc" }, { id: "asc" }], take: FINANCE_READ_BUDGET + 1 });
-  invariant(rows.length <= FINANCE_READ_BUDGET, 413, "FINANCE_READ_BUDGET", "Narrow the Finance import selection.");
-  const readable = await readableArtifactIds(actor, workspaceId, "FinanceImportCandidate", rows);
-  return rows.filter(row => readable.has(row.id));
+async function visitReadableCandidates(release: WorkItemReadRelease, workspaceId: string, batchIds: string[], visit: (rows: FinanceImportCandidate[]) => void) {
+  if (!batchIds.length) return;
+  let after: Pick<FinanceImportCandidate, "sourceKey" | "id"> | undefined;
+  for (;;) {
+    const rows = await release.db.financeImportCandidate.findMany({where: {workspaceId, batchId: {in: batchIds},
+      ...(after ? {OR: [{sourceKey: {gt: after.sourceKey}}, {sourceKey: after.sourceKey, id: {gt: after.id}}]} : {})},
+      orderBy: [{sourceKey: "asc"}, {id: "asc"}], take: 100});
+    const next = rows.at(-1);
+    // Missing/stale heads can only reject. Survivors still traverse the full
+    // caller/native/ancestor evaluator and retain their original release proof.
+    const heads = await currentArtifactInputRootsBatch(release.db, workspaceId, "FinanceImportCandidate", rows);
+    visit((await release.capture("FinanceImportCandidate", rows.filter(row => heads.get(row.id) != null))).records);
+    if (rows.length < 100) return;
+    invariant(next && next.id !== after?.id, 409, "SOURCE_CHANGED", "Finance candidates changed during pagination.");
+    after = {sourceKey: next.sourceKey, id: next.id};
+  }
+}
+function emptyCounts() {
+  return { addCount: 0, updateCount: 0, unchangedCount: 0, duplicateCount: 0, conflictCount: 0, skippedCount: 0,
+    rejectedCount: 0, appliedCount: 0, warningCount: 0, blockerCount: 0 };
+}
+function countCandidate(counts: ReturnType<typeof emptyCounts>, candidate: FinanceImportCandidate, now: Date) {
+  counts[COUNT_KEY[candidate.action]] += 1;
+  counts.rejectedCount += Number(candidate.reviewState === "REJECTED");
+  counts.appliedCount += Number(candidate.reviewState === "APPLIED");
+  counts.blockerCount += Number(candidate.reviewState === "BLOCKED");
+  counts.warningCount += Number(warning(candidate, now));
+}
+function completeCounts(batch: FinanceImportBatch, counts: ReturnType<typeof emptyCounts>) {
+  const interpretation = batch.interpretationJson ? parseFinanceImportInterpretationV1(batch.interpretationJson) : null;
+  return {...counts,
+    warningCount: counts.warningCount + (interpretation?.exceptions.filter(item => item.severity === "WARNING" && !HISTORICAL_POLICY_CODES.has(item.code)).length ?? 0),
+    blockerCount: Math.max(counts.blockerCount, interpretation?.exceptions.filter(item => item.severity === "BLOCKER").length ?? 0,
+      Number(batch.currencyState === "UNRESOLVED" && batch.stage === "NEEDS_INPUT"))};
 }
 function currentCounts(batch: FinanceImportBatch, candidates: FinanceImportCandidate[], now: Date) {
-  const counts = { addCount: 0, updateCount: 0, unchangedCount: 0, duplicateCount: 0, conflictCount: 0, skippedCount: 0,
-    rejectedCount: 0, appliedCount: 0, warningCount: 0, blockerCount: 0 };
-  for (const candidate of candidates) {
-    counts[COUNT_KEY[candidate.action]] += 1;
-    counts.rejectedCount += Number(candidate.reviewState === "REJECTED");
-    counts.appliedCount += Number(candidate.reviewState === "APPLIED");
-    counts.blockerCount += Number(candidate.reviewState === "BLOCKED");
-    counts.warningCount += Number(warning(candidate, now));
-  }
-  const interpretation = batch.interpretationJson ? parseFinanceImportInterpretationV1(batch.interpretationJson) : null;
-  counts.warningCount += interpretation?.exceptions.filter(item => item.severity === "WARNING" && !HISTORICAL_POLICY_CODES.has(item.code)).length ?? 0;
-  counts.blockerCount = Math.max(counts.blockerCount, interpretation?.exceptions.filter(item => item.severity === "BLOCKER").length ?? 0,
-    Number(batch.currencyState === "UNRESOLVED" && batch.stage === "NEEDS_INPUT"));
-  return counts;
+  const counts = emptyCounts();
+  for (const candidate of candidates) countCandidate(counts, candidate, now);
+  return completeCounts(batch, counts);
 }
+
 function summaryOf(batch: FinanceImportBatch) {
   return Object.fromEntries(Object.keys(SUMMARY_SELECT).map(key => [key, batch[key as keyof FinanceImportBatch]])) as Pick<FinanceImportBatch, keyof typeof SUMMARY_SELECT>;
 }
-async function bindRead(actor: AppActor, workspaceId: string, batches: FinanceImportBatch[], candidates: FinanceImportCandidate[]) {
-  if (!batches.length && !candidates.length) return;
-  await captureArtifactInputProof(actor, workspaceId, [
-    ...batches.map(row => ({ kind: "FinanceImportBatch" as const, id: row.id, snapshot: row })),
-    ...candidates.map(row => ({ kind: "FinanceImportCandidate" as const, id: row.id, snapshot: row })),
-  ]);
+async function readFinanceSnapshot<T>(actor: AppActor, workspaceId: string, collect: (release: WorkItemReadRelease) => Promise<T>) {
+  await requireFinanceReportImportReadAccess(actor, workspaceId);
+  let release!: WorkItemReadRelease;
+  const value = await collectWorkItemReadSnapshot(workspaceId, async tx => {
+    release = new WorkItemReadRelease(actor, workspaceId, tx);
+    return collect(release);
+  });
+  // Provider replay and current Finance policy happen after the local read-only
+  // snapshot closes. Reuse exactly the original observed proof/head union.
+  await requireFinanceReportImportReadAccess(actor, workspaceId);
+  return release.finish(value);
 }
+async function bindBatch(release: WorkItemReadRelease, batch: FinanceImportBatch) {
+  await release.observe("FinanceImportBatch", [batch]);
+}
+
 function candidateState(decision: FinanceImportReconciliationDecision, now: Date): FinanceImportCandidateReviewState {
   return decision.reviewState === "BLOCKED" ? "BLOCKED" : ["ADD", "UPDATE"].includes(decision.action) && historical(decision.candidate.periodEnd, now) ? "WARNING" : decision.reviewState;
 }
@@ -86,54 +114,76 @@ async function reconcile(tx: Prisma.TransactionClient, actor: AppActor, identity
   return { ...reconcileFinanceImportCandidates({ ...identity, candidates: rows, currentFacts: current.facts }), lineageRoots: current.roots };
 }
 export async function listFinanceReportImports(actor: AppActor, workspaceId: string, now = new Date()) {
-  await requireFinanceReportImportReadAccess(actor, workspaceId);
-  const rows = await prisma.financeImportBatch.findMany({ where: { workspaceId }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: FINANCE_READ_BUDGET + 1 });
-  invariant(rows.length <= FINANCE_READ_BUDGET, 413, "FINANCE_READ_BUDGET", "Narrow the Finance import selection.");
-  const readable = await readableArtifactIds(actor, workspaceId, "FinanceImportBatch", rows);
-  const batches = rows.filter(row => readable.has(row.id)).slice(0, 100);
-  const candidates = await readableCandidates(actor, workspaceId, batches.map(row => row.id));
-  await bindRead(actor, workspaceId, batches, candidates);
-  return batches.map(batch => ({ ...summaryOf(batch), ...currentCounts(batch, candidates.filter(row => row.batchId === batch.id), now) }));
+  return readFinanceSnapshot(actor, workspaceId, async release => {
+    const batches: FinanceImportBatch[] = [];
+    const budget = createArtifactSampleBudget(100);
+    let after: FinanceImportBatch | undefined;
+    while (batches.length < 100) {
+      const take = budget.nextTake();
+      const rows: FinanceImportBatch[] = await release.db.financeImportBatch.findMany({where: {workspaceId,
+        ...(after ? {OR: [{createdAt: {lt: after.createdAt}}, {createdAt: after.createdAt, id: {gt: after.id}}]} : {})},
+        orderBy: [{createdAt: "desc"}, {id: "asc"}], take});
+      budget.consume(rows.length, take);
+      batches.push(...(await release.capture("FinanceImportBatch", rows)).records.slice(0, 100 - batches.length));
+      if (rows.length < take) break;
+      after = rows.at(-1);
+    }
+    const counts = new Map(batches.map(batch => [batch.id, emptyCounts()]));
+    await visitReadableCandidates(release, workspaceId, batches.map(batch => batch.id), rows => {
+      for (const row of rows) countCandidate(counts.get(row.batchId)!, row, now);
+  });
+  return batches.map(batch => ({...summaryOf(batch), ...completeCounts(batch, counts.get(batch.id)!)}));
+  });
 }
 export async function getFinanceReportImportSummary(actor: AppActor, params: { workspaceId: string; batchId: string }, now = new Date()) {
-  await requireFinanceReportImportReadAccess(actor, params.workspaceId);
-  const batch = await prisma.financeImportBatch.findUnique({ where: { id_workspaceId: { id: params.batchId, workspaceId: params.workspaceId } } });
-  invariant(batch, 404, "FINANCE_REPORT_IMPORT_NOT_FOUND", "The Finance report import was not found.");
-  await bindRead(actor, params.workspaceId, [batch], []);
-  const candidates = await readableCandidates(actor, params.workspaceId, [batch.id]);
-  await bindRead(actor, params.workspaceId, [batch], candidates);
-  return { ...summaryOf(batch), ...currentCounts(batch, candidates, now) };
+  return readFinanceSnapshot(actor, params.workspaceId, async release => {
+    const batch = await release.db.financeImportBatch.findUnique({ where: { id_workspaceId: { id: params.batchId, workspaceId: params.workspaceId } } });
+    invariant(batch, 404, "FINANCE_REPORT_IMPORT_NOT_FOUND", "The Finance report import was not found.");
+    await bindBatch(release, batch);
+    const counts = emptyCounts();
+    await visitReadableCandidates(release, params.workspaceId, [batch.id], rows => {for (const row of rows) countCandidate(counts, row, now);});
+    return {...summaryOf(batch), ...completeCounts(batch, counts)};
+  });
 }
 export async function getFinanceReportImport(actor: AppActor, params: { workspaceId: string; batchId: string }, now = new Date()) {
-  await requireFinanceReportImportReadAccess(actor, params.workspaceId);
-  const batch = await prisma.financeImportBatch.findUnique({ where: { id_workspaceId: { id: params.batchId, workspaceId: params.workspaceId } } });
-  invariant(batch, 404, "FINANCE_REPORT_IMPORT_NOT_FOUND", "The Finance report import was not found.");
-  await bindRead(actor, params.workspaceId, [batch], []);
-  const candidates = await readableCandidates(actor, params.workspaceId, [batch.id]);
-  await bindRead(actor, params.workspaceId, [batch], candidates);
-  const applications = candidates.length ? await prisma.financeImportApplication.findMany({ where: { workspaceId: params.workspaceId,
-    batchId: batch.id, candidateId: { in: candidates.map(row => row.id) } }, orderBy: { id: "asc" }, take: FINANCE_READ_BUDGET + 1 }) : [];
-  invariant(applications.length <= FINANCE_READ_BUDGET, 413, "FINANCE_READ_BUDGET", "Narrow the Finance import selection.");
-  const admittedApplications = await readableArtifactIds(actor, params.workspaceId, "FinanceImportApplication", applications);
-  const visibleApplications = applications.filter(row => admittedApplications.has(row.id));
-  if (visibleApplications.length) await captureArtifactInputProof(actor, params.workspaceId,
-    visibleApplications.map(row => ({ kind: "FinanceImportApplication" as const, id: row.id, snapshot: row })));
-  await bindRead(actor, params.workspaceId, [batch], candidates);
-  const applicationByCandidate = new Map(visibleApplications.map(row => [row.candidateId, {
-    id: row.id, outcome: row.outcome, targetFactId: row.targetFactId, appliedByUserId: row.appliedByUserId, appliedAt: row.appliedAt,
-  }]));
-  const { interpretationJson, ...detail } = batch;
-  const interpretation = interpretationJson ? parseFinanceImportInterpretationV1(interpretationJson) : null;
-  const warnings = interpretation?.exceptions.filter(({ severity, code }) => severity === "WARNING" && !HISTORICAL_POLICY_CODES.has(code)) ?? [];
-  const numericFormat = interpretation?.numericFormat.status === "RESOLVED"
-    ? { status: "RESOLVED" as const, decimalSeparator: interpretation.numericFormat.decimalSeparator,
-        groupingSeparator: interpretation.numericFormat.groupingSeparator, amountScale: interpretation.numericFormat.amountScale }
-    : { status: "UNRESOLVED" as const, decimalSeparator: null, groupingSeparator: null, amountScale: null };
-  return { ...detail, ...currentCounts(batch, candidates, now), warnings,
-    clarification: { canConfirm: detail.stage === "NEEDS_INPUT" && detail.safeErrorCode === "CURRENCY_UNRESOLVED"
-      && numericFormat.status === "RESOLVED" && candidates.length > 0, numericFormat },
-    candidates: candidates.map(candidate => ({ ...present(candidate, now), application: applicationByCandidate.get(candidate.id) ?? null })) };
+  return readFinanceSnapshot(actor, params.workspaceId, async release => {
+    const batch = await release.db.financeImportBatch.findUnique({ where: { id_workspaceId: { id: params.batchId, workspaceId: params.workspaceId } } });
+    invariant(batch, 404, "FINANCE_REPORT_IMPORT_NOT_FOUND", "The Finance report import was not found.");
+    await bindBatch(release, batch);
+    const candidates: FinanceImportCandidate[] = [];
+    await visitReadableCandidates(release, params.workspaceId, [batch.id], rows => {candidates.push(...rows);});
+    const applicationByCandidate = new Map<string, {id: string; outcome: import("@prisma/client").FinanceImportApplicationOutcome;
+      targetFactId: string | null; appliedByUserId: string; appliedAt: Date}>();
+    // Detail deliberately returns every permitted candidate. Only its returned
+    // rows and compact application summaries survive bounded join hydration.
+    for (let offset = 0; offset < candidates.length; offset += 100) {
+      let afterId: string | undefined;
+      for (;;) {
+        const rows = await release.db.financeImportApplication.findMany({where: {workspaceId: params.workspaceId, batchId: batch.id,
+          candidateId: {in: candidates.slice(offset, offset + 100).map(row => row.id)}, ...(afterId ? {id: {gt: afterId}} : {})},
+          orderBy: {id: "asc"}, take: 100});
+        const admitted = await release.capture("FinanceImportApplication", rows);
+        for (const row of admitted.records) applicationByCandidate.set(row.candidateId, {id: row.id, outcome: row.outcome,
+          targetFactId: row.targetFactId, appliedByUserId: row.appliedByUserId, appliedAt: row.appliedAt});
+        if (rows.length < 100) break;
+        invariant(rows.at(-1)!.id !== afterId, 409, "SOURCE_CHANGED", "Finance applications changed during pagination.");
+        afterId = rows.at(-1)!.id;
+      }
+    }
+    const { interpretationJson, ...detail } = batch;
+    const interpretation = interpretationJson ? parseFinanceImportInterpretationV1(interpretationJson) : null;
+    const warnings = interpretation?.exceptions.filter(({ severity, code }) => severity === "WARNING" && !HISTORICAL_POLICY_CODES.has(code)) ?? [];
+    const numericFormat = interpretation?.numericFormat.status === "RESOLVED"
+      ? { status: "RESOLVED" as const, decimalSeparator: interpretation.numericFormat.decimalSeparator,
+          groupingSeparator: interpretation.numericFormat.groupingSeparator, amountScale: interpretation.numericFormat.amountScale }
+      : { status: "UNRESOLVED" as const, decimalSeparator: null, groupingSeparator: null, amountScale: null };
+    return { ...detail, ...currentCounts(batch, candidates, now), warnings,
+      clarification: { canConfirm: detail.stage === "NEEDS_INPUT" && detail.safeErrorCode === "CURRENCY_UNRESOLVED"
+        && numericFormat.status === "RESOLVED" && candidates.length > 0, numericFormat },
+      candidates: candidates.map(candidate => ({ ...present(candidate, now), application: applicationByCandidate.get(candidate.id) ?? null })) };
+  });
 }
+
 function reviewable(batch: { stage: string; version: number }, expectedVersion: number) {
   validVersion(expectedVersion);
   invariant(["READY_FOR_REVIEW", "PARTIALLY_APPLIED"].includes(batch.stage) && batch.version === expectedVersion, 409, "FINANCE_REPORT_REVIEW_CONFLICT", "The Finance report import changed. Refresh and try again.");

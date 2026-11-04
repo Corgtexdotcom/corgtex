@@ -5,6 +5,9 @@ import { postgresHostingConfig } from './hosting.bicep'
 @description('Dedicated servers by default; existing-shared references one server in this subscription without managing its lifecycle.')
 param postgresHosting postgresHostingConfig = { mode: 'dedicated' }
 
+@description('Opt in to legacy Core backing resources. False omits Core from this incremental deployment and retains any previously deployed resources; it does not retire Core.')
+param enableCore bool = false
+
 @allowed(['westus3'])
 param location string = 'westus3'
 
@@ -27,14 +30,14 @@ param opsPostgresSkuName string = 'Standard_D2ds_v5'
 @description('General Purpose by default. B1ms/B2s require an explicitly accepted Burstable production exception and measured capacity.')
 param corePostgresSkuName string = 'Standard_D2ds_v5'
 @allowed(['redis', 'postgres'])
-param opsSharedStateBackend string = 'redis'
+param opsSharedStateBackend string = 'postgres'
 @allowed(['redis', 'postgres'])
-param coreSharedStateBackend string = 'redis'
+param coreSharedStateBackend string = 'postgres'
 @secure()
 @description('Required for dedicated creation only. Leave omitted for existing-shared; never supply an existing server password to this template.')
 param opsPostgresAdministratorPassword string = ''
 @secure()
-@description('Required for dedicated creation only. Leave omitted for existing-shared; never supply an existing server password to this template.')
+@description('Only needed when enableCore is true and PostgreSQL is dedicated. Omit this parameter and any Key Vault reference when Core is disabled.')
 param corePostgresAdministratorPassword string = ''
 
 @allowed(['Disabled', 'Enabled'])
@@ -86,13 +89,14 @@ module hosting './hosting.bicep' = {
     tags: tags
     migrationOperatorPrincipalId: migrationOperatorPrincipalId
     postgresHosting: postgresHosting
+    enableCore: enableCore
     postgresAdministratorLogin: postgresAdministratorLogin
     opsPostgresSkuName: opsPostgresSkuName
     corePostgresSkuName: corePostgresSkuName
     opsSharedStateBackend: opsSharedStateBackend
     coreSharedStateBackend: coreSharedStateBackend
     opsPostgresAdministratorPassword: opsPostgresAdministratorPassword
-    corePostgresAdministratorPassword: corePostgresAdministratorPassword
+    corePostgresAdministratorPassword: enableCore ? corePostgresAdministratorPassword : ''
     opsPostgresPublicNetworkAccess: opsPostgresPublicNetworkAccess
     corePostgresPublicNetworkAccess: corePostgresPublicNetworkAccess
     opsTemporaryRestoreIpv4: opsTemporaryRestoreIpv4

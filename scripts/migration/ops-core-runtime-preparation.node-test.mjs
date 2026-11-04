@@ -1,13 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, writeFile, chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { archiveEvidenceHash } from "./ops-core-archive.mjs";
 import { opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
 import { prepareOpsCoreRuntimeValues } from "./ops-core-runtime-config.mjs";
 import { readPrivateInput, prepareRuntime, validateRuntimePreparationInput,
-  validateRuntimePreparationReceipt } from "./prepare-opscore-runtime.mjs";
+  validateRuntimePreparationReceipt, runtimePreparationDiagnostic } from "./prepare-opscore-runtime.mjs";
 
 const subscription = "227eb707-bc46-415e-a09b-7d2b69fb14b2";
 const base = `/subscriptions/${subscription}/resourceGroups/rg-corgtex-opscore-hosting/providers/`;
@@ -180,4 +183,90 @@ test("workflow input rejects a file larger than one Actions secret", async () =>
     await writeFile(path, "x".repeat(48_001), { mode: 0o600 });
     await assert.rejects(readPrivateInput(path), /RUNTIME_INPUT_NOT_PRIVATE/);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+async function runPreparationCli(prepared, text = JSON.stringify(prepared)) {
+  const directory = await mkdtemp(join(tmpdir(), "opscore-runtime-cli-"));
+  try {
+    const inputPath = join(directory, "input.json"), receiptPath = join(directory, "receipt.json");
+    await writeFile(inputPath, text, { mode: 0o600 });
+    const script = fileURLToPath(new URL("./prepare-opscore-runtime.mjs", import.meta.url));
+    // No inherited credentials or provider executables: validation must fail
+    // before observation, and a regression cannot invoke a real Azure CLI.
+    const result = spawnSync(process.execPath, [script, prepared.domain, inputPath, receiptPath], {
+      encoding: "utf8", env: { PATH: directory }, timeout: 10_000,
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, "");
+    assert.equal(existsSync(receiptPath), false);
+    return result.stderr;
+  } finally { await rm(directory, { recursive: true, force: true }); }
+}
+
+const cliSecrets = ["synthetic-private-user", "synthetic-private-password", "synthetic-private-token",
+  "synthetic-session-secret", "synthetic-encryption-key", "fixture.up.railway.app", "old.example.test"];
+function assertCliRedaction(text) {
+  for (const secret of cliSecrets) assert.equal(text.includes(secret), false);
+}
+
+for (const domain of ["core", "ops"]) for (const role of ["web", "worker"]) for (const [code, url] of [
+  ["RAILWAY_HOST", "https://synthetic-private-user:synthetic-private-password@fixture.up.railway.app:8443/mcp?token=synthetic-private-token"],
+  ["LEGACY_ORIGIN", "http://synthetic-private-user:synthetic-private-password@old.example.test:8080/mcp?token=synthetic-private-token"],
+  ["INVALID_ENDPOINT", "https://synthetic-private-user:synthetic-private-password@old.example.test:999999/mcp?token=synthetic-private-token"],
+]) test(`runtime preparation CLI preserves ${code} for ${domain} ${role}`, async () => {
+  const prepared = input(domain);
+  prepared.plan.azureOnly = { enabled: true, legacyOrigins: ["https://old.example.test"] };
+  for (const runtimeRole of ["web", "worker"]) Object.assign(prepared.sourceEnvironments[runtimeRole], {
+    SESSION_COOKIE_SECRET: "synthetic-session-secret", ENCRYPTION_KEY: "synthetic-encryption-key",
+  });
+  prepared.sourceEnvironments[role].MCP_PUBLIC_URL = url;
+  prepared.plan.roles[role].sourceNames = Object.keys(prepared.sourceEnvironments[role]);
+  const stderr = await runPreparationCli(prepared);
+  assertCliRedaction(stderr);
+  assert.deepEqual(JSON.parse(stderr), { status: "RUNTIME_PREPARATION_FAILED", code: "RUNTIME_AZURE_ONLY_CONFIGURATION_INVALID",
+    findings: [{ role, setting: "MCP_PUBLIC_URL", code }] });
+});
+
+test("runtime preparation CLI preserves a policy reason without serializing its private origin", async () => {
+  const prepared = input();
+  prepared.plan.azureOnly = { enabled: true,
+    legacyOrigins: ["https://synthetic-private-user:synthetic-private-password@old.example.test?token=synthetic-private-token"] };
+  const stderr = await runPreparationCli(prepared);
+  assertCliRedaction(stderr);
+  assert.deepEqual(JSON.parse(stderr), { status: "RUNTIME_PREPARATION_FAILED", code: "RUNTIME_AZURE_ONLY_CONFIGURATION_INVALID",
+    findings: [{ role: "web", code: "POLICY_INVALID" }] });
+});
+
+test("runtime preparation CLI keeps unrelated input failures generic and redacted", async () => {
+  const stderr = await runPreparationCli(input(), '{"private":"synthetic-private-password"');
+  assertCliRedaction(stderr);
+  assert.deepEqual(JSON.parse(stderr), { status: "RUNTIME_PREPARATION_FAILED", code: "RUNTIME_INPUT_INVALID" });
+});
+
+test("runtime preparation diagnostics omit extra finding fields and unrecognized diagnostic values", () => {
+  const report = runtimePreparationDiagnostic({ message: "RUNTIME_AZURE_ONLY_CONFIGURATION_INVALID",
+    stack: "synthetic-private-password", cause: { value: "synthetic-private-token" }, findings: [
+      { role: "web", setting: "MCP_PUBLIC_URL", code: "RAILWAY_HOST", value: "synthetic-private-password",
+        details: { url: "https://old.example.test" } },
+      { role: "worker", code: "CONFIG_INVALID", value: "synthetic-private-token" },
+      { role: "synthetic-private-user", setting: "APP_URL", code: "RAILWAY_HOST" },
+      { role: "web", setting: "synthetic-private-password", code: "RAILWAY_HOST" },
+      { role: "web", setting: "APP_URL", code: "synthetic-private-token" },
+      null,
+    ] });
+  assertCliRedaction(JSON.stringify(report));
+  assert.deepEqual(report, { status: "RUNTIME_PREPARATION_FAILED", code: "RUNTIME_AZURE_ONLY_CONFIGURATION_INVALID",
+    findings: [{ role: "web", setting: "MCP_PUBLIC_URL", code: "RAILWAY_HOST" }, { role: "worker", code: "CONFIG_INVALID" }] });
+});
+
+test("runtime preparation diagnostics attach findings only to the recognized guard failure", () => {
+  for (const message of ["RUNTIME_INPUT_INVALID", "synthetic-private-password"]) {
+    const report = runtimePreparationDiagnostic({ message,
+      findings: [{ role: "web", setting: "APP_URL", code: "RAILWAY_HOST", value: "synthetic-private-password" }] });
+    assertCliRedaction(JSON.stringify(report));
+    assert.deepEqual(report, { status: "RUNTIME_PREPARATION_FAILED",
+      code: message === "RUNTIME_INPUT_INVALID" ? message : "RUNTIME_PREPARATION_UNEXPECTED" });
+  }
 });

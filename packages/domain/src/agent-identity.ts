@@ -8,7 +8,7 @@ import { appendEvents } from "./events";
 import { closeRoleLifecycleForAgent, endRoleHolderHistory, startRoleHolderHistory } from "./role-onboarding";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { readableArtifactIds, invalidateArtifactInputLineage } from "./source-lineage";
-import { captureReadableDigestInputs } from "./digest-lineage";
+import { DigestReadRelease } from "./digest-lineage";
 import { AGENT_REGISTRY } from "./agent-registry";
 // ---------------------------------------------------------------------------
 // CRUD — AgentIdentity
@@ -16,15 +16,14 @@ import { AGENT_REGISTRY } from "./agent-registry";
 
 async function readableIdentityRows<T extends { id: string; createdByUserId: string | null; circleAssignments: Array<{
   id: string; circleId: string; roleId: string | null; circle: { id: string; name: string }; role: { id: string; name: string } | null;
-}> }>(actor: AppActor, workspaceId: string, rows: T[]) {
-  const identityIds = await readableArtifactIds(actor, workspaceId, "AgentIdentity", rows);
-  const identities = rows.filter((row) => identityIds.has(row.id));
+}> }>(release: DigestReadRelease, rows: T[]) {
+  const identities = (await release.capture("AgentIdentity", rows)).records;
   const assignments = identities.flatMap((row) => row.circleAssignments);
   const [safeAssignments, circles, roles, authors] = await Promise.all([
-    captureReadableDigestInputs({ actor, workspaceId, kind: "CircleAgentAssignment", records: assignments }),
-    captureReadableDigestInputs({ actor, workspaceId, kind: "Circle", records: assignments.map((row) => row.circle) }),
-    captureReadableDigestInputs({ actor, workspaceId, kind: "Role", records: assignments.flatMap((row) => row.role ? [row.role] : []) }),
-    captureReadableDigestInputs({ actor, workspaceId, kind: "User", records: identities.flatMap((row) => row.createdByUserId ? [{ id: row.createdByUserId }] : []) }),
+    release.capture("CircleAgentAssignment", assignments),
+    release.capture("Circle", assignments.map((row) => row.circle)),
+    release.capture("Role", assignments.flatMap((row) => row.role ? [row.role] : [])),
+    release.capture("User", identities.flatMap((row) => row.createdByUserId ? [{ id: row.createdByUserId }] : [])),
   ]);
   const assignmentIds = new Set(safeAssignments.records.map((row) => row.id)), circleIds = new Set(circles.records.map((row) => row.id));
   const roleIds = new Set(roles.records.map((row) => row.id)), authorIds = new Set(authors.records.map((row) => row.id));
@@ -177,7 +176,8 @@ export async function listAgentIdentities(actor: AppActor, workspaceId: string, 
     },
     orderBy: { createdAt: "asc" },
   });
-  return readableIdentityRows(actor, workspaceId, identities);
+  const release = new DigestReadRelease(actor, workspaceId);
+  return release.finish(await readableIdentityRows(release, identities));
 }
 
 export async function getAgentIdentity(actor: AppActor, workspaceId: string, agentIdentityId: string) {
@@ -196,10 +196,11 @@ export async function getAgentIdentity(actor: AppActor, workspaceId: string, age
     },
   });
   invariant(identity, 404, "NOT_FOUND", "Agent identity not found.");
-  const readable = (await readableIdentityRows(actor, workspaceId, [identity]))[0];
+  const release = new DigestReadRelease(actor, workspaceId);
+  const readable = (await readableIdentityRows(release, [identity]))[0];
   invariant(readable, 404, "NOT_FOUND", "Agent identity not found.");
-  const authors = identity.createdByUser ? await captureReadableDigestInputs({ actor, workspaceId, kind: "User", records: [identity.createdByUser] }) : null;
-  return { ...readable, createdByUser: authors?.records.length ? identity.createdByUser : null };
+  const authors = identity.createdByUser ? await release.capture("User", [identity.createdByUser]) : null;
+  return release.finish({ ...readable, createdByUser: authors?.records.length ? identity.createdByUser : null });
 }
 
 export async function deactivateAgentIdentity(
@@ -601,7 +602,7 @@ export async function resolveAgentBehaviorContext(workspaceId: string, agentKey:
   if (workspaceBehavior?.behaviorMd && readableIds.has(workspaceBehavior.id)) {
     parts.push(`## Workspace Agent Policy\n\n${workspaceBehavior.behaviorMd}`);
   }
-  if (agentIdentity?.behaviorMd && readableIds.has(agentIdentity.id)) {
+  if (agentIdentity?.isActive && agentIdentity.behaviorMd && readableIds.has(agentIdentity.id)) {
     parts.push(`## Agent-Specific Behavior\n\n${agentIdentity.behaviorMd}`);
   }
 

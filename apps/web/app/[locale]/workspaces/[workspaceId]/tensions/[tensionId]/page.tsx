@@ -1,5 +1,6 @@
+import { AdviceRequestWindowNotice } from "@/lib/components/AdviceRequestWindowNotice";
 import Link from "next/link";
-import { AppError, getTension, getWorkspaceArchiveRecord, listAdviceRequests, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listTensions, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getTension, ArchiveMetadataReadRelease, getWorkspaceArchiveRecord, listAdviceRequestWindow, listDeliberationEntries, listExternalResourceAttachments, listHumanMembers, listTensions, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
@@ -44,7 +45,9 @@ export default async function TensionDetailPage({
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { workspaceId, tensionId } = await params;
+  const resolvedSearch = searchParams ? await searchParams : {};
   const actor = await requirePageActor();
+  const archiveRelease = new ArchiveMetadataReadRelease(actor, workspaceId);
   const t = await getTranslations("tensions");
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
@@ -93,7 +96,7 @@ export default async function TensionDetailPage({
   const { previousId, nextId } = reviewNeighbors(contextIds, tensionId);
   const listHref = reviewListHref(`/workspaces/${workspaceId}/tensions`, listQuery);
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const [entries, versionHistory, evidence, externalResourceAttachments, inputRequests, archiveRecord, members] = await Promise.all([
+  const [entries, versionHistory, evidence, externalResourceAttachments, adviceWindow, archiveRecord, members] = await Promise.all([
     archivedSafeRead(isArchived, listDeliberationEntries(actor, { workspaceId, parentType: "TENSION", parentId: tensionId }), []),
     archivedSafeRead(isArchived, listWorkItemVersions(actor, { workspaceId, entityType: "TENSION", entityId: tensionId }), {
       entityType: "Tension" as const,
@@ -103,12 +106,13 @@ export default async function TensionDetailPage({
     }),
     archivedSafeRead(isArchived, listWorkItemEvidence(actor, { workspaceId, entityType: "Tension", entityId: tensionId }), []),
     archivedSafeRead(isArchived, listExternalResourceAttachments(actor, { workspaceId, entityType: "Tension", entityId: tensionId }), []),
-    isArchived ? Promise.resolve([]) : listAdviceRequests(actor, { workspaceId, subjectType: "TENSION", subjectId: tensionId }),
+    isArchived ? Promise.resolve({ items: [], complete: true, nextCursor: null }) : listAdviceRequestWindow(actor, { workspaceId, subjectType: "TENSION", subjectId: tensionId, cursor: typeof resolvedSearch.adviceCursor === "string" ? resolvedSearch.adviceCursor : undefined }),
     isArchived
-      ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Tension", entityId: tension.id }), null)
+      ? archivedSafeRead(true, getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Tension", entityId: tension.id }, archiveRelease), null)
       : Promise.resolve(null),
     isArchived ? Promise.resolve([]) : listHumanMembers(workspaceId),
   ]);
+  const inputRequests = adviceWindow.items;
   const deliberationTargets = isArchived
     ? { options: [], defaultValue: "", actorMemberId: null, actorCircleIds: [] }
     : await getDeliberationTargets({ actor, workspaceId, parentCircleId: tension.circleId });
@@ -269,6 +273,8 @@ export default async function TensionDetailPage({
       ) : null,
     };
   });
+
+  await archiveRelease.finish(undefined);
 
   return (
     <>
@@ -436,8 +442,11 @@ export default async function TensionDetailPage({
         </section>
       )}
 
-      {(canRequestInput || inputRequests.length > 0) && (
+      {(canRequestInput || inputRequests.length > 0 || !adviceWindow.complete || Boolean(resolvedSearch.adviceCursor)) && (
         <WorkItemConversationSurface title={t("sectionInputRequests")} className="work-request-surface">
+          <div id="advice-requests" />
+          <AdviceRequestWindowNotice page={adviceWindow} path={`/workspaces/${workspaceId}/tensions/${tensionId}`} search={resolvedSearch}
+            labels={{ limited: tWork("adviceWindowLimited"), older: tWork("olderAdviceRequests"), newest: tWork("newestAdviceRequests") }} />
           <WorkItemRequestList
             requests={inputRequestCards}
             labels={{

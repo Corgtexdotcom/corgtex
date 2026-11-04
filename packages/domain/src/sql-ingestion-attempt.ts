@@ -163,7 +163,8 @@ export async function failSqlIngestionAttempt(input: {attempt: SqlIngestionAttem
       if (!(failure instanceof AppError) || failure.code !== "SQL_INGESTION_FENCE_LOST") throw failure;
     }
     const failed = await tx.sqlIngestionAttempt.updateMany({where: {id: state.attemptId, workspaceId: state.workspaceId,
-      sourceId: state.sourceId, generation: state.generation, ownerNonce: state.ownerNonce, status: {in: ["RUNNING", "REVOKED", "RECLAIMED"]}},
+      sourceId: state.sourceId, generation: state.generation, ownerNonce: state.ownerNonce,
+      logId: state.logId, configurationFingerprint: state.configurationFingerprint, status: {in: ["RUNNING", "REVOKED", "RECLAIMED"]}},
       data: {status: "FAILED", error, completedAt: now}});
     if (failed.count === 1) await tx.externalDataSyncLog.updateMany({where: {
       id: state.logId, sourceId: state.sourceId, sqlAttemptId: state.attemptId, completedAt: null}, data: {error, completedAt: now}});
@@ -176,6 +177,19 @@ export async function failSqlIngestionAttempt(input: {attempt: SqlIngestionAttem
       workspaceId: state.workspaceId, sourceId: state.sourceId, status: "RUNNING", activeAttemptId: state.attemptId,
       generation: state.generation, ownerNonce: state.ownerNonce},
     data: {status: "FAILED", activeAttemptId: null, ownerNonce: null, leaseExpiresAt: null}});
+    // The original opaque token may reclaim only its own terminal, non-serving
+    // staging, even after a newer generation owns the source. Repeated failure
+    // acknowledgements retry cleanup without rewriting the historical failure.
+    const terminal = failed.count === 1 || await tx.sqlIngestionAttempt.count({where: {
+      id: state.attemptId, workspaceId: state.workspaceId, sourceId: state.sourceId,
+      generation: state.generation, ownerNonce: state.ownerNonce, logId: state.logId,
+      configurationFingerprint: state.configurationFingerprint, status: "FAILED"}}) === 1;
+    if (terminal) await tx.sqlKnowledgePublication.deleteMany({where: {
+      workspaceId: state.workspaceId, sourceId: state.sourceId, attemptId: state.attemptId,
+      generation: state.generation, configurationFingerprint: state.configurationFingerprint,
+      status: {in: ["PREPARING", "PREPARED"]}, committedAt: null}});
+    // The parent cascade deletes at most the bounded run's staged rows without
+    // hydrating vectors. Native receipt, attempt and log remain auditable.
   }, {timeout: 10_000});
 }
 

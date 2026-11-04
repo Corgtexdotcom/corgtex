@@ -16,7 +16,7 @@ const record = (value: unknown): value is Record<string, unknown> => Boolean(val
 const string = (metadata: Record<string, unknown>, key: string) => typeof metadata[key] === "string" ? metadata[key] as string : null;
 
 /** Every semantic field comes from the independently proven Document. */
-export function documentSourceProjection(document: Document, sourceType: "DOC" | "FILE_UPLOAD") {
+function documentSourceProjection(document: Document, sourceType: "DOC" | "FILE_UPLOAD") {
   const metadata = record(document.metadata) ? document.metadata : {};
   const size = typeof metadata.sizeBytes === "number" && Number.isSafeInteger(metadata.sizeBytes) && metadata.sizeBytes >= 0
     ? metadata.sizeBytes : null;

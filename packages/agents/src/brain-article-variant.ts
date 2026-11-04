@@ -5,8 +5,9 @@ export async function runBrainArticleVariantJob(params: {
   workspaceId: string; jobId: string; expectedAttempt: number; expectedOwner: string;
 }) {
   return generateBrainArticleVariant({ ...params,
-    generate: async (sources) => {
+    generate: async (sources, controls) => {
       const response = await defaultModelGateway.extract({
+        ...controls,
         model: resolveModel("fast"), workspaceId: params.workspaceId, workflowJobId: params.jobId,
         instruction: `Write a factual Brain wiki article using only the supplied permitted sources.
 Choose a title supported by those sources. Use a neutral wiki style and include only supported claims.

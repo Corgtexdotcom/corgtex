@@ -98,7 +98,8 @@ export function AdminWorkspacesTab({ workspaces, workspaceId }: Props) {
 
       {expandedId && (
         <div className="card" style={{ padding: 24, background: "var(--gray-2)", marginTop: 8 }}>
-          <AdminWorkspaceMemberPanel 
+          <AdminWorkspaceMemberPanel
+            key={JSON.stringify([workspaceId, expandedId])}
             targetWorkspaceId={expandedId} 
             workspaceId={workspaceId} 
           />

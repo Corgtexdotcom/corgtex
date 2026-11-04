@@ -21,7 +21,7 @@ export function freezeCommunicationPayload<T>(value: T): T {
   if (value && typeof value === "object") { Object.values(value).forEach(freezeCommunicationPayload); Object.freeze(value); }
   return value;
 }
-export function slackSigningBindingHash(workspaceId?: string) {
+function slackSigningBindingHash(workspaceId?: string) {
   const binding = getSlackWorkspaceBinding(workspaceId);
   invariant(binding?.signingSecret, 503, "SLACK_NOT_CONFIGURED", "Slack request verification is unavailable.");
   return communicationNativeHash(communicationCanonicalJson({ workspaceId: workspaceId ?? null, source: binding.source,

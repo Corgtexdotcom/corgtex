@@ -84,7 +84,7 @@ export async function runConstitutionUpdateTriggerAgent(params: {
       }
 
       const receipt = await helpers.captureInputs(mergeArtifactInputProofs(plannedRoots, context.lineageRoots as LineageRoot[], [...helpers.behaviorLineageRoots]));
-      const impact = await helpers.tool("model.chat", { proposalId: proposal.id }, async () => defaultModelGateway.chat({ model,
+      const impact = await helpers.tool("model.chat", { proposalId: proposal.id }, async (operation) => defaultModelGateway.chat(operation.modelRequest({ model,
         workspaceId: params.workspaceId,
         agentRunId: runId,
         taskType: "AGENT",
@@ -103,7 +103,7 @@ export async function runConstitutionUpdateTriggerAgent(params: {
             }),
           },
         ],
-      }), { receipt });
+      })), { receipt });
 
       return {
         lineageReceipt: receipt,

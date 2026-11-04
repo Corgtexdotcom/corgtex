@@ -33,6 +33,14 @@ vi.mock("./source-lineage", async importOriginal => ({ ...await importOriginal<a
   captureArtifactInputSnapshotProof: vi.fn(async () => [{kind: "ArtifactInputSnapshot", id: "snapshot-1", fingerprint: "a".repeat(64)}]),
   recordArtifactInputLineage: vi.fn(),
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) => new Set(records.map((row: { id: string }) => row.id))) }));
+// These tests cover request/summary contracts; real proof fencing is exercised in
+// agent-runs.lineage.test.ts and agent-runs-release.integration.test.ts.
+vi.mock("./digest-lineage", async importOriginal => ({ ...await importOriginal<any>(),
+  DigestReadRelease: class {
+    async capture(_kind: string, records: Array<{ id: string }>) { return { records, roots: [] }; }
+    async finish<T>(value: T) { return value; }
+  },
+}));
 vi.mock("./proposals", () => ({ getProposal: vi.fn() }));
 
 describe("agent-runs", () => {

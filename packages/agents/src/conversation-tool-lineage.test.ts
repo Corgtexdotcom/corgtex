@@ -122,7 +122,18 @@ beforeEach(() => {
   for (const kind of Object.keys(fixture.rows)) fixture.rows[kind] = [];
   vi.clearAllMocks();
   fixture.prisma.$executeRaw.mockReset().mockResolvedValue(1);
-  fixture.prisma.$queryRaw.mockReset().mockResolvedValue([]);
+  fixture.prisma.$queryRaw.mockReset().mockImplementation(async (query: { sql?: string; values?: unknown[] }) => {
+    if (query.sql?.includes('SELECT DISTINCT ON ("artifactId") "artifactId", "contentHash", "rootsJson"')) {
+      const [workspace, kind, ...ids] = query.values!;
+      const heads = new Map<string, any>();
+      for (const row of fixture.rows.artifactInputLineage) {
+        if (row.workspaceId !== workspace || row.artifactType !== kind || !ids.includes(row.artifactId)) continue;
+        if (!heads.has(row.artifactId) || heads.get(row.artifactId).revision < row.revision) heads.set(row.artifactId, row);
+      }
+      return [...heads.values()].map(({ artifactId, contentHash, rootsJson }) => ({ artifactId, contentHash, rootsJson }));
+    }
+    return [];
+  });
   installSourcePermissionEpochFixture(fixture.prisma);
 });
 vi.mock("@corgtex/domain", async () => ({

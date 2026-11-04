@@ -1,3 +1,4 @@
+import { startAudioTranscriptHeartbeat } from "./audio-transcript-heartbeat";
 import { MAX_AUDIO_FILE_BYTES } from "./meeting-audio-limits";
 export { MAX_AUDIO_FILE_BYTES } from "./meeting-audio-limits";
 import { createHash, randomUUID } from "node:crypto";
@@ -41,9 +42,11 @@ type AudioLease = { attempts: number; lockedBy: string; lockedAt: Date };
 type AudioWriteAuthority = {
   actor: AppActor; workspaceId: string; audioAssetId: string;
   workflowJobId: string; expectedLease: AudioLease; roots: readonly LineageRoot[];
+  heartbeat: ReturnType<typeof startAudioTranscriptHeartbeat>;
 };
 
 async function assertAudioWriteAuthority(tx: Prisma.TransactionClient, authority: AudioWriteAuthority) {
+  authority.heartbeat.assertActive();
   await tx.$queryRaw`SELECT "id" FROM "WorkflowJob" WHERE "id" = ${authority.workflowJobId}
     AND "workspaceId" = ${authority.workspaceId} FOR SHARE`;
   const job = await tx.workflowJob.findFirst({ where: { id: authority.workflowJobId,
@@ -51,13 +54,14 @@ async function assertAudioWriteAuthority(tx: Prisma.TransactionClient, authority
   invariant(job?.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE && job.status === "RUNNING"
     && job.attempts === authority.expectedLease.attempts
     && job.lockedBy === authority.expectedLease.lockedBy
-    && job.lockedAt?.getTime() === authority.expectedLease.lockedAt.getTime()
+    && job.startedAt && job.lockedAt && job.lockedAt.getTime() > Date.now() - 5 * 60_000
     && (job.payload as { audioAssetId?: string })?.audioAssetId === authority.audioAssetId,
   409, "SOURCE_CHANGED", "Audio transcription lease changed.");
   await tx.$queryRaw`SELECT "id" FROM "MeetingAudioAsset" WHERE "id" = ${authority.audioAssetId}
     AND "workspaceId" = ${authority.workspaceId} FOR UPDATE`;
   invariant(await isArtifactInputProofReadable(authority.actor, authority.workspaceId, authority.roots, tx),
     409, "SOURCE_CHANGED", "Audio source authorization changed.");
+  authority.heartbeat.assertActive();
 }
 
 async function authorizedAudioUpdate(authority: AudioWriteAuthority, data: Prisma.MeetingAudioAssetUncheckedUpdateInput,
@@ -87,10 +91,24 @@ async function markAudioAssetFailed(params: {
   });
 }
 
+/** Consume a dedicated upload backing store before the first await, detaching
+ * retained aliases. Pooled, sliced, shared or nontransferable bytes need one copy. */
+function takeAudioUploadBytes(source: Buffer): Buffer {
+  if (source.buffer instanceof ArrayBuffer && source.byteOffset === 0 && source.byteLength === source.buffer.byteLength) {
+    try {
+      return Buffer.from(structuredClone(source.buffer, { transfer: [source.buffer] }));
+    } catch {
+      // Node marks pooled/untransferable backing stores as nontransferable.
+    }
+  }
+  return Buffer.from(source);
+}
+
 export async function createMeetingAudioAsset(actor: AppActor, params: {
   workspaceId: string;
   fileName: string;
   mimeType?: string | null;
+  /** Dedicated backing stores are consumed; callers must relinquish these bytes. */
   fileBuffer: Buffer;
   meetingId?: string | null;
   title?: string | null;
@@ -103,7 +121,7 @@ export async function createMeetingAudioAsset(actor: AppActor, params: {
   const originalUserId = actor.user.id;
   invariant(params.fileBuffer.byteLength > 0, 400, "INVALID_INPUT", "Audio file is required.");
   invariant(params.fileBuffer.byteLength <= MAX_AUDIO_FILE_BYTES, 413, "AUDIO_TOO_LARGE", "Audio file is too large.");
-  params = { ...params, fileBuffer: Buffer.from(params.fileBuffer),
+  params = { ...params, fileBuffer: takeAudioUploadBytes(params.fileBuffer),
     recordedAt: params.recordedAt ? new Date(params.recordedAt) : null,
     participantEmails: params.participantEmails ? [...params.participantEmails] : null };
   const originalFileHash = createHash("sha256").update(params.fileBuffer).digest("hex");
@@ -218,9 +236,10 @@ export async function runMeetingAudioAssetTranscription(params: {
   invariant(params.workflowJobId, 409, "SOURCE_RESTRICTED", "Audio transcription needs its exact leased job.");
   const worker = await createAudioTranscriptWorkerActor({ workspaceId: audioAsset.workspaceId,
     audioAssetId: audioAsset.id, workflowJobId: params.workflowJobId, expectedLease: params.expectedLease });
+  const heartbeat = startAudioTranscriptHeartbeat(worker.renewLease);
   const authority: AudioWriteAuthority = { actor: worker.actor, workspaceId: worker.asset.workspaceId,
     audioAssetId: worker.asset.id, workflowJobId: params.workflowJobId,
-    expectedLease: params.expectedLease, roots: worker.roots };
+    expectedLease: params.expectedLease, roots: worker.roots, heartbeat };
   try {
       if (worker.asset.status === "INGESTED") {
         invariant((await readableArtifactIds(worker.actor, worker.asset.workspaceId,
@@ -305,7 +324,9 @@ export async function runMeetingAudioAssetTranscription(params: {
         message: "Audio transcription failed." }).catch(() => undefined);
     }
     throw error;
-  } finally { revokeAudioTranscriptWorkerActor(worker.actor); }
+  } finally {
+    try { await heartbeat.stop(); } finally { revokeAudioTranscriptWorkerActor(worker.actor); }
+  }
 }
 
 /** A crashed worker can finish only a previously committed transcript whose
@@ -393,6 +414,7 @@ async function ensureAudioAssetTranscript(
     && await isArtifactInputProofReadable(params.actor, audioAsset.workspaceId, params.roots),
   409, "SOURCE_CHANGED", "Stored audio or source authorization changed before transcription.");
 
+  params.authority.heartbeat.assertActive();
   const response = await params.transcriber.transcribeAudio({
     workspaceId: audioAsset.workspaceId,
     workflowJobId: params.workflowJobId ?? undefined,
@@ -400,7 +422,10 @@ async function ensureAudioAssetTranscript(
     mimeType: audioAsset.mimeType,
     data: storedAudio.data,
     prompt: audioAsset.title ? `Meeting title: ${audioAsset.title}` : null,
+    authorizeAttempt: params.authority.heartbeat.authorizeAttempt,
+    signal: params.authority.heartbeat.signal,
   });
+  params.authority.heartbeat.assertActive();
   const transcript = response.text.trim();
   invariant(transcript.length > 0, 422, "EMPTY_TRANSCRIPT", "Audio transcription returned no text.");
   invariant(await isArtifactInputProofReadable(params.actor, audioAsset.workspaceId, params.roots),

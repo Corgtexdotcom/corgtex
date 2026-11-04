@@ -1,3 +1,4 @@
+import { WorkItemReadRelease, readWorkItemListSnapshot, readableWorkItemPage, rankedReadableTensionPage, workItemAfter } from "./work-item-readable-page";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -135,11 +136,44 @@ function workItemOrderBy(sort: WorkItemSort | undefined): Prisma.TensionOrderByW
   ];
 }
 
-async function readableTensionVotes<T extends { id: string; userId: string }>(actor: AppActor, workspaceId: string, votes: T[]) {
-  invariant(votes.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Vote permission scan exceeds its supported size.");
-  return (await captureReadableDigestInputs({ actor, workspaceId, kind: "TensionUpvote", records: votes,
-    additionalInputs: (vote) => [{ kind: "User", id: vote.userId }],
-  })).records;
+async function readableTensionVotes<T extends { id: string; userId: string }>(actor: AppActor, workspaceId: string, votes: T[], release?: WorkItemReadRelease) {
+  const additionalInputs = (vote: T) => [{kind: "User" as const, id: vote.userId}];
+  const captured = release ? await release.capture("TensionUpvote",votes,additionalInputs)
+    : await captureReadableDigestInputs({actor,workspaceId,kind:"TensionUpvote",records:votes,additionalInputs});
+  release?.add(captured.roots);
+  return captured.records;
+}
+
+/** Stream votes for at most one candidate page. Counts retain no vote bodies;
+ * selected hydration retains only the votes the response actually returns. */
+async function scanReadableTensionVotes(actor: AppActor, workspaceId: string, tensionIds: string[],
+  release: WorkItemReadRelease, consume: (votes: import("@prisma/client").TensionUpvote[]) => void,
+  budget?: { examined: number }) {
+  if (!tensionIds.length) return;
+  let cursor: string | undefined;
+  for (;;) {
+    const take = budget ? Math.min(100, 20_001 - budget.examined) : 100;
+    const page = await release.db.tensionUpvote.findMany({
+      where: { tensionId: { in: tensionIds }, tension: { workspaceId }, ...(cursor ? { id: { gt: cursor } } : {}) },
+      orderBy: { id: "asc" },
+      take,
+    });
+    invariant(page.length <= take && page.every((vote) => !cursor || vote.id > cursor),
+      409, "SOURCE_CHANGED", "Tension votes changed during the scan.");
+    if (budget) {
+      budget.examined += page.length;
+      invariant(budget.examined <= 20_000, 409, "SOURCE_READ_SCAN_LIMIT", "Tension ranking exceeds its vote window; narrow the filters.");
+    }
+    consume(await readableTensionVotes(actor, workspaceId, page, release));
+    if (page.length < take) return;
+    cursor = page.at(-1)!.id;
+  }
+}
+
+async function loadReadableTensionVotes(actor: AppActor, workspaceId: string, tensionId: string, release: WorkItemReadRelease) {
+  const result: import("@prisma/client").TensionUpvote[] = [];
+  await scanReadableTensionVotes(actor, workspaceId, [tensionId], release, votes => result.push(...votes));
+  return result;
 }
 
 async function redactTensionJoins<T extends {
@@ -151,12 +185,16 @@ async function redactTensionJoins<T extends {
   raisedByMember?: { id: string } | null;
   circleId?: string | null;
   circle?: { id: string } | null;
-}>(actor: AppActor, workspaceId: string, rows: T[]) {
+}>(actor: AppActor, workspaceId: string, rows: T[], release?: WorkItemReadRelease) {
+  function capture<R extends {id: string}>(kind: import("./source-lineage").LineageKind, records: R[]) {
+    return release ? release.capture(kind,records) : captureReadableDigestInputs({actor,workspaceId,kind,records});
+  }
   const [authors, members, circles] = await Promise.all([
-    captureReadableDigestInputs({ actor, workspaceId, kind: "User", records: rows.flatMap((row) => row.author ? [row.author] : []) }),
-    captureReadableDigestInputs({ actor, workspaceId, kind: "Member", records: rows.flatMap((row) => [row.assigneeMember, row.raisedByMember].filter((member): member is { id: string } => Boolean(member))) }),
-    captureReadableDigestInputs({ actor, workspaceId, kind: "Circle", records: rows.flatMap((row) => row.circle ? [row.circle] : []) }),
+    capture("User", rows.flatMap(row => row.author ? [row.author] : [])),
+    capture("Member", rows.flatMap(row => [row.assigneeMember, row.raisedByMember].filter((member): member is {id: string} => Boolean(member)))),
+    capture("Circle", rows.flatMap(row => row.circle ? [row.circle] : [])),
   ]);
+  release?.add([...authors.roots, ...members.roots, ...circles.roots]);
   const authorIds = new Set(authors.records.map((row) => row.id));
   const memberIds = new Set(members.records.map((row) => row.id));
   const circleIds = new Set(circles.records.map((row) => row.id));
@@ -173,112 +211,129 @@ async function redactTensionJoins<T extends {
 }
 
 export async function listTensions(actor: AppActor, workspaceId: string, opts?: ListTensionsOptions) {
-  const take = opts?.take ?? 20;
-  const skip = opts?.skip ?? 0;
-  const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const where: Prisma.TensionWhereInput = {
-    workspaceId,
-    ...privacyFilter(actor, membership),
-    ...archiveFilterWhere(opts?.archiveFilter),
-  };
-  const openedAt = dateRangeWhere(opts?.openedFrom, opts?.openedTo);
-  const closedAt = dateRangeWhere(opts?.closedFrom, opts?.closedTo);
-  if (opts?.status) where.status = opts.status;
-  const circleIds = listFilterValues(opts?.circleIds);
-  if (circleIds.length > 0) where.circleId = { in: circleIds };
-  else if (opts?.circleId) where.circleId = opts.circleId;
-  if (openedAt) where.publishedAt = openedAt;
-  if (closedAt) where.resolvedAt = closedAt;
-  const memberIds = listFilterValues([...(opts?.memberIds ?? []), opts?.memberId]);
-  if (memberIds.length > 0) {
-    appendTensionWhereAnd(where, {
-      OR: [
-        { assigneeMemberId: { in: memberIds } },
-        { raisedByMemberId: { in: memberIds } },
-        {
-          author: {
-            memberships: {
-              some: {
-                id: { in: memberIds },
-                workspaceId,
-                isActive: true,
+  return readWorkItemListSnapshot(actor, workspaceId, async release => {
+    const db = release.db;
+    const take = opts?.take ?? 20;
+    const skip = opts?.skip ?? 0;
+    const membership = await requireWorkspaceMembership({ actor, workspaceId, tx: db });
+    const where: Prisma.TensionWhereInput = {
+      workspaceId,
+      ...privacyFilter(actor, membership),
+      ...archiveFilterWhere(opts?.archiveFilter),
+    };
+    const openedAt = dateRangeWhere(opts?.openedFrom, opts?.openedTo);
+    const closedAt = dateRangeWhere(opts?.closedFrom, opts?.closedTo);
+    if (opts?.status) where.status = opts.status;
+    const circleIds = listFilterValues(opts?.circleIds);
+    if (circleIds.length > 0) where.circleId = { in: circleIds };
+    else if (opts?.circleId) where.circleId = opts.circleId;
+    if (openedAt) where.publishedAt = openedAt;
+    if (closedAt) where.resolvedAt = closedAt;
+    const memberIds = listFilterValues([...(opts?.memberIds ?? []), opts?.memberId]);
+    if (memberIds.length > 0) {
+      appendTensionWhereAnd(where, {
+        OR: [
+          { assigneeMemberId: { in: memberIds } },
+          { raisedByMemberId: { in: memberIds } },
+          {
+            author: {
+              memberships: {
+                some: {
+                  id: { in: memberIds },
+                  workspaceId,
+                  isActive: true,
+                },
               },
             },
           },
-        },
-      ],
-    });
-  }
+        ],
+      });
+    }
 
-  const candidates = await prisma.tension.findMany({
-      where,
-      include: {
-        author: {
-          select: {
-            id: true,
-            displayName: true,
-            email: true,
+    // Shared across rank scans and selected hydration. Never release a partial
+    // vote aggregate as an exact rank when this bounded request is exhausted.
+    const voteBudget = { examined: 0 };
+    const page= !opts?.sort || opts.sort==="priority"
+      ? await rankedReadableTensionPage<import("@prisma/client").Tension>({actor,workspaceId,release,take,skip,
+        load:afterId=>db.tension.findMany({where:afterId?{AND:[where,{id:{gt:afterId}}]}:where,orderBy:{id:"asc"},take:100}),
+        votes: async rows => {
+          const counts = new Map<string, number>();
+          await scanReadableTensionVotes(actor, workspaceId, rows.map(row => row.id), release, votes => {
+            for (const vote of votes) counts.set(vote.tensionId, (counts.get(vote.tensionId) ?? 0) + 1);
+          }, voteBudget);
+          return counts;
+        }})
+      : await readableWorkItemPage<import("@prisma/client").Tension>({actor,workspaceId,release,kind:"Tension",take,skip,
+        load:after=>db.tension.findMany({where:after?{AND:[where,workItemAfter(after,opts.sort)]}:where,orderBy:workItemOrderBy(opts.sort),take:100})});
+    const hydrated=page.items.length?await db.tension.findMany({where:{AND:[where,{id:{in:page.items.map(row=>row.id)}}]},
+        include: {
+          author: {
+            select: {
+              id: true,
+              displayName: true,
+              email: true,
+            },
           },
-        },
-        assigneeMember: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                displayName: true,
-                email: true,
+          assigneeMember: {
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  displayName: true,
+                  email: true,
+                },
               },
             },
           },
-        },
-        raisedByMember: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                displayName: true,
-                email: true,
+          raisedByMember: {
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  displayName: true,
+                  email: true,
+                },
               },
             },
           },
+          circle: true,
+          proposal: true,
         },
-        circle: true,
-        upvotes: true,
-        proposal: true,
-      },
-      orderBy: workItemOrderBy(opts?.sort),
-      take: 5001,
-    });
-  invariant(candidates.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Source permission scan exceeds its supported size.");
-  const permitted = await readableArtifactIds(actor, workspaceId, "Tension", candidates);
-  const admitted = candidates.filter((candidate) => permitted.has(candidate.id));
-  const votes = await readableTensionVotes(actor, workspaceId, admitted.flatMap((candidate) => candidate.upvotes ?? []));
-  const voteIds = new Set(votes.map((vote) => vote.id));
-  const withVotes = admitted.map((candidate) => ({ ...candidate,
-    upvotes: (candidate.upvotes ?? []).filter((vote) => voteIds.has(vote.id)),
-  }));
-  if (!opts?.sort || opts.sort === "priority") withVotes.sort((left, right) =>
-    (right.priority ?? 0) - (left.priority ?? 0) || right.upvotes.length - left.upvotes.length
-    || (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0) || right.id.localeCompare(left.id));
-  const total = admitted.length;
-  const items = withVotes.slice(skip, skip + take);
-  const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", items.map((item) => item.id));
-  const redactedItems = await redactTensionJoins(actor, workspaceId, items);
-  const linkedProposals = items.flatMap((item) => item.proposal ? [item.proposal] : []);
-  const visibleProposalIds = linkedProposals.length
-    ? await readableArtifactIds(actor, workspaceId, "Proposal", linkedProposals) : new Set<string>();
-  return {
-    items: redactedItems.map((item) => ({
-      ...item,
-      proposalId: item.proposal && visibleProposalIds.has(item.proposal.id) ? item.proposalId : null,
-      proposal: item.proposal && visibleProposalIds.has(item.proposal.id)
-        ? { id: item.proposal.id, title: item.proposal.title } : null,
-      ...requestCountSummaries.get(item.id),
-    })),
-    total,
-    take,
-    skip,
-  };
+    }):[];
+    const byId=new Map(hydrated.map(row=>[row.id,row]));
+    const selected=page.items.flatMap(row=>{const loaded=byId.get(row.id);return loaded?[{...loaded,...row}]:[];});
+    const votesByTension = new Map<string, import("@prisma/client").TensionUpvote[]>();
+    for (let offset = 0; offset < selected.length; offset += 100) {
+      await scanReadableTensionVotes(actor, workspaceId, selected.slice(offset, offset + 100).map(row => row.id), release, votes => {
+        for (const vote of votes) {
+          const existing = votesByTension.get(vote.tensionId) ?? [];
+          existing.push(vote);
+          votesByTension.set(vote.tensionId, existing);
+        }
+      }, voteBudget);
+    }
+    const items = selected.map(row => ({ ...row, upvotes: votesByTension.get(row.id) ?? [] }));
+    invariant(items.length === page.items.length,409,"SOURCE_CHANGED","Selected tensions changed within collection.");
+    const total=page.total;
+    const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", items.map((item) => item.id), rows => release.observe("AdviceRequest", rows), db);
+    const redactedItems = await redactTensionJoins(actor, workspaceId, items, release);
+    const linkedProposals = items.flatMap((item) => item.proposal ? [item.proposal] : []);
+    const visibleProposalIds = linkedProposals.length
+      ? await release.readable("Proposal", linkedProposals) : new Set<string>();
+    await release.observe("Proposal",linkedProposals.filter(row=>visibleProposalIds.has(row.id)));
+    return {
+      items: redactedItems.map((item) => ({
+        ...item,
+        proposalId: item.proposal && visibleProposalIds.has(item.proposal.id) ? item.proposalId : null,
+        proposal: item.proposal && visibleProposalIds.has(item.proposal.id)
+          ? { id: item.proposal.id, title: item.proposal.title } : null,
+        ...requestCountSummaries.get(item.id),
+      })),
+      total,
+      take,
+      skip,
+    };
+  });
 }
 
 async function applyTensionDuplicateUpdate(actor: AppActor, params: CreateTensionParams, tensionId: string) {
@@ -916,19 +971,21 @@ export async function getTension(actor: AppActor, params: { workspaceId: string;
       assigneeMember: { include: { user: { select: { id: true, displayName: true, email: true } } } },
       raisedByMember: { include: { user: { select: { id: true, displayName: true, email: true } } } },
       proposal: true,
-      upvotes: true,
     },
   });
   invariant(tension, 404, "NOT_FOUND", "Tension not found.");
   invariant((await readableArtifactIds(actor, params.workspaceId, "Tension", [tension])).has(tension.id),
     404, "NOT_FOUND", "Tension not found.");
+  const release = new WorkItemReadRelease(actor, params.workspaceId);
+  await release.observe("Tension", [tension]);
   const visibleProposalIds = tension.proposal
     ? await readableArtifactIds(actor, params.workspaceId, "Proposal", [tension.proposal]) : new Set<string>();
-  return {
-    ...(await redactTensionJoins(actor, params.workspaceId, [tension]))[0],
-    upvotes: await readableTensionVotes(actor, params.workspaceId, tension.upvotes ?? []),
+  if (tension.proposal && visibleProposalIds.has(tension.proposal.id)) await release.observe("Proposal", [tension.proposal]);
+  return release.finish({
+    ...(await redactTensionJoins(actor, params.workspaceId, [tension], release))[0],
+    upvotes: await loadReadableTensionVotes(actor, params.workspaceId, tension.id, release),
     proposalId: tension.proposal && visibleProposalIds.has(tension.proposal.id) ? tension.proposalId : null,
     proposal: tension.proposal && visibleProposalIds.has(tension.proposal.id)
       ? { id: tension.proposal.id, title: tension.proposal.title, status: tension.proposal.status } : null,
-  };
+  });
 }

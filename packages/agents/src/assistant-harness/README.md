@@ -61,14 +61,18 @@ waiting/resume outcome. Checkpoint counters alone cannot guarantee the invocatio
 ordinary read failures remain sanitized tool errors. Failed dispatches consume reservations,
 and retrying a runner does not reset that durable budget.
 
-Gateway invocation is not an individual provider HTTP attempt. The current gateway has
-internal retries and OpenRouter fallback, with no request-level retry-disable option or
-per-attempt authorization hook. It also awaits budget/headers before its first HTTP send.
-This harness therefore cannot claim fresh authority or separate reservations for each
-downstream attempt. Before live enablement, gateway-owned integration must guard each
-actual attempt with current source/claim authority, propagate revocation cancellation and
-define the fallback policy. Gateway remains the sole usage writer; repeated provider work
-may be billed again. There is no exactly-once provider billing claim.
+Gateway invocation is not an individual provider HTTP attempt. Each invocation reserves
+once and supplies a server-created `authorizeAttempt` capability for both chat modes.
+The gateway calls it after awaited preparation before every HTTP send, including retries.
+It rechecks live source/claim authority against the immutable admitted runtime and complete
+saved source vector, observing both admitted cancellation and the gateway deadline signal
+without replacing the admitted signal. Safe CANCELLED/SCOPE/LIMIT denials survive gateway
+sanitization; arbitrary adapter errors remain private. Late authorization cannot permit a
+send after cancellation. Guarded OpenRouter requests disable opaque provider fallbacks;
+gateway routing and usage accounting remain authoritative. Unsent attempts create no usage.
+Denied attempts keep the invocation reservation consumed. Repeated provider work may be
+billed again; there is no exactly-once provider billing claim. All live enablement and
+application integration gates remain required.
 
 Incremental output requires an `AssistantDeliveryPort` bound to the actual authenticated
 personal subscription. The runtime rejects an audience that differs from its workspace,

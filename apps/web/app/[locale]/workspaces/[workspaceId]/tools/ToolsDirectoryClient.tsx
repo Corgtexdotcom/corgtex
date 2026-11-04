@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { CheckboxFilter, TableActionGroup } from "@/lib/components/ControlPrimitives";
@@ -416,6 +416,9 @@ export function ToolsDirectoryClient({
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
+  const formSession = useRef(0);
+  const pendingSave = useRef<number | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
   const activeType = normalizeCatalogType(searchParams.getAll("type"));
   const activeSurface = normalizeToolsSurface(searchParams.getAll("surface"), searchParams.getAll("type"));
   const query = normalizeCatalogQuery(searchParams.getAll("q"));
@@ -597,7 +600,15 @@ export function ToolsDirectoryClient({
     }));
   }
 
+  function beginFormSession() {
+    formSession.current += 1;
+    pendingSave.current = null;
+    setIsSaving(false);
+    setError(null);
+  }
+
   function resetForm() {
+    beginFormSession();
     setForm(EMPTY_FORM);
     setEditingId(null);
     setIsFormOpen(false);
@@ -611,6 +622,7 @@ export function ToolsDirectoryClient({
   }
 
   function startEdit(link: ToolLink) {
+    beginFormSession();
     setForm(linkToForm(link));
     setEditingId(link.id);
     setIsFormOpen(true);
@@ -627,6 +639,11 @@ export function ToolsDirectoryClient({
 
   async function submitForm(event: React.FormEvent) {
     event.preventDefault();
+    // A ref also rejects duplicate submits in the same render/event turn.
+    if (pendingSave.current !== null) return;
+    const session = formSession.current;
+    pendingSave.current = session;
+    setIsSaving(true);
     setError(null);
     const editingLink = editingId ? links.find((link) => link.id === editingId) ?? null : null;
     const canSubmitCredentials = !editingId || Boolean(editingLink?.canManageCredentials);
@@ -649,29 +666,43 @@ export function ToolsDirectoryClient({
       payload.credentialSecret = form.credentialSecret;
     }
 
-    const res = await fetch(
-      editingId
-        ? `/api/workspaces/${workspaceId}/tool-links/${editingId}`
-        : `/api/workspaces/${workspaceId}/tool-links`,
-      {
-        method: editingId ? "PATCH" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      },
-    );
-    const data = await res.json().catch(() => null);
-    if (!res.ok) {
-      setError(data?.error?.message ?? t("errorGeneric"));
-      return;
-    }
+    try {
+      const res = await fetch(
+        editingId
+          ? `/api/workspaces/${workspaceId}/tool-links/${editingId}`
+          : `/api/workspaces/${workspaceId}/tool-links`,
+        {
+          method: editingId ? "PATCH" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      );
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.id) {
+        if (formSession.current === session) {
+          setError(data?.error?.message ?? t("errorGeneric"));
+        }
+        return;
+      }
 
-    setLinks((current) => (
-      editingId
-        ? current.map((link) => (link.id === editingId ? data : link))
-        : [data, ...current]
-    ));
-    resetForm();
-    await refreshCatalog();
+      // Accepted writes still update the list, but cannot reset a newer draft.
+      setLinks((current) => (
+        editingId
+          ? current.map((link) => (link.id === editingId ? data : link))
+          : [data, ...current]
+      ));
+      if (formSession.current === session) resetForm();
+    } catch {
+      if (formSession.current === session) setError(t("errorGeneric"));
+      return;
+    } finally {
+      if (pendingSave.current === session) {
+        pendingSave.current = null;
+        setIsSaving(false);
+      }
+    }
+    // A failed catalog refresh must not turn an accepted write into a save retry.
+    await refreshCatalog().catch(() => {});
     router.refresh();
   }
 
@@ -1303,7 +1334,10 @@ export function ToolsDirectoryClient({
               Add reference to Brain
             </a>
             {showLinks && (
-              <button type="button" className="secondary small" onClick={() => setIsFormOpen((open) => !open)}>
+              <button type="button" className="secondary small" onClick={() => {
+                beginFormSession();
+                setIsFormOpen((open) => !open);
+              }}>
                 {isFormOpen ? t("btnCancel") : "Add manual link"}
               </button>
             )}
@@ -1515,93 +1549,95 @@ export function ToolsDirectoryClient({
               Manual links are saved in the shared link library. Captured links appear automatically after communication history is processed.
             </p>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
+          <fieldset disabled={isSaving} className="stack" style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
+              <label>
+                {t("formTitle")}
+                <input required value={form.title} onChange={(event) => setField("title", event.target.value)} />
+              </label>
+              <label>
+                {t("formUrl")}
+                <input required value={form.url} onChange={(event) => setField("url", event.target.value)} placeholder="https://example.com" />
+              </label>
+              <label>
+                {t("formCategory")}
+                <select value={form.category} onChange={(event) => setField("category", event.target.value)}>
+                  {CATEGORIES.map(([value, labelKey]) => (
+                    <option key={value} value={value}>{labelKey.startsWith("category") ? t(labelKey) : labelKey}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
             <label>
-              {t("formTitle")}
-              <input required value={form.title} onChange={(event) => setField("title", event.target.value)} />
+              {t("formDescription")}
+              <MarkdownEditor
+                name="descriptionMd"
+                value={form.descriptionMd}
+                onValueChange={(descriptionMd) => setField("descriptionMd", descriptionMd)}
+                placeholder={t("placeholderDescription")}
+                rows={4}
+              />
             </label>
             <label>
-              {t("formUrl")}
-              <input required value={form.url} onChange={(event) => setField("url", event.target.value)} placeholder="https://example.com" />
+              {t("formAccessNotes")}
+              <MarkdownEditor
+                name="accessNotesMd"
+                value={form.accessNotesMd}
+                onValueChange={(accessNotesMd) => setField("accessNotesMd", accessNotesMd)}
+                placeholder={t("placeholderAccessNotes")}
+                rows={4}
+              />
             </label>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
+              <label>
+                {t("formPreviewTitle")}
+                <input value={form.previewTitle} onChange={(event) => setField("previewTitle", event.target.value)} placeholder={t("placeholderPreviewTitle")} />
+              </label>
+              <label>
+                {t("formPreviewImageUrl")}
+                <input value={form.previewImageUrl} onChange={(event) => setField("previewImageUrl", event.target.value)} />
+              </label>
+            </div>
             <label>
-              {t("formCategory")}
-              <select value={form.category} onChange={(event) => setField("category", event.target.value)}>
-                {CATEGORIES.map(([value, labelKey]) => (
-                  <option key={value} value={value}>{labelKey.startsWith("category") ? t(labelKey) : labelKey}</option>
-                ))}
-              </select>
+              {t("formPreviewDescription")}
+              <input value={form.previewDescription} onChange={(event) => setField("previewDescription", event.target.value)} placeholder={t("placeholderPreviewDescription")} />
             </label>
-          </div>
-          <label>
-            {t("formDescription")}
-            <MarkdownEditor
-              name="descriptionMd"
-              value={form.descriptionMd}
-              onValueChange={(descriptionMd) => setField("descriptionMd", descriptionMd)}
-              placeholder={t("placeholderDescription")}
-              rows={4}
-            />
-          </label>
-          <label>
-            {t("formAccessNotes")}
-            <MarkdownEditor
-              name="accessNotesMd"
-              value={form.accessNotesMd}
-              onValueChange={(accessNotesMd) => setField("accessNotesMd", accessNotesMd)}
-              placeholder={t("placeholderAccessNotes")}
-              rows={4}
-            />
-          </label>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
-            <label>
-              {t("formPreviewTitle")}
-              <input value={form.previewTitle} onChange={(event) => setField("previewTitle", event.target.value)} placeholder={t("placeholderPreviewTitle")} />
-            </label>
-            <label>
-              {t("formPreviewImageUrl")}
-              <input value={form.previewImageUrl} onChange={(event) => setField("previewImageUrl", event.target.value)} />
-            </label>
-          </div>
-          <label>
-            {t("formPreviewDescription")}
-            <input value={form.previewDescription} onChange={(event) => setField("previewDescription", event.target.value)} placeholder={t("placeholderPreviewDescription")} />
-          </label>
-          {canEditFormCredentials && (
-            <fieldset style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 14 }}>
-              <legend style={{ padding: "0 6px", fontWeight: 600 }}>{t("credentialOptional")}</legend>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
-                <label>
-                  {t("formCredentialLabel")}
-                  <input value={form.credentialLabel} onChange={(event) => setField("credentialLabel", event.target.value)} placeholder={t("placeholderCredentialLabel")} />
-                </label>
-                <label>
-                  {t("formCredentialSecret")}
-                  <input type="password" value={form.credentialSecret} onChange={(event) => setField("credentialSecret", event.target.value)} placeholder={t("placeholderCredentialSecret")} />
-                </label>
-              </div>
-            </fieldset>
-          )}
-          <fieldset style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 14 }}>
-            <legend style={{ padding: "0 6px", fontWeight: 600 }}>{t("formCircles")}</legend>
-            {circles.length === 0 ? (
-              <p className="nr-item-meta">{t("noCircles")}</p>
-            ) : (
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8 }}>
-                {circles.map((circle) => (
-                  <CheckboxFilter
-                    key={circle.id}
-                    checked={form.circleIds.includes(circle.id)}
-                    onChange={() => toggleCircle(circle.id)}
-                  >
-                    {circle.name}
-                  </CheckboxFilter>
-                ))}
-              </div>
+            {canEditFormCredentials && (
+              <fieldset style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 14 }}>
+                <legend style={{ padding: "0 6px", fontWeight: 600 }}>{t("credentialOptional")}</legend>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
+                  <label>
+                    {t("formCredentialLabel")}
+                    <input value={form.credentialLabel} onChange={(event) => setField("credentialLabel", event.target.value)} placeholder={t("placeholderCredentialLabel")} />
+                  </label>
+                  <label>
+                    {t("formCredentialSecret")}
+                    <input type="password" value={form.credentialSecret} onChange={(event) => setField("credentialSecret", event.target.value)} placeholder={t("placeholderCredentialSecret")} />
+                  </label>
+                </div>
+              </fieldset>
             )}
+            <fieldset style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 14 }}>
+              <legend style={{ padding: "0 6px", fontWeight: 600 }}>{t("formCircles")}</legend>
+              {circles.length === 0 ? (
+                <p className="nr-item-meta">{t("noCircles")}</p>
+              ) : (
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8 }}>
+                  {circles.map((circle) => (
+                    <CheckboxFilter
+                      key={circle.id}
+                      checked={form.circleIds.includes(circle.id)}
+                      onChange={() => toggleCircle(circle.id)}
+                    >
+                      {circle.name}
+                    </CheckboxFilter>
+                  ))}
+                </div>
+              )}
+            </fieldset>
           </fieldset>
           <TableActionGroup>
-            <button type="submit" className="small">{isEditing ? t("btnUpdateTool") : "Add link"}</button>
+            <button type="submit" className="small" disabled={isSaving}>{isEditing ? t("btnUpdateTool") : "Add link"}</button>
             <button type="button" className="secondary small" onClick={resetForm}>{t("btnCancel")}</button>
           </TableActionGroup>
         </form>

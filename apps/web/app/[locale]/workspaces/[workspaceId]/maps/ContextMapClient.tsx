@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
   Background,
   BaseEdge,
@@ -183,6 +183,8 @@ type DiffJsonInput = {
 };
 
 export type ContextMapClientData = {
+  readWindow?: { scope: "WINDOW"; complete: boolean; objectsComplete: boolean;
+    relationshipsComplete: boolean; evidenceComplete: boolean; proposedDiffsComplete: boolean; variantsComplete: boolean };
   mapView: ContextMapView;
   mapViews: ContextMapView[];
   objects: ContextGraphObject[];
@@ -1076,6 +1078,8 @@ export default function ContextMapClient({
 }) {
   const initialSelectedObjectId = data.objects.find((object) => isCanvasObject(object, data.mapView))?.id ?? null;
   const canvasRef = useRef<HTMLDivElement>(null);
+  const fitTimersRef = useRef<number[]>([]);
+  const inspectorContentId = useId();
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>(initialSelectedObjectId ? [initialSelectedObjectId] : []);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(initialSelectedObjectId);
   const [selectedRelationshipId, setSelectedRelationshipId] = useState<string | null>(null);
@@ -1083,6 +1087,7 @@ export default function ContextMapClient({
   const [regionContextStatus, setRegionContextStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [message, setMessage] = useState<{ tone: "info" | "error"; text: string } | null>(null);
   const [isCompactLayout, setIsCompactLayout] = useState(false);
+  const [isCompactInspectorOpen, setIsCompactInspectorOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(() => {
     if (typeof window === "undefined") return false;
     return new URL(window.location.href).searchParams.get("fullscreen") === "1";
@@ -1172,6 +1177,9 @@ export default function ContextMapClient({
   }), [data.mapView.viewType, filteredObjects, layoutByObjectId]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<ContextMapFlowNode>(initialNodes);
+  const initialFitOptions = useMemo(() => isCompactLayout
+    ? { nodes: [{ id: initialSelectedObjectId ?? "" }], minZoom: 1, maxZoom: 1 }
+    : undefined, [initialSelectedObjectId, isCompactLayout]);
   const nodeRectsById = useMemo(() => new Map(nodes.map((node) => [node.id, nodeRectFromFlowNode(node)])), [nodes]);
 
   // Routing rects are frozen while a node is dragged so the whole edge set is
@@ -1242,7 +1250,7 @@ export default function ContextMapClient({
   useEffect(() => {
     setInspectorWidth(storedInspectorWidth());
     const updateLayout = () => {
-      const compact = window.innerWidth < 920;
+      const compact = window.innerWidth <= 920;
       setIsCompactLayout(compact);
       setInspectorDock(compact ? "bottom" : storedInspectorDock());
     };
@@ -1424,24 +1432,55 @@ export default function ContextMapClient({
       }));
   }
 
-  function fitMap() {
-    flowInstance?.fitView({ padding: isFullscreen ? 0.12 : 0.18, duration: 220 });
+  function fitMap(objectId = selectedObjectId) {
+    const focusId = nodes.find((node) => node.id === objectId)?.id ?? nodes[0]?.id;
+    flowInstance?.fitView({
+      padding: isFullscreen ? 0.12 : 0.18,
+      duration: 220,
+      ...(isCompactLayout && focusId ? { nodes: [{ id: focusId }], minZoom: 1, maxZoom: 1 } : {}),
+    });
+  }
+
+  function navigateToCard(objectId: string) {
+    cancelScheduledFit();
+    closeMapMenus();
+    setSelectedRelationshipId(null);
+    setSelectedObjectId(objectId);
+    setSelectedObjectIds([objectId]);
+    fitMap(objectId);
+  }
+
+  function cancelScheduledFit() {
+    fitTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    fitTimersRef.current = [];
   }
 
   function scheduleFit() {
+    cancelScheduledFit();
     const delays = [80, 240, 520];
-    for (const delay of delays) {
+    fitTimersRef.current = delays.map((delay) => (
       window.setTimeout(() => {
-        flowInstance?.fitView({ padding: isFullscreen ? 0.12 : 0.18, duration: 220 });
-      }, delay);
-    }
+        fitMap();
+      }, delay)
+    ));
+    return cancelScheduledFit;
   }
 
   useEffect(() => {
     if (!flowInstance || nodes.length === 0) return;
-    scheduleFit();
+    return scheduleFit();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flowInstance, data.mapView.id, isFullscreen, statusFilters, typeFilters, includeStale, nodes.length, inspectorDock]);
+  }, [flowInstance, data.mapView.id, isFullscreen, statusFilters, typeFilters, includeStale, nodes.length, inspectorDock, isCompactLayout]);
+
+  useEffect(() => {
+    if (!flowInstance || !isCompactLayout || !canvasRef.current) return;
+    const focusId = initialNodes.find((node) => node.id === selectedObjectId)?.id ?? initialNodes[0]?.id;
+    const observer = new ResizeObserver(() => {
+      if (focusId) void flowInstance.fitView({ nodes: [{ id: focusId }], minZoom: 1, maxZoom: 1 });
+    });
+    observer.observe(canvasRef.current);
+    return () => observer.disconnect();
+  }, [flowInstance, initialNodes, isCompactLayout, selectedObjectId]);
 
   function resetLocalLayout() {
     setNodes(initialNodes);
@@ -1892,9 +1931,12 @@ export default function ContextMapClient({
           <button className="secondary small" type="button" onClick={() => setShowFilters((value) => !value)} title="Filter visible facts">
             <SlidersHorizontal size={14} aria-hidden="true" /> Filters
           </button>
-          <button className="secondary small" type="button" onClick={fitMap} title="Fit map to view">
-            <Crosshair size={14} aria-hidden="true" /> Fit
+          <button className="secondary small" type="button" onClick={() => { cancelScheduledFit(); fitMap(); }} title={isCompactLayout ? "Center selected card at a readable size" : "Fit map to view"}>
+            <Crosshair size={14} aria-hidden="true" /> {isCompactLayout ? "Focus" : "Fit"}
           </button>
+          {isCompactLayout && <button className="secondary small" type="button" onClick={() => { cancelScheduledFit(); void flowInstance?.fitView({ padding: 0.18, duration: 220 }); }} title="See all cards; use Focus to read a card">
+            Overview
+          </button>}
           <button className="secondary small" type="button" onClick={resetLocalLayout} title="Reset unsaved layout changes">
             <RotateCcw size={14} aria-hidden="true" /> Reset
           </button>
@@ -1932,6 +1974,24 @@ export default function ContextMapClient({
           </button>
         </div>
       </div>
+
+      {data.readWindow?.complete === false && (
+        <p role="status" style={{ margin: 0, padding: "0.625rem 1rem", fontSize: "0.875rem", color: "var(--text-muted)" }}>
+          Showing a limited window of this map. More permitted facts may exist outside this window.
+        </p>
+      )}
+
+      {isCompactLayout && nodes.length > 0 && (
+        <div className="context-map-card-navigation">
+          <label>
+            <span>Map card</span>
+            <select value={nodes.some((node) => node.id === selectedObjectId) ? selectedObjectId! : nodes[0].id} onChange={(event) => navigateToCard(event.target.value)}>
+              {nodes.map((node, index) => <option key={node.id} value={node.id}>{index + 1} of {nodes.length}: {node.data.object.title}</option>)}
+            </select>
+          </label>
+          <span>Drag to pan, pinch to zoom. Use Overview to see connections.</span>
+        </div>
+      )}
 
       {showFilters && (
         <div className="context-map-filter-bar">
@@ -2002,8 +2062,8 @@ export default function ContextMapClient({
           {nodes.length === 0 ? (
             <div className="context-map-empty">
               <CircleHelp size={32} aria-hidden="true" />
-              <h3>{data.guidance.emptyTitle}</h3>
-              <p>{data.guidance.emptyDescription}</p>
+              <h3>{data.readWindow?.complete === false ? "No visible facts in this window" : data.guidance.emptyTitle}</h3>
+              <p>{data.readWindow?.complete === false ? "This limited window does not establish that the map is empty." : data.guidance.emptyDescription}</p>
             </div>
           ) : (
             <ReactFlow<ContextMapFlowNode, ContextMapFlowEdge>
@@ -2014,6 +2074,7 @@ export default function ContextMapClient({
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onInit={setFlowInstance}
+              onMoveStart={(event) => { if (event) cancelScheduledFit(); }}
               onConnect={handleConnect}
               onPaneClick={() => {
                 closeMapMenus();
@@ -2048,6 +2109,7 @@ export default function ContextMapClient({
                 setContextMenu({ kind: "edge", x: event.clientX, y: event.clientY, edgeId: edge.id });
               }}
               onNodeClick={(_, node) => {
+                cancelScheduledFit();
                 if (manualConnectSourceId && manualConnectSourceId !== node.id && !isPreviewId(node.id)) {
                   openConnectionDraft(manualConnectSourceId, node.id);
                   return;
@@ -2058,6 +2120,7 @@ export default function ContextMapClient({
                 setSelectedObjectIds((current) => sameIds(current, [node.id]) ? current : [node.id]);
               }}
               onEdgeClick={(_, edge) => {
+                cancelScheduledFit();
                 closeMapMenus();
                 const relationship = relationshipById.get(edge.id);
                 setSelectedRelationshipId(edge.id);
@@ -2099,12 +2162,13 @@ export default function ContextMapClient({
               connectionMode={ConnectionMode.Loose}
               connectionRadius={28}
               fitView
+              fitViewOptions={initialFitOptions}
               minZoom={0.2}
               maxZoom={1.8}
               attributionPosition="bottom-right"
             >
               <Background gap={24} size={1} color="#d7dee8" />
-              <Controls />
+              <Controls showFitView={!isCompactLayout} />
             </ReactFlow>
           )}
         </div>
@@ -2247,7 +2311,7 @@ export default function ContextMapClient({
           </div>
         )}
 
-        <aside className={`context-map-inspector context-map-inspector--${inspectorDock}`}>
+        <aside className={`context-map-inspector context-map-inspector--${inspectorDock}`} aria-label="Inspector">
           {inspectorDock === "right" && !isCompactLayout && (
             <button
               aria-label="Resize inspector"
@@ -2262,9 +2326,15 @@ export default function ContextMapClient({
               <strong>{selectedRelationship ? "Connection" : "Selected item"}</strong>
             </div>
             <div className="context-map-inspector-actions">
-              <button type="button" className="secondary small" onClick={() => setInspectorDock(inspectorDock === "right" ? "bottom" : "right")}>
-                {inspectorDock === "right" ? "Bottom" : "Right"}
-              </button>
+              {isCompactLayout ? (
+                <button type="button" className="secondary small" aria-expanded={isCompactInspectorOpen} aria-controls={inspectorContentId} onClick={() => setIsCompactInspectorOpen((value) => !value)}>
+                  {isCompactInspectorOpen ? "Hide Inspector" : "Show Inspector"}
+                </button>
+              ) : (
+                <button type="button" className="secondary small" onClick={() => setInspectorDock(inspectorDock === "right" ? "bottom" : "right")}>
+                  {inspectorDock === "right" ? "Bottom" : "Right"}
+                </button>
+              )}
               {message && (
                 <button type="button" className="secondary small context-map-icon-button" onClick={() => setMessage(null)} aria-label="Clear message">
                   <X size={14} aria-hidden="true" />
@@ -2275,7 +2345,7 @@ export default function ContextMapClient({
 
           {message && <div className={`context-map-message context-map-message--${message.tone}`}>{message.text}</div>}
 
-          <div className="context-map-inspector-scroll">
+          <div id={inspectorContentId} className="context-map-inspector-scroll" hidden={isCompactLayout && !isCompactInspectorOpen}>
             {selectedRelationship ? (
               <>
                 <section className="context-map-inspector-section">

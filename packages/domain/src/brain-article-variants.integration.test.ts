@@ -282,6 +282,40 @@ describe("permitted article variants across real read/write boundaries", () => {
     else process.env.ENCRYPTION_KEY = previousEncryptionKey;
   });
 
+  it.each(["source", "caller", "claim"].flatMap(change => [0, 1].map(priorSends => ({ change, priorSends }))))(
+    "provider attempt denies article $change drift after $priorSends sends", async ({ change, priorSends }) => {
+      const f = await fixture(); const lease = await claim(f);
+      await prisma.workflowJob.update({ where: { id: lease.jobId }, data: { lockedAt: new Date(), startedAt: new Date() } });
+      let sends = 0;
+      const result = await generateBrainArticleVariant({ ...lease, generate: async (_sources, controls) => {
+        if (priorSends) { await controls?.authorizeAttempt({ signal: controls.signal }); sends++; }
+        if (change === "source") await archiveAndRestoreSource(f);
+        if (change === "caller") {
+          await prisma.member.update({ where: { id: f.readerMember.id }, data: { isActive: false } });
+          await prisma.member.update({ where: { id: f.readerMember.id }, data: { isActive: true } });
+        }
+        if (change === "claim") await prisma.workflowJob.update({ where: { id: lease.jobId }, data: { attempts: 2, lockedBy: "replacement" } });
+        await controls?.authorizeAttempt({ signal: controls.signal }); sends++;
+        return { title: "Candidate", bodyMd: "Permitted original facts." };
+      } }).catch(error => error);
+      expect(sends).toBe(priorSends);
+      expect(result).toBeInstanceOf(Error);
+      expect(await prisma.brainArticle.count({ where: { workspaceId: f.workspace.id, variantOfArticleId: f.canonical.id } })).toBe(0);
+      if (change === "claim") expect(await prisma.workflowJob.findUniqueOrThrow({ where: { id: lease.jobId } }))
+        .toMatchObject({ status: "RUNNING", attempts: 2, lockedBy: "replacement" });
+    });
+
+  it("provider attempt permits article retries with unchanged original authority", async () => {
+    const f = await fixture(); const lease = await claim(f);
+    await prisma.workflowJob.update({ where: { id: lease.jobId }, data: { lockedAt: new Date(), startedAt: new Date() } });
+    let sends = 0;
+    const result = await generateBrainArticleVariant({ ...lease, generate: async (_sources, controls) => {
+      for (let attempt = 0; attempt < 2; attempt++) { await controls.authorizeAttempt({ signal: controls.signal }); sends++; }
+      return { title: "Candidate", bodyMd: "Permitted original facts." };
+    } });
+    expect(sends).toBe(2); expect(result.phase).toBe("APPLIED");
+  });
+
   it("enqueues denied canonicals automatically, serves a separate owned variant, and redacts internal recipe metadata", async () => {
     const f = await fixture();
     await expect(getArticle(f.readerActor, { workspaceId: f.workspace.id, slug: f.canonical.slug }))

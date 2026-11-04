@@ -84,6 +84,14 @@ describe("typed SQL publication orchestration", () => {
     expect(ports.disposeSqlIngestionCapture).toHaveBeenCalledExactlyOnceWith(receipt);
   });
 
+  it.each([true, false])("completes an already-queued empty legacy configuration (active=%s) without claim, log or provider work", async isActive => {
+    mocked.find.mockResolvedValue({...source, selectedTables: [], isActive});
+    expect(await createSqlIngestionRunner(ports)(source.id)).toEqual({skipped: true, reason: "table_selection_required"});
+    expect(mocked.createLog).not.toHaveBeenCalled();
+    expect(ports.claimSqlIngestionAttempt).not.toHaveBeenCalled();
+    expect(ports.captureSqlIngestionAttempt).not.toHaveBeenCalled();
+  });
+
   it("never contacts the provider or updates source status when a competing claim wins", async () => {
     const error = new Error("SQL_INGESTION_FENCE_LOST");
     vi.mocked(ports.claimSqlIngestionAttempt).mockRejectedValueOnce(error);
@@ -146,6 +154,26 @@ describe("outbox execution ownership", () => {
     await expect(createSqlIngestionRunner(ports)(source.id, lease)).rejects.toThrow(/driver|workspace/);
     expect(ports.claimSqlIngestionAttempt).not.toHaveBeenCalled();
   });
+  it("continues attempt renewals during six minutes of final validation and drains before the publication callback", async () => {
+    vi.useFakeTimers();
+    try {
+      const lease = execution();
+      vi.mocked(ports.publishPreparedSqlKnowledgeAttempt).mockImplementation(async ({beforePublication, commit}) => {
+        // The real publisher's PG ordering regression separately pins this hook after native validation.
+        await vi.advanceTimersByTimeAsync(360_000);
+        expect(ports.renewSqlIngestionAttempt).toHaveBeenCalledTimes(6);
+        expect(lease.beforePublication).not.toHaveBeenCalled();
+        await beforePublication?.();
+        expect(lease.beforePublication).toHaveBeenCalledOnce();
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(ports.renewSqlIngestionAttempt).toHaveBeenCalledTimes(6);
+        await commit(tx, identity);
+        return {...identity, committed: true};
+      });
+      await createSqlIngestionRunner(ports)(source.id, lease);
+    } finally {vi.useRealTimers();}
+  });
+
   it("checks execution after capture before any models", async () => {
     const lease = execution();
     vi.mocked(ports.captureSqlIngestionAttempt).mockImplementation(async () => {

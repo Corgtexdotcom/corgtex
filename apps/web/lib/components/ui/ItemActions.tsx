@@ -8,17 +8,19 @@ interface ItemActionsProps {
   more?: ReactNode;
   /** Accessible label for the kebab trigger. Required when `more` is provided. */
   moreLabel?: string;
+  /** Use dialog for popovers containing fields or disclosure editors. */
+  moreRole?: "menu" | "dialog";
   className?: string;
 }
 
-export function ItemActions({ primary, more, moreLabel, className = "" }: ItemActionsProps) {
+export function ItemActions({ primary, more, moreLabel, moreRole = "menu", className = "" }: ItemActionsProps) {
   const hasPrimary = primary != null && primary !== false;
   const hasMore = more != null && more !== false && !!moreLabel;
   if (!hasPrimary && !hasMore) return null;
   return (
     <div className={`item-actions ${className}`}>
       <div className="item-actions-primary">{primary}</div>
-      {hasMore && <ActionMenu label={moreLabel!}>{more}</ActionMenu>}
+      {hasMore && <ActionMenu label={moreLabel!} panelRole={moreRole}>{more}</ActionMenu>}
     </div>
   );
 }

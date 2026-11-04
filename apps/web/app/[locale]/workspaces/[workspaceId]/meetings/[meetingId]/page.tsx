@@ -2,7 +2,7 @@ import {
   getMeeting,
   getMeetingParticipants,
   getMeetingTranscriptProcessingState,
-  getWorkspaceArchiveRecord,
+  ArchiveMetadataReadRelease, getWorkspaceArchiveRecord,
   meetingAgendaSections,
   normalizeMeetingAgendaForDisplay,
   privacyFilter,
@@ -148,6 +148,7 @@ export default async function MeetingDetailPage({
   const { workspaceId, meetingId } = await params;
   const resolvedSearch = searchParams ? await searchParams : {};
   const actor = await requirePageActor();
+  const archiveRelease = new ArchiveMetadataReadRelease(actor, workspaceId);
   const t = await getTranslations("meetings");
   const tActions = await getTranslations("actions");
   const format = await getFormatter();
@@ -195,7 +196,7 @@ export default async function MeetingDetailPage({
   const isArchived = Boolean(meeting.archivedAt);
   const isAdmin = actor.kind === "agent" || membership?.role === "ADMIN";
   const archiveRecord = isArchived
-    ? await getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Meeting", entityId: meeting.id })
+    ? await getWorkspaceArchiveRecord(actor, { workspaceId, entityType: "Meeting", entityId: meeting.id }, archiveRelease)
     : null;
   
   const agenda = normalizeMeetingAgendaForDisplay(meeting.agendaJson, meeting.title || t("untitledMeeting"));
@@ -294,6 +295,8 @@ export default async function MeetingDetailPage({
       </div>
     );
   };
+
+  await archiveRelease.finish(undefined);
 
   return (
     <>

@@ -70,6 +70,28 @@ export const fixture = (() => {
         const start = args.cursor ? ordered.findIndex((row) => row.id === args.cursor.id) + (args.skip ?? 0) : args.skip ?? 0;
         return ordered.slice(start, start + (args.take ?? ordered.length)).map((row) => project(row, args));
       }),
+      groupBy: vi.fn(async (args: any) => {
+        const groups = new Map<string, any[]>();
+        for (const row of rows[name].filter((item) => matches(item, args.where))) {
+          const key = JSON.stringify(args.by.map((field: string) => row[field]));
+          groups.set(key, [...(groups.get(key) ?? []), row]);
+        }
+        const result: Record<string, any>[] = [...groups.values()].map((group) => ({
+          ...Object.fromEntries(args.by.map((field: string) => [field, group[0][field]])),
+          ...(args._max ? { _max: Object.fromEntries(Object.keys(args._max).map((field) =>
+            [field, group.reduce((max, row) => max == null || row[field] > max ? row[field] : max, null)])) } : {}),
+          ...(args._count ? { _count: args._count === true ? group.length : Object.fromEntries(Object.keys(args._count).map((field) =>
+            [field, field === "_all" ? group.length : group.filter((row) => row[field] != null).length])) } : {}),
+        }));
+        const order = Array.isArray(args.orderBy) ? args.orderBy : args.orderBy ? [args.orderBy] : [];
+        result.sort((a, b) => {
+          for (const part of order) for (const [field, direction] of Object.entries(part)) {
+            if (a[field] !== b[field]) return (a[field] > b[field] ? 1 : -1) * (direction === "desc" ? -1 : 1);
+          }
+          return 0;
+        });
+        return result.slice(args.skip ?? 0, (args.skip ?? 0) + (args.take ?? result.length));
+      }),
       count: vi.fn(async (args: any) => rows[name].filter((row) => matches(row, args.where)).length),
       create: vi.fn(async ({ data }: any) => { const row = stored(name, data); rows[name].push(row); return { ...row }; }),
       createMany: vi.fn(async ({ data }: any) => { for (const item of data) rows[name].push(stored(name, item)); return { count: data.length }; }),

@@ -116,7 +116,7 @@ const getContextMapInfoTool: ModelTool = {
   type: "function",
   function: {
     name: "get_context_map_info",
-    description: "Read bounded metadata for the current context map, selected items, visible objects, and visible relationships. Does not include evidence excerpts.",
+    description: "Read bounded metadata for the current context map, selected items, visible objects, and visible relationships. Check readWindow before interpreting absence or completeness; this tool further limits objects to80 and relationships to120. Does not include evidence excerpts.",
     parameters: {
       type: "object",
       properties: {
@@ -194,8 +194,13 @@ async function getContextMapInfoAction(actor: AppActor, ctx: ContextMapToolConte
     includeStale: args.includeStale === true || pageContextIncludeStale(ctx),
   });
   const selectedIds = new Set(selectedObjectIds(ctx, args));
+  const objectsComplete = data.readWindow.objectsComplete && data.objects.length <= 80;
+  const relationshipsComplete = data.readWindow.relationshipsComplete && data.relationships.length <= 120;
+  const readWindow = { ...data.readWindow, objectsComplete, relationshipsComplete,
+    complete: data.readWindow.complete && objectsComplete && relationshipsComplete };
   return {
     mapView: data.mapView,
+    readWindow,
     permissions: data.permissions,
     currentPageContext: ctx.pageContext ?? null,
     selectedObjects: data.objects.filter((object) => selectedIds.has(object.id)).map(mapObjectSummary),

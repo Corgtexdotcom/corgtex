@@ -111,8 +111,14 @@ const f = vi.hoisted(() => {
       chat: vi.fn(async () => ({ content: "SYNTHETIC derived answer" })) } };
 });
 
-vi.mock("../../domain/src/source-lineage", () => ({withArtifactCountReleaseSnapshot: f.countRelease}));
-vi.mock("@corgtex/domain", () => ({ readableArtifactIds: f.readable, resolveKnowledgeAccessDomains: f.resolveDomains, lineageContentFingerprint: f.hash, captureArtifactInputProof: f.capture, isArtifactInputProofReadable: f.currentProof }));
+vi.mock("../../domain/src/source-lineage", () => ({withArtifactCountReleaseSnapshot: f.countRelease,
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map<string, string>()}),
+  isArtifactInputProofReadableAtObservedHeads: f.currentProof}));
+vi.mock("@corgtex/domain", () => ({ readableArtifactIds: f.readable, resolveKnowledgeAccessDomains: f.resolveDomains, lineageContentFingerprint: f.hash, captureArtifactInputProof: f.capture, isArtifactInputProofReadable: f.currentProof,
+  mergeLineageInputRoot: (prior: unknown, root: unknown) => {
+    if (prior && JSON.stringify(prior) !== JSON.stringify(root)) throw Object.assign(new Error("Changed original proof"), {code: "SOURCE_CHANGED"});
+    return root;
+  } }));
 vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/shared")>();
   return { ...actual, prisma: f.prisma, setCacheJson: async (...args: Parameters<typeof actual.setCacheJson>) => {
@@ -124,7 +130,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
 vi.mock("@corgtex/models", async () => ({ ...await import("../../models/src/provider-errors"), defaultModelGateway: f.gateway, resolveModel: () => "test" }));
 
 import { resetLocalCacheStore } from "@corgtex/shared";
-import { answerKnowledgeQuestion, fetchReadableKnowledgeChunk, getKnowledgeSearchInputRoots, searchIndexedKnowledge } from "./retrieval";
+import { answerKnowledgeQuestion, fetchReadableKnowledgeChunk, getKnowledgeSearchInputRoots, scanReadableKnowledgeChunks, searchIndexedKnowledge } from "./retrieval";
 
 const alice: AppActor = { kind: "user", user: { id: "alice", email: "alice@example.test", displayName: "Alice" } };
 const bob: AppActor = { kind: "user", user: { id: "bob", email: "bob@example.test", displayName: "Bob" } };
@@ -170,8 +176,9 @@ describe("actor-aware knowledge lineage", () => {
     const results = await searchIndexedKnowledge({ actor: bob, workspaceId: "ws-1", query: "policy", limit: 1, accessDomains: ["FINANCE", "WORKSPACE"] });
     expect(results.map((result) => result.sourceId)).toEqual(["public"]);
     expect(f.prisma.knowledgeChunk.findMany.mock.calls.filter(([query]) => query.take === 500)[0][0]).toMatchObject({ where: {
-      accessDomain: { in: ["WORKSPACE"] }, OR: [expect.objectContaining({ sourceType: "BRAIN_ARTICLE", sourceId: "public", metadata: { path: ["sourceContentHash"], equals: f.hash("BrainArticle", f.sources[2]) } })],
+      accessDomain: { in: ["WORKSPACE"] },
     }, take: 500 });
+    expect(f.prisma.brainArticle.findMany.mock.calls[0][0].where.id.in).toEqual(expect.arrayContaining(["finance", "unknown", "public"]));
     expect(f.gateway.rerank.mock.calls[0][0].documents.join(" ")).not.toMatch(/finance|unknown|other-tenant/);
     expect(f.readable).toHaveBeenCalledWith(bob, "ws-1", "BrainArticle", expect.arrayContaining([expect.objectContaining({ bodyMd: "Synthetic policy finance" })]));
   });
@@ -540,18 +547,54 @@ describe("child lineage admission before retrieval windows", () => {
     else expect(await searchIndexedKnowledge({actor: bob, workspaceId: "ws-1", query: "policy", limit: 1})).toEqual([]);
   });
 
-  it("fails explicitly on parent scan overflow before querying or scoring child bodies", async () => {
+  it("hydrates only candidate parents when more than 5000 unrelated sources have no chunks", async () => {
     for (let index = 0; index < 5001; index++) article(`parent-${index}`, [publicInput]);
-    await expect(searchIndexedKnowledge({actor: bob, workspaceId: "ws-1", query: "policy"})).rejects.toMatchObject({code: "KNOWLEDGE_SCAN_LIMIT"});
-    expect(f.prisma.knowledgeChunk.findMany).not.toHaveBeenCalled();
-    expect(f.gateway.embed).not.toHaveBeenCalled();
-    expect(f.afterCacheWrite).not.toHaveBeenCalled();
+    f.receipts.splice(0);
+    article("candidate", [publicInput]);
+    const results = await searchIndexedKnowledge({actor: bob, workspaceId: "ws-1", query: "policy"});
+    expect(results.map(result => result.sourceId)).toEqual(["candidate"]);
+    expect(f.prisma.brainArticle.findMany.mock.calls).not.toHaveLength(0);
+    for (const [query] of f.prisma.brainArticle.findMany.mock.calls) {
+      expect(query.where.id.in).toEqual(["candidate"]);
+      expect(query.take).toBeLessThanOrEqual(500);
+    }
+    expect(f.gateway.rerank.mock.calls[0][0].documents).toHaveLength(1);
   });
 
-  it("fails explicitly at the raw scan bound before models, counts, or caches release partial results", async () => {
+  it("fails explicitly when knowledge search exhausts its raw candidate budget", async () => {
     f.domains.set("bob:ws-1", ["WORKSPACE"]);
     crowdedChildren("ws-1", 5001);
     await expect(searchIndexedKnowledge({actor: bob, workspaceId: "ws-1", query: "policy"})).rejects.toMatchObject({code: "KNOWLEDGE_SCAN_LIMIT"});
+    const pages = f.prisma.knowledgeChunk.findMany.mock.calls.filter(([query]) => Array.isArray(query.orderBy) && query.orderBy.length === 3);
+    expect(pages).toHaveLength(11);
+    expect(pages.at(-1)![0].take).toBe(1);
+    expect(f.gateway.embed).not.toHaveBeenCalled();
+    expect(f.gateway.rerank).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("preserves readable candidate ceilings and source-type windows (explicit types: %s)", async explicitTypes => {
+    for (let index = 0; index < 501; index++) {
+      article(`article-${index}`, [publicInput]);
+      const document = article(`document-${index}`, [publicInput]);
+      Object.assign(document, {type: "DOCUMENT", accessDomain: "WORKSPACE"});
+      const chunk = f.receipts[f.receipts.length - 1];
+      chunk.sourceType = "DOCUMENT";
+      chunk.metadata.sourceContentHash = f.hash("Document", document);
+    }
+    const result = await scanReadableKnowledgeChunks({actor: bob, workspaceId: "ws-1", accessDomains: ["WORKSPACE"],
+      ...(explicitTypes ? {sourceTypes: ["BRAIN_ARTICLE" as const, "DOCUMENT" as const, "BRAIN_ARTICLE" as const]} : {})}, 500);
+    expect(result.chunks).toHaveLength(explicitTypes ? 1000 : 500);
+    for (const type of ["BRAIN_ARTICLE", "DOCUMENT"]) {
+      expect(result.chunks.filter(chunk => chunk.sourceType === type)).toHaveLength(explicitTypes ? 500 : 250);
+    }
+    expect(result.roots.filter(root => root.kind === "KnowledgeChunk")).toHaveLength(result.chunks.length);
+    expect(result.chunks.map(chunk => chunk.id)).not.toContain("chunk-article-500");
+    expect(result.chunks.map(chunk => chunk.id)).not.toContain("chunk-document-500");
+  });
+
+  it("keeps the complete count's existing raw bound without releasing a partial total", async () => {
+    f.domains.set("bob:ws-1", ["WORKSPACE"]);
+    crowdedChildren("ws-1", 5001);
     const {countReadableKnowledgeChunks} = await import("./counts");
     await expect(countReadableKnowledgeChunks(bob, "ws-1")).rejects.toMatchObject({code: "KNOWLEDGE_SCAN_LIMIT"});
     expect(f.gateway.embed).not.toHaveBeenCalled();

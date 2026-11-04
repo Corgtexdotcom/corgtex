@@ -27,6 +27,34 @@ async function fixture(){
   return{workspace,owner,peer,users,select,restore};
 }
 describe("selected current legacy recovery",()=>{
+  it.each(["newest", "older"] as const)("finds a current file binding among 101 outcomes with valid receipt %s", async position => {
+    const f = await fixture(), bytes = Buffer.from("Synthetic paging-bound file");
+    const key = `workspaces/${f.workspace.id}/uploads/${randomUUID()}/original.txt`;
+    const document = await db.document.create({data:{workspaceId:f.workspace.id,title:"Original",source:"upload",storageKey:key,mimeType:"text/plain",metadata:{size:bytes.length}}});
+    const source = await db.brainSource.create({data:{workspaceId:f.workspace.id,sourceType:"FILE_UPLOAD",tier:1,content:"Original extract",metadata:{documentId:document.id},fileStorageKey:key,fileSizeBytes:bytes.length,fileMimeType:"text/plain"}});
+    await f.restore("Document", document);
+    store.stream.mockImplementation(async()=>({body:new ReadableStream({start(controller){controller.enqueue(bytes);controller.close();}})}));
+    const result = await f.restore("BrainSource", source);
+    const receipt = await db.conversationOperationOutcome.findUniqueOrThrow({where:{id:result.receiptId!}});
+    await db.conversationOperationOutcome.createMany({data:Array.from({length:100},()=>({
+      workspaceId:f.workspace.id,actorKind:"user",userId:f.owner.kind === "user" ? f.owner.user.id : null,
+      operation:receipt.operation,requestKey:randomUUID(),requiredScopes:[],
+      controlJson:{version:0,targetId:source.id},
+      createdAt:new Date(receipt.createdAt.getTime() + (position === "older" ? 1000 : -1000)),
+    }))});
+    const query = db.conversationOperationOutcome.findMany.bind(db.conversationOperationOutcome);
+    const sizes:number[]=[];
+    const reads = vi.spyOn(db.conversationOperationOutcome,"findMany").mockImplementation((async args => {
+      const rows = await query(args);
+      if(args?.where?.operation === receipt.operation && args.where.controlJson) sizes.push(rows.length);
+      return rows;
+    }) as typeof db.conversationOperationOutcome.findMany);
+    expect(await legacyRecoveryFileBinding(f.peer,f.workspace.id,source.id)).toMatchObject({storageKey:key,sizeBytes:bytes.length});
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(100);
+    expect(sizes).toHaveLength(position === "older" ? 2 : 1);
+    reads.mockRestore();
+  });
+
   it("restores an ordinary Action without rewriting history and exact retries issue one receipt",async()=>{
     const f=await fixture();
     const action=await db.action.create({data:{workspaceId:f.workspace.id,authorUserId:f.users[0].id,title:"Preserved legacy Action",bodyMd:"Exact old generated body",status:"OPEN",isPrivate:false}});

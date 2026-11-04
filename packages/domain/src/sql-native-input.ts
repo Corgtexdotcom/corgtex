@@ -62,7 +62,7 @@ function validateNativeSet(payload: Payload, selectedTables: readonly string[]) 
     for (const row of rows) {
       const key = JSON.stringify([row.table, row.primaryKey]);
       invariant(row.table === page.table && isDeepStrictEqual(row.definition, page.definition)
-        && row.definition.key.length === 1 && typeof row.primaryKey === "string" && row.primaryKey.length > 0
+        && row.definition.key.length === 1 && typeof row.primaryKey === "string"
         && Array.isArray(row.values) && row.values.length > 0 && row.values.every((value: unknown) => typeof value === "string")
         && row.row && typeof row.row === "object" && !Array.isArray(row.row)
         && !containsDecodedDate(row.row)
@@ -376,6 +376,35 @@ export async function isSqlNativeRunInputCurrent(actor: AppActor, workspaceId: s
     }
     return valid === true && await isSqlNativeRunInputLocallyCurrent(actor, workspaceId, input);
   } catch {return false;}
+}
+
+/** Reauthorize the same RUNNING capture before each outbound model attempt.
+ * Local locks are released before native I/O; this never finalizes or replaces
+ * the captured receipt or its original parents. */
+export async function assertSqlNativeModelInputCurrent(attempt: SqlIngestionAttempt,
+  receipt: AuthenticatedSqlRunReceipt): Promise<void> {
+  const original = captureOf(attempt, receipt);
+  const assertSameCapture = () => invariant(captureOf(attempt, receipt) === original && !original.finalized,
+    409, "SQL_NATIVE_RECEIPT_INVALID", "Native SQL capture changed during model authorization.");
+  const assertLocal = async () => {
+    assertSameCapture();
+    await prisma.$transaction(async tx => {
+      await lockSqlIngestionAttempt(attempt, tx);
+      await assertSqlNativeCaptureCurrent(attempt, receipt, tx);
+    }, { timeout: 10_000 });
+    assertSameCapture();
+  };
+  await assertLocal();
+  const source = await sqlIngestionSourceForCapture(attempt);
+  const parents = freeze({ rows: original.payload.rows.map(({ table, definition, values, primaryKey }) =>
+    ({ table, definition, values, primaryKey })), pages: original.payload.pages });
+  assertSameCapture();
+  assertOutsideArtifactNativeCommitPhase();
+  const allowed = await getRegisteredSqlNativeAccessValidator(source.driverType)({ source, parents,
+    assertCurrentSource: () => assertSqlIngestionAttemptCurrent(attempt) });
+  assertSameCapture();
+  invariant(allowed === true, 409, "SQL_NATIVE_CAPTURE_ACCESS_REVOKED", "Native SQL source access changed before model delivery.");
+  await assertLocal();
 }
 
 /** Real input recheck for the current publisher; terminal user-read rules above

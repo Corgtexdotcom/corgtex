@@ -51,7 +51,10 @@ vi.mock("./brain-access", () => ({
   resolveKnowledgeAccessDomains: resolveKnowledgeAccessDomainsMock,
 }));
 
-vi.mock("./source-lineage", () => ({
+vi.mock("./source-lineage", async importOriginal => ({
+  mergeLineageInputRoot: (await importOriginal<typeof import("./source-lineage")>()).mergeLineageInputRoot,
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {await remote();return finish(prismaMock);},
   captureArtifactInputProof: vi.fn(async (_actor, _ws, inputs) => inputs.map((input: any) => ({ kind: input.kind, id: input.id, fingerprint: "fixture" }))),
   captureImmutableArtifactInputProof: vi.fn(async (_actor, _ws, roots) => roots),
   currentArtifactInputRoots: vi.fn(async () => null), preserveUnknownArtifactInputSnapshot: vi.fn(),
@@ -84,7 +87,7 @@ describe("listDocuments", () => {
         accessDomain: { in: ["WORKSPACE", "FINANCE"] },
         archivedAt: null,
       },
-      orderBy: { id: "asc" }, take: 100,
+      orderBy: { id: "asc" }, take: 10001,
     });
   });
 
@@ -114,7 +117,7 @@ describe("listDocuments", () => {
         accessDomain: { in: ["WORKSPACE"] },
         archivedAt: { not: null },
       },
-      orderBy: { id: "asc" }, take: 100,
+      orderBy: { id: "asc" }, take: 10001,
     });
   });
 });

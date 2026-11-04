@@ -122,7 +122,7 @@ export async function runConstitutionSynthesisAgent(params: {
       invariant(lineageRoots.length > 0 && await isArtifactInputProofReadable(actor, params.workspaceId, lineageRoots),
         409, "SOURCE_CHANGED", "Constitution synthesis inputs are unavailable.");
       const receipt = await helpers.captureInputs(lineageRoots);
-      const synthesized = await helpers.tool("model.chat", { policyCount: policies.length }, async () => defaultModelGateway.chat({ model,
+      const synthesized = await helpers.tool("model.chat", { policyCount: policies.length }, async (operation) => defaultModelGateway.chat(operation.modelRequest({ model,
         workspaceId: params.workspaceId,
         agentRunId: runId,
         taskType: "AGENT",
@@ -157,7 +157,7 @@ ${currentConstitution ? "You are UPDATING the existing constitution. You MUST pr
             }),
           },
         ],
-      }), { receipt });
+      })), { receipt });
 
       const { bodyMd, references } = parseConstitutionSynthesis(
         synthesized.content,
@@ -167,7 +167,7 @@ ${currentConstitution ? "You are UPDATING the existing constitution. You MUST pr
       if (currentConstitution) invariant(await isArtifactInputProofReadable(actor, params.workspaceId, lineageRoots),
         409, "SOURCE_CHANGED", "Constitution summary inputs changed.");
       const diffSummary = currentConstitution
-        ? await helpers.tool("model.chat", { purpose: "diff-summary" }, async () => defaultModelGateway.chat({ model,
+        ? await helpers.tool("model.chat", { purpose: "diff-summary" }, async (operation) => defaultModelGateway.chat(operation.modelRequest({ model,
             workspaceId: params.workspaceId,
             agentRunId: runId,
             taskType: "SUMMARY",
@@ -184,7 +184,7 @@ ${currentConstitution ? "You are UPDATING the existing constitution. You MUST pr
                 }),
               },
             ],
-          }), { receipt })
+          })), { receipt })
         : null;
 
       // Persist the new constitution version

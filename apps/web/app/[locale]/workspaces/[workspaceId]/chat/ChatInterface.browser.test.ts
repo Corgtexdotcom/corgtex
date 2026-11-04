@@ -14,7 +14,12 @@ vi.mock("@corgtex/domain", () => ({ exportConversationAnswerToBrain: nativeExpor
 vi.mock("@corgtex/agents", () => ({ processConversationTurnStream: vi.fn(), sanitizeConversationPageContext: (value: unknown) => value }));
 vi.mock("@corgtex/models", () => ({ defaultModelGateway: { chat: vi.fn() } }));
 vi.mock("@/lib/auth", () => ({ resolveRequestActor: async () => ({ kind: "user", user: { id: "synthetic-user" } }) }));
-vi.mock("@/lib/http", () => ({ handleRouteError: (error: Error) => Response.json({ message: error.message }, { status: 409 }) }));
+vi.mock("@corgtex/shared", () => ({ isDatabaseUnavailableError: () => false }));
+vi.mock("@corgtex/shared/telemetry-node", () => ({ captureErrorTelemetry: vi.fn() }));
+vi.mock("@/lib/http", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/http")>(),
+  handleRouteError: (error: Error) => Response.json({ message: error.message }, { status: 409 }),
+}));
 
 // PERSONAL_CHAT_BROWSER_QA=1 npm run test:unit -- ChatInterface.browser.test.ts
 // Uses actual React effects and browser streams; all data and APIs are synthetic.

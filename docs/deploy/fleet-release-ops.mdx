@@ -115,12 +115,45 @@ Configure the protected GitHub environment `managed-azure-release-production` wi
 
 The inventory input is an opaque Build Artifact UUID from the private `Corgtexdotcom/corgtex-ops` repository, paired with the SHA-256 of its exact bytes. The asset must be private JSON, at most 96 KB, classified `INTERNAL` or `CLIENT_PRIVATE`, and typed `DOCUMENT` or `OTHER`. The server reloads and hashes the stored bytes, evaluates P0-05, requires exactly one `ACTIVE_CLIENT_PRIMARY` deployment, and verifies its opaque target identity against the requested deployment UUID. Do not put inventory bytes, target JSON, credentials, or customer-private facts in workflow inputs or logs.
 
+### Shared selfserve database
+
+The authoritative selfserve `REMOTE_MANAGED` host uses this managed workflow with
+`EXCLUSIVE` activation. Its `SHARED_WORKSPACE` tenant mappings are not release
+hosts. Legacy Fleet promotion and the standalone selfserve web-first script reject
+live promotion of this host; manually stopping a worker does not make either path
+safe.
+
+Configure the existing protected `MANAGED_RELEASE_TARGETS_JSON` entry on the
+control plane for the exact authoritative host and account, origin, subscription,
+resource group, web and worker apps, registry, provider evidence, approved candidate
+schema digest, and separately approved schema-compatible recovery pair. Keep its
+activation policy `EXCLUSIVE`. No deployment relabelling or eligibility migration
+is required. The authenticated preflight must return
+`protectedReleaseProfile=SELF_SERVE_IMPORTER_FENCE_V1` and the current target digest;
+write-intent protocol version 2 alone is insufficient. A server without this
+profile must be upgraded through its own protected release before host promotion.
+Freeze a new inventory after that upgrade and configuration, then use the same
+inventory reference/hash and host UUID in the existing `managed-azure-release.yml`
+dry run and approved execution. Missing or changed configuration fails closed,
+including recovery; never fall back to the historical remote protocol.
+
+Execution stores the V3 recovery envelope and its owner under the current lease
+before changing revision modes. It sets **both** apps to Multiple and verifies
+that all known old worker and web revisions have stopped before the migration-capable
+web revision starts. Unknown revisions, configuration drift, or an uncertain lease
+retain the fence. Only the approved compatible worker and web pair may complete
+recovery after migrations could have started. Both roles are verified before
+Single mode is restored. Keep other release tools and importers disabled throughout
+this single-writer window. The workflow does not delete failed source records or
+repair indexes; candidate and recovery images need separate migrated-database
+compatibility evidence for the intended release.
+
 Before any live run:
 
 1. Confirm the workflow is running from the current `main` head and both digest-pinned release images exist for the exact 40-character release SHA.
 2. Confirm the deployment is already the authoritative managed Azure production target; this workflow does not perform a provider cutover or data migration.
 3. Confirm both Container Apps use Single revision mode, each has one expected role container, and `latestRevisionName` equals `latestReadyRevisionName`.
-4. Confirm the current and incoming application versions are mixed-version compatible for the web-then-worker update order.
+4. For STANDARD activation, confirm mixed-version compatibility for the web-then-worker update order. For protected EXCLUSIVE activation, confirm the approved candidate and recovery pair are compatible with the migrated database and use the all-writer drain above.
 5. Name one operator who owns recovery and establish a one-writer window from baseline capture through verified success or completed compensation. Pause every other Azure writer for the two apps during that window.
 6. Dispatch the workflow with the exact inventory reference, inventory hash, deployment UUID, release SHA, release version, and audited reason. Leave `execute` false first.
 7. Review the bounded `DRY_RUN_READY` result. A dry-run reads inventory, control-plane state, source images, the destination registry, and both Container Apps, but does not acquire a lease, import images, or write Azure.
@@ -133,13 +166,15 @@ Execution acquires the database-clock lease, rechecks the target, stores complet
 - `ROLLED_BACK`: both apps are proven on fresh rollback revisions derived from the recorded baseline; the lease is cleared.
 - `RECOVERY_REQUIRED`: any drift, timeout, lost fence, crash, ambiguous ARM result, unknown partial state, or failed compensation retains the fenced lease, rollback record, and bounded recovery code. Keep the one-writer window in place, assign the named recovery owner, and do not retry the workflow as a new release. Use the fenced recovery claim only after the retained lease expires and after classifying both apps from fresh Azure reads.
 
-If a failure occurs before any Container App mutation and leaves `RECOVERY_REQUIRED`,
+For historical V1 remote releases only, if a failure occurs before any Container App mutation and leaves `RECOVERY_REQUIRED`,
 use the manual `Managed Azure Release Recovery` workflow before any new release run.
 It claims the expired fenced recovery lease through the control plane, reads the
 stored rollback baseline, verifies both Container Apps still match that baseline,
 and then finalizes rollback to clear the lease. It does not import images, patch
 Container Apps, or mark the incoming release successful. Any baseline drift or
 ambiguous Azure read must stop as `RECOVERY_BLOCKED` for manual investigation.
+
+Protected EXCLUSIVE releases use the retained V3 envelope and approved compatible recovery pair, including when a failed mode or drain operation prevented forward startup. Do not apply the V1 baseline-only procedure to selfserve.
 
 Repository rollback is to disable the workflow or merge a normal protected revert. Live rollback is never inferred from an error response; it is complete only after terminal Azure operations and exact baseline readback for both apps.
 

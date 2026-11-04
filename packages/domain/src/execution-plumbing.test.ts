@@ -126,6 +126,9 @@ vi.mock("./source-lineage", () => ({
   captureArtifactInputProof: vi.fn(), captureArtifactInputSnapshotProof: vi.fn(),
   captureImmutableArtifactInputProof: vi.fn(), readableArtifactIds: vi.fn(),
   isArtifactInputProofReadable: vi.fn(), isArtifactInputProofPubliclyShareable: vi.fn(),
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({ value: await read(), heads: new Map() }),
+  mergeLineageInputRoot: (_previous: unknown, root: unknown) => root,
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: unknown, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => { await remote(); return finish(prismaMock); },
 }));
 vi.mock("./producer-lineage", () => ({ prepareProducerLineage: vi.fn(), finishProducerLineage: vi.fn() }));
 
@@ -842,6 +845,42 @@ describe("execution plumbing domain", () => {
     expect(context.recent.proposals[0]).not.toHaveProperty("ownerMember");
   });
 
+  it("rejects an incomplete execution sample after 200 hidden candidates", async () => {
+    const hidden = Array.from({length:5001},(_,i)=>requestFixture({id:`request-${String(i).padStart(5,"0")}`}));
+    const known = requestFixture({id:"request-99999"});
+    const rows = [...hidden, known];
+    prismaMock.executionRequest.findMany.mockImplementation(async ({where,take}) => rows.filter(row => !where.OR || row.id > where.OR[1].id.gt).slice(0,take));
+    prismaMock.executionRequest.findFirst.mockImplementation(async ({where}) => where.id===known.id ? known : null);
+    const {listExecutionRequests}=await import("./execution-plumbing");
+    await expect(listExecutionRequests(actor,{workspaceId:"workspace-1",status:"pending",take:1})).rejects.toMatchObject({code:"SOURCE_READ_SCAN_LIMIT"});
+    expect(prismaMock.executionRequest.findMany).toHaveBeenCalledTimes(2);
+    expect(prismaMock.executionRequest.findMany.mock.calls.every(([q])=>q.take===100 && q.where.status==="PENDING"
+      && JSON.stringify(q.orderBy)===JSON.stringify([{createdAt:"desc"},{id:"asc"}]))).toBe(true);
+  });
+
+  it("replenishes recent company inputs within the candidate budget and preserves recorded meeting dates", async () => {
+    const rows=Array.from({length:121},(_,i)=>({id:`action-${String(i).padStart(5,"0")}`,title:`Action ${i}`,updatedAt:new Date("2026-06-02"),assigneeMemberId:null}));
+    prismaMock.action.findMany.mockImplementation(async ({where,take})=>rows.filter(row=>!where.OR || row.id>where.OR[1].id.gt).slice(0,take));
+    const capture=vi.mocked(captureArtifactInputProof).getMockImplementation()!;
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (...args)=>{
+      if(args[2].some(input=>input.kind==="Action" && input.id < "action-00101")) throw new AppError(409,"UNKNOWN_LINEAGE","Hidden candidate");
+      return capture(...args);
+    });
+    prismaMock.tension.findMany.mockResolvedValue([]);
+    prismaMock.proposal.findMany.mockResolvedValue([]);
+    prismaMock.brainArticle.findMany.mockResolvedValue([]);
+    prismaMock.meeting.findMany.mockResolvedValue([
+      {id:"meeting-a",title:"Recorded earlier",recordedAt:new Date("2024-01-01"),updatedAt:new Date("2026-06-01")},
+      {id:"meeting-b",title:"Recorded later",recordedAt:new Date("2026-05-01"),updatedAt:new Date("2026-05-01")},
+    ]);
+    const {getCompanyContext}=await import("./execution-plumbing");
+    const context=await getCompanyContext(actor,"workspace-1") as any;
+    expect(context.recent.actions.map((row:any)=>row.id)).toEqual(rows.slice(101).map(row=>row.id));
+    expect(context.recent.meetings.map((row:any)=>row.id)).toEqual(["meeting-b","meeting-a"]);
+    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(2);
+    expect(prismaMock.action.findMany.mock.calls.every(([q])=>q.take===100)).toBe(true);
+  });
+
   it("applies Brain draft visibility when listing article write-back targets", async () => {
     requireWorkspaceMembership.mockResolvedValueOnce({ id: "member-1", workspaceId: "workspace-1", userId: "user-1", role: "MEMBER", isActive: true });
     prismaMock.brainArticle.findMany.mockResolvedValueOnce([]);
@@ -1354,13 +1393,13 @@ describe("execution plumbing domain", () => {
     expect(prismaMock.executionRequest.create).not.toHaveBeenCalled();
   });
 
-  it("filters unknown CRM requests and target titles before sampling and enforces an explicit read budget", async () => {
+  it("filters unknown CRM requests and target titles before sampling and rejects malformed pages", async () => {
     const { listExecutionRequests, listWritebackTargets } = await import("./execution-plumbing");
     prismaMock.executionRequest.findMany.mockResolvedValue([
       requestFixture({ id: "unknown", writebackTargetType: "CRM_COMMUNICATION", contextJson: null }),
       requestFixture({ id: "known", writebackTargetType: "CRM_COMMUNICATION" }),
     ]);
-    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({ id: "known", writebackTargetType: "CRM_COMMUNICATION" }));
+    prismaMock.executionRequest.findFirst.mockImplementation(async ({where}) => where.id === "known" ? requestFixture({ id: "known", writebackTargetType: "CRM_COMMUNICATION" }) : null);
     expect((await listExecutionRequests(actor, { workspaceId: "workspace-1", take: 1 })).map((row) => row.id)).toEqual(["known"]);
     prismaMock.crmCommunicationSuggestion.findMany.mockResolvedValue([
       communicationSuggestionFixture({ id: "unproven", title: "Hidden raw title" }), communicationSuggestionFixture({ id: "known", title: "Public draft", subject: null }),
@@ -1371,6 +1410,56 @@ describe("execution plumbing domain", () => {
     });
     expect((await listWritebackTargets(actor, { workspaceId: "workspace-1", targetTypes: ["CRM_COMMUNICATION"], take: 1 })).items.map((row) => row.title)).toEqual(["Public draft"]);
     prismaMock.executionRequest.findMany.mockResolvedValue(Array.from({ length: 5001 }, () => requestFixture()));
-    await expect(listExecutionRequests(actor, { workspaceId: "workspace-1" })).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
+    await expect(listExecutionRequests(actor, { workspaceId: "workspace-1" })).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_CHANGED" });
   });
+  it("rejects a target sample after 200 unrelated candidates", async () => {
+    const rows=Array.from({length:5002},(_,index)=>({id:String(index).padStart(5,"0"),title:index<5001?"Unrelated":"Late MATCH",updatedAt:new Date("2026-01-01"),status:"OPEN"}));
+    prismaMock.action.findMany.mockImplementation(async args=>{
+      expect(args.take).toBe(100);
+      const after=args.where.AND?.[1]?.OR?.[1]?.id?.gt;
+      return rows.filter(row=>!after||row.id>after).slice(0,args.take);
+    });
+    const {listWritebackTargets}=await import("./execution-plumbing");
+    await expect(listWritebackTargets(actor,{workspaceId:"workspace-1",targetTypes:["ACTION"],query:"match",take:1})).rejects.toMatchObject({code:"SOURCE_READ_SCAN_LIMIT"});
+    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(2);
+  });
+
+  it("replenishes denied meeting dates within the candidate window using stable ties", async () => {
+    const rows = Array.from({length: 301}, (_, i) => ({id: `meeting-${String(i).padStart(4,"0")}`,title:"Meeting",status:"COMPLETED",
+      recordedAt:new Date("2026-01-01"),updatedAt:new Date("2026-02-01")}));
+    prismaMock.meeting.findMany.mockImplementation(async args => {
+      const cursor = args.where.AND?.[1]?.OR?.[1]?.id?.gt;
+      return rows.filter(row => !cursor || row.id > cursor).slice(0,args.take);
+    });
+    const capture = vi.mocked(captureArtifactInputProof).getMockImplementation()!;
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (...args) => {
+      if(args[2].some(input => input.kind === "Meeting" && input.id < "meeting-0101")) throw new AppError(409,"UNKNOWN_LINEAGE","Hidden meeting");
+      return capture(...args);
+    });
+    const {listWritebackTargets} = await import("./execution-plumbing");
+    expect((await listWritebackTargets(actor,{workspaceId:"workspace-1",targetTypes:["MEETING"],take:2})).items.map(row=>row.id)).toEqual(["meeting-0101","meeting-0102"]);
+    expect(prismaMock.meeting.findMany).toHaveBeenCalledTimes(2);
+    expect(prismaMock.meeting.findMany.mock.calls[1][0]).toMatchObject({where:{AND:[expect.anything(),{OR:[{recordedAt:{lt:rows[99].recordedAt}},{recordedAt:rows[99].recordedAt,id:{gt:"meeting-0099"}}]}]},take:100});
+  });
+
+  it.each(["company", "targets"])("returns newest persisted meetings in a large healthy %s workspace", async consumer => {
+    const rows = Array.from({length: 501}, (_, i) => ({id: `meeting-${String(i).padStart(4,"0")}`, title: "Meeting", status: "COMPLETED",
+      recordedAt: new Date(Date.UTC(2026,0,1 + Math.floor(i/2))), updatedAt: new Date("2026-01-01")}));
+    prismaMock.meeting.findMany.mockImplementation(async args => {
+      const ordered = [...rows].sort((a,b) => Array.isArray(args.orderBy) && args.orderBy[0].recordedAt
+        ? b.recordedAt.getTime()-a.recordedAt.getTime() || a.id.localeCompare(b.id) : a.id.localeCompare(b.id));
+      const cursor = args.where.AND?.[1] ?? args.where;
+      return ordered.filter(row => cursor.OR ? row.recordedAt < cursor.OR[0].recordedAt.lt || (+row.recordedAt === +cursor.OR[1].recordedAt && row.id > cursor.OR[1].id.gt)
+        : !cursor.id?.gt || row.id > cursor.id.gt).slice(0,args.take);
+    });
+    for (const delegate of [prismaMock.action,prismaMock.tension,prismaMock.proposal,prismaMock.brainArticle]) delegate.findMany.mockResolvedValue([]);
+    const {getCompanyContext,listWritebackTargets} = await import("./execution-plumbing");
+    const actual = consumer === "company" ? (await getCompanyContext(actor,"workspace-1") as any).recent.meetings
+      : (await listWritebackTargets(actor,{workspaceId:"workspace-1",targetTypes:["MEETING"],take:10})).items;
+    const expected = [...rows].sort((a,b)=>b.recordedAt.getTime()-a.recordedAt.getTime() || a.id.localeCompare(b.id)).slice(0,10);
+    expect(actual.map((row: {id:string})=>row.id)).toEqual(expected.map(row=>row.id));
+    expect(prismaMock.meeting.findMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.meeting.findMany.mock.calls[0][0]).toMatchObject({take:100,orderBy:[{recordedAt:"desc"},{id:"asc"}]});
+  });
+
 });

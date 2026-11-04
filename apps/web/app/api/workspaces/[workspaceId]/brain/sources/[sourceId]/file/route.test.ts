@@ -149,9 +149,15 @@ describe("source byte-bound authorized proxy", () => {
     expect(response.status).toBe(200); expect(produced).toBe(65 * 16);
     const callsBeforeDelivery = mocks.readable.mock.calls.length;
     const reader = response.body!.getReader(); let delivered = 0;
-    for (;;) { const next = await reader.read(); if (next.done) break; delivered += next.value.byteLength; }
+    for (;;) {
+      const priorChecks = mocks.readable.mock.calls.length;
+      const next = await reader.read(); if (next.done) break;
+      expect(next.value.byteLength).toBeLessThanOrEqual(4 * 1024 * 1024);
+      expect(mocks.readable.mock.calls.length).toBe(priorChecks + 1);
+      delivered += next.value.byteLength;
+    }
     expect(delivered).toBe(65 * 1024 * 1024);
-    expect(mocks.readable.mock.calls.length - callsBeforeDelivery).toBe(65 * 16); // exactly one final authorization per 64 KiB delivery
+    expect(mocks.readable.mock.calls.length - callsBeforeDelivery).toBe(17); // one fresh full authorization per verified delivery, each at most 4 MiB
     expect(mocks.signed).not.toHaveBeenCalled();
   });
 
@@ -172,17 +178,17 @@ describe("source byte-bound authorized proxy", () => {
     expect((await GET(request(), context())).status).toBe(403);
   });
 
-  it("withholds resumed normal delivery after privacy revocation even within one small file", async () => {
-    const fileBytes = new Uint8Array(128 * 1024); source.fileSizeBytes = fileBytes.length; source.metadata.fileContentHash = sha(fileBytes);
+  it("withholds resumed normal delivery after privacy revocation at the next verified delivery", async () => {
+    const fileBytes = new Uint8Array(8 * 1024 * 1024); source.fileSizeBytes = fileBytes.length; source.metadata.fileContentHash = sha(fileBytes);
     mocks.stream.mockResolvedValue({ body: body(fileBytes) });
     const response = await GET(request(), context()); const reader = response.body!.getReader();
-    expect((await reader.read()).value!.length).toBe(64 * 1024); allowed = false;
+    expect((await reader.read()).value!.length).toBe(4 * 1024 * 1024); allowed = false;
     await expect(reader.read()).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
   it("withholds support revoke/regrant after a paused delivery using the captured epoch", async () => {
     mocks.supportContext.mockReturnValue({ origin: supportOrigin });
-    const fileBytes = new Uint8Array(128 * 1024); source.fileSizeBytes = fileBytes.length; source.metadata.fileContentHash = sha(fileBytes);
+    const fileBytes = new Uint8Array(8 * 1024 * 1024); source.fileSizeBytes = fileBytes.length; source.metadata.fileContentHash = sha(fileBytes);
     mocks.stream.mockResolvedValue({ body: body(fileBytes) });
     const response = await GET(request(), context()); const reader = response.body!.getReader();
     await reader.read(); supportVersion = 3;
@@ -230,7 +236,7 @@ describe("source byte-bound authorized proxy", () => {
   it("cancels a pending provider read on client abort before headers", async () => {
     const cancel = vi.fn(); mocks.stream.mockResolvedValue({ body: new ReadableStream({ cancel }, { highWaterMark: 0 }) });
     const abort = new AbortController(); const pending = GET(request(abort.signal), context());
-    await vi.waitFor(() => expect(mocks.readable.mock.calls.length).toBeGreaterThanOrEqual(4));
+    await vi.waitFor(() => expect(mocks.stream).toHaveBeenCalledOnce());
     abort.abort(); const response = await pending;
     expect(response.status).not.toBe(200); expect(response.headers.get("content-disposition")).toBeNull(); expect(cancel).toHaveBeenCalledOnce();
   });

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { prisma } from "@corgtex/shared";
-import { defaultModelGateway, resolveModel } from "@corgtex/models";
+import { defaultModelGateway, resolveModel, type ModelAttemptGuard, type ModelRequestControls } from "@corgtex/models";
 import { AGENT_REGISTRY } from "@corgtex/domain";
 import {
   createArticle,
@@ -99,6 +99,8 @@ export async function absorbSource(params: {
   recoveryReceiptId?: string;
   /** Trusted server principal; never reconstructed from a source's author. */
   actor?: AppActor;
+  signal?: AbortSignal;
+  authorizeAttempt?: ModelAttemptGuard;
 }) {
   params = {...params};
   const agentActor = sealArtifactInputActor(params.actor ?? {
@@ -143,6 +145,29 @@ export async function absorbSource(params: {
       : isArtifactInputProofPubliclyShareable(agentActor, params.workspaceId, immutableRoots, client)
         .then(async publicProof => publicProof || await isLegacyRecoveryProofWorkspaceShareable(agentActor,params.workspaceId,immutableRoots,client))),
       409, "SOURCE_RESTRICTED", "Absorption inputs cannot be published to the workspace.");
+  }
+  const controller = new AbortController();
+  const signal = params.signal ? AbortSignal.any([controller.signal, params.signal]) : controller.signal;
+  const authorizeAttempt: ModelAttemptGuard = async context => {
+    try {
+      signal.throwIfAborted();
+      context.signal.throwIfAborted();
+      await params.authorizeAttempt?.(context);
+      signal.throwIfAborted();
+      context.signal.throwIfAborted();
+      await assertInputsCurrent();
+      signal.throwIfAborted();
+      context.signal.throwIfAborted();
+    } catch (error) {
+      controller.abort(error);
+      throw error;
+    }
+  };
+  async function guardedModel<T>(work: (controls: ModelRequestControls) => Promise<T>): Promise<T> {
+    signal.throwIfAborted();
+    const result = await work({ signal, authorizeAttempt });
+    signal.throwIfAborted();
+    return result;
   }
   // Fresh opaque suffixes avoid probing private article names to choose the output slug.
   function proposedSlug(base: string) {
@@ -232,7 +257,8 @@ export async function absorbSource(params: {
 
   // Step 1: Classify source and match to articles
   const model = params.model ?? resolveModel(AGENT_REGISTRY["brain-absorb"].defaultModelTier);
-  const analysis = await defaultModelGateway.extract({
+  const analysis = await guardedModel(controls => defaultModelGateway.extract({
+    ...controls,
     model,
     workspaceId: params.workspaceId,
     agentRunId: params.agentRunId,
@@ -256,7 +282,7 @@ Determine:
       sourceContent: source.content.slice(0, 4000),
       ingestionGuidanceMd: source.ingestionGuidanceMd,
     }),
-  });
+  }));
 
   const result = analysis.output as {
     articleType?: string;
@@ -291,7 +317,8 @@ Determine:
     }
 
     await assertInputsCurrent();
-    const synthesized = await defaultModelGateway.chat({
+    const synthesized = await guardedModel(controls => defaultModelGateway.chat({
+      ...controls,
       model,
       workspaceId: params.workspaceId,
       agentRunId: params.agentRunId,
@@ -322,7 +349,7 @@ Rules:
           }),
         },
       ],
-    });
+    }));
 
     await assertInputsCurrent();
     initialWritePlans.push({
@@ -337,7 +364,8 @@ Rules:
     const existingSlug = activeArticles.find((a) => a.slug === createNew.slug);
     if (!existingSlug && updateSlugs.length === 0) {
       await assertInputsCurrent();
-      const drafted = await defaultModelGateway.chat({
+      const drafted = await guardedModel(controls => defaultModelGateway.chat({
+        ...controls,
         model,
         workspaceId: params.workspaceId,
         agentRunId: params.agentRunId,
@@ -365,7 +393,7 @@ Rules:
             }),
           },
         ],
-      });
+      }));
 
       await assertInputsCurrent();
       initialWritePlans.push({
@@ -384,7 +412,8 @@ Rules:
     const baseSlug = slugify(createNew?.slug || fallbackTitle, "uploaded-knowledge-source");
     const slug = proposedSlug(baseSlug);
     await assertInputsCurrent();
-    const drafted = await defaultModelGateway.chat({
+    const drafted = await guardedModel(controls => defaultModelGateway.chat({
+      ...controls,
       model,
       workspaceId: params.workspaceId,
       agentRunId: params.agentRunId,
@@ -411,7 +440,7 @@ Rules:
           }),
         },
       ],
-    });
+    }));
 
     await assertInputsCurrent();
     initialWritePlans.push({

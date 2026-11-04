@@ -28,7 +28,7 @@ function lineageStore(action: ReturnType<typeof actionSource>) {
 }
 
 /** Synthetic SQL storage only; current permission and receipt helpers remain real. */
-function epochTransport(lockRow = vi.fn().mockResolvedValue([])) {
+function epochTransport(lockRow = vi.fn().mockResolvedValue([]), manifests?: ReturnType<typeof lineageStore>) {
   const epochs = new Map<string, bigint>();
   return {
     $executeRaw: vi.fn(async (query: Prisma.Sql) => {
@@ -42,6 +42,11 @@ function epochTransport(lockRow = vi.fn().mockResolvedValue([])) {
       return 1;
     }),
     $queryRaw: vi.fn(async (query: Prisma.Sql, ...values: unknown[]) => {
+      if (query.sql?.includes('FROM "ArtifactInputLineage"') && manifests) {
+        const [workspaceId, artifactType, ...ids] = query.values;
+        const rows = await manifests.findMany({ where: { workspaceId, artifactType, artifactId: { in: ids } }, orderBy: { revision: "desc" } });
+        return [...new Set(rows.map(row => row.artifactId))].map(id => rows.find(row => row.artifactId === id));
+      }
       if (!query.sql?.includes('FROM "SourcePermissionEpoch"')) return lockRow(query, ...values);
       const [workspaceId, ...identities] = query.values;
       const rows = [];
@@ -533,8 +538,8 @@ describe("deriveNotificationsForEvent", () => {
 describe("Action assignment dispatch", () => {
   function fixture() {
     const recipients = [
-      { userId: "user-2", user: { email: "assignee@example.com" } },
-      { userId: "user-3", user: { email: "other@example.com" } },
+      { userId: "user-2", user: { id: "user-2", email: "assignee@example.com", displayName: "Assignee" } },
+      { userId: "user-3", user: { id: "user-3", email: "other@example.com", displayName: "Other" } },
     ];
     const action = actionSource();
     const notifications = new Map<string, any>();
@@ -544,10 +549,18 @@ describe("Action assignment dispatch", () => {
     const preferences = vi.fn().mockResolvedValue([]);
     const manifests = lineageStore(action);
     const tx = {
-      ...epochTransport(),
+      ...epochTransport(undefined, manifests),
       artifactInputLineage: manifests,
+      workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
+      user: { findUnique: vi.fn(async ({ where }) => recipients.find(row => row.userId === where.id)?.user ?? null) },
       action: { findFirst: vi.fn().mockResolvedValue(action) },
       member: {
+        findUnique: vi.fn(async ({ where }) => {
+          const key = where.workspaceId_userId;
+          const recipient = key.workspaceId === "workspace-1" && recipients.find(row => row.userId === key.userId);
+          return recipient ? { id: recipient.userId.replace("user-", "member-"), workspaceId: key.workspaceId,
+            userId: recipient.userId, role: "CONTRIBUTOR", isActive: true } : null;
+        }),
         findFirst: vi.fn().mockResolvedValue({ id: "member-2", workspaceId: "workspace-1", userId: "user-2", isActive: true }),
         findMany: vi.fn().mockImplementation(async ({ where }: { where: { userId?: { in?: string[] } } }) => (
           where.userId?.in

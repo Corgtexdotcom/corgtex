@@ -4,6 +4,7 @@ import type { Prisma } from "@prisma/client";
 
 const lineage = vi.hoisted(() => ({
   advanceHumanArtifactInputLineage: vi.fn(),
+  captureHumanArtifactInputAdvance: vi.fn(),
   captureArtifactInputProof: vi.fn(),
   captureArtifactInputSnapshotProof: vi.fn(),
   currentArtifactInputRoots: vi.fn(),

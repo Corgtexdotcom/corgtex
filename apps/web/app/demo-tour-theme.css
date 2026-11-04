@@ -76,6 +76,16 @@
   border: 1px solid transparent;
 }
 
+.driver-popover-footer .driver-popover-next-btn:focus {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.driver-popover button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .driver-popover-footer .driver-popover-next-btn:hover {
   background: var(--text);
   transform: translateY(-1px);
@@ -88,6 +98,11 @@
 }
 
 .driver-popover-footer .driver-popover-prev-btn:hover {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.driver-popover-footer .driver-popover-prev-btn:focus {
   background: var(--accent-soft);
   color: var(--text);
 }
@@ -126,6 +141,14 @@
   content: "Skip";
   font-size: 0.8rem;
   line-height: 1;
+}
+
+.driver-popover.demo-tour-popover .driver-popover-close-btn {
+  font-size: 0.8rem;
+}
+
+.driver-popover.demo-tour-popover .driver-popover-close-btn::before {
+  content: none;
 }
 
 .driver-popover .driver-popover-close-btn:hover {

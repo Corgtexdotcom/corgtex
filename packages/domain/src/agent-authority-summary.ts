@@ -58,6 +58,7 @@ export type BuildAgentAuthoritySummariesInput = {
   credentials?: AgentAuthorityCredentialInput[] | null;
   recentRuns?: AgentAuthorityRunInput[] | null;
   pendingApprovalRuns?: AgentAuthorityRunInput[] | null;
+  pendingApprovalCountsByAgent?: Array<{ agentKey: string; count: number }> | null;
   usageByAgent?: AgentAuthorityUsageInput[] | null;
   runCountsByAgent?: Array<{ agentKey: string; count: number }> | null;
   workspaceBudget?: { monthlyCostCapUsd?: number | string | null; alertThresholdPct?: number | null } | null;
@@ -109,6 +110,7 @@ export function buildAgentAuthoritySummaries(input: BuildAgentAuthoritySummaries
   const identitiesByKey = new Map(identities.map((identity) => [identity.agentKey, identity]));
   const configsByKey = new Map(configs.map((config) => [config.agentKey, config]));
   const usageByAgent = new Map((input.usageByAgent ?? []).map((usage) => [usage.agentKey, usage]));
+  const pendingCounts = new Map((input.pendingApprovalCountsByAgent ?? []).map(row => [row.agentKey, row.count]));
   const runCountsByAgent = new Map((input.runCountsByAgent ?? []).map((row) => [row.agentKey, row.count]));
   const runsByAgent = new Map<string, AgentAuthorityRunInput[]>();
   const pendingRunsByAgent = new Map<string, AgentAuthorityRunInput[]>();
@@ -125,6 +127,7 @@ export function buildAgentAuthoritySummaries(input: BuildAgentAuthoritySummaries
     ...identities.map((identity) => identity.agentKey).filter(Boolean),
     ...(input.recentRuns ?? []).map((run) => run.agentKey).filter(Boolean),
     ...(input.pendingApprovalRuns ?? []).map((run) => run.agentKey).filter(Boolean),
+    ...pendingCounts.keys(),
   ])).map((agentKey) => {
     const identity = identitiesByKey.get(agentKey);
     const config = configsByKey.get(agentKey);
@@ -176,8 +179,8 @@ export function buildAgentAuthoritySummaries(input: BuildAgentAuthoritySummaries
       approval: {
         hasGovernancePolicy: config?.hasGovernancePolicy ?? Boolean(governancePolicy),
         governancePolicy,
-        pendingApprovalCount: approvalRuns.length,
-        latestApprovalRequiredRun: approvalRuns[0] ?? null,
+        pendingApprovalCount: input.pendingApprovalCountsByAgent ? pendingCounts.get(agentKey) ?? 0 : approvalRuns.length,
+        latestApprovalRequiredRun: input.pendingApprovalCountsByAgent && !pendingCounts.get(agentKey) ? null : approvalRuns[0] ?? null,
       },
       recentActivity: {
         latestRun: runsForAgent[0] ?? null,

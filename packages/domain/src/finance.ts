@@ -1,3 +1,4 @@
+import { isWorkItemPermissionSnapshot } from "./source-permission-epochs";
 import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
@@ -437,7 +438,7 @@ export async function getFinanceAccessPolicy(actor: AppActor, workspaceId: strin
   if (actor.kind === "agent") {
     requireAgentScope(actor, "finance:read");
   }
-  if (db !== prisma) {
+  if (db !== prisma && !isWorkItemPermissionSnapshot(db,workspaceId)) {
     await lockFinanceReadAuthority(db, workspaceId, actor.kind === "user" ? actor.user.id : "");
   }
   const [membership, flagState] = await Promise.all([

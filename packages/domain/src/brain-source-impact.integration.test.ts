@@ -74,6 +74,8 @@ describe("Brain source archive impact", () => {
     const unlinked = await prisma.brainSource.create({ data: {
       workspaceId: workspace.id, sourceType: "DOC", tier: 1, content: "Unlinked text", authorMemberId: member.id,
     } });
+    await prisma.$transaction(tx => recordArtifactInputLineage({ tx, actor: editor, workspaceId: workspace.id,
+      artifact: { kind: "BrainSource", id: unlinked.id }, content: unlinked, origin: "HUMAN_ORIGINAL", inputs: [] }));
     const first = await archiveWorkspaceArtifact(editor, { workspaceId: workspace.id, entityType: "BrainSource", entityId: unlinked.id });
     const repeated = await archiveWorkspaceArtifact(editor, { workspaceId: workspace.id, entityType: "BrainSource", entityId: unlinked.id });
     expect(first.id).toBe(unlinked.id);

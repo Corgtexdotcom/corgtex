@@ -63,6 +63,7 @@ const WARNING_LENGTH = 80_000;
 export function ChatInterface({
   workspaceId,
   conversations: initialConversations,
+  historyLimited = false,
   companyQuestions: initialCompanyQuestions = [],
   activeSessionId,
   compact = false,
@@ -72,6 +73,7 @@ export function ChatInterface({
 }: {
   workspaceId: string;
   conversations: ConversationSummary[];
+  historyLimited?: boolean;
   companyQuestions?: CompanyQuestionSummary[];
   activeSessionId: string | null;
   compact?: boolean;
@@ -776,6 +778,7 @@ export function ChatInterface({
             ))}
           </div>
         )}
+        {historyLimited && <p role="status" className="chat-session-preview">{t("historyLimited")}</p>}
         {conversations.map((conversation) => (
           <button
             key={conversation.id}
@@ -799,7 +802,7 @@ export function ChatInterface({
         ))}
         {conversations.length === 0 && (
           <div style={{ padding: "32px 16px", textAlign: "center", color: "var(--muted)", fontSize: "0.85rem" }}>
-            {t("noConversations")}
+            {t(historyLimited ? "historyWindowEmpty" : "noConversations")}
           </div>
         )}
       </div>

@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { headers } from "next/headers";
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import type { NextRequest } from "next/server";
 import { clearSession, isGlobalOperator, resolveAgentActorFromBearer, resolveControlPlaneAgentFromBearer, resolveSessionActor } from "@corgtex/domain";
 import { env, isDatabaseUnavailableError, sessionCookieName } from "@corgtex/shared";
@@ -13,6 +13,14 @@ import { requireAgentRouteCapability } from "./agent-route-capabilities";
 
 const SESSION_UNAVAILABLE_REDIRECT = "/login?error=session-unavailable";
 const SESSION_RESOLUTION_TIMEOUT_MS = 15_000;
+const WORKSPACE_ACCESS_DENIAL_CODES = new Set([
+  "NOT_A_MEMBER",
+  "WORKSPACE_SCOPE_MISMATCH",
+  "FORBIDDEN",
+  "SUPPORT_CONTENT_RESTRICTED",
+  "SUPPORT_AUTHORIZATION_REVOKED",
+  "AGENT_WORKSPACE_SCOPE_REQUIRED",
+]);
 
 function sessionUnavailableError() {
   return new AppError(503, "SESSION_UNAVAILABLE", "Session is temporarily unavailable. Try again.");
@@ -164,7 +172,22 @@ export async function requirePageActor() {
     }
   }
 
-  if (workspaceId) await requireWorkspaceMembership({ actor, workspaceId });
+  if (workspaceId) {
+    try {
+      await requireWorkspaceMembership({ actor, workspaceId });
+    } catch (error) {
+      // Page reads must not reveal whether an inaccessible workspace exists.
+      // Keep action/API semantics and unexpected service failures unchanged.
+      if (!requestHeaders.has("next-action")
+        && /^\/(?:en\/|es\/)?workspaces\//.test(pathname)
+        && error instanceof AppError
+        && error.status === 403
+        && WORKSPACE_ACCESS_DENIAL_CODES.has(error.code)) {
+        notFound();
+      }
+      throw error;
+    }
+  }
 
   return actor;
 }

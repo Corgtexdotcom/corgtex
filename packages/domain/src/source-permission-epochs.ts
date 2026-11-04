@@ -17,6 +17,51 @@ export type PermissionEpochProof = { version: 1; policyVersion: typeof SOURCE_PE
 type EpochClient = Prisma.TransactionClient | typeof prisma;
 const MAX_EPOCH_IDENTITIES = 10000;
 
+type CollectionSnapshot = {db: Prisma.TransactionClient; workspaceId: string; active: boolean};
+const collectionSnapshot = new AsyncLocalStorage<CollectionSnapshot>();
+class MissingCollectionEpochs extends Error {
+  constructor(readonly workspaceId: string, readonly identities: PermissionEpochIdentity[]) { super("Initialize missing collection epochs outside the snapshot."); }
+}
+export function isWorkItemPermissionSnapshot(db: EpochClient, workspaceId: string) {
+  const scope = collectionSnapshot.getStore();
+  if (!scope) return false;
+  invariant(scope.active && scope.db === db && scope.workspaceId === workspaceId,
+    409,"SOURCE_CHANGED","Collection permission snapshot belongs to another client or expired scope.");
+  return true;
+}
+
+/** Internal work-item inventory only. A missing key discards the entire attempt;
+ * seed it outside the read-only snapshot, then collect from a fresh snapshot.
+ * No original proof survives an initialization retry or grants serving authority.
+ * First-use progress has a 10,000-key initialization budget per request; this
+ * does not cap already-initialized list totals. Repeated disappearance has a
+ * separate global budget, never reset by new keys. */
+export async function collectWorkItemPermissionSnapshot<T>(workspaceId: string, read: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  const initialized = new Set<string>();
+  let repeatedMissing = 0;
+  for (;;) {
+    try {
+      return await prisma.$transaction(async tx => {
+        await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+        const scope: CollectionSnapshot = {db:tx,workspaceId,active:true};
+        return collectionSnapshot.run(scope, async () => {
+          try { return await read(tx); } finally { scope.active = false; }
+        });
+      }, {isolationLevel:Prisma.TransactionIsolationLevel.RepeatableRead,timeout:30_000});
+    } catch (error) {
+      if (!(error instanceof MissingCollectionEpochs)) throw error;
+      const keys = error.identities.map(epochKey);
+      if (keys.some(key => initialized.has(key))) repeatedMissing++;
+      const fresh = keys.filter(key => !initialized.has(key));
+      invariant(error.workspaceId === workspaceId && repeatedMissing < 3
+        && initialized.size + fresh.length <= MAX_EPOCH_IDENTITIES,
+      409,"SOURCE_CHANGED","Collection permission initialization exceeded its bounded progress budget; retry.");
+      await prisma.$transaction(tx => capturePermissionEpochs(tx,workspaceId,error.identities));
+      for (const key of keys) initialized.add(key);
+    }
+  }
+}
+
 type PermissionReadPass = { db: EpochClient; workspaceId: string; active: boolean;
   observed: Map<string, string>; checked: Map<string, string> };
 const permissionReadPass = new AsyncLocalStorage<PermissionReadPass>();
@@ -226,6 +271,10 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
   if (kind === "ExternalContentSource" || kind === "ExternalProviderFetchInput") {
     add("ExternalMcpConnection", row.connectionId); add("ExternalContentSource", row.externalContentSourceId);
   }
+  if (kind === "OAuthProviderFetchInput") {
+    add("OAuthConnectionPolicy", row.connectionId);
+    if (row.sourceKind === "documents" || row.sourceKind === "email") add(row.sourceKind === "documents" ? "OAuthDocumentsPolicy" : "OAuthEmailPolicy", row.connectionId);
+  }
   if (kind === "ExternalMcpResponseInput") add("ExternalMcpConnection", row.connectionId);
   if (kind === "ExternalMcpResponseInput" || kind === "ExternalMcpConnectionSet") add("ExternalMcpConnectionSetPolicy", row.localUserId);
   if (kind === "BrainArticle" && typeof row.variantOfArticleId === "string") add("BrainArticle", row.variantOfArticleId);
@@ -236,24 +285,51 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
 export async function capturePermissionEpochs(tx: Prisma.TransactionClient, workspaceId: string,
   identities: readonly PermissionEpochIdentity[]): Promise<PermissionEpochProof> {
   assertSourceCommitTransactionCompatible(tx);
-  invariant(!permissionReadPass.getStore() && !nativePermissionReadPass.getStore(), 409, "SOURCE_LOCK_UNCOVERED",
+  invariant(!permissionReadPass.getStore() && !nativePermissionReadPass.getStore() && !batchPermissionRead.getStore(), 409, "SOURCE_LOCK_UNCOVERED",
     "Epoch capture cannot mutate a read-only permission proof pass.");
   const sorted = [...new Map(identities.map((identity) => [JSON.stringify([identity.kind, identity.id]), identity])).entries()]
     .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([, identity]) => identity);
   invariant(sorted.length > 0 && sorted.length <= MAX_EPOCH_IDENTITIES, 409, "PERMISSION_PROOF_LIMIT", "Source permission proof requires a bounded rebuild.");
+  const snapshot = isWorkItemPermissionSnapshot(tx,workspaceId);
   const planned = hasActiveSourceCommitLockPlan(tx);
   const insert = planned ? assertSourceCommitEpochCaptureCovered(tx, workspaceId, sorted) : sorted;
-  if (insert.length) await tx.$executeRaw(Prisma.sql`INSERT INTO "SourcePermissionEpoch" ("id", "workspaceId", "sourceKind", "sourceId", "epoch")
+  if (!snapshot && insert.length) await tx.$executeRaw(Prisma.sql`INSERT INTO "SourcePermissionEpoch" ("id", "workspaceId", "sourceKind", "sourceId", "epoch")
     VALUES ${Prisma.join(insert.map((identity) => Prisma.sql`(${randomUUID()}, ${workspaceId}, ${identity.kind}, ${identity.id}, 0)`))}
     ON CONFLICT ("workspaceId", "sourceKind", "sourceId") DO NOTHING`);
   const rows = await tx.$queryRaw<Array<{ sourceKind: string; sourceId: string; epoch: bigint }>>(Prisma.sql`
     SELECT "sourceKind", "sourceId", "epoch" FROM "SourcePermissionEpoch" WHERE "workspaceId" = ${workspaceId}
     AND ("sourceKind", "sourceId") IN (${Prisma.join(sorted.map((identity) => Prisma.sql`(${identity.kind}, ${identity.id})`))})
-    ORDER BY "sourceKind" COLLATE "C", "sourceId" COLLATE "C" ${planned ? Prisma.empty : Prisma.raw("FOR SHARE")}`);
+    ORDER BY "sourceKind" COLLATE "C", "sourceId" COLLATE "C" ${planned || snapshot ? Prisma.empty : Prisma.raw("FOR SHARE")}`);
   const epochs = new Map(rows.map((row) => [JSON.stringify([row.sourceKind, row.sourceId]), row.epoch.toString()]));
+  if (snapshot && rows.length !== sorted.length) throw new MissingCollectionEpochs(workspaceId,sorted.filter(identity => !epochs.has(epochKey(identity))));
   invariant(rows.length === sorted.length, 409, "PERMISSION_CHANGED", "A source permission epoch is unavailable.");
   return { version: 1, policyVersion: SOURCE_PERMISSION_POLICY_VERSION,
     entries: sorted.map((identity) => ({...identity, epoch: epochs.get(JSON.stringify([identity.kind, identity.id]))!})) };
+}
+
+type BatchPermissionRead = {db: EpochClient; workspaceId: string; active: boolean; epochs: Map<string, string>};
+const batchPermissionRead = new AsyncLocalStorage<BatchPermissionRead>();
+
+/** A bounded pure validation callback. These are raw epoch observations, never
+ * authority decisions. Unknown keys stay fresh; every retained key is compared
+ * again before success, including writes made on the same transaction. */
+export async function withArtifactPermissionBatchRead(db: EpochClient, workspaceId: string,
+  proofs: readonly PermissionEpochProof[], read: () => Promise<boolean>): Promise<boolean> {
+  const keys = new Set<string>();
+  for (const value of proofs) for (const entry of value.entries) {
+    keys.add(epochKey(entry));
+    if (keys.size > MAX_EPOCH_IDENTITIES) return read();
+  }
+  const proof = mergePermissionEpochProofs(...proofs);
+  if (!proof || proof.entries.length > MAX_EPOCH_IDENTITIES || hasActiveSourceCommitLockPlan(db)
+    || permissionReadPass.getStore() || nativePermissionReadPass.getStore()) return read();
+  if (!await isArtifactPermissionEpochProofCurrent(workspaceId, proof, db)) return false;
+  const pass: BatchPermissionRead = {db, workspaceId, active: true,
+    epochs: new Map(proof.entries.map(entry => [epochKey(entry), entry.epoch]))};
+  const result = await batchPermissionRead.run(pass, async () => {
+    try { return await read(); } finally { pass.active = false; pass.epochs.clear(); }
+  });
+  return result && await isArtifactPermissionEpochProofCurrent(workspaceId, proof, db);
 }
 
 export async function isArtifactPermissionEpochProofCurrent(workspaceId: string, value: unknown,
@@ -263,6 +339,14 @@ export async function isArtifactPermissionEpochProofCurrent(workspaceId: string,
   if (!proof) return false;
   const planned = hasActiveSourceCommitLockPlan(db);
   if (planned) assertSourceCommitPermissionReadCovered(db, workspaceId, proof);
+  const batch = batchPermissionRead.getStore();
+  if (batch) {
+    invariant(batch.active && batch.db === db && batch.workspaceId === workspaceId,
+      409, "SOURCE_CHANGED", "Permission batch belongs to another or expired read.");
+    if (proof.entries.every(entry => batch.epochs.has(epochKey(entry)))) {
+      return proof.entries.every(entry => batch.epochs.get(epochKey(entry)) === entry.epoch);
+    }
+  }
   const pass = permissionReadPass.getStore();
   if (pass) {
     invariant(pass.active && planned && pass.db === db && pass.workspaceId === workspaceId,
@@ -280,7 +364,7 @@ export async function isArtifactPermissionEpochProofCurrent(workspaceId: string,
     AND ("sourceKind", "sourceId") IN (${Prisma.join(proof.entries.map((entry) => Prisma.sql`(${entry.kind}, ${entry.id})`))})
     ORDER BY "sourceKind" COLLATE "C", "sourceId" COLLATE "C"`;
   const rows = await db.$queryRaw<Array<{ sourceKind: string; sourceId: string; epoch: bigint }>>(
-    db === prisma || planned ? query : Prisma.sql`${query} FOR SHARE`);
+    db === prisma || planned || isWorkItemPermissionSnapshot(db,workspaceId) ? query : Prisma.sql`${query} FOR SHARE`);
   const epochs = new Map(rows.map((row) => [JSON.stringify([row.sourceKind, row.sourceId]), row.epoch.toString()]));
   return rows.length === proof.entries.length && proof.entries.every((entry) => epochs.get(JSON.stringify([entry.kind, entry.id])) === entry.epoch);
 }

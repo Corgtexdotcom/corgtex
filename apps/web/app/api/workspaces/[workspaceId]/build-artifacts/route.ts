@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { listBuildArtifacts, upsertBuildArtifact } from "@corgtex/domain";
+import { listBuildArtifactPage, upsertBuildArtifact } from "@corgtex/domain";
 import { validateBody } from "@/lib/http";
 import { withWorkspaceRoute } from "@/lib/route-handler";
 import { disabledWorkspaceFeatureResponse } from "@/lib/workspace-feature-route";
@@ -29,11 +29,13 @@ export const GET = withWorkspaceRoute(async (request, { actor, workspaceId }) =>
   if (disabled) return disabled;
 
   const status = request.nextUrl.searchParams.get("status");
-  const artifacts = await listBuildArtifacts(actor, {
+  const window = await listBuildArtifactPage(actor, {
     workspaceId,
+    cursor: request.nextUrl.searchParams.get("cursor") ?? undefined,
+    take: request.nextUrl.searchParams.has("take") ? Number(request.nextUrl.searchParams.get("take")) : undefined,
     status: status === "OPEN" || status === "MERGED" || status === "CLOSED" ? status : undefined,
   });
-  return NextResponse.json({ items: artifacts });
+  return NextResponse.json(window);
 });
 
 export const POST = withWorkspaceRoute(async (request, { actor, workspaceId }) => {

@@ -6,7 +6,7 @@ vi.mock("@/lib/workspace-feature-flags",()=>({requireWorkspaceFeature:f.feature}
 vi.mock("@corgtex/shared",()=>({getMcpOrigin:()=>f.origin}));
 vi.mock("@corgtex/domain",async()=>({AppError:(await import("../../../../../../../../packages/domain/src/errors")).AppError,listCrmAccounts:f.accounts,listContacts:f.contacts,listDeals:f.deals,listCrmActivities:f.activities}));
 vi.mock("../../../../../../../../packages/domain/src/crm-direct-original-read",()=>({serializeCrmDirectReadResult:f.serialize}));
-vi.mock("@/lib/http",()=>({handleRouteError:(error:any)=>Response.json({error:error.code??"INVALID_INPUT"},{status:error.status??400})}));
+vi.mock("@/lib/http",()=>({handleRouteError:(error:any)=>Response.json({error:error.code??"INVALID_INPUT"},{status:error.status??500})}));
 import { AppError } from "../../../../../../../../packages/domain/src/errors";
 import { GET } from "./route";
 function request(query:string,workspace="ws") {return GET(new NextRequest(`http://localhost/api/workspaces/${workspace}/leads/archive?${query}`),{params:Promise.resolve({workspaceId:workspace})});}
@@ -19,8 +19,8 @@ describe("CRM native archive presentation HTTP composition",()=>{
     expect(read).toHaveBeenCalledWith(f.actor,"ws",{archiveFilter:"all",take:7,skip:2});expect(f.serialize).toHaveBeenCalledWith(f.actor,result);expect(f.feature).toHaveBeenCalledWith("ws","RELATIONSHIPS");
     expect(await response.json()).toEqual(result);expect(f.order.at(-1)).toBe("final-delivery");
   });
-  it.each(["family=private","family=accounts&archiveFilter=active","family=accounts&take=5001","family=accounts&skip=-1"])("rejects unsupported presentation input %s",async query=>{
-    expect((await request(query)).status).toBe(400);expect(f.accounts).not.toHaveBeenCalled();expect(f.serialize).not.toHaveBeenCalled();
+  it.each(["", "family=private", "family=accounts&archiveFilter=active", "family=accounts&take=5001", "family=accounts&take=nope", "family=accounts&take=1.5", "family=accounts&skip=-1", "family=accounts&skip=5001", "family=accounts&skip=nope"])("rejects unsupported presentation input %s",async query=>{
+    const response = await request(query); expect(response.status).toBe(400); expect(await response.json()).toEqual({error:"VALIDATION_ERROR"}); for (const read of [f.accounts,f.contacts,f.deals,f.activities]) expect(read).not.toHaveBeenCalled(); expect(f.feature).not.toHaveBeenCalled(); expect(f.serialize).not.toHaveBeenCalled();
   });
   it("returns no body when source or membership revokes before final serialization",async()=>{
     f.serialize.mockRejectedValue(new AppError(409,"SOURCE_CHANGED","changed"));const response=await request("family=accounts");

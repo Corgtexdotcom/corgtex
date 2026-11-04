@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getConversation, isArtifactInputProofReadable, type LineageRoot, addConversationTurn, renameConversation, deleteConversation, completeRoleOnboardingConversation } from "@corgtex/domain";
+import { getConversation, requireWorkspaceMembership, isArtifactInputProofReadable, type LineageRoot, addConversationTurn, renameConversation, deleteConversation, completeRoleOnboardingConversation } from "@corgtex/domain";
 import { processConversationTurnStream, sanitizeConversationPageContext } from "@corgtex/agents";
 import { defaultModelGateway } from "@corgtex/models";
 import { resolveRequestActor } from "@/lib/auth";
@@ -238,7 +238,8 @@ export async function POST(
             // Auto-name: generate a title from the first message if none exists
             if (!conversation.topic) {
               try {
-                if (finalResult?.lineageRoots.length && await isArtifactInputProofReadable(actor, workspaceId, finalResult.lineageRoots)) {
+                const titleLineageRoots = structuredClone(finalResult?.lineageRoots ?? []);
+                if (titleLineageRoots.length && await isArtifactInputProofReadable(actor, workspaceId, titleLineageRoots)) {
                   const titleResponse = await defaultModelGateway.chat({
                     workspaceId,
                     ...catalogUsageContext(actor),
@@ -251,15 +252,24 @@ export async function POST(
                       { role: "user", content: userMessage },
                     ],
                     signal: modelAbortController.signal,
+                    authorizeAttempt: async ({ signal }) => {
+                      signal.throwIfAborted();
+                      await requireWorkspaceMembership({ actor, workspaceId });
+                      signal.throwIfAborted();
+                      if (!await isArtifactInputProofReadable(actor, workspaceId, titleLineageRoots)) {
+                        throw new Error("Conversation title sources changed.");
+                      }
+                      signal.throwIfAborted();
+                    },
                   });
-                  if (await isArtifactInputProofReadable(actor, workspaceId, finalResult.lineageRoots)) {
+                  if (await isArtifactInputProofReadable(actor, workspaceId, titleLineageRoots)) {
                     const generatedTopic = titleResponse.content.trim().slice(0, 80);
                     if (generatedTopic) {
                       await renameConversation(actor, {
                         workspaceId,
                         conversationId,
                         topic: generatedTopic,
-                        lineageRoots: finalResult.lineageRoots,
+                        lineageRoots: titleLineageRoots,
                       });
                       if (cancellation.cancelled) return;
                       controller.enqueue(encodeStreamPayload(encoder, { topic: generatedTopic }));

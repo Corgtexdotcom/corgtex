@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("@corgtex/shared", () => ({
   getSharedStateBackend: () => mocks.backend,
+  isRedisConfigured: () => true, isSecretEncryptionConfigured: () => true,
   encryptSecret: mocks.encrypt, decryptSecret: mocks.decrypt, getRedisClient: mocks.redis,
   redisKey: (key: string) => `test:${key}`,
   prisma: { pendingTranscriptUpload: { create: mocks.create, findFirst: mocks.findFirst, deleteMany: mocks.deleteMany }, $executeRaw: mocks.cleanup },

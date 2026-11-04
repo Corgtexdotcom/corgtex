@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 
 const ARM = "https://management.azure.com";
-const API = Object.freeze({ app: "2024-03-01", postgres: "2025-08-01", redis: "2025-07-01", network: "2024-05-01" });
+const API = Object.freeze({ app: "2024-03-01", postgres: "2025-08-01", redis: "2025-07-01", network: "2024-05-01",
+  storage: "2023-05-01", vault: "2023-07-01", identity: "2023-01-31" });
 const GUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const HASH = /^[a-f0-9]{64}$/;
 const NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.()-]{0,89}$/;

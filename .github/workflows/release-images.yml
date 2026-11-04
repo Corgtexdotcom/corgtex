@@ -2,6 +2,24 @@ name: Release Images
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Build/publish images, or prove an existing immutable pair without publishing or deploying
+        type: choice
+        options: [build, proof]
+        default: build
+      proof_source_sha:
+        description: Full recovery image source SHA (proof mode only)
+        type: string
+      proof_web_digest:
+        description: Immutable recovery web sha256 digest (proof mode only)
+        type: string
+      proof_worker_digest:
+        description: Immutable recovery worker sha256 digest (proof mode only)
+        type: string
+      proof_schema_sha:
+        description: Full candidate schema source SHA on main ancestry (proof mode only)
+        type: string
   push:
     tags:
       - "v*"
@@ -12,6 +30,7 @@ permissions:
 
 jobs:
   publish:
+    if: inputs.mode != 'proof'
     name: Build and publish web/worker images
     runs-on: ubuntu-latest
     environment: fleet-release-production
@@ -97,5 +116,55 @@ jobs:
         with:
           name: release-image-digests-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-image-digests.json
+          if-no-files-found: error
+          retention-days: 30
+
+  startup-proof:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'proof'
+    name: Isolated immutable web and worker startup proof
+    runs-on: ubuntu-latest
+    environment: fleet-release-production
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 20
+    env:
+      IMAGE_PROOF_SOURCE_SHA: ${{ inputs.proof_source_sha }}
+      IMAGE_PROOF_WEB_DIGEST: ${{ inputs.proof_web_digest }}
+      IMAGE_PROOF_WORKER_DIGEST: ${{ inputs.proof_worker_digest }}
+      IMAGE_PROOF_SCHEMA_SHA: ${{ inputs.proof_schema_sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Validate closed immutable proof inputs
+        run: node --input-type=module -e 'import { proofInputs } from "./scripts/release/image-startup-proof.mjs"; proofInputs(process.env);'
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.proof_schema_sha }}
+          path: .candidate-schema
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require reviewed sources on main ancestry
+        run: |
+          git merge-base --is-ancestor "$IMAGE_PROOF_SOURCE_SHA" origin/main
+          git -C .candidate-schema merge-base --is-ancestor HEAD origin/main
+          test "$(git -C .candidate-schema rev-parse HEAD)" = "$IMAGE_PROOF_SCHEMA_SHA"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.22.0
+      - name: Stage immutable images using existing ephemeral package read access
+        env:
+          IMAGE_PROOF_READ_ACTOR: ${{ github.actor }}
+          IMAGE_PROOF_READ_TOKEN: ${{ github.token }}
+        run: node scripts/release/image-startup-proof.mjs --prepare
+      - name: Boot both normal entrypoints on isolated candidate schema
+        run: node scripts/release/image-startup-proof.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: immutable-startup-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/image-startup-proof
           if-no-files-found: error
           retention-days: 30

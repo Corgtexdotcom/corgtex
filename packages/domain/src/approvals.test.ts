@@ -22,6 +22,7 @@ const prismaMock = vi.hoisted(() => {
       update: vi.fn(),
       updateMany: vi.fn(),
     },
+    user: { findMany: vi.fn() },
     objection: { findMany: vi.fn().mockResolvedValue([]) },
     auditLog: {
       create: vi.fn(),
@@ -70,6 +71,14 @@ const lineage = vi.hoisted(() => ({
 }));
 vi.mock("./source-lineage", () => ({
   readableArtifactIds: lineage.readable,
+  captureArtifactPermissionEpochs: vi.fn().mockResolvedValue({version: 1, entries: []}),
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  captureReadableWorkItemInputs: async (actor: unknown, workspaceId: string, kind: string, rows: Array<{id: string}>) => ({
+    ids: await lineage.readable(actor, workspaceId, kind, rows), roots: [], heads: new Map(),
+  }),
+  mergeLineageInputRoot: (_prior: unknown, root: unknown) => root,
+  withArtifactCountReleaseSnapshot: async (_actor: unknown, _workspaceId: string, _roots: unknown,
+    remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => { await remote(); return finish(prismaMock); },
   captureArtifactInputProof: lineage.capture,
   captureArtifactInputSnapshotProof: lineage.snapshot,
   currentArtifactInputRoots: lineage.roots,
@@ -78,6 +87,11 @@ vi.mock("./source-lineage", () => ({
   advanceHumanArtifactInputLineage: lineage.advance,
   lineageContentFingerprint: vi.fn().mockReturnValue("a".repeat(64)),
   preserveUnknownArtifactInputSnapshot: vi.fn(),
+}));
+
+vi.mock("./source-permission-epochs", () => ({
+  capturePermissionEpochs: vi.fn().mockResolvedValue({version: 1, entries: []}),
+  isArtifactPermissionEpochProofCurrent: vi.fn().mockResolvedValue(true),
 }));
 
 beforeEach(() => {
@@ -90,6 +104,16 @@ beforeEach(() => {
     isActive: true,
   });
   prismaMock.member.findMany.mockResolvedValue([{ id: "member-1" }]);
+  prismaMock.$queryRaw.mockResolvedValue([]);
+  prismaMock.user.findMany.mockImplementation(async () => {
+    const members = await prismaMock.member.findMany.mock.results[0]?.value ?? [];
+    const flows = await prismaMock.approvalFlow.findMany.mock.results[0]?.value ?? [];
+    const users = new Map(members.filter((member: any) => member.user).map((member: any) =>
+      [member.user.id, {id: member.user.id, displayName: member.user.displayName, email: member.user.email}]));
+    for (const flow of flows) for (const objection of flow.objections ?? []) if (objection.user) users.set(objection.userId,
+      {id: objection.userId, displayName: objection.user.displayName, email: objection.user.email});
+    return [...users.values()];
+  });
   prismaMock.approvalDecision.upsert.mockResolvedValue({});
   prismaMock.approvalFlow.update.mockResolvedValue({});
   prismaMock.auditLog.create.mockResolvedValue({});
@@ -235,6 +259,7 @@ describe("listActionableApprovalFlows", () => {
         status: "ACTIVE",
         createdAt: new Date("2026-05-26T12:00:00.000Z"),
         decisions: [],
+        objections: [],
       },
       {
         id: "flow-archived-proposal",
@@ -244,6 +269,7 @@ describe("listActionableApprovalFlows", () => {
         status: "ACTIVE",
         createdAt: new Date("2026-05-26T11:00:00.000Z"),
         decisions: [],
+        objections: [],
       },
       {
         id: "flow-private-proposal",
@@ -253,6 +279,7 @@ describe("listActionableApprovalFlows", () => {
         status: "ACTIVE",
         createdAt: new Date("2026-05-26T10:00:00.000Z"),
         decisions: [],
+        objections: [],
       },
       {
         id: "flow-missing-proposal",
@@ -262,6 +289,7 @@ describe("listActionableApprovalFlows", () => {
         status: "ACTIVE",
         createdAt: new Date("2026-05-26T07:00:00.000Z"),
         decisions: [],
+        objections: [],
       },
     ]);
     prismaMock.proposal.findMany.mockResolvedValue([
@@ -285,9 +313,9 @@ describe("listProposalDecisionStates", () => {
       id: "reviewer-1", workspaceId: "ws-1", userId: "u-1", role: "MEMBER", isActive: true,
     });
     prismaMock.member.findMany.mockResolvedValue([
-      { id: "author-member", userId: "author", user: { displayName: "Author", email: "author@example.com" } },
-      { id: "reviewer-1", userId: "u-1", user: { displayName: "Reviewer One", email: "one@example.com" } },
-      { id: "reviewer-2", userId: "u-2", user: { displayName: "Reviewer Two", email: "two@example.com" } },
+      { id: "author-member", userId: "author", user: { id: "author", displayName: "Author", email: "author@example.com" } },
+      { id: "reviewer-1", userId: "u-1", user: { id: "u-1", displayName: "Reviewer One", email: "one@example.com" } },
+      { id: "reviewer-2", userId: "u-2", user: { id: "u-2", displayName: "Reviewer Two", email: "two@example.com" } },
     ]);
     prismaMock.proposal.findMany.mockResolvedValue([{ id: "p-1", authorUserId: "author" }]);
     prismaMock.approvalFlow.findMany.mockResolvedValue([{

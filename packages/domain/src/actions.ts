@@ -1,5 +1,5 @@
+import { WorkItemReadRelease, readWorkItemListSnapshot, readableWorkItemPage, workItemAfter } from "./work-item-readable-page";
 import { completeActionWithNativeRequest } from "./action-completion";
-import { scanSourceReadableRecords } from "./source-scoped-read";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { createHash } from "node:crypto";
 import { prisma } from "@corgtex/shared";
@@ -18,7 +18,7 @@ import { requireDraftManager, requireCreationInputRoots } from "./draft-permissi
 import { requireCollaborativeWorkItemEditor } from "./collaborative-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
 import { captureImmutableArtifactInputProof, readableArtifactIds } from "./source-lineage";
-import { captureReadableDigestInputs } from "./digest-lineage";
+import { captureReadableDigestInputs, DigestReadRelease } from "./digest-lineage";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import {
@@ -180,11 +180,11 @@ async function resolveAssigneeMemberId(tx: Prisma.TransactionClient, workspaceId
   return member.id;
 }
 
-async function loadActionChecklistSummaries(actor: AppActor, workspaceId: string, actionIds: string[]) {
+async function loadActionChecklistSummaries(actor: AppActor, workspaceId: string, actionIds: string[], release?: WorkItemReadRelease) {
   const summaries = new Map<string, ActionChecklistSummary>();
   if (actionIds.length === 0) return summaries;
 
-  const items = await prisma.actionChecklistItem.findMany({
+  const items = await (release?.db ?? prisma).actionChecklistItem.findMany({
     where: {
       workspaceId,
       actionId: { in: actionIds },
@@ -192,7 +192,8 @@ async function loadActionChecklistSummaries(actor: AppActor, workspaceId: string
 
   });
 
-  const visible = await readableArtifactIds(actor, workspaceId, "ActionChecklistItem", items);
+  const visible = await readableArtifactIds(actor, workspaceId, "ActionChecklistItem", items, release?.db);
+  await release?.observe("ActionChecklistItem", items.filter(item => visible.has(item.id)));
   for (const item of items.filter((item) => visible.has(item.id))) {
     const current = summaries.get(item.actionId) ?? { checklistItemCount: 0, checklistCompletedCount: 0 };
     current.checklistItemCount += 1;
@@ -318,15 +319,28 @@ function actionListWhere(actor: AppActor, membership: MembershipSummary | null, 
   return where;
 }
 
-export async function countActionsByStatus(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
-  const membership = await requireWorkspaceOperation({ operation: "list_actions", actor, workspaceId });
+async function collectActionStatusCounts(actor: AppActor, workspaceId: string, opts: ListActionsOptions | undefined, release: WorkItemReadRelease) {
+  const membership = await requireWorkspaceOperation({ operation: "list_actions", actor, workspaceId, tx: release.db });
   const where = actionListWhere(actor, membership, workspaceId, { ...opts, status: undefined, statuses: undefined });
-  const rows = await scanSourceReadableRecords({ actor, workspaceId, kind: "Action", load: (afterId, take) => prisma.action.findMany({
-    where: { AND: [where, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take,
-  }) });
   const counts = { DRAFT: 0, OPEN: 0, IN_PROGRESS: 0, COMPLETED: 0, ALL: 0 };
-  for (const row of rows) { counts[row.status] += 1; counts.ALL += 1; }
+  let afterId: string | undefined;
+  let examined = 0;
+  for (;;) {
+    const page: import("@prisma/client").Action[] = await release.db.action.findMany({
+      where: { AND: [where, ...(afterId ? [{ id: { gt: afterId } }] : [])] }, orderBy: { id: "asc" }, take: 100,
+    });
+    examined += page.length;
+    invariant(examined <= 10_000, 409, "SOURCE_READ_SCAN_LIMIT", "Action status counts exceed their candidate window; narrow the filters.");
+    const rows = await release.admit("Action",page);
+    for (const row of rows) { counts[row.status]++; counts.ALL++; }
+    if (page.length < 100) break;
+    afterId = page.at(-1)!.id;
+  }
   return counts;
+}
+
+export async function countActionsByStatus(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
+  return readWorkItemListSnapshot(actor, workspaceId, release => collectActionStatusCounts(actor, workspaceId, opts, release));
 }
 
 async function redactActionJoins<T extends {
@@ -336,11 +350,13 @@ async function redactActionJoins<T extends {
   assigneeMember?: { id: string } | null;
   circleId?: string | null;
   circle?: { id: string } | null;
-}>(actor: AppActor, workspaceId: string, rows: T[]) {
+}>(actor: AppActor, workspaceId: string, rows: T[], release?: WorkItemReadRelease) {
+  const capture = <R extends {id: string}>(kind: Parameters<WorkItemReadRelease["capture"]>[0], records: R[]) =>
+    release ? release.capture(kind,records) : captureReadableDigestInputs({actor,workspaceId,kind,records});
   const [authors, members, circles] = await Promise.all([
-    captureReadableDigestInputs({ actor, workspaceId, kind: "User", records: rows.flatMap((row) => row.author ? [row.author] : []) }),
-    captureReadableDigestInputs({ actor, workspaceId, kind: "Member", records: rows.flatMap((row) => row.assigneeMember ? [row.assigneeMember] : []) }),
-    captureReadableDigestInputs({ actor, workspaceId, kind: "Circle", records: rows.flatMap((row) => row.circle ? [row.circle] : []) }),
+    capture("User", rows.flatMap(row => row.author ? [row.author] : [])),
+    capture("Member", rows.flatMap(row => row.assigneeMember ? [row.assigneeMember] : [])),
+    capture("Circle", rows.flatMap(row => row.circle ? [row.circle] : [])),
   ]);
   const authorIds = new Set(authors.records.map((row) => row.id));
   const memberIds = new Set(members.records.map((row) => row.id));
@@ -355,67 +371,101 @@ async function redactActionJoins<T extends {
   }));
 }
 
-export async function listActions(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
-  const take = opts?.take ?? 20;
-  const skip = opts?.skip ?? 0;
-  const membership = await requireWorkspaceOperation({ operation: "list_actions", actor, workspaceId });
-  const where = actionListWhere(actor, membership, workspaceId, opts);
+function actionPageAfter(row: import("@prisma/client").Action, sort: ListActionsOptions["sort"]): Prisma.ActionWhereInput {
+  if(sort!=="due_asc" && sort!=="due_desc") return workItemAfter(row,sort);
+  const tied=workItemAfter(row,"date");
+  if(row.dueAt===null) return {dueAt:null,...tied};
+  return {OR:[{dueAt:null},{dueAt:sort==="due_asc"?{gt:row.dueAt}:{lt:row.dueAt}},{dueAt:row.dueAt,...tied}]};
+}
 
-  const candidates = await prisma.action.findMany({
-      where,
-      include: {
-        author: {
-          select: {
-            id: true,
-            displayName: true,
-            email: true,
+async function collectActions(actor: AppActor, workspaceId: string, opts: ListActionsOptions | undefined, release: WorkItemReadRelease) {
+    const db = release.db;
+    const take = opts?.take ?? 20;
+    const skip = opts?.skip ?? 0;
+    const membership = await requireWorkspaceOperation({ operation: "list_actions", actor, workspaceId, tx: db });
+    const where = actionListWhere(actor, membership, workspaceId, opts);
+
+    const page=await readableWorkItemPage<import("@prisma/client").Action>({actor,workspaceId,release,kind:"Action",take,skip,
+      load: after => db.action.findMany({where:after?{AND:[where,actionPageAfter(after,opts?.sort)]}:where,
+        orderBy:workItemOrderBy(opts?.sort),take:100})});
+    const selected = page.items;
+    const hydrated = selected.length ? await db.action.findMany({where:{AND:[where,{id:{in:selected.map(row=>row.id)}}]},
+        include: {
+          author: {
+            select: {
+              id: true,
+              displayName: true,
+              email: true,
+            },
           },
-        },
-        assigneeMember: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                displayName: true,
-                email: true,
+          assigneeMember: {
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  displayName: true,
+                  email: true,
+                },
               },
             },
           },
+          circle: true,
+          proposal: true,
         },
-        circle: true,
-        proposal: true,
-      },
-      orderBy: workItemOrderBy(opts?.sort),
-      take: 5001,
-    });
-  invariant(candidates.length <= 5000, 503, "SOURCE_READ_SCAN_LIMIT", "Source permission scan exceeds its supported size.");
-  const permitted = await readableArtifactIds(actor, workspaceId, "Action", candidates);
-  const admitted = candidates.filter((candidate) => permitted.has(candidate.id));
-  const total = admitted.length;
-  const items = admitted.slice(skip, skip + take);
-  const itemIds = items.map((item) => item.id);
-  const [requestCountSummaries, checklistSummaries] = await Promise.all([
-    loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", itemIds),
-    loadActionChecklistSummaries(actor, workspaceId, itemIds),
-  ]);
-  const redactedItems = await redactActionJoins(actor, workspaceId, items);
-  const linkedProposals = items.flatMap((item) => item.proposal ? [item.proposal] : []);
-  const visibleProposalIds = linkedProposals.length
-    ? await readableArtifactIds(actor, workspaceId, "Proposal", linkedProposals) : new Set<string>();
-  return {
-    items: redactedItems.map((item) => ({
-      ...item,
-      proposalId: item.proposal && visibleProposalIds.has(item.proposal.id) ? item.proposalId : null,
-      proposal: item.proposal && visibleProposalIds.has(item.proposal.id)
-        ? { id: item.proposal.id, title: item.proposal.title } : null,
-      ...requestCountSummaries.get(item.id),
-      checklistItemCount: checklistSummaries.get(item.id)?.checklistItemCount ?? 0,
-      checklistCompletedCount: checklistSummaries.get(item.id)?.checklistCompletedCount ?? 0,
-    })),
-    total,
-    take,
-    skip,
-  };
+    }) : [];
+    const byId=new Map(hydrated.map(row=>[row.id,row]));
+    const items=selected.flatMap(row=>{const loaded=byId.get(row.id);return loaded?[{...loaded,...row}]:[];});
+    invariant(items.length === selected.length,409,"SOURCE_CHANGED","Selected actions changed within collection.");
+    const total=page.total;
+    const itemIds = items.map((item) => item.id);
+    const [requestCountSummaries, checklistSummaries] = await Promise.all([
+      loadAdviceRequestCountSummaries(actor, workspaceId, "ACTION", itemIds, rows => release.observe("AdviceRequest", rows), db),
+      loadActionChecklistSummaries(actor, workspaceId, itemIds, release),
+    ]);
+    const redactedItems = await redactActionJoins(actor, workspaceId, items, release);
+    const linkedProposals = items.flatMap((item) => item.proposal ? [item.proposal] : []);
+    const visibleProposalIds = linkedProposals.length
+      ? await release.readable("Proposal", linkedProposals) : new Set<string>();
+    await release.observe("Proposal",linkedProposals.filter(row=>visibleProposalIds.has(row.id)));
+    return {
+      items: redactedItems.map((item) => ({
+        ...item,
+        proposalId: item.proposal && visibleProposalIds.has(item.proposal.id) ? item.proposalId : null,
+        proposal: item.proposal && visibleProposalIds.has(item.proposal.id)
+          ? { id: item.proposal.id, title: item.proposal.title } : null,
+        ...requestCountSummaries.get(item.id),
+        checklistItemCount: checklistSummaries.get(item.id)?.checklistItemCount ?? 0,
+        checklistCompletedCount: checklistSummaries.get(item.id)?.checklistCompletedCount ?? 0,
+      })),
+      total,
+      take,
+      skip,
+    };
+}
+
+export async function listActions(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
+  return readWorkItemListSnapshot(actor, workspaceId, release => collectActions(actor, workspaceId, opts, release));
+}
+
+/** Exact status buckets, page clamping and hydrated rows describe one inventory.
+ * The original proof union is released only after the collection snapshot closes. */
+export async function listActionsWithStatusCounts(actor: AppActor, workspaceId: string,
+  opts: Omit<ListActionsOptions, "skip"> & {page?: number} = {}) {
+  const take = opts.take ?? 20;
+  const requestedPage = opts.page ?? 1;
+  invariant(Number.isSafeInteger(take) && take > 0 && take <= 5000
+    && Number.isSafeInteger(requestedPage) && requestedPage > 0,
+  400, "INVALID_INPUT", "Action page is invalid.");
+  return readWorkItemListSnapshot(actor, workspaceId, async release => {
+    const statusCounts = await collectActionStatusCounts(actor, workspaceId, opts, release);
+    const statuses = opts.statuses?.length ? [...new Set(opts.statuses)] : opts.status ? [opts.status] : [];
+    const total = statuses.length ? statuses.reduce((sum, status) => sum + statusCounts[status], 0) : statusCounts.ALL;
+    const pageCount = Math.max(1, Math.ceil(total / take));
+    const page = Math.min(requestedPage, pageCount);
+    const result = await collectActions(actor, workspaceId, {...opts, take, skip: (page - 1) * take}, release);
+    invariant(result.total === total, 409, "SOURCE_CHANGED", "Action counts changed during collection.");
+    return {...result, statusCounts, page, pageCount};
+  });
 }
 
 export async function getAction(actor: AppActor, params: Parameters<typeof readAction>[1]) {
@@ -465,23 +515,33 @@ async function readAction(actor: AppActor, params: {
     },
   });
   invariant(action, 404, "NOT_FOUND", "Action not found.");
-  invariant((await readableArtifactIds(actor, params.workspaceId, "Action", [action])).has(action.id),
-    404, "NOT_FOUND", "Action not found.");
-  const visibleProposalIds = action.proposal
-    ? await readableArtifactIds(actor, params.workspaceId, "Proposal", [action.proposal]) : new Set<string>();
-  return {
-    ...(await redactActionJoins(actor, params.workspaceId, [action]))[0],
+  const release = new WorkItemReadRelease(actor, params.workspaceId);
+  invariant((await release.admit("Action", [action])).length, 404, "NOT_FOUND", "Action not found.");
+  const proposals = await release.observeRead(() => captureReadableDigestInputs({
+    actor, workspaceId: params.workspaceId, kind: "Proposal", records: action.proposal ? [action.proposal] : [],
+  }));
+  release.add(proposals.roots);
+  const visibleProposalIds = new Set(proposals.records.map(row => row.id));
+  return release.finish({
+    ...(await redactActionJoins(actor, params.workspaceId, [action], release))[0],
     proposalId: action.proposal && visibleProposalIds.has(action.proposal.id) ? action.proposalId : null,
     proposal: action.proposal && visibleProposalIds.has(action.proposal.id)
       ? { id: action.proposal.id, title: action.proposal.title } : null,
-  };
+  });
 }
 
 export async function listActionChecklistItems(actor: AppActor, params: {
   workspaceId: string;
   actionId: string;
 }) {
-  await getAction(actor, { workspaceId: params.workspaceId, actionId: params.actionId });
+  await requireWorkspaceOperation({ actor, workspaceId: params.workspaceId, operation: "list_actions" });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const action = await prisma.action.findFirst({ where: {
+    id: params.actionId, workspaceId: params.workspaceId, ...privacyFilter(actor, membership), archivedAt: null,
+  } });
+  invariant(action, 404, "NOT_FOUND", "Action not found.");
+  const release = new DigestReadRelease(actor, params.workspaceId);
+  invariant((await release.capture("Action", [action])).records.length, 404, "NOT_FOUND", "Action not found.");
   const items = await prisma.actionChecklistItem.findMany({
     where: {
       workspaceId: params.workspaceId,
@@ -493,8 +553,8 @@ export async function listActionChecklistItems(actor: AppActor, params: {
       { id: "asc" },
     ],
   });
-  const visible = await readableArtifactIds(actor, params.workspaceId, "ActionChecklistItem", items);
-  return items.filter((item) => visible.has(item.id));
+  const visible = await release.capture("ActionChecklistItem", items);
+  return release.finish(visible.records);
 }
 
 export async function createActionChecklistItem(actor: AppActor, params: ProducerLineageParams & {

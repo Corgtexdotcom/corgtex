@@ -1,4 +1,6 @@
 import type { Meeting, MeetingTranscriptSourceProvider } from "@prisma/client";
+import { createVariantModelControls, type VariantGenerationControls } from "./variant-model-attempt";
+import { requireWorkspaceMembership } from "./auth";
 import { defaultModelGateway } from "@corgtex/models";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { createMeeting, getMeeting, uploadMeetingTranscript } from "./meetings";
@@ -7,7 +9,7 @@ import { invariant } from "./errors";
 import { audioTranscriptIntakeRoots, directMemberTranscriptRoots, withMemberTranscriptReceipt,
   type AudioTranscriptIntakeReceipt, type DirectMemberTranscriptReceipt } from "./native-transcript-input";
 import { getAudioTranscriptWorkerPurpose } from "./native-transcript-principal";
-import { captureArtifactInputProof, captureArtifactInputSnapshotProof } from "./source-lineage";
+import { captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifactInputProofReadable } from "./source-lineage";
 
 type IntakeStatus = "meeting_created" | "meeting_matched" | "needs_clarification";
 
@@ -136,13 +138,16 @@ export function classifyUploadedTextForMeeting(params: {
 }
 
 async function inferMetadataWithModel(params: {
+  modelControls?: VariantGenerationControls;
   workspaceId: string;
   transcript: string;
   fileName?: string | null;
   userMessage?: string | null;
 }) {
   try {
+    params.modelControls?.signal.throwIfAborted();
     const extraction = await defaultModelGateway.extract({
+      ...params.modelControls,
       workspaceId: params.workspaceId,
       instruction: "Extract meeting metadata from this uploaded meeting transcript. Return null for fields that are not explicitly present or strongly implied.",
       schemaHint: "{ title: string | null, recordedAt: string | null, participantEmails: string[] }",
@@ -152,6 +157,7 @@ async function inferMetadataWithModel(params: {
         transcriptPreview: params.transcript.slice(0, 12000),
       }),
     });
+    params.modelControls?.signal.throwIfAborted();
     const output = extraction.output as Record<string, unknown>;
     return {
       title: typeof output.title === "string" ? output.title : null,
@@ -161,11 +167,14 @@ async function inferMetadataWithModel(params: {
         : [],
     };
   } catch {
+    params.modelControls?.signal.throwIfAborted();
     return { title: null, recordedAt: null, participantEmails: [] };
   }
 }
 
 export async function inferMeetingTranscriptMetadata(params: {
+  /** Server-owned capability; never part of submitted transcript identity. */
+  modelControls?: VariantGenerationControls;
   workspaceId: string;
   transcript: string;
   fileName?: string | null;
@@ -269,9 +278,15 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     invariant(direct, 409, "UNKNOWN_LINEAGE", "Selected meeting metadata lacks an exact source receipt.");
     return captureArtifactInputSnapshotProof(actor, params.workspaceId, direct, tx);
   }) : [];
-  const completeRoots = [...nativeRoots, ...selectedMeetingRoots];
+  const completeRoots = structuredClone([...nativeRoots, ...selectedMeetingRoots]);
+  const modelAttempt = createVariantModelControls(async () => {
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, completeRoots),
+      409, "SOURCE_CHANGED", "Transcript metadata authority changed.");
+  });
   const canonicalRecordedAt = existingMeeting?.recordedAt ?? params.recordedAt ?? null;
   const inferred = await inferMeetingTranscriptMetadata({
+    modelControls: modelAttempt.controls,
     workspaceId: params.workspaceId,
     transcript,
     fileName: params.fileName,

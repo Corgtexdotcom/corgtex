@@ -1,4 +1,4 @@
-import { countActionsByStatus, listActions, listCircles, listHumanMembers, requireWorkspaceMembership, type ActionSort } from "@corgtex/domain";
+import { listActionsWithStatusCounts, listActions, listCircles, listHumanMembers, requireWorkspaceMembership, type ActionSort } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
@@ -52,6 +52,8 @@ import {
 import { formatWorkItemPriority, normalizeWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
 import { ActionPagination } from "./ActionPagination";
 import { appendActionReturnTo, buildActionListReturnHref } from "./return-context";
+import { ActionsViewPreferences } from "./ActionsViewPreferences";
+import { actionsViewStorageKey } from "./view-preferences";
 
 export const dynamic = "force-dynamic";
 
@@ -137,6 +139,7 @@ export default async function ActionsPage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
+  const preferenceUserId = actor.kind === "user" ? actor.user.id : null;
   const t = await getTranslations("actions");
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
@@ -171,19 +174,15 @@ export default async function ActionsPage({
     statuses: view === "kanban" ? undefined : statusFilters,
     take: ACTION_PAGE_SIZE,
   };
-  const actionStatusCounts = view === "kanban" ? null : await countActionsByStatus(actor, workspaceId, actionListFilters);
-  const selectedTotal = actionStatusCounts
-    ? statusFilters.length === 0
-      ? actionStatusCounts.ALL
-      : statusFilters.reduce((total, status) => total + actionStatusCounts[status], 0)
-    : 0;
-  const pageCount = Math.max(1, Math.ceil(selectedTotal / ACTION_PAGE_SIZE));
-  const page = Math.min(requestedPage, pageCount);
   const [actionResult, circles, members] = await Promise.all([
-    listActions(actor, workspaceId, { ...actionListOptions, skip: (page - 1) * ACTION_PAGE_SIZE }),
+    view === "kanban"
+      ? listActions(actor, workspaceId, { ...actionListOptions, skip: 0 })
+        .then(result => ({...result, statusCounts: null, page: 1, pageCount: 1}))
+      : listActionsWithStatusCounts(actor, workspaceId, { ...actionListOptions, page: requestedPage }),
     listCircles(actor, workspaceId),
     listHumanMembers(workspaceId),
   ]);
+  const {statusCounts: actionStatusCounts, page, pageCount} = actionResult;
   const actions = actionResult.items;
   const activeHumanMemberIds = new Set(members.map((member) => member.id));
 
@@ -373,11 +372,13 @@ export default async function ActionsPage({
     return <p className="muted">{t("noActionsFound")}</p>;
   }
 
-  function renderActionMove(action: ActionListItem, targetStatus: ActionColumnStatus, options: { hidden?: boolean; primary?: boolean } = {}) {
+  function renderActionMove(action: ActionListItem, targetStatus: ActionColumnStatus, options: { hidden?: boolean; primary?: boolean; menuItem?: boolean } = {}) {
     const key = `${options.hidden ? "hidden-" : ""}move-${targetStatus.toLowerCase()}`;
     const transition = `${action.id}:${targetStatus}`;
     const buttonClass = options.primary ? "primary small" : undefined;
-    const buttonProps = options.hidden ? { "aria-hidden": true, tabIndex: -1 } : {};
+    const buttonProps = options.hidden
+      ? { "aria-hidden": true, tabIndex: -1 }
+      : options.menuItem ? { role: "menuitem" as const, tabIndex: -1 } : {};
 
     if (targetStatus === "COMPLETED") {
       return (
@@ -398,6 +399,7 @@ export default async function ActionsPage({
             cancelLabel={tCommon("cancel")}
             fileLabel={tWork("evidence")}
             className={options.primary ? "primary small" : undefined}
+            menuItem={options.menuItem}
           />
         </span>
       );
@@ -408,6 +410,7 @@ export default async function ActionsPage({
         <form
           key={key}
           action={returnActionToDraftAction}
+          role={options.menuItem ? "none" : undefined}
           data-work-item-transition={transition}
           className={options.hidden ? "nr-hidden-transition-form" : undefined}
         >
@@ -423,6 +426,7 @@ export default async function ActionsPage({
       <form
         key={key}
         action={actionHandler}
+        role={options.menuItem ? "none" : undefined}
         data-work-item-transition={transition}
         className={options.hidden ? "nr-hidden-transition-form" : undefined}
       >
@@ -500,21 +504,21 @@ export default async function ActionsPage({
       .map((targetStatus) => renderActionMove(action, targetStatus, { hidden: true }));
     for (const targetStatus of actionColumnStatuses) {
       if (!canMoveToStatus(targetStatus) || targetStatus === primaryTarget) continue;
-      moreItems.push(renderActionMove(action, targetStatus));
+      moreItems.push(renderActionMove(action, targetStatus, { menuItem: true }));
     }
     if (canEditContent) {
       moreItems.push(
-        <a key="edit" className="secondary small" href={actionEditHref(action.id)}>
+        <a key="edit" role="menuitem" tabIndex={-1} className="secondary small" href={actionEditHref(action.id)}>
           {t("btnEdit")}
         </a>,
       );
     }
-    if (moreItems.length > 0) moreItems.push(<div key="divider" className="action-menu-divider" />);
+    if (moreItems.length > 0) moreItems.push(<div key="divider" role="separator" className="action-menu-divider" />);
     moreItems.push(
-      <form key="delete" action={deleteActionAction}>
+      <form key="delete" action={deleteActionAction} role="none">
         <input type="hidden" name="workspaceId" value={workspaceId} />
         <input type="hidden" name="actionId" value={action.id} />
-        <ConfirmSubmitButton className="danger" confirmMessage={t("confirmArchive")}>
+        <ConfirmSubmitButton className="danger" confirmMessage={t("confirmArchive")} menuItem>
           {t("btnDelete")}
         </ConfirmSubmitButton>
       </form>,
@@ -907,7 +911,7 @@ export default async function ActionsPage({
       : statusActionColumns;
 
   return (
-    <>
+    <ActionsViewPreferences userId={preferenceUserId} workspaceId={workspaceId} href={listReturnHref}>
       <WorkspacePageHeader title={t("pageTitle")} description={t("pageDescription")} />
 
       {resolvedSearch.versionConflict && (
@@ -1038,7 +1042,7 @@ export default async function ActionsPage({
           <WorkItemKanbanBoard
             columns={actionColumns}
             readOnly={isDemo}
-            storageKey={`work-items:${workspaceId}:actions`}
+            storageKey={`${actionsViewStorageKey(preferenceUserId ?? "agent", workspaceId)}:board`}
             visibleColumnIds={boardGroup === "status" ? visibleActionColumnIds : undefined}
             hideColumnHrefs={boardGroup === "status" ? actionColumnHideHrefs : undefined}
             settingsLabel={tWork("columnSettings")}
@@ -1078,6 +1082,6 @@ export default async function ActionsPage({
           />
         )}
       </section>
-    </>
+    </ActionsViewPreferences>
   );
 }

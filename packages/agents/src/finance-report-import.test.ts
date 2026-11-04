@@ -53,7 +53,7 @@ function proposal(format: "PDF" | "XLSX" = "PDF", amounts: readonly [string, str
 }
 
 function model(...responses: Array<unknown | Error>) {
-  const extract = vi.fn(async (_request: { instruction: string }) => {
+  const extract = vi.fn(async (_request: Parameters<ModelGateway["extract"]>[0]) => {
     const next = responses.shift();
     if (next instanceof Error) throw next;
     return { output: next as Record<string, unknown>, raw: JSON.stringify(next), usage: { provider: "test", model: "test" } };
@@ -169,7 +169,7 @@ describe("proposeFinanceReportImportV1", () => {
   });
 });
 
-const helpers = { behaviorLineageRoots: [], captureInputs: vi.fn(async () => ({ kind: "receipt" })), tool: vi.fn(async (_name, _input, work) => work()) };
+const helpers = { behaviorLineageRoots: [], captureInputs: vi.fn(async () => ({ kind: "receipt" })), tool: vi.fn(async (_name, _input, work) => work({modelRequest: (request: any) => request})) };
 describe("runFinanceReportImportAgentV1", () => {
   it("links a sanitized AgentRun and persists only exact blocked candidates", async () => {
     vi.clearAllMocks(); const report = source(); lifecycle.claim.mockResolvedValue({ skipped: false, batchId: "batch-1", version: 4,
@@ -233,4 +233,44 @@ describe("Finance model live input boundary", () => {
       workspaceCurrencyCodes: [], gateway: second.gateway, beforeModel: boundary })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
     expect(second.extract).toHaveBeenCalledTimes(1);
   });
+});
+
+describe("Finance receipt attempt control propagation", () => {
+  it("forwards the same guard and signal to both structured-output attempts", async () => {
+    const report = source(), controlled = model(proposal());
+    const controller = new AbortController();
+    const guard = vi.fn(async (_context: {signal: AbortSignal}) => undefined);
+    controlled.extract.mockImplementationOnce(async request => {
+      expect(request.signal).toBe(controller.signal); expect(request.authorizeAttempt).toBe(guard);
+      await request.authorizeAttempt!({signal: controller.signal});
+      return {output: {}, raw: "", usage: {}} as never;
+    }).mockImplementationOnce(async request => {
+      expect(request.signal).toBe(controller.signal); expect(request.authorizeAttempt).toBe(guard);
+      await request.authorizeAttempt!({signal: controller.signal});
+      return {output: proposal(), raw: "", usage: {}} as never;
+    });
+    await expect(proposeFinanceReportImportV1({workspaceId: "workspace-1", format: report.format,
+      extractedEvidence: report.extractedEvidence, workspaceCurrencyCodes: [], gateway: controlled.gateway,
+      signal: controller.signal, authorizeAttempt: guard})).resolves.toMatchObject({kind: "SUCCESS", attempts: 2});
+    expect(guard).toHaveBeenCalledTimes(2);
+  });
+});
+
+it("rechecks the Finance native claim inside the provider attempt after credential work", async () => {
+  vi.clearAllMocks(); const report = source(); let sends = 0;
+  lifecycle.prepare.mockResolvedValue({actor: {kind: "user", user: {id: "u"}}, lineageRoots: []});
+  lifecycle.claim.mockResolvedValue({skipped: false, version: 4, format: report.format,
+    extractedEvidence: report.extractedEvidence, workspaceCurrencyCodes: [], receipt: "original-native-claim"});
+  lifecycle.assert.mockReset().mockResolvedValue(undefined);
+  lifecycle.execute.mockImplementation(async config => config.execute(await config.buildContext({}, "guard-run"), helpers, "guard-run", "quality-model"));
+  lifecycle.extract.mockImplementationOnce(async request => {
+    // Credentials/retry delay invalidates the native job claim after preflight.
+    lifecycle.assert.mockRejectedValueOnce(new AppError(409, "SOURCE_CHANGED", "Native claim replaced"));
+    await request.authorizeAttempt({signal: new AbortController().signal}); sends++;
+    return {output: proposal(), raw: "", usage: {}};
+  });
+  await expect(runFinanceReportImportAgentV1({workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 3,
+    workflowJobId: "job-1", attempts: 1, isFinalAttempt: false})).rejects.toThrow("provider failed");
+  expect(sends).toBe(0); expect(lifecycle.persist).not.toHaveBeenCalled();
+  expect(lifecycle.assert).toHaveBeenCalledWith("original-native-claim");
 });

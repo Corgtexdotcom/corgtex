@@ -7,6 +7,7 @@ import { driver } from "driver.js";
 import "driver.js/dist/driver.css";
 import "../../../demo-tour-theme.css";
 import { Dialog } from "@/lib/components/Dialog";
+import { workspaceRouteMatches, workspaceStepUrl } from "./onboarding-tour-routing";
 
 interface TourStep {
   path: string;
@@ -35,9 +36,27 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
   const pathname = usePathname();
   const t = useTranslations("demo.tour");
   const driverRef = useRef<ReturnType<typeof driver> | null>(null);
-  const targetStepIndexRef = useRef<number | null>(null);
+  const targetStepRef = useRef<{ index: number; path: string; from: string } | null>(null);
+  const startTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoStartRef = useRef<{ path: string; started: boolean } | null>(null);
   const [showBriefingCta, setShowBriefingCta] = useState(false);
   const isMapRoute = Boolean(pathname?.includes(`/workspaces/${workspaceId}/maps`));
+
+  const clearScheduledStart = useCallback(() => {
+    if (startTimerRef.current !== null) {
+      clearTimeout(startTimerRef.current);
+      startTimerRef.current = null;
+    }
+  }, []);
+
+  // Programmatic teardown (navigation, restart, unmount) is not a dismissal.
+  // Driver.js destroy() bypasses onDestroyStarted and clears its active state.
+  const destroyTour = useCallback(() => {
+    clearScheduledStart();
+    const current = driverRef.current;
+    driverRef.current = null;
+    current?.destroy();
+  }, [clearScheduledStart]);
 
   const tourSteps: TourStep[] = useMemo(() => [
     {
@@ -106,6 +125,11 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
       showProgress: true,
       animate: true,
       allowClose: true,
+      popoverClass: "demo-tour-popover",
+      onPopoverRender: (popover) => {
+        popover.closeButton.textContent = t("skip");
+        popover.closeButton.setAttribute("aria-label", t("skip"));
+      },
       steps: tourSteps.map((step, index) => ({
         element: step.element,
         popover: {
@@ -114,18 +138,18 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
             const nextStep = tourSteps[index + 1];
             if (!nextStep) {
               markTourCompleted(workspaceId);
-              driverObj.destroy();
+              destroyTour();
               setShowBriefingCta(true);
               return;
             }
 
             const currentPath = window.location.pathname;
-            const expectedPath = `/workspaces/${workspaceId}${nextStep.path === "/" ? "" : nextStep.path}`;
+            const expectedPath = workspaceStepUrl(workspaceId, nextStep.path);
 
-            if (currentPath !== expectedPath) {
-              targetStepIndexRef.current = index + 1;
+            if (!workspaceRouteMatches(currentPath, expectedPath)) {
+              targetStepRef.current = { index: index + 1, path: expectedPath, from: currentPath };
+              destroyTour();
               router.push(expectedPath);
-              driverObj.destroy(); // Temporarily kill overlay during nav
             } else {
               driverObj.moveNext();
             }
@@ -135,79 +159,97 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
             if (!prevStep) return;
 
             const currentPath = window.location.pathname;
-            const expectedPath = `/workspaces/${workspaceId}${prevStep.path === "/" ? "" : prevStep.path}`;
+            const expectedPath = workspaceStepUrl(workspaceId, prevStep.path);
 
-            if (currentPath !== expectedPath) {
-              targetStepIndexRef.current = index - 1;
+            if (!workspaceRouteMatches(currentPath, expectedPath)) {
+              targetStepRef.current = { index: index - 1, path: expectedPath, from: currentPath };
+              destroyTour();
               router.push(expectedPath);
-              driverObj.destroy();
             } else {
               driverObj.movePrevious();
             }
           }
         }
       })),
-      onCloseClick: () => {
+      // Escape, overlay click and Skip all pass through this user-dismissal hook.
+      onDestroyStarted: () => {
+        targetStepRef.current = null;
         markTourCompleted(workspaceId);
-        driverObj.destroy();
+        destroyTour();
       },
     });
 
     return driverObj;
-  }, [router, tourSteps, workspaceId]);
+  }, [destroyTour, router, t, tourSteps, workspaceId]);
 
   const restartTour = useCallback(() => {
     setShowBriefingCta(false);
+    destroyTour();
+    targetStepRef.current = null;
+    autoStartRef.current = { path: window.location.pathname, started: true };
 
-    const homePath = `/workspaces/${workspaceId}`;
-    if (window.location.pathname !== homePath) {
-      targetStepIndexRef.current = 0;
-      router.push(homePath);
-      return;
+    const homePath = workspaceStepUrl(workspaceId, "/");
+    const navigateHome = !workspaceRouteMatches(window.location.pathname, homePath);
+    if (navigateHome) {
+      targetStepRef.current = { index: 0, path: homePath, from: window.location.pathname };
     }
 
-    driverRef.current?.drive(0);
-  }, [router, workspaceId]);
+    // Explicit Restart supersedes any in-flight navigation, even after Escape.
+    router.push(homePath);
+    if (navigateHome) return;
+    driverRef.current = initDriver();
+    driverRef.current.drive(0);
+  }, [destroyTour, initDriver, router, workspaceId]);
 
   useEffect(() => {
-    const completed = isTourCompleted(workspaceId);
-    
-    driverRef.current = initDriver();
-
-    if (!completed && !isMapRoute) {
-      // Start tour on first visit after a brief delay
-      setTimeout(() => {
-        driverRef.current?.drive(0);
-      }, 1000);
-    }
-
-    // Listen for custom restart event
     const handleRestart = () => restartTour();
-
-    window.addEventListener("corgtex:restart-tour", handleRestart);
-    
-    return () => {
-      window.removeEventListener("corgtex:restart-tour", handleRestart);
-      if (targetStepIndexRef.current === null) {
-        driverRef.current?.destroy();
+    const handleEscape = (event: KeyboardEvent) => {
+      // A route transition temporarily has no Driver overlay to receive Escape.
+      if (event.key === "Escape" && targetStepRef.current !== null) {
+        targetStepRef.current = null;
+        markTourCompleted(workspaceId);
+        destroyTour();
       }
     };
-  }, [workspaceId, initDriver, isMapRoute, restartTour]);
+    window.addEventListener("corgtex:restart-tour", handleRestart);
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      window.removeEventListener("corgtex:restart-tour", handleRestart);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [destroyTour, restartTour, workspaceId]);
 
   useEffect(() => {
-    // Handle cross-page navigation continuation
-    if (targetStepIndexRef.current !== null) {
-      const targetIndex = targetStepIndexRef.current;
-      targetStepIndexRef.current = null;
-      
-      // Wait for DOM to settle after page transition
-      setTimeout(() => {
-        // Force re-init if destroyed by navigation
-        driverRef.current = initDriver();
-        driverRef.current.drive(targetIndex);
-      }, 500);
+    const currentPath = pathname ?? window.location.pathname;
+    const target = targetStepRef.current;
+    if (target) {
+      if (workspaceRouteMatches(currentPath, target.path)) {
+        startTimerRef.current = setTimeout(() => {
+          startTimerRef.current = null;
+          targetStepRef.current = null;
+          driverRef.current = initDriver();
+          driverRef.current.drive(target.index);
+        }, 500);
+      } else if (!workspaceRouteMatches(currentPath, target.from)) {
+        // A redirect or unrelated navigation interrupts the requested step.
+        targetStepRef.current = null;
+      }
+    } else if (!isMapRoute && !isTourCompleted(workspaceId)) {
+      autoStartRef.current ??= { path: currentPath, started: false };
+      const initial = autoStartRef.current;
+      if (initial.path !== currentPath) initial.started = true;
+      if (!initial.started && initial.path === currentPath) {
+        startTimerRef.current = setTimeout(() => {
+          startTimerRef.current = null;
+          initial.started = true;
+          driverRef.current = initDriver();
+          driverRef.current.drive(0);
+        }, 1000);
+      }
     }
-  }, [pathname, initDriver]);
+
+    return destroyTour;
+  }, [destroyTour, initDriver, isMapRoute, pathname, workspaceId]);
 
   const keepExploring = useCallback(() => {
     setShowBriefingCta(false);

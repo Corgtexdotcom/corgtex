@@ -47,6 +47,17 @@ describe("work item API helpers", () => {
     });
   });
 
+  it("keeps denied envelopes and redacted responsibility free of labels", () => {
+    expect(serializeActionWorkItem({ id: "withheld", contentWithheld: true })).toEqual({ id: "withheld", contentWithheld: true });
+    expect(serializeTensionWorkItem({
+      id: "redacted", assigneeMemberId: null, assigneeMember: null, raisedByMemberId: null, raisedByMember: null,
+      upvotes: [], adviceRequestCount: 3, activeAdviceRequestCount: 2,
+    })).toMatchObject({
+      assigneeMemberId: null, assigneeMemberName: null, raisedByMemberId: null, raisedByMemberName: null,
+      upvoteCount: 0, adviceRequestCount: 3, activeAdviceRequestCount: 2, inputRequestCount: 3, activeInputRequestCount: 2,
+    });
+  });
+
   it("serializes proposal priority and owner fields", () => {
     expect(serializeProposalWorkItem({
       id: "proposal-1",

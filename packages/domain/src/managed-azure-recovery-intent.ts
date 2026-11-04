@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { ManagedAzureRollbackPayload } from "./managed-azure-recovery-payload";
 import { createManagedReleaseProofReader } from "./managed-release-proof-support";
 
-export const MANAGED_RELEASE_WRITE_INTENT_PROTOCOL_VERSION = 1;
+const MANAGED_RELEASE_WRITE_INTENT_PROTOCOL_VERSION = 1;
 // Runner capability is distinct from immutable revision intent format.
 export const MANAGED_RELEASE_RUNNER_PROTOCOL_VERSION = 2;
 

@@ -3,7 +3,7 @@ import type { AppActor } from "@corgtex/shared";
 import type { OAuthConnection, OAuthProvider, Prisma } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
-import { invariant } from "./errors";
+import { AppError, invariant } from "./errors";
 import { extractSupportedMeetingUrlFromText } from "./meeting-urls";
 
 const ENCRYPTED_TOKEN_STORAGE_VERSION = "aes-256-gcm";
@@ -432,6 +432,11 @@ export async function getExternalDataSource(actor: AppActor, params: {
   return source;
 }
 
+function requireSelectedSqlTables(selectedTables: readonly string[]) {
+  invariant(selectedTables.length > 0 && selectedTables.every(table => table.trim().length > 0),
+    400, "SQL_TABLE_SELECTION_REQUIRED", "Select at least one SQL table before saving or enabling this source.");
+}
+
 export async function createExternalDataSource(actor: AppActor, params: {
   workspaceId: string;
   label: string;
@@ -443,6 +448,8 @@ export async function createExternalDataSource(actor: AppActor, params: {
 }) {
   await requireDataSourceAdmin(actor, params.workspaceId);
 
+  if (params.selectedTables.length) requireSelectedSqlTables(params.selectedTables);
+
   return prisma.externalDataSource.create({
     data: {
       workspaceId: params.workspaceId,
@@ -450,6 +457,8 @@ export async function createExternalDataSource(actor: AppActor, params: {
       driverType: params.driverType,
       connectionStringEnc: params.connectionStringEnc,
       selectedTables: params.selectedTables,
+      // Keep an empty saved connection available for discovery, never polling.
+      isActive: params.selectedTables.length > 0,
       pullCadenceMinutes: params.pullCadenceMinutes,
       cursorColumn: params.cursorColumn,
     },
@@ -469,13 +478,17 @@ export async function updateExternalDataSource(actor: AppActor, params: {
 }) {
   await requireDataSourceAdmin(actor, params.workspaceId);
 
+  if (params.selectedTables !== undefined) requireSelectedSqlTables(params.selectedTables);
+
   return prisma.$transaction(async (tx) => {
     const source = await tx.externalDataSource.findFirst({
       where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null },
-      select: { id: true },
+      select: { id: true, selectedTables: true },
     });
 
     invariant(source, 404, "NOT_FOUND", "Data source not found");
+
+    if (params.isActive === true) requireSelectedSqlTables(params.selectedTables ?? source.selectedTables);
 
     const data: Prisma.ExternalDataSourceUpdateInput = {};
     if (params.label !== undefined) data.label = params.label;
@@ -518,10 +531,11 @@ export async function enqueueExternalDataSourceSync(actor: AppActor, params: {
   return prisma.$transaction(async (tx) => {
     const source = await tx.externalDataSource.findFirst({
       where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null },
-      select: { id: true },
+      select: { id: true, selectedTables: true },
     });
 
     invariant(source, 404, "NOT_FOUND", "Data source not found");
+    requireSelectedSqlTables(source.selectedTables);
 
     const timestamp = Date.now();
     return tx.workflowJob.upsert({
@@ -538,8 +552,63 @@ export async function enqueueExternalDataSourceSync(actor: AppActor, params: {
   });
 }
 
-export async function refreshOAuthTokenIfNeeded(connectionId: string): Promise<OAuthConnection> {
-  let connection = await prisma.oAuthConnection.findUnique({
+/** Match the exact credential state observed by this attempt, including same-account reauthorization. */
+export function oauthConnectionAttemptWhere(connection: OAuthConnection): Prisma.OAuthConnectionWhereUniqueInput {
+  return {id: connection.id, provider: connection.provider, providerAccountId: connection.providerAccountId,
+    userId: connection.userId, workspaceId: connection.workspaceId, status: connection.status,
+    accessToken: connection.accessToken, refreshToken: connection.refreshToken,
+    tokenStorageVersion: connection.tokenStorageVersion, expiresAt: connection.expiresAt, updatedAt: connection.updatedAt};
+}
+
+export async function updateOAuthConnectionForAttempt(connection: OAuthConnection,
+  data: Prisma.OAuthConnectionUpdateInput, controls?: OAuthSourceAttemptControls): Promise<OAuthConnection> {
+  controls?.signal?.throwIfAborted();
+  await controls?.authorizeAttempt();
+  controls?.signal?.throwIfAborted();
+  let updated: OAuthConnection;
+  try {
+    updated = await prisma.oAuthConnection.update({where: oauthConnectionAttemptWhere(connection), data});
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "P2025") {
+      // Credential contention does not establish provider revocation. Never adopt
+      // the replacement grant or turn this into a permanent permission denial.
+      throw new AppError(503, "OAUTH_PROVIDER_INDETERMINATE", "OAuth connection changed during this attempt; retry.");
+    }
+    throw error;
+  }
+  controls?.onConnectionUpdated?.(updated);
+  return updated;
+}
+
+async function readOAuthRefreshResponse(response: Response, connection: OAuthConnection,
+  label: string, controls?: OAuthSourceAttemptControls) {
+  let body: Record<string, unknown> = {};
+  if (response.status !== 401 && response.status !== 403) {
+    if (response.status === 429 || response.status >= 500) {
+      throw new AppError(503, "OAUTH_PROVIDER_INDETERMINATE", "OAuth token refresh is temporarily unavailable.");
+    }
+    const parsed: unknown = await response.json();
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) body = parsed as Record<string, unknown>;
+  }
+  await controls?.authorizeAttempt();
+  if (!response.ok) {
+    if ([401, 403].includes(response.status) || body.error === "invalid_grant" || body.error === "invalid_token") {
+      await updateOAuthConnectionForAttempt(connection,
+        {status: "ERROR", lastSyncError: `Failed to refresh ${label} token`}, controls);
+      throw new AppError(response.status, "OAUTH_PROVIDER_AUTH_REVOKED", "OAuth token refresh authority was denied.");
+    }
+    throw new AppError(503, "OAUTH_PROVIDER_INDETERMINATE", "OAuth token refresh could not be verified.");
+  }
+  const expiresIn = body.expires_in === undefined ? null : Number(body.expires_in);
+  invariant(typeof body.access_token === "string" && body.access_token.length > 0
+    && (expiresIn === null || Number.isFinite(expiresIn) && expiresIn > 0)
+    && (body.refresh_token === undefined || typeof body.refresh_token === "string" && body.refresh_token.length > 0),
+  503, "OAUTH_PROVIDER_INDETERMINATE", "OAuth token refresh returned an invalid response.");
+  return {access_token: body.access_token, expires_in: expiresIn, refresh_token: body.refresh_token as string | undefined};
+}
+
+export async function refreshOAuthTokenIfNeeded(connectionId: string, controls?: OAuthSourceAttemptControls): Promise<OAuthConnection> {
+  let connection = controls?.connection ?? await prisma.oAuthConnection.findUnique({
     where: { id: connectionId },
   });
 
@@ -549,20 +618,11 @@ export async function refreshOAuthTokenIfNeeded(connectionId: string): Promise<O
     const refreshToken = oauthRefreshToken(connection);
     const accessTokenEnc = encryptOAuthToken(oauthAccessToken(connection));
     const refreshTokenEnc = refreshToken ? encryptOAuthToken(refreshToken) : null;
-    await prisma.oAuthConnection.update({
-      where: { id: connection.id },
-      data: {
-        accessToken: accessTokenEnc,
-        refreshToken: refreshTokenEnc,
-        tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
-      },
-    });
-    connection = {
-      ...connection,
+    connection = await updateOAuthConnectionForAttempt(connection, {
       accessToken: accessTokenEnc,
       refreshToken: refreshTokenEnc,
       tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
-    };
+    }, controls);
   }
 
   // Refresh if less than 5 minutes remain
@@ -573,7 +633,7 @@ export async function refreshOAuthTokenIfNeeded(connectionId: string): Promise<O
     }
 
     if (connection.provider === "GOOGLE") {
-      const response = await fetch("https://oauth2.googleapis.com/token", {
+      const response = await oauthSourceFetch("https://oauth2.googleapis.com/token", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -582,32 +642,24 @@ export async function refreshOAuthTokenIfNeeded(connectionId: string): Promise<O
           refresh_token: refreshToken,
           grant_type: "refresh_token",
         }),
-      });
+      }, controls);
+      await controls?.authorizeAttempt();
 
-      if (!response.ok) {
-        await prisma.oAuthConnection.update({
-          where: { id: connection.id },
-          data: { status: "ERROR", lastSyncError: "Failed to refresh Google token" },
-        });
-        throw new Error("Failed to refresh Google token");
-      }
-      const data = await response.json();
+      const data = await readOAuthRefreshResponse(response, connection, "Google", controls);
+      await controls?.authorizeAttempt();
 
-      return prisma.oAuthConnection.update({
-        where: { id: connection.id },
-        data: {
+      return updateOAuthConnectionForAttempt(connection, {
           accessToken: encryptOAuthToken(data.access_token),
           tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
           expiresAt: data.expires_in ? new Date(Date.now() + data.expires_in * 1000) : null,
           status: "ACTIVE",
           lastSyncError: null,
           ...(data.refresh_token && { refreshToken: encryptOAuthToken(data.refresh_token) }),
-        },
-      });
+      }, controls);
     }
 
     if (connection.provider === "MICROSOFT") {
-      const response = await fetch("https://login.microsoftonline.com/organizations/oauth2/v2.0/token", {
+      const response = await oauthSourceFetch("https://login.microsoftonline.com/organizations/oauth2/v2.0/token", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -616,32 +668,162 @@ export async function refreshOAuthTokenIfNeeded(connectionId: string): Promise<O
           refresh_token: refreshToken,
           grant_type: "refresh_token",
         }),
-      });
+      }, controls);
+      await controls?.authorizeAttempt();
 
-      if (!response.ok) {
-        await prisma.oAuthConnection.update({
-          where: { id: connection.id },
-          data: { status: "ERROR", lastSyncError: "Failed to refresh Microsoft token" },
-        });
-        throw new Error("Failed to refresh Microsoft token");
-      }
-      const data = await response.json();
+      const data = await readOAuthRefreshResponse(response, connection, "Microsoft", controls);
+      await controls?.authorizeAttempt();
 
-      return prisma.oAuthConnection.update({
-        where: { id: connection.id },
-        data: {
+      return updateOAuthConnectionForAttempt(connection, {
           accessToken: encryptOAuthToken(data.access_token),
           tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
           expiresAt: data.expires_in ? new Date(Date.now() + data.expires_in * 1000) : null,
           status: "ACTIVE",
           lastSyncError: null,
           ...(data.refresh_token && { refreshToken: encryptOAuthToken(data.refresh_token) }),
-        },
-      });
+      }, controls);
     }
   }
 
   return connection;
+}
+
+type CalendarConnectionScope = {
+  userId: string;
+  workspaceId: string;
+  provider: OAuthProvider;
+};
+
+function isCalendarAvailabilityConnection(connection: OAuthConnection, scope: CalendarConnectionScope) {
+  const calendar = syncSettingsRecord(syncSettingsRecord(connection.syncSettings).calendar);
+  return connection.userId === scope.userId && connection.workspaceId === scope.workspaceId
+    && connection.provider === scope.provider && connection.status === "ACTIVE"
+    && hasCalendarSyncScope(scope.provider, connection.scopes) && calendar.enabled !== false;
+}
+
+function assertOAuthConnectionActive(connection: OAuthConnection | null, scope: CalendarConnectionScope): asserts connection is OAuthConnection {
+  invariant(connection?.status === "ACTIVE" && isCalendarAvailabilityConnection(connection, scope),
+    409, "CALENDAR_CONNECTION_UNAVAILABLE", "The calendar connection is no longer eligible.");
+}
+
+function availabilityRecord(value: unknown): Record<string, unknown> {
+  invariant(value !== null && typeof value === "object" && !Array.isArray(value),
+    502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+  return value as Record<string, unknown>;
+}
+
+function availabilityTime(value: unknown) {
+  invariant(typeof value === "string" && Number.isFinite(Date.parse(value)),
+    502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+  return new Date(value).toISOString();
+}
+
+export type CalendarAvailabilityResult =
+  | { provider: "GOOGLE"; calendars: Record<string, { busy: Array<{ start: string; end: string }> }> }
+  | { provider: "MICROSOFT"; schedules: Record<string, Array<{
+    status: string; start: { dateTime: string; timeZone: "UTC" }; end: { dateTime: string; timeZone: "UTC" };
+  }>> }
+  | { error: string };
+
+export async function getCalendarAvailability(actor: AppActor, params: {
+  workspaceId: string; provider: OAuthProvider; emails: string[]; timeMin: string; timeMax: string;
+}): Promise<CalendarAvailabilityResult> {
+  try {
+    invariant(actor.kind === "user", 403, "FORBIDDEN", "Calendar availability requires an authenticated user.");
+    if (params.provider !== "GOOGLE" && params.provider !== "MICROSOFT") {
+      return { error: "Choose GOOGLE or MICROSOFT explicitly before checking calendar availability." };
+    }
+    invariant(Array.isArray(params.emails) && params.emails.length > 0 && params.emails.length <= 20
+      && params.emails.every(email => typeof email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)),
+    400, "INVALID_INPUT", "Provide calendar email addresses.");
+    const timeMin = availabilityTime(params.timeMin);
+    const timeMax = availabilityTime(params.timeMax);
+    invariant(timeMin < timeMax, 400, "INVALID_INPUT", "Provide a valid availability interval.");
+    const emails = [...new Set(params.emails)];
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+    const scope: CalendarConnectionScope = { userId: actor.user.id, workspaceId: params.workspaceId, provider: params.provider };
+    // Never fall back to another workspace, an unbound legacy row, or an implicit provider.
+    const candidates = await prisma.oAuthConnection.findMany({
+      where: { ...scope, status: "ACTIVE" }, take: 2,
+    });
+    invariant(candidates.length === 1 && isCalendarAvailabilityConnection(candidates[0], scope),
+      409, "CALENDAR_CONNECTION_UNAVAILABLE", "Connect an active calendar with read consent in this workspace.");
+    // Reuse the SOURCE refresh classifier and exact-generation CAS. Calendar resource
+    // failures must never revoke the shared Docs/Email grant or adopt a new grant.
+    let expected = candidates[0];
+    const authorizeAttempt = async () => {
+      await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+      const current = await prisma.oAuthConnection.findUnique({ where: { id: expected.id } });
+      assertOAuthConnectionActive(current, scope);
+      const snapshot = oauthConnectionAttemptWhere(expected);
+      invariant(Object.entries(snapshot).every(([key, value]) => {
+        const actual = current[key as keyof OAuthConnection];
+        return value instanceof Date ? actual instanceof Date && actual.getTime() === value.getTime() : actual === value;
+      }), 409, "CALENDAR_CONNECTION_UNAVAILABLE", "The calendar connection changed during availability.");
+    };
+    await authorizeAttempt();
+    const refreshed = await refreshOAuthTokenIfNeeded(expected.id, {
+      connection: expected, authorizeAttempt, onConnectionUpdated: current => { expected = current; },
+    });
+    await authorizeAttempt();
+    const accessToken = oauthAccessToken(refreshed);
+    const google = params.provider === "GOOGLE";
+    const response = await fetch(google
+      ? "https://www.googleapis.com/calendar/v3/freeBusy"
+      : "https://graph.microsoft.com/v1.0/me/calendar/getSchedule", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json",
+        ...(!google && { Prefer: 'outlook.timezone="UTC"' }),
+      },
+      body: JSON.stringify(google ? { timeMin, timeMax, items: emails.map(id => ({ id })) } : {
+        schedules: emails, startTime: { dateTime: timeMin, timeZone: "UTC" },
+        endTime: { dateTime: timeMax, timeZone: "UTC" }, availabilityViewInterval: 30,
+      }),
+    });
+    invariant(response.ok, 502, "CALENDAR_PROVIDER_ERROR", "Calendar availability request failed.");
+    const data = availabilityRecord(await response.json());
+    await authorizeAttempt();
+    if (google) {
+      const raw = availabilityRecord(data.calendars);
+      const calendars: Extract<CalendarAvailabilityResult, { provider: "GOOGLE" }>["calendars"] = {};
+      for (const email of emails) {
+        const item = availabilityRecord(raw[email]);
+        invariant((item.errors === undefined || (Array.isArray(item.errors) && item.errors.length === 0)) && Array.isArray(item.busy),
+          502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+        calendars[email] = { busy: item.busy.map(value => {
+          const interval = availabilityRecord(value);
+          const start = availabilityTime(interval.start), end = availabilityTime(interval.end);
+          invariant(start < end, 502, "CALENDAR_PROVIDER_ERROR", "Invalid busy interval.");
+          return { start, end };
+        }) };
+      }
+      return { provider: "GOOGLE", calendars };
+    }
+    invariant(Array.isArray(data.value), 502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+    const schedules: Extract<CalendarAvailabilityResult, { provider: "MICROSOFT" }>["schedules"] = {};
+    for (const email of emails) {
+      const matches = data.value.map(availabilityRecord).filter(item => typeof item.scheduleId === "string" && item.scheduleId.toLowerCase() === email.toLowerCase());
+      invariant(matches.length === 1, 502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+      const item = matches[0];
+      invariant(!item.error && Array.isArray(item.scheduleItems), 502, "CALENDAR_PROVIDER_ERROR", "Incomplete calendar availability.");
+      schedules[email] = item.scheduleItems.map(value => {
+        const interval = availabilityRecord(value);
+        invariant(typeof interval.status === "string" && ["free", "tentative", "busy", "oof", "workingElsewhere"].includes(interval.status),
+          502, "CALENDAR_PROVIDER_ERROR", "Unknown calendar availability.");
+        const start = availabilityRecord(interval.start), end = availabilityRecord(interval.end);
+        invariant(start.timeZone === "UTC" && end.timeZone === "UTC", 502, "CALENDAR_PROVIDER_ERROR", "Unknown calendar time zone.");
+        const startTime = availabilityTime(parseMicrosoftDateTime(start as { dateTime?: string; timeZone?: string }).toISOString());
+        const endTime = availabilityTime(parseMicrosoftDateTime(end as { dateTime?: string; timeZone?: string }).toISOString());
+        invariant(startTime < endTime, 502, "CALENDAR_PROVIDER_ERROR", "Invalid busy interval.");
+        return { status: interval.status, start: { dateTime: startTime, timeZone: "UTC" }, end: { dateTime: endTime, timeZone: "UTC" } };
+      });
+    }
+    return { provider: "MICROSOFT", schedules };
+  } catch {
+    // Provider bodies, exceptions and token envelopes must never reach a tool/model/log.
+    return { error: "Calendar availability is unavailable. Check workspace membership, provider connection and calendar read consent, then retry." };
+  }
 }
 
 export interface CalendarEvent {
@@ -694,14 +876,14 @@ export interface OAuthEmailMessage {
 async function readProviderTextResponse(response: Response, label: string) {
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(`${label} API error: ${text}`);
+    throw new AppError(response.status, "OAUTH_PROVIDER_RESPONSE_ERROR", `${label} API request failed (${response.status}).`);
   }
   return text;
 }
 
 async function readProviderJsonResponse(response: Response, label: string) {
   const text = await readProviderTextResponse(response, label);
-  return text ? JSON.parse(text) as any : {};
+  return JSON.parse(text) as any;
 }
 
 const GOOGLE_DRIVE_DOCUMENT_MIME_TYPES = [
@@ -713,7 +895,8 @@ const GOOGLE_DRIVE_DOCUMENT_MIME_TYPES = [
 function hasGoogleDriveDocumentScope(scopes: string[]) {
   return scopes.some((scope) => {
     const normalized = scope.toLowerCase();
-    return normalized === "https://www.googleapis.com/auth/drive.file"
+    return normalized === "https://www.googleapis.com/auth/drive"
+      || normalized === "https://www.googleapis.com/auth/drive.file"
       || normalized === "https://www.googleapis.com/auth/drive.readonly";
   });
 }
@@ -865,8 +1048,9 @@ export async function selectGoogleDriveDocumentsForSync(actor: AppActor, params:
   });
 }
 
-export async function fetchCalendarEvents(connectionId: string, timeMin: Date, timeMax: Date): Promise<CalendarEvent[]> {
-  const connection = await refreshOAuthTokenIfNeeded(connectionId);
+export async function fetchCalendarEvents(connectionId: string, timeMin: Date, timeMax: Date,
+  controls?: OAuthSourceAttemptControls): Promise<CalendarEvent[]> {
+  const connection = await refreshOAuthTokenIfNeeded(connectionId, controls);
   if (connection.status !== "ACTIVE") {
     return [];
   }
@@ -881,9 +1065,9 @@ export async function fetchCalendarEvents(connectionId: string, timeMin: Date, t
       showDeleted: "true",
     });
 
-    const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${query}`, {
+    const res = await oauthSourceFetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${query}`, {
       headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    }, controls);
 
     if (!res.ok) throw new Error(`Google Calendar API error: ${await res.text()}`);
     const data = await res.json();
@@ -921,12 +1105,12 @@ export async function fetchCalendarEvents(connectionId: string, timeMin: Date, t
       $orderBy: "start/dateTime",
     });
 
-    const res = await fetch(`https://graph.microsoft.com/v1.0/me/events?${query}`, {
+    const res = await oauthSourceFetch(`https://graph.microsoft.com/v1.0/me/events?${query}`, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         Prefer: 'outlook.timezone="UTC"',
       },
-    });
+    }, controls);
 
     if (!res.ok) throw new Error(`Microsoft Graph API error: ${await res.text()}`);
     const data = await res.json();
@@ -999,20 +1183,45 @@ function isPlainTextDocumentMimeType(mimeType: string | null) {
     || lower === "application/sql";
 }
 
-export async function fetchSelectedDocuments(connectionId: string, selectedDocumentIds: string[]): Promise<OAuthDocumentSource[]> {
+export type OAuthSourceAttemptControls = {
+  authorizeAttempt: () => Promise<void>; signal?: AbortSignal; expectedAccountId?: string;
+  /** Calendar retains its original attempt row and acknowledges only its own writes. */
+  connection?: OAuthConnection;
+  onConnectionUpdated?: (connection: OAuthConnection) => void;
+};
+async function oauthSourceFetch(input: string, init: RequestInit, controls?: OAuthSourceAttemptControls) {
+  controls?.signal?.throwIfAborted();
+  await controls?.authorizeAttempt();
+  controls?.signal?.throwIfAborted();
+  return fetch(input, {...init, ...(controls?.signal ? {signal: controls.signal} : {})});
+}
+
+async function assertOAuthSourceAccount(connection: OAuthConnection, accessToken: string, controls?: OAuthSourceAttemptControls) {
+  if (!controls?.expectedAccountId) return;
+  const url = connection.provider === "GOOGLE" ? "https://www.googleapis.com/oauth2/v2/userinfo" : "https://graph.microsoft.com/v1.0/me";
+  const profile = await readProviderJsonResponse(await oauthSourceFetch(url, {headers: {Authorization: `Bearer ${accessToken}`}}, controls), "OAuth account");
+  invariant(String(profile.id) === controls.expectedAccountId && connection.providerAccountId === controls.expectedAccountId,
+    409, "SOURCE_CHANGED", "OAuth provider account changed.");
+  await controls.authorizeAttempt();
+}
+
+export async function fetchSelectedDocuments(connectionId: string, selectedDocumentIds: string[], controls?: OAuthSourceAttemptControls): Promise<OAuthDocumentSource[]> {
   const ids = selectedDocumentIds.map((id) => id.trim()).filter(Boolean);
   if (ids.length === 0) return [];
 
-  const connection = await refreshOAuthTokenIfNeeded(connectionId);
+  await controls?.authorizeAttempt();
+  const connection = await refreshOAuthTokenIfNeeded(connectionId, controls);
+  await controls?.authorizeAttempt();
   if (connection.status !== "ACTIVE") return [];
   const accessToken = oauthAccessToken(connection);
+  await assertOAuthSourceAccount(connection, accessToken, controls);
   const documents: OAuthDocumentSource[] = [];
 
   if (connection.provider === "GOOGLE") {
     for (const id of ids) {
-      const metadata = await readProviderJsonResponse(await fetch(
+      const metadata = await readProviderJsonResponse(await oauthSourceFetch(
         `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?fields=id,name,mimeType,webViewLink,modifiedTime`,
-        { headers: { Authorization: `Bearer ${accessToken}` } },
+        { headers: { Authorization: `Bearer ${accessToken}` } }, controls,
       ), "Google Drive");
       const mimeType = typeof metadata.mimeType === "string" ? metadata.mimeType : null;
       const isGoogleDoc = mimeType?.startsWith("application/vnd.google-apps.") ?? false;
@@ -1022,9 +1231,9 @@ export async function fetchSelectedDocuments(connectionId: string, selectedDocum
       const contentUrl = isGoogleDoc && exportMimeType
         ? `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}/export?mimeType=${encodeURIComponent(exportMimeType)}`
         : `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?alt=media`;
-      const contentText = await readProviderTextResponse(await fetch(contentUrl, {
+      const contentText = await readProviderTextResponse(await oauthSourceFetch(contentUrl, {
         headers: { Authorization: `Bearer ${accessToken}` },
-      }), "Google Drive");
+      }, controls), "Google Drive");
       documents.push({
         id: String(metadata.id ?? id),
         sourceKey: id,
@@ -1042,15 +1251,15 @@ export async function fetchSelectedDocuments(connectionId: string, selectedDocum
   if (connection.provider === "MICROSOFT") {
     for (const id of ids) {
       const itemPath = microsoftDriveItemPath(id);
-      const metadata = await readProviderJsonResponse(await fetch(
+      const metadata = await readProviderJsonResponse(await oauthSourceFetch(
         `https://graph.microsoft.com/v1.0${itemPath}`,
-        { headers: { Authorization: `Bearer ${accessToken}` } },
+        { headers: { Authorization: `Bearer ${accessToken}` } }, controls,
       ), "Microsoft Graph");
       const mimeType = typeof metadata.file?.mimeType === "string" ? metadata.file.mimeType : null;
       if (!isPlainTextDocumentMimeType(mimeType)) continue;
-      const contentText = await readProviderTextResponse(await fetch(
+      const contentText = await readProviderTextResponse(await oauthSourceFetch(
         `https://graph.microsoft.com/v1.0${itemPath}/content`,
-        { headers: { Authorization: `Bearer ${accessToken}` } },
+        { headers: { Authorization: `Bearer ${accessToken}` } }, controls,
       ), "Microsoft Graph");
       documents.push({
         id: String(metadata.id ?? id),
@@ -1080,29 +1289,32 @@ function messageHeader(headers: unknown, name: string) {
   return typeof value === "string" ? value : null;
 }
 
-export async function fetchFilteredEmailMessages(connectionId: string, filters: string[]): Promise<OAuthEmailMessage[]> {
+export async function fetchFilteredEmailMessages(connectionId: string, filters: string[], controls?: OAuthSourceAttemptControls): Promise<OAuthEmailMessage[]> {
   const safeFilters = filters.map((filter) => filter.trim()).filter(Boolean);
   if (safeFilters.length === 0) return [];
 
-  const connection = await refreshOAuthTokenIfNeeded(connectionId);
+  await controls?.authorizeAttempt();
+  const connection = await refreshOAuthTokenIfNeeded(connectionId, controls);
+  await controls?.authorizeAttempt();
   if (connection.status !== "ACTIVE") return [];
   const accessToken = oauthAccessToken(connection);
+  await assertOAuthSourceAccount(connection, accessToken, controls);
   const messages: OAuthEmailMessage[] = [];
 
   if (connection.provider === "GOOGLE") {
     for (const filter of safeFilters) {
       const query = new URLSearchParams({ q: filter, maxResults: "10" });
-      const listing = await readProviderJsonResponse(await fetch(
+      const listing = await readProviderJsonResponse(await oauthSourceFetch(
         `https://gmail.googleapis.com/gmail/v1/users/me/messages?${query}`,
-        { headers: { Authorization: `Bearer ${accessToken}` } },
+        { headers: { Authorization: `Bearer ${accessToken}` } }, controls,
       ), "Gmail");
       const messageRefs = Array.isArray(listing.messages) ? listing.messages : [];
       for (const ref of messageRefs) {
         const id = typeof ref?.id === "string" ? ref.id : null;
         if (!id) continue;
-        const detail = await readProviderJsonResponse(await fetch(
+        const detail = await readProviderJsonResponse(await oauthSourceFetch(
           `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`,
-          { headers: { Authorization: `Bearer ${accessToken}` } },
+          { headers: { Authorization: `Bearer ${accessToken}` } }, controls,
         ), "Gmail");
         const headers = detail.payload?.headers;
         const date = messageHeader(headers, "Date");
@@ -1128,14 +1340,15 @@ export async function fetchFilteredEmailMessages(connectionId: string, filters: 
         $search: `"${filter.replace(/"/g, "\\\"")}"`,
         $select: "id,subject,from,receivedDateTime,webLink,bodyPreview",
       });
-      const listing = await readProviderJsonResponse(await fetch(
+      const listing = await readProviderJsonResponse(await oauthSourceFetch(
         `https://graph.microsoft.com/v1.0/me/messages?${query}`,
         {
           headers: {
             Authorization: `Bearer ${accessToken}`,
             ConsistencyLevel: "eventual",
+            Prefer: 'IdType="ImmutableId"',
           },
-        },
+        }, controls,
       ), "Microsoft Graph");
       for (const item of Array.isArray(listing.value) ? listing.value : []) {
         messages.push({
@@ -1153,4 +1366,100 @@ export async function fetchFilteredEmailMessages(connectionId: string, filters: 
   }
 
   return messages;
+}
+
+
+/** Replay a saved message by its provider ID, then prove membership in the saved
+ * provider selection. A new inbox discovery page is not the old message's authority. */
+export async function fetchSelectedEmailMessage(connectionId: string, messageId: string, filter: string,
+  controls: OAuthSourceAttemptControls): Promise<OAuthEmailMessage | null> {
+  await controls.authorizeAttempt();
+  const connection = await refreshOAuthTokenIfNeeded(connectionId, controls);
+  await controls.authorizeAttempt();
+  if (connection.status !== "ACTIVE") return null;
+  const accessToken = oauthAccessToken(connection);
+  await assertOAuthSourceAccount(connection, accessToken, controls);
+  const headers = {Authorization: `Bearer ${accessToken}`};
+  if (connection.provider === "GOOGLE") {
+    const detail = await readProviderJsonResponse(await oauthSourceFetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date&metadataHeaders=Message-ID`,
+      {headers}, controls), "Gmail");
+    if (detail.id !== messageId) return null;
+    const providerHeaders = detail.payload?.headers;
+    const rfcId = messageHeader(providerHeaders, "Message-ID");
+    // Only an exact server-returned RFC822 atom can narrow Google's own q parser.
+    const safeRfcId = rfcId && /^<[^\s<>"(){}]+@[^\s<>"(){}]+>$/.test(rfcId) && rfcId.length <= 998;
+    // Headerless mail can still prove exact ID membership in the original q;
+    // incomplete bounded provider pages remain indeterminate rather than guessing the filter locally.
+    const query = new URLSearchParams({q: safeRfcId ? `(${filter}) rfc822msgid:${rfcId}` : filter, maxResults: "100"});
+    let next: string | null = `https://gmail.googleapis.com/gmail/v1/users/me/messages?${query}`;
+    const seen = new Set<string>();
+    let matched = false;
+    while (next && !matched) {
+      invariant(!seen.has(next) && seen.size < 100, 503, "OAUTH_SELECTION_INCOMPLETE",
+        "The original Gmail selection could not be completely verified. Retry after narrowing the selection.");
+      seen.add(next);
+      const listing = await readProviderJsonResponse(await oauthSourceFetch(next, {headers}, controls), "Gmail");
+      matched = Array.isArray(listing.messages) && listing.messages.some((item: {id?: unknown}) => item.id === messageId);
+      const token = typeof listing.nextPageToken === "string" ? listing.nextPageToken : null;
+      if (token) query.set("pageToken", token);
+      next = token ? `https://gmail.googleapis.com/gmail/v1/users/me/messages?${query}` : null;
+    }
+    if (!matched) return null;
+    const date = messageHeader(providerHeaders, "Date");
+    return {id: messageId, provider: connection.provider, subject: messageHeader(providerHeaders, "Subject") ?? "Untitled email",
+      from: messageHeader(providerHeaders, "From"), receivedAt: date ? new Date(date) : null, webUrl: null,
+      snippet: typeof detail.snippet === "string" ? detail.snippet : "", filter};
+  }
+  if (connection.provider === "MICROSOFT") {
+    const messageHeaders = {...headers, Prefer: 'IdType="ImmutableId"'};
+    const item = await readProviderJsonResponse(await oauthSourceFetch(
+      `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}?$select=id,subject,from,receivedDateTime,webLink,bodyPreview`,
+      {headers: messageHeaders}, controls), "Microsoft Graph");
+    if (item.id !== messageId || typeof item.receivedDateTime !== "string") return null;
+    const received = new Date(item.receivedDateTime);
+    if (!Number.isFinite(received.getTime())) return null;
+    // Keep Microsoft's original KQL predicate, but restrict membership to the
+    // exact provider-returned UTC second rather than a potentially saturated day.
+    const second = Math.floor(received.getTime() / 1000) * 1000;
+    const start = new Date(second).toISOString().replace(".000Z", "Z");
+    const end = new Date(second + 1000).toISOString().replace(".000Z", "Z");
+    const query = new URLSearchParams({$top: "1000", $select: "id",
+      $search: `"(${filter.replace(/"/g, '\\"')}) AND received>=${start} AND received<${end}"`});
+    let next: string | null = `https://graph.microsoft.com/v1.0/me/messages?${query}`;
+    const seen = new Set<string>();
+    let examined = 0;
+    let matched = false;
+    while (next && !matched) {
+      let url: URL;
+      try { url = new URL(next); }
+      catch { throw new AppError(503, "OAUTH_SELECTION_INCOMPLETE", "Outlook selection continuation was invalid."); }
+      invariant(url.origin === "https://graph.microsoft.com" && url.pathname === "/v1.0/me/messages"
+        && !seen.has(next) && seen.size < 100,
+      503, "OAUTH_SELECTION_INCOMPLETE", "Outlook selection could not be completely verified. Retry later.");
+      seen.add(next);
+      const listing = await readProviderJsonResponse(await oauthSourceFetch(next,
+        {headers: {...messageHeaders, ConsistencyLevel: "eventual"}}, controls), "Microsoft Graph");
+      invariant(Array.isArray(listing.value) && listing.value.every((row: unknown) => row !== null
+        && typeof row === "object" && "id" in row && typeof row.id === "string" && row.id.length > 0),
+        503, "OAUTH_SELECTION_INCOMPLETE", "Outlook selection response was incomplete.");
+      matched = listing.value.some((row: {id?: unknown}) => row.id === messageId);
+      examined += listing.value.length;
+      // Graph search has a 1,000-result ceiling, even without a nextLink.
+      // Its truncated absence is neither membership nor source revocation.
+      invariant(matched || examined < 1000, 503, "OAUTH_SELECTION_INCOMPLETE",
+        "Outlook selection reached the provider search limit. Retry later.");
+      const continuation = listing["@odata.nextLink"];
+      invariant(continuation == null || typeof continuation === "string" && continuation.length > 0,
+        503, "OAUTH_SELECTION_INCOMPLETE", "Outlook selection continuation was incomplete.");
+      next = typeof continuation === "string" ? continuation : null;
+    }
+    if (!matched) return null;
+    return {id: messageId, provider: connection.provider,
+      subject: typeof item.subject === "string" && item.subject.trim() ? item.subject : "Untitled email",
+      from: typeof item.from?.emailAddress?.address === "string" ? item.from.emailAddress.address : null,
+      receivedAt: received, webUrl: typeof item.webLink === "string" ? item.webLink : null,
+      snippet: typeof item.bodyPreview === "string" ? item.bodyPreview : "", filter};
+  }
+  return null;
 }

@@ -201,7 +201,7 @@ export async function runMeetingSummaryAgent(params: {
           meetingId: meeting.id,
           chunkIndex: chunk.chunkIndex,
           chunkCount: chunk.chunkCount,
-        }, async () => defaultModelGateway.extract({
+        }, async (operation) => defaultModelGateway.extract(operation.modelRequest({
           model,
           workspaceId: params.workspaceId,
           agentRunId: runId,
@@ -242,14 +242,14 @@ export async function runMeetingSummaryAgent(params: {
             } : null,
           }),
           schemaHint: MEETING_BLOCK_SCHEMA_HINT,
-        }), { receipt });
+        })), { receipt });
         blockOutputs.push(normalizeMeetingBlocks(blockExtraction.output));
       }
       const meetingBlocks = mergeMeetingBlockOutputs(blockOutputs);
       const summaryTranscript = transcriptForSummaryChat(transcript, transcriptChunks);
 
       await revalidateInputs();
-      const summary = await helpers.tool("model.chat", { meetingId: meeting.id }, async () => defaultModelGateway.chat({ model,
+      const summary = await helpers.tool("model.chat", { meetingId: meeting.id }, async (operation) => defaultModelGateway.chat(operation.modelRequest({ model,
         workspaceId: params.workspaceId,
         agentRunId: runId,
         taskType: "SUMMARY",
@@ -307,7 +307,7 @@ export async function runMeetingSummaryAgent(params: {
             }),
           },
         ],
-      }), { receipt });
+      })), { receipt });
 
       const summaryMd = normalizeMeetingProductTerminology(
         applyGuidanceTermCorrections(summary.content, meeting.ingestionGuidanceMd),

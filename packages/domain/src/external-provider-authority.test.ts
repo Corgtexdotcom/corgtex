@@ -29,7 +29,7 @@ const fixture = vi.hoisted(() => {
     if (args.select) result = Object.fromEntries(Object.keys(args.select).map((key) => [key, result[key]]));
     return result;
   };
-  const names = ["informationCategoryPolicy", "crmAccount", "crmContact", "crmDeal", "crmActivity", "crmDealStageTransition", "crmConversation", "crmConversationMessage",
+  const names = ["workspaceArchiveRecord", "workspacePermalink", "brainArticle", "informationCategoryPolicy", "crmAccount", "crmContact", "crmDeal", "crmActivity", "crmDealStageTransition", "crmConversation", "crmConversationMessage",
     "crmProspectWorkspace", "crmCommunicationSuggestion", "document", "meeting", "meetingInsight", "artifactInputLineage", "artifactInputSnapshot", "workspace", "executionRequest", "executionResult", "demoLead", "crmQualification", "workflowJob", "brainSource", "mcpToolInput", "member", "user", "knowledgeChunk", "externalMcpConnection", "externalContentSource", "externalContentSyncLog", "externalProviderFetchInput", "communicationMessageNativeInput"];
   const prisma: any = { $queryRaw: vi.fn(async () => []), $executeRaw: vi.fn(async () => 1),
     auditLog: { create: vi.fn(async () => ({})) }, event: { createMany: vi.fn(async () => ({ count: 1 })) } };
@@ -81,10 +81,11 @@ const fixture = vi.hoisted(() => {
   return { prisma, tables, time, state, revoked: new Set<string>(), departed: new Set<string>() };
 });
 vi.mock("../../shared/src/env", () => ({ env: { ENCRYPTION_KEY: "a".repeat(64) } }));
-vi.mock("@corgtex/shared", async () => ({ ...await import("../../shared/src/crypto"), prisma: fixture.prisma, env: { APP_URL: "https://synthetic.test" }, toInputJson: (value: unknown) => value }));
+vi.mock("@corgtex/shared", async () => ({ ...await import("../../shared/src/crypto"),
+  ...await import("../../shared/src/mcp-context"), ...await import("../../shared/src/support-context"), prisma: fixture.prisma, env: { APP_URL: "https://synthetic.test" }, toInputJson: (value: unknown) => value }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership: vi.fn(async ({ actor, workspaceId }) => {
   if (!["ws-crm", "ws-other"].includes(workspaceId) || fixture.departed.has(actor.user?.id ?? "agent")) throw Object.assign(new Error("Membership revoked"), { status: 403 });
-  return { id: `member-${actor.user?.id ?? "agent"}`, role: "MEMBER" };
+  return { id: `member-${actor.user?.id ?? "agent"}`, role: actor.user?.globalRole === "OPERATOR" ? "ADMIN" : "MEMBER" };
 }), requireGlobalOperator: vi.fn() }));
 vi.mock("./brain-access", () => ({ resolveKnowledgeAccessDomains: vi.fn(async (actor) => actor.user?.id === "finance" && !fixture.revoked.has("finance")
   ? ["WORKSPACE", "FINANCE"] : ["WORKSPACE"]) }));
@@ -100,6 +101,9 @@ const remote = vi.hoisted(() => ({ details: { id: "file", name: "Original Box ti
 vi.mock("./external-mcp", async importOriginal => ({ ...await importOriginal<typeof import("./external-mcp")>(),
   readBoxExternalMcpNativeResponse: remote.transport }));
 
+import { ArchiveMetadataReadRelease, getWorkspaceArchiveRecord, listArchivedWorkspaceArtifacts } from "./archive";
+import { inspectLegacyRecovery } from "./legacy-recovery";
+import * as lineage from "./source-lineage";
 import { selectExternalContentSource, syncExternalContentSource, listExternalContentSources, enqueueExternalContentSourceSync } from "./external-content-sources";
 import { captureExternalProviderFetchInput, createExternalProviderSyncActor, externalProviderResponseHash,
   getExternalProviderPrincipalUserId, isExternalProviderCapturedResponse, isExternalProviderFetchInputCurrent, assertExternalProviderCapturedResponseCurrent } from "./external-provider-authority";
@@ -138,6 +142,107 @@ describe("External provider live authority and copied lineage with real helpers"
       if (remote.fail) throw new Error("Restricted provider payload");
       return structuredClone(toolName === "get_file_details" ? remote.details : remote.content); });
   });
+  it.each(["fresh", "late-revocation"] as const)("retains native provider authority for an UNKNOWN recovery preview: %s", async phase => {
+    const source = await setup();
+    const receipt = await capture(source.id);
+    const roots = await captureArtifactInputProof(owner, ws, [{ kind: "ExternalProviderFetchInput", id: receipt.input.id }]);
+    const document = await fixture.prisma.document.create({ data: { id: "unknown-provider-document", workspaceId: ws,
+      title: "Historical provider copy", source: "legacy", content: "Original Box bytes" } });
+    await fixture.prisma.artifactInputLineage.create({ data: { workspaceId: ws, artifactType: "Document", artifactId: document.id,
+      revision: 1, origin: "UNKNOWN", contentHash: lineage.lineageContentFingerprint("Document", document), inputsJson: [], rootsJson: roots } });
+    const admin = { ...owner, user: { ...(owner as Extract<AppActor, { kind: "user" }>).user, globalRole: "OPERATOR" as const } } as AppActor;
+    const before = structuredClone(fixture.tables);
+    const original = lineage.captureArtifactReadHeadObservation;
+    let capturedCalls = 0;
+    remote.transport.mockClear();
+    const observation = vi.spyOn(lineage, "captureArtifactReadHeadObservation").mockImplementation(async read => {
+      const result = await original(read);
+      capturedCalls = remote.transport.mock.calls.length;
+      if (phase === "late-revocation") remote.fail = true;
+      return result;
+    });
+    try {
+      const preview = inspectLegacyRecovery(admin, { workspaceId: ws, kind: "Document", id: document.id });
+      if (phase === "fresh") await expect(preview).resolves.toMatchObject({ id: document.id,
+        fingerprint: lineage.lineageContentFingerprint("Document", document), knownContributors: roots.length, private: false, hasFile: false });
+      else await expect(preview).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+      expect(capturedCalls).toBeGreaterThan(0);
+      expect(remote.transport.mock.calls.length).toBeGreaterThan(capturedCalls);
+      expect(fixture.tables).toEqual(before);
+      // The transport throws if any provider request occurs inside either RR.
+      expect(fixture.state.transactionDepth).toBe(0);
+    } finally { observation.mockRestore(); }
+  });
+
+  it.each(["fresh", "permalink-revocation", "later-admission-revocation", "detail-fresh", "detail-revocation"] as const)(
+    "replays original restored archive provider authority after discovery: %s", async phase => {
+      const source = await setup(); const receipt = await capture(source.id);
+      const roots = await captureArtifactInputProof(owner, ws, [{ kind: "ExternalProviderFetchInput", id: receipt.input.id }]);
+      const preflight = await prepareExternalProviderCommitPreflight(owner, ws, { roots, receipts: [receipt] });
+      const article = await fixture.prisma.$transaction((tx: any) => withExternalProviderCommitPreflight(owner, ws, tx, preflight, async () => {
+        const row = await tx.brainArticle.create({ data: { id: "rebuilt-restored-article", workspaceId: ws,
+          title: "Restored provider copy", bodyMd: "Original Box bytes", isPrivate: false, ownerMemberId: null, authority: "REFERENCE" } });
+        await recordArtifactInputLineage({ tx, actor: owner, workspaceId: ws, artifact: { kind: "BrainArticle", id: row.id },
+          content: row, origin: "DERIVED", inputs: [], inheritedRoots: roots });
+        return row;
+      }));
+      await fixture.prisma.workspaceArchiveRecord.create({ data: { id: "archive-restored", workspaceId: ws,
+        entityType: "BrainArticle", entityId: article.id, archivedAt: fixture.time, restoredAt: fixture.time, purgedAt: null } });
+      await fixture.prisma.workspacePermalink.create({ data: { id: "restored-permalink", workspaceId: ws,
+        entityType: "BrainArticle", entityId: article.id } });
+      if (phase === "later-admission-revocation") await fixture.prisma.workspaceArchiveRecord.create({ data: {
+        id: "archive-later", workspaceId: ws, entityType: "BrainArticle", entityId: article.id,
+        archivedAt: new Date(0), restoredAt: fixture.time, purgedAt: null,
+      } });
+      const admin = { ...owner, user: { ...(owner as Extract<AppActor, { kind: "user" }>).user, globalRole: "OPERATOR" as const } } as AppActor;
+      const localBefore = structuredClone(fixture.tables);
+      if (phase === "detail-fresh" || phase === "detail-revocation") {
+        const release = new ArchiveMetadataReadRelease(admin, ws);
+        const record = await getWorkspaceArchiveRecord(admin, {workspaceId: ws, entityType: "BrainArticle", entityId: article.id,
+          includeRestored: true}, release);
+        expect(record).toMatchObject({id: "archive-restored"});
+        const capturedCalls = remote.transport.mock.calls.length;
+        if (phase === "detail-revocation") remote.fail = true;
+        if (phase === "detail-fresh") await expect(release.finish(record)).resolves.toMatchObject({id: "archive-restored"});
+        else await expect(release.finish(record)).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+        expect(remote.transport.mock.calls.length).toBeGreaterThan(capturedCalls);
+        expect(fixture.tables).toEqual(localBefore);
+        expect(fixture.state.transactionDepth).toBe(0);
+        return;
+      }
+      const callsBeforeLateQuery: number[] = [];
+      remote.transport.mockClear();
+      const delegate = fixture.prisma.workspacePermalink;
+      const original = delegate.findMany.getMockImplementation();
+      const captureOriginal = lineage.captureArtifactArchiveMetadataProof;
+      let captures = 0;
+      const captureSpy = phase === "later-admission-revocation" ? vi.spyOn(lineage, "captureArtifactArchiveMetadataProof").mockImplementation(async (...args) => {
+        const proof = await captureOriginal(...args);
+        if (++captures === 2) { callsBeforeLateQuery.push(remote.transport.mock.calls.length); remote.fail = true; }
+        return proof;
+      }) : undefined;
+      delegate.findMany.mockImplementation(async (args: any) => {
+        const rows = await original(args);
+        if (phase !== "later-admission-revocation") {
+          callsBeforeLateQuery.push(remote.transport.mock.calls.length);
+          if (phase !== "fresh") remote.fail = true;
+        }
+        return rows;
+      });
+      try {
+        const read = listArchivedWorkspaceArtifacts(admin, { workspaceId: ws, includeRestored: true });
+        if (phase === "fresh") {
+          await expect(read).resolves.toMatchObject([{ id: "archive-restored", permanentPath: `/workspaces/${ws}/items/restored-permalink` }]);
+        } else await expect(read).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+        expect(callsBeforeLateQuery).toHaveLength(1);
+        expect(callsBeforeLateQuery[0]).toBeGreaterThan(0);
+        expect(remote.transport.mock.calls.length).toBeGreaterThan(callsBeforeLateQuery[0]);
+        expect(fixture.tables).toEqual(localBefore);
+        // The shared provider harness throws on any network call in a tx;
+        // successful fresh release therefore also exercises the local RR fence.
+        expect(fixture.state.transactionDepth).toBe(0);
+      } finally { delegate.findMany.mockImplementation(original); captureSpy?.mockRestore(); }
+    });
   it("captures encrypted exact responses with opaque runtime identity and checks every live read", async () => {
     const source = await setup(); const receipt = await capture(source.id);
     expect(isExternalProviderCapturedResponse(receipt)).toBe(true); expect(isExternalProviderCapturedResponse({ ...receipt })).toBe(false);
@@ -440,6 +545,22 @@ describe("External provider live authority and copied lineage with real helpers"
     job.status = "COMPLETED"; await enqueueExternalContentSourceSync(owner, { workspaceId: ws, sourceId: source.id }); const next = claimJob();
     const syncKnowledge = vi.fn(); const result = await syncExternalContentSource({ workspaceId: ws, sourceId: source.id, workflowJobId: next.id, syncKnowledge });
     expect(result.status).toBe("UNCHANGED"); expect(syncKnowledge).not.toHaveBeenCalled(); expect(fixture.tables.brainSource).toHaveLength(1);
+  });
+  it("retries indexing after copying succeeded but indexing failed, then becomes unchanged", async () => {
+    const source = await setup(); const job = claimJob();
+    const run = (syncKnowledge: (input: any) => Promise<number>) => syncExternalContentSource({
+      workspaceId: ws, sourceId: source.id, workflowJobId: job.id, syncKnowledge,
+    });
+    await expect(run(async () => { throw new Error("Synthetic index failure"); })).rejects.toMatchObject({ code: "EXTERNAL_CONTENT_SYNC_FAILED" });
+    expect(fixture.tables.brainSource).toHaveLength(1);
+    expect(fixture.tables.externalContentSyncLog.at(-1).status).toBe("ERROR");
+    const index = vi.fn(async () => 1);
+    await expect(run(index)).resolves.toMatchObject({ status: "SYNCED", chunksCreated: 1 });
+    expect(index).toHaveBeenCalledTimes(1);
+    expect(fixture.tables.externalContentSyncLog.at(-1).status).toBe("SYNCED");
+    await expect(run(index)).resolves.toMatchObject({ status: "UNCHANGED", chunksCreated: 0 });
+    expect(index).toHaveBeenCalledTimes(1);
+    expect(fixture.tables.brainSource).toHaveLength(2);
   });
   it("preserves prior copies and withholds raw errors on failed refetch", async () => {
     const source = await setup(); const job = claimJob(); remote.fail = true;

@@ -1,0 +1,60 @@
+name: Azure Ops Read-only Inventory
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: azure-ops-readonly-inventory
+  cancel-in-progress: false
+
+jobs:
+  inventory:
+    if: github.ref == 'refs/heads/main'
+    name: Capture sanitized Ops ARM metadata (not cutover acceptance)
+    runs-on: ubuntu-latest
+    environment: azure-migration-foundation
+    timeout-minutes: 10
+    env:
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Check the existing protected subscription binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module -e 'import { OPSCORE_SUBSCRIPTION } from "./scripts/migration/ops-core-runtime-targets.mjs"; if (process.env.AZURE_SUBSCRIPTION_ID !== OPSCORE_SUBSCRIPTION) { console.error("Protected subscription binding mismatch; no Azure request made."); process.exit(1); }'
+      - name: Log in with the existing migration OIDC identity
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Read intended Ops resources through ARM GET only
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          node scripts/migration/ops-core-azure-inventory.mjs --execute
+      - name: Explain the evidence boundary
+        if: always()
+        shell: bash
+        run: |
+          printf '%s\n' '## Ops inventory only' 'A successful capture is not migration acceptance. Review PASS/FAIL/UNKNOWN checks and evidence gaps in the sanitized artifact. No source, runtime, network, database, grant or secret changes are performed.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain sanitized metadata only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-ops-inventory-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/azure-ops-inventory/summary.json
+          if-no-files-found: warn
+          retention-days: 7

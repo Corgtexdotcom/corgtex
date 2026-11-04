@@ -231,6 +231,7 @@ describe("native SQL publication across independent processes", () => {
       throw new Error("Expected concurrent PostgreSQL lock was not observed");
     }
     try {
+      const lockHolderPid = Number((await fixture.writer.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
       await fixture.writer.query(`SELECT pg_advisory_lock($1)`, [key]);
       await fixture.writer.query(`CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
         IF NEW."workspaceId" = '${source.workspaceId}' THEN PERFORM pg_advisory_xact_lock(${key}); END IF; RETURN NEW; END $$`);
@@ -238,7 +239,10 @@ describe("native SQL publication across independent processes", () => {
       await worker.run(source.id, false);
       let publisherPid = 0;
       await eventually(async () => {
-        const result = await observer.query(`SELECT pid FROM pg_stat_activity WHERE wait_event='advisory' AND query LIKE 'INSERT INTO "public"."KnowledgeChunk"%'`);
+        // Observe the fixture's actual lock relationship, independent of INSERT formatting.
+        const result = await observer.query(`SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event = 'advisory'
+            AND $1::int = ANY(pg_blocking_pids(pid))`, [lockHolderPid]);
         publisherPid = Number(result.rows[0]?.pid ?? 0); return publisherPid > 0;
       });
       const epoch = await db.sourcePermissionEpoch.findUniqueOrThrow({ where: { workspaceId_sourceKind_sourceId: {
@@ -628,7 +632,11 @@ describe("exclusive SQL outbox admission", () => {
     await worker.prepared();
     await worker.release();
     await worker.publicationReady();
-    await db.workflowJob.update({ where: { id: job.id }, data: { lockedBy: "replacement-worker", attempts: { increment: 1 }, lockedAt: new Date() } });
+    const prepared = await db.sqlKnowledgePublication.findFirstOrThrow({where: {sourceId: source.id}});
+    const native = await db.sqlNativeRunInput.findUniqueOrThrow({where: {id: prepared.nativeInputId}});
+    expect(prepared.status).toBe("PREPARED");
+    expect(await db.sqlKnowledgeStagedChunk.count({where: {publicationId: prepared.id}})).toBeGreaterThan(0);
+    const replacement = await db.workflowJob.update({ where: { id: job.id }, data: { lockedBy: "replacement-worker", attempts: { increment: 1 }, lockedAt: new Date() } });
     await worker.releasePublication();
     await worker.complete(); // Dispatcher records the owned failure instead of rejecting its cycle.
     expect(await db.workflowJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: "RUNNING", lockedBy: "replacement-worker", attempts: 2, error: null });
@@ -636,6 +644,18 @@ describe("exclusive SQL outbox admission", () => {
     expect(await cacheVersion(source.workspaceId)).toBe(0);
     expect(await db.externalDataSource.findUniqueOrThrow({ where: { id: source.id } })).toMatchObject({ lastCursorValue: null, lastSyncAt: null });
     expect(await db.externalDataSyncLog.findFirstOrThrow({ where: { sourceId: source.id } })).toMatchObject({ chunksCreated: 0, error: "SQL_WORKFLOW_LEASE_LOST" });
-    expect(await db.sqlKnowledgePublication.findFirstOrThrow({ where: { sourceId: source.id } })).toMatchObject({ status: "PREPARED" });
+    // Terminal cleanup removes only abandoned non-serving preparation. The
+    // immutable native receipt and exact failed attempt/log remain auditable,
+    // and the replacement workflow's complete row must not be overwritten.
+    expect(await db.sqlKnowledgePublication.findUnique({where: {id: prepared.id}})).toBeNull();
+    expect(await db.sqlKnowledgeStagedChunk.count({where: {publicationId: prepared.id}})).toBe(0);
+    expect(await db.sqlNativeRunInput.findUnique({where: {id: native.id}})).toEqual(native);
+    expect(await db.sqlIngestionAttempt.findUnique({where: {id: prepared.attemptId}})).toMatchObject({
+      status: "FAILED", sourceId: source.id, generation: prepared.generation,
+      error: "SQL_WORKFLOW_LEASE_LOST", completedAt: expect.any(Date)});
+    expect(await db.externalDataSyncLog.findFirstOrThrow({where: {sourceId: source.id}})).toMatchObject({
+      sqlAttemptId: prepared.attemptId, rowsProcessed: 0, chunksCreated: 0,
+      error: "SQL_WORKFLOW_LEASE_LOST", completedAt: expect.any(Date)});
+    expect(await db.workflowJob.findUnique({where: {id: job.id}})).toEqual(replacement);
   });
 });

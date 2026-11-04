@@ -4,8 +4,9 @@ import { defaultModelGateway, resolveModel } from "@corgtex/models";
 export async function runBrainSourceRegenerationJob(params: { workspaceId: string; jobId: string; expectedAttempt: number; expectedOwner: string }) {
   return generateBrainSourceRemovalCandidate({
     ...params,
-    generate: async (article, sources) => {
+    generate: async (article, sources, controls) => {
       const response = await defaultModelGateway.chat({
+        ...controls,
         model: resolveModel("fast"),
         workspaceId: params.workspaceId,
         workflowJobId: params.jobId,
