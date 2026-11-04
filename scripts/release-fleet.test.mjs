@@ -5,10 +5,10 @@ import { buildWorkflowInputs, runFleetReleaseDispatch, workflowForInputs } from 
 const SHA = "c9077ff031e8e672923c84d52eeef862368f3493";
 
 describe("release fleet command", () => {
-  it("defaults to latest-stable and primary target groups", () => {
+  it("defaults to latest-stable and selfserve only", () => {
     expect(buildWorkflowInputs(["--reason", "Ship latest stable."])).toMatchObject({
       release: "latest-stable",
-      targets: "managed-customers,selfserve,ops",
+      targets: "selfserve",
       reason: "Ship latest stable.",
       dryRun: false,
       concurrency: 2,

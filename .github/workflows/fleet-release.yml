@@ -9,10 +9,10 @@ on:
         type: string
         default: latest-stable
       targets:
-        description: "default, all, managed-customers, selfserve, ops, backup-app, or legacy aliases. Default excludes backup-app."
+        description: "selfserve by default; explicit default/all or other workload groups retain broad selection."
         required: true
         type: string
-        default: managed-customers,selfserve,ops
+        default: selfserve
       target_id:
         description: "Optional exact control-plane deployment ID. Set this to promote one deployment only."
         required: false
