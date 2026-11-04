@@ -483,14 +483,14 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     });
   }
 
-  it("retains an uploaded reference across conversation-create failure without uploading twice", async () => {
+  it("retains an uploaded reference across a known creation rejection without uploading twice", async () => {
     await input().fill("Create with uploaded file");
     await page.locator('input[type="file"]').setInputFiles({ name: "create.txt", mimeType: "text/plain", buffer: Buffer.from("Synthetic create file") });
     await send().click();
     await requestAt(0);
     await reply(page, 0, { message: "Synthetic upload ready", webUrl: "/synthetic-create-file" });
     await requestAt(1);
-    await reply(page, 1, {}, 503);
+    await reply(page, 1, { error: { code: "INVALID_INPUT", message: "Synthetic pre-write rejection" } }, 400);
     expect(await send().isEnabled()).toBe(true);
     await send().click();
     expect((await requestAt(2)).url).toBe("/api/workspaces/alpha/conversations");
