@@ -182,7 +182,10 @@ describe.runIf(process.env.GOAL_EDITOR_BROWSER_QA === "1")("Goal editor browser 
     const actions = await page.evaluate(() => (window as any).fixture.actions);
     expect(actions.map((action: any) => action.expectedVersion)).toEqual(["3", "3", "3", "4"]);
     expect(actions[0]).toEqual({ workspaceId: "synthetic-workspace", goalId: "goal-a", expectedVersion: "3", title: "Unsaved title", descriptionMd: "Unsaved description", cadence: "QUARTERLY", level: "COMPANY", startDate: "2026-10-01", targetDate: "", parentGoalId: "goal-parent", circleId: "circle-1", ownerMemberId: "member-1" });
-    await page.keyboard.press("Escape");
+    // Pending disables the focused submit button. Send Escape from the active
+    // editor, as current dialog dismissal is scoped to its focus boundary.
+    await form().locator("input[name=title]").press("Escape");
+    await expect.poll(() => editPopover().count()).toBe(0);
     await openEdit("Goal B");
     expect(await form().getByRole("alert").count()).toBe(0);
     expect(await form().locator("input[name=expectedVersion]").inputValue()).toBe("9");
