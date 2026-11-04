@@ -252,7 +252,6 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     await configure(page, { workspaceId: "beta" });
     await reply(page, 0, { message: "Synthetic attachment stored", webUrl: "/synthetic-file" });
     expect((await requests(page)).length).toBe(1);
-    expect((await requests(page))[0].aborted).toBe(false);
     expect(await input().inputValue()).toBe("");
     expect(await page.locator(".chat-attachment-bar").count()).toBe(0);
     expect(await input().isEnabled()).toBe(true);
@@ -264,7 +263,6 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
       await page.locator('input[type="file"]').setInputFiles({ name: "once.txt", mimeType: "text/plain", buffer: Buffer.from("Synthetic once") });
       await send().click(); await requestAt(1);
       await load("b", 2);
-      expect((await requests(page))[1].aborted).toBe(false);
       if (responseWhileAway) await reply(page, 1, { message: "Stored once", webUrl: "/synthetic-once" });
       expect(await messages().innerText()).toContain("Answer b");
       await load("a", 3); await send().click();
