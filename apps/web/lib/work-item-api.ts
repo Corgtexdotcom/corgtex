@@ -8,8 +8,6 @@ import {
   normalizeGoalWorkItem,
   normalizeProposalWorkItem,
   normalizeTensionWorkItem,
-  workItemMemberDisplayName,
-  workItemUserDisplayName,
 } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -63,14 +61,6 @@ export function workItemPriorityFromBody(body: Record<string, unknown>) {
   if ("priority" in body) return coerceWorkItemPriorityInput(body.priority);
   if ("priorityLabel" in body) return coerceWorkItemPriorityInput(body.priorityLabel, "priorityLabel");
   return undefined;
-}
-
-export function userDisplayName(user: UserLike | null | undefined) {
-  return workItemUserDisplayName(user);
-}
-
-export function memberDisplayName(member: MemberLike) {
-  return workItemMemberDisplayName(member);
 }
 
 export function serializeActionWorkItem<T extends ActionLike>(action: T): ReturnType<typeof normalizeActionWorkItem<T>>;
