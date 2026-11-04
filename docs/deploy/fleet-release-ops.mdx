@@ -5,6 +5,10 @@ description: "Operator checklist for promoting a stable Corgtex release across t
 
 Fleet releases promote a canary-proven Corgtex release through GitHub Actions. Operators trigger and monitor the workflow; GitHub Actions and the Ops control plane own provider credentials, target discovery, release metadata, and health proof.
 
+The Fleet Release and Fleet Release Preflight forms, and `npm run release:fleet` without `--targets`, default to `selfserve`. Explicit workload groups and the broad `default`/`all` aliases retain their existing meaning.
+
+For a selfserve-only static inventory, `FLEET_RELEASE_TARGETS_JSON` can contain a nonempty array with the existing Azure selfserve target, its exact deployment ID, `group: "selfserve"`, `provider: "azure"`, runtime URL and Azure resource identifiers. A nonempty array disables control-plane discovery. The other target variables remain additive: the legacy-named `FLEET_RELEASE_AZURE_TARGET_JSON` must remain configured for selfserve validation and should contain the identical selfserve deployment (deduplicated by deployment ID), while Ops and backup-app variables must be cleared separately if they should leave the configured fleet entirely. Empty arrays are rejected by configuration validation; an unset general inventory permits discovery again. These are production environment settings requiring separate operator approval; changing workflow defaults does not edit them or retire customer records.
+
 The release workflow must use the GitHub environment `fleet-release-production`. Do not wire fleet releases to the generic `production` environment.
 
 Fleet promotion reuses immutable GHCR images for the release SHA. It does not build Docker images. If the canonical web or worker image for `sha-<gitSha>` is missing, publish it with the `Release Images` workflow before running a real fleet promotion.

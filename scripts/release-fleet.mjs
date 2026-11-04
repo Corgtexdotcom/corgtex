@@ -14,7 +14,7 @@ import {
 export function buildWorkflowInputs(argv = process.argv.slice(2)) {
   const args = parseKeyValueArgs(argv);
   const release = normalizeReleaseInput(args.release ?? "latest-stable");
-  const targets = normalizeTargets(args.targets).join(",");
+  const targets = normalizeTargets(args.targets ?? "selfserve").join(",");
   const targetId = args.targetId?.trim() ?? "";
   const reason = args.reason ?? "";
   if (!reason.trim()) {
