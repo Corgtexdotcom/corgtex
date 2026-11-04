@@ -58,7 +58,7 @@ export async function POST(request: NextRequest) {
         ? actionRequestSource("GPT_REQUEST", actor.user.id, request.headers.get("Idempotency-Key") ?? "")
         : undefined,
     });
-    const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, action.id) ?? action;
+    const actionForResponse = await loadActionWorkItemResponse(actor, workspaceId, action.id) ?? { id: action.id, contentWithheld: true };
     const item = serializeActionWorkItem(actionForResponse);
     if ("contentWithheld" in item) return NextResponse.json(item);
 
