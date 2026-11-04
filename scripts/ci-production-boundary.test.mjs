@@ -150,7 +150,10 @@ describe("automatic production CI boundary", () => {
     const jobs = parse(workflow).jobs;
     const tests = jobs.test;
     expect(tests.strategy).toEqual({"fail-fast": false, matrix: {shard: [1, 2, 3]}});
-    expect(tests["runs-on"]).toBe("ubuntu-latest");
+    const fixtureJobs = Object.entries(jobs).filter(([, value]) =>
+      value.steps?.some(step => step.uses === "./.github/actions/ci-pgvector"));
+    expect(fixtureJobs.map(([name]) => name).sort()).toEqual(["check-native", "db-sync", "test"]);
+    for (const [, fixtureJob] of fixtureJobs) expect(fixtureJob["runs-on"]).toBe("ubuntu-24.04");
     expect(tests.if).toBeUndefined();
     expect(tests["continue-on-error"]).toBeUndefined();
     expect(tests.steps.some(step => step["continue-on-error"])).toBe(false);

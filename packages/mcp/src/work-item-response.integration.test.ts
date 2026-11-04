@@ -140,6 +140,30 @@ describe("MCP work item response release", () => {
     expect(row.version).toBe(2);
   });
 
+  it.each(["Action", "Tension"] as const)("withholds a missing canonical %s create response after a single committed write", async kind => {
+    const f = await fixture(true);
+    if (kind === "Action") {
+      const originalRead = prisma.action.findFirst.bind(prisma.action);
+      vi.spyOn(prisma.action, "findFirst").mockImplementation((async args => {
+        if (args?.include?.assigneeMember) return null;
+        return originalRead(args);
+      }) as typeof prisma.action.findFirst);
+    } else {
+      const originalRead = prisma.tension.findFirst.bind(prisma.tension);
+      vi.spyOn(prisma.tension, "findFirst").mockImplementation((async args => {
+        if (args?.include?.assigneeMember) return null;
+        return originalRead(args);
+      }) as typeof prisma.tension.findFirst);
+    }
+    const result = await f.call(kind, true);
+    const rows = kind === "Action"
+      ? await prisma.action.findMany({ where: { workspaceId: f.workspace.id, title: "Created Action" } })
+      : await prisma.tension.findMany({ where: { workspaceId: f.workspace.id, title: "Created Tension" } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].version).toBe(1);
+    expect(result).toEqual({ id: rows[0].id, contentWithheld: true });
+  });
+
   it("rejects original joined labels changed during the real outer post-call scope check", async () => {
     const f = await fixture(true);
     const original = mcpContext.withMcpRequiredScopes;

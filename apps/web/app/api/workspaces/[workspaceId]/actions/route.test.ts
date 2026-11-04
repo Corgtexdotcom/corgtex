@@ -463,20 +463,21 @@ describe("POST /api/workspaces/[workspaceId]/actions", () => {
     expect(readBoundary.admit).not.toHaveBeenCalled();
   });
 
-  // PUN-90: current behavior only, not a privacy guarantee. The missing-read
-  // fallback skips canonical admission/release and needs review before extraction.
-  it("falls back to the created action when its canonical read is missing", async () => {
+  it("withholds the created action when its canonical read is missing", async () => {
     prisma.action.findFirst.mockResolvedValueOnce(null);
     const { POST } = await import("./route");
     const response = await POST(actionCreateRequest({ title: "Follow up" }), context());
 
     expect(response.status).toBe(201);
     const body = await response.json();
-    expect(body.action).toMatchObject({
-      id: "action-1", title: "Follow up", status: "DRAFT", priorityLabel: "Important",
-      assigneeMemberId: "member-2", assigneeMemberName: null, inputRequestCount: null,
+    expect(body).toEqual({
+      action: { id: "action-1", contentWithheld: true },
+      webUrl: "https://app.corgtex.com/workspaces/workspace-1/actions/action-1",
+      permanentUrl: null,
     });
-    expect(body.action).not.toHaveProperty("contentWithheld");
+    for (const field of ["title", "bodyMd", "status", "priority", "assigneeMemberId"]) {
+      expect(body.action).not.toHaveProperty(field);
+    }
     expect(readBoundary.admit).not.toHaveBeenCalled();
     expect(loadAdviceRequestCountSummaries).not.toHaveBeenCalled();
     expect(readBoundary.finish).not.toHaveBeenCalled();
@@ -587,16 +588,8 @@ describe("PATCH /api/workspaces/[workspaceId]/actions/[actionId]", () => {
     expect(updateAction).toHaveBeenCalledOnce();
     expect(response.status).toBe(200);
     const body = await response.json();
-    if (outcome === "denied") expect(body).toEqual({ action: { id: "action-1", contentWithheld: true } });
-    else {
-      // Same potentially unsafe fallback as POST; denied reads must never use it.
-      expect(body.action).toMatchObject({
-        id: "action-1", status: "OPEN", version: 3, priorityLabel: "Urgent",
-        assigneeMemberId: "member-2", assigneeMemberName: null, inputRequestCount: null,
-      });
-      expect(body.action).not.toHaveProperty("contentWithheld");
-      expect(readBoundary.admit).not.toHaveBeenCalled();
-    }
+    expect(body).toEqual({ action: { id: "action-1", contentWithheld: true } });
+    if (outcome === "missing") expect(readBoundary.admit).not.toHaveBeenCalled();
     expect(loadAdviceRequestCountSummaries).not.toHaveBeenCalled();
     expect(readBoundary.finish).not.toHaveBeenCalled();
   });

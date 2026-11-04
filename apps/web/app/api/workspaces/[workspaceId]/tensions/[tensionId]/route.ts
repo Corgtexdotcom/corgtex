@@ -37,7 +37,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       priority: workItemPriorityFromBody(body),
       expectedVersion: body.expectedVersion,
     });
-    const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, tension.id) ?? tension;
+    const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, tension.id) ?? { id: tension.id, contentWithheld: true };
     return NextResponse.json({ tension: serializeTensionWorkItem(tensionForResponse) });
   } catch (error) {
     return handleRouteError(error);
