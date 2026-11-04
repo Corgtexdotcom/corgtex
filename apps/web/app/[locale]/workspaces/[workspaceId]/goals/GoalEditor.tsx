@@ -50,13 +50,15 @@ export function GoalEditor({ workspaceId, goal }: {
   const tCommon = useTranslations("common");
   const choices = useContext(ChoicesContext);
   const [materialized, setMaterialized] = useState(false);
+  const [parentSelection, setParentSelection] = useState(goal.parentGoalId ?? "");
   if (!choices) throw new Error("GoalEditor requires shared page choices");
+  const parentOutsideChoices = materialized && goal.parentGoalId && !choices.goals.some(item => item.id === goal.parentGoalId);
 
   // ActionMenu mounts this component only while open. Materialize on first Edit
   // expansion and retain the form when collapsed so unsaved fields survive.
   // Closing the menu unmounts it and resets fields/action state as before.
   return (
-    <details onToggle={(event) => {
+    <details onReset={() => setParentSelection(goal.parentGoalId ?? "")} onToggle={(event) => {
       if (event.currentTarget.open) setMaterialized(true);
     }}>
       <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
@@ -111,7 +113,14 @@ export function GoalEditor({ workspaceId, goal }: {
           <div className="actions-inline">
             <label style={{ flex: 1 }}>
               {t("formParentGoal")}
-              <select name="parentGoalId" defaultValue={goal.parentGoalId ?? ""}>
+              <select
+                name={parentOutsideChoices && parentSelection === goal.parentGoalId ? undefined : "parentGoalId"}
+                defaultValue={goal.parentGoalId ?? ""}
+                onChange={event => setParentSelection(event.target.value)}
+              >
+                {/* An omitted field preserves the current reference in the existing
+                    action. Do not turn a bounded/missing choice into an unlink. */}
+                {parentOutsideChoices && <option value={goal.parentGoalId!}>{t("unknown")}</option>}
                 <option value="">{t("formNone")}</option>
                 {choices.goals.filter((item) => item.id !== goal.id).map((item) => (
                   <option key={item.id} value={item.id}>{item.title}</option>

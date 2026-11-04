@@ -36,11 +36,13 @@ describe.runIf(process.env.GOAL_EDITOR_BROWSER_QA === "1")("Goal editor browser 
         });
         window.fixture = { actions: [], result: { status: "conflict" }, resolve: null,
           role: new URLSearchParams(location.search).get("role") ?? "ADMIN",
+          limited: new URLSearchParams(location.search).has("limited"),
           goals: [makeGoal("goal-a", "Goal A"), makeGoal("goal-b", "Goal B", { version: 9, authorUserId: "other-author", parentGoalId: null, circleId: null, ownerMemberId: null }),
             makeGoal("goal-shared", "Shared active", { status: "ACTIVE", isPrivate: false, authorUserId: "other-author" }),
             makeGoal("goal-private", "Private active", { status: "ACTIVE", authorUserId: "other-author" }),
             makeGoal("goal-completed", "Completed", { status: "COMPLETED" }),
             makeGoal("goal-parent", "Annual parent", { cadence: "ANNUAL" })] };
+        if (window.fixture.limited) window.fixture.goals = window.fixture.goals.filter(goal => goal.id !== "goal-parent");
         const element = await GoalsPage({ params: Promise.resolve({ workspaceId: "synthetic-workspace" }), searchParams: Promise.resolve({}) });
         createRoot(document.getElementById("root")).render(
           <NextIntlClientProvider locale="en" timeZone="UTC" messages={en}>{element}</NextIntlClientProvider>
@@ -60,7 +62,7 @@ describe.runIf(process.env.GOAL_EDITOR_BROWSER_QA === "1")("Goal editor browser 
           const modules: Record<string, string> = {
             "@corgtex/domain": `export class DigestReadRelease { async finish() {} }
               export class ArchiveMetadataReadRelease { async finish() {} }
-              export const listGoalsPage = async () => ({ items: window.fixture.goals, complete: true, nextCursor: null });
+              export const listGoalsPage = async () => ({ items: window.fixture.goals, complete: !window.fixture.limited, nextCursor: window.fixture.limited ? "synthetic-next" : null });
               export const buildGoalTree = goals => goals;
               export const listCircles = async () => [{ id: "circle-1", name: "Synthetic circle" }];
               export const listHumanMembers = async () => [{ id: "member-1", user: { displayName: null, email: "owner@example.test" } }];
@@ -201,5 +203,31 @@ describe.runIf(process.env.GOAL_EDITOR_BROWSER_QA === "1")("Goal editor browser 
     await row("Goal B").waitFor();
     expect(await row("Goal B").getByRole("button", { name: "More actions", exact: true }).count()).toBe(1);
     expect(await row("Completed").getByRole("button", { name: "More actions", exact: true }).count()).toBe(0);
+  });
+
+  it("preserves an out-of-window parent on title edits and reset, while allowing an explicit unlink or replacement", async () => {
+    await page.goto(origin + "/?limited=1");
+    await openEdit("Goal A");
+    const parent = form().getByLabel("Parent goal", { exact: true });
+    expect(await parent.inputValue()).toBe("goal-parent");
+    expect(await parent.locator("option:checked").textContent()).toBe("Unknown");
+    await form().locator("input[name=title]").fill("Title-only edit");
+    async function submit() {
+      const count = await page.evaluate(() => (window as any).fixture.actions.length);
+      await form().getByRole("button", { name: "Save as draft", exact: true }).click();
+      await expect.poll(() => page.evaluate(() => (window as any).fixture.actions.length)).toBe(count + 1);
+      const action = await page.evaluate(() => (window as any).fixture.actions.at(-1));
+      await page.evaluate(() => (window as any).fixture.resolve());
+      await expect.poll(() => form().getAttribute("aria-busy")).toBe("false");
+      return action;
+    }
+    expect(await submit()).not.toHaveProperty("parentGoalId");
+    await parent.selectOption("");
+    expect(await submit()).toHaveProperty("parentGoalId", "");
+    await parent.selectOption("goal-b");
+    expect(await submit()).toHaveProperty("parentGoalId", "goal-b");
+    await form().evaluate(node => (node as HTMLFormElement).reset());
+    expect(await parent.inputValue()).toBe("goal-parent");
+    expect(await submit()).not.toHaveProperty("parentGoalId");
   });
 });
