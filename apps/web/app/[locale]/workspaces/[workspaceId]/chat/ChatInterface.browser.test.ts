@@ -105,6 +105,24 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     });
   }
 
+  it("keeps the selected transcript and draft when translations and questions refresh", async () => {
+    await load(); await input().fill("Selected draft");
+    await configure(page, { questions: true });
+    expect(await messages().innerText()).toContain("Answer a");
+    expect(await input().inputValue()).toBe("Selected draft");
+    expect(await page.locator(".chat-session-item.active").innerText()).toContain("Synthetic a");
+    expect(await requests(page)).toHaveLength(1);
+  });
+
+  it("supports the page's omitted company-question prop without a render loop", async () => {
+    await configure(page, { omitQuestions: true });
+    await load(); await startSend("Ordinary page message", 1);
+    expect(await input().isDisabled()).toBe(true);
+    await streamAction(page, 1, "stream"); await streamAction(page, 1, "finish");
+    expect(await input().isEnabled()).toBe(true);
+    expect(await page.locator(".chat-unread-question-open").count()).toBe(0);
+  });
+
   it("clears old turns and prevents a send while the next conversation is loading", async () => {
     await load();
     await input().fill("Draft a");
@@ -464,6 +482,27 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     expect(await input().inputValue()).toBe("Saved company answer");
   });
 
+  for (const secondOpens of [false, true]) {
+    it(`settles the old question receipt after a second question ${secondOpens ? "opens" : "fails to open"}`, async () => {
+      await configure(page, { questions: true, secondQuestion: true });
+      await page.locator(".chat-unread-question-open").filter({ hasText: "Synthetic company question" }).click(); await requestAt(0);
+      await reply(page, 0, { conversation: conversation("q") });
+      await input().fill("First answer"); await send().click(); await requestAt(1);
+      await page.locator(".chat-unread-question-open").filter({ hasText: "Synthetic second question" }).click(); await requestAt(2);
+      await reply(page, 2, secondOpens ? { conversation: conversation("q2") } : {}, secondOpens ? 200 : 503);
+      await reply(page, 1, { checkIn: { id: "question", status: "ANSWERED" } });
+      expect(await input().isEnabled()).toBe(true);
+      if (secondOpens) {
+        await startSend("Second answer", 3);
+        expect(JSON.parse((await requests(page))[3].body!)).toMatchObject({ checkInId: "question2" });
+      } else {
+        expect(await input().inputValue()).toBe("First answer");
+        expect(await messages().innerText()).toContain("Answer q");
+        expect(await page.locator(".chat-question-policy").count()).toBe(0);
+      }
+    });
+  }
+
   it("does not apply an old answer receipt to another workspace's question list or draft", async () => {
     await configure(page, { questions: true }); await page.locator(".chat-unread-question-open").click(); await requestAt(0);
     await reply(page, 0, { conversation: conversation("q") }); await input().fill("Alpha answer"); await send().click(); await requestAt(1);
@@ -598,9 +637,35 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     await page.getByTitle("Back to conversations", { exact: true }).click();
     expect((await requests(page))[1]).toMatchObject({ aborted: true, canceled: true });
     await load("a", 2);
+    await restoreDraft();
     expect(await input().inputValue()).toBe("Keep interrupted rail prompt");
     expect(await input().isEnabled()).toBe(true);
     expect(await error().count()).toBe(0);
+  });
+
+  it("keeps uncertain-send recovery available after collapsing and reopening the actual rail", async () => {
+    await configure(page, { rail: true }); await load(); await startSend("Rail uncertain draft", 1);
+    await streamAction(page, 1, "stream"); await finishUncommitted(page, 1);
+    await requestAt(2); await reply(page, 2, { conversation: conversation("a") });
+    await page.getByRole("button", { name: "Collapse AI rail", exact: true }).click();
+    await page.getByRole("button", { name: "Open AI rail", exact: true }).click();
+    expect(await error().innerText()).toContain("may already be saved");
+    await restoreDraft(); expect(await input().inputValue()).toBe("Rail uncertain draft");
+    expect(await requests(page)).toHaveLength(3);
+    await mkdir(".artifacts/personal-chat", { recursive: true });
+    await page.screenshot({ path: ".artifacts/personal-chat/rail-uncertain-restored.png", fullPage: true });
+  });
+
+  it("does not let an empty-conversation starter overwrite an uncertain retained draft", async () => {
+    const empty = { ...conversation("a"), turns: [] };
+    await select("a"); await requestAt(0); await reply(page, 0, { conversation: empty });
+    await startSend("Retained original", 1); await streamAction(page, 1, "stream"); await finishUncommitted(page, 1);
+    await requestAt(2); await reply(page, 2, { conversation: empty });
+    const starters = page.locator(".chat-starters button");
+    expect(await starters.count()).toBe(3); expect(await starters.first().isDisabled()).toBe(true);
+    await starters.first().dispatchEvent("click"); await restoreDraft();
+    expect(await input().inputValue()).toBe("Retained original");
+    expect(await requests(page)).toHaveLength(3);
   });
 
   it("decodes split UTF-8 and event lines, then sends a second turn without recreating the conversation", async () => {

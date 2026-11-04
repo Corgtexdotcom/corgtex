@@ -18,7 +18,7 @@ export type ChatFixture = {
   requests: ChatRequest[];
   canonicalReads: ChatRequest[];
   refreshes: number;
-  configure: (patch: { workspaceId?: string; activeSessionId?: string | null; rail?: boolean; mobileMode?: boolean; questions?: boolean }) => void;
+  configure: (patch: { workspaceId?: string; activeSessionId?: string | null; rail?: boolean; mobileMode?: boolean; questions?: boolean; omitQuestions?: boolean; secondQuestion?: boolean }) => void;
   reply: (id: number, value: unknown, status?: number) => void;
   reject: (id: number) => void;
   stream: (id: number) => void;
@@ -93,7 +93,7 @@ export async function startChatBrowserFixture(options: {
       };
       fixture.reject = id => { const reject = rejected.get(id); rejected.delete(id); pending.delete(id); reject(new TypeError('Synthetic network failure')); };
       fixture.reply = (id, value, status = 200) => {
-        if (status === 200 && value.conversation) conversations.set(fixture.requests[id].url, value.conversation);
+        if (status === 200 && value?.conversation) conversations.set(fixture.requests[id].url, value.conversation);
         const resolve = pending.get(id); pending.delete(id); rejected.delete(id);
         resolve(new Response(JSON.stringify(value), {status, headers: {'Content-Type': 'application/json'}}));
       };
@@ -136,18 +136,19 @@ export async function startChatBrowserFixture(options: {
       const root = createRoot(document.getElementById('root'));
       fixture.unmount = () => root.unmount();
       function Fixture() {
-        const [props, setProps] = useState({workspaceId: 'alpha', activeSessionId: null, rail: false, mobileMode: false, questions: false});
+        const [props, setProps] = useState({workspaceId: 'alpha', activeSessionId: null, rail: false, mobileMode: false, questions: false, omitQuestions: false, secondQuestion: false});
         fixture.configure = patch => setProps(previous => ({...previous, ...patch}));
         fixture.pathname = '/en/workspaces/' + props.workspaceId;
         const conversations = React.useMemo(() => (props.workspaceId === 'alpha' ? ['a', 'b'] : ['c']).map(id => ({
           id, topic: 'Synthetic ' + id, agentKey: 'assistant', status: 'ACTIVE', updatedAt: '2026-01-01T00:00:00.000Z', lastMessage: 'Preview ' + id,
         })), [props.workspaceId]);
         const questions = React.useMemo(() => props.questions ? [{id: 'question', questionText: 'Synthetic company question',
-          confidence: null, priority: 1, relatedConversationId: null, createdAt: '2026-01-01T00:00:00.000Z'}] : [], [props.questions]);
+          confidence: null, priority: 1, relatedConversationId: null, createdAt: '2026-01-01T00:00:00.000Z'}, ...(props.secondQuestion ? [{id: 'question2', questionText: 'Synthetic second question',
+          confidence: null, priority: 2, relatedConversationId: null, createdAt: '2026-01-01T00:00:00.000Z'}] : [])] : [], [props.questions, props.secondQuestion]);
         return <NextIntlClientProvider locale="en" timeZone="UTC" messages={${JSON.stringify({ chat: messages.chat, demo: messages.demo })}}>
           <div className="ws-layout">
           {props.rail ? <WorkspaceChatRail workspaceId={props.workspaceId} conversations={conversations} companyQuestions={questions} aiWorkspaceState={{}} />
-            : <ChatInterface {...props} compact={props.mobileMode} conversations={conversations} companyQuestions={questions} />}
+            : <ChatInterface {...props} compact={props.mobileMode} conversations={conversations} {...(props.omitQuestions ? {} : {companyQuestions: questions})} />}
           </div>
         </NextIntlClientProvider>;
       }

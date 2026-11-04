@@ -55,6 +55,8 @@ type ChatDraft = {
 };
 type UploadResult = { status?: string; message?: string; webUrl?: string | null; error?: { code?: string; message?: string } };
 
+const EMPTY_COMPANY_QUESTIONS: CompanyQuestionSummary[] = [];
+
 const UNCERTAIN_SEND = "Your previous send may already be saved. Review this conversation before restoring the draft; sending it again may create a duplicate.";
 const UNCERTAIN_QUESTION = "Your answer may already be saved. Reload questions and review this conversation before restoring the draft.";
 
@@ -80,7 +82,7 @@ export function ChatInterface({
   workspaceId,
   conversations: initialConversations,
   historyLimited = false,
-  companyQuestions: initialCompanyQuestions = [],
+  companyQuestions: initialCompanyQuestions = EMPTY_COMPANY_QUESTIONS,
   activeSessionId,
   compact = false,
   mobileMode = false,
@@ -129,6 +131,7 @@ export function ChatInterface({
   const draftSessionRef = useRef(activeSessionId);
   const draftRef = useRef<ChatDraft>({ input: "", attachedFile: null });
   const workspaceRef = useRef(workspaceId);
+  const controlledSelectionRef = useRef<{ workspaceId: string; activeSessionId: string | null } | null>(null);
 
   const cancelRequest = useCallback(() => {
     const request = requestRef.current;
@@ -148,12 +151,14 @@ export function ChatInterface({
     requestRef.current === request && !request.controller.signal.aborted, []);
 
   function updateInput(value: string) {
+    if (draftRef.current.uncertainSend) return;
     draftRef.current = { ...draftRef.current, input: value };
     draftsRef.current.set(draftSessionRef.current, draftRef.current);
     setInput(value);
   }
 
   function updateAttachment(file: File | null) {
+    if (draftRef.current.uncertainSend) return;
     draftRef.current = { ...draftRef.current, attachedFile: file, uploadedMessage: undefined };
     draftsRef.current.set(draftSessionRef.current, draftRef.current);
     setAttachedFile(file);
@@ -321,6 +326,9 @@ export function ChatInterface({
   }, [t, workspaceId, beginRequest, isCurrentRequest, selectDraft, acknowledgeDraftRead]);
 
   useEffect(() => {
+    const previous = controlledSelectionRef.current;
+    if (previous?.workspaceId === workspaceId && previous.activeSessionId === activeSessionId) return;
+    controlledSelectionRef.current = { workspaceId, activeSessionId };
     if (activeSessionId) {
       void loadConversation(activeSessionId);
     } else {
@@ -331,7 +339,7 @@ export function ChatInterface({
       setExportContext(null);
       setLoading(false);
     }
-  }, [activeSessionId, loadConversation, cancelRequest, selectDraft]);
+  }, [workspaceId, activeSessionId, loadConversation, cancelRequest, selectDraft]);
 
   useEffect(() => {
     if (questionSnapshotRef.current !== initialCompanyQuestions) {
@@ -703,11 +711,13 @@ export function ChatInterface({
           }
           if (data?.checkIn?.id !== answeredQuestionId) throw new Error(t("errorFailedToSend"));
           settleQuestionDraft(false);
+          if (questionWritesRef.current === questionWrites && workspaceRef.current === workspaceId) {
+            setActiveQuestionId(previous => previous === answeredQuestionId ? null : previous);
+          }
           if (!isCurrentRequest(request)) {
             refreshQuestionsWhenIdle();
             return;
           }
-          setActiveQuestionId(previous => previous === answeredQuestionId ? null : previous);
         } catch (err) {
           settleQuestionDraft(!rejected);
           refreshQuestionsWhenIdle();
@@ -1179,6 +1189,7 @@ export function ChatInterface({
                   ].map((starter) => (
                     <button
                       key={starter}
+                      disabled={loading || Boolean(uncertainDraft) || questionWritePending}
                       onClick={() => {
                         updateInput(starter);
                         inputRef.current?.focus();
@@ -1219,16 +1230,16 @@ export function ChatInterface({
             <div ref={messagesEndRef} />
           </div>
 
-          {error && (
+          {(error || uncertainDraft) && (
             <div className="form-message form-message-error" style={{ margin: "0 16px 8px" }}>
-              <span>{error}</span>
+              <span>{error ?? (uncertainDraft?.kind === "question" ? UNCERTAIN_QUESTION : UNCERTAIN_SEND)}</span>
               {errorAction?.message === error ? (
                 <>
                   {" "}
                   <a href={errorAction.href}>{errorAction.label}</a>
                 </>
               ) : null}
-              {uncertainDraft && error !== (uncertainDraft.kind === "question" ? UNCERTAIN_QUESTION : UNCERTAIN_SEND)
+              {uncertainDraft && error && error !== (uncertainDraft.kind === "question" ? UNCERTAIN_QUESTION : UNCERTAIN_SEND)
                 && <p>{uncertainDraft.kind === "question" ? UNCERTAIN_QUESTION : UNCERTAIN_SEND}</p>}
               {uncertainDraft && <div className="actions-inline" style={{ flexWrap: "wrap" }}>
                 <button type="button" className="secondary small" disabled={loading || Boolean(uncertainDraft.questionPending)} onClick={() => {
@@ -1247,6 +1258,7 @@ export function ChatInterface({
               <span className="chat-attachment-name">{attachedFile.name}</span>
               <button
                 aria-label={t("titleRemoveAttachment")}
+                disabled={loading || Boolean(uncertainDraft) || questionWritePending}
                 onClick={removeAttachment}
                 className="chat-attachment-remove"
                 type="button"
