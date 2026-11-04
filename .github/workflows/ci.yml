@@ -574,9 +574,7 @@ jobs:
       OBSERVATION_SINCE: ${{ needs.smoke-mode-gate.outputs.observation_since }}
       PRODUCTION_VALIDATION_TARGET: ${{ needs.smoke-mode-gate.outputs.selected_target }}
       SELFSERVE_VALIDATION_EXPECTED_SHA: ${{ needs.smoke-mode-gate.outputs.selfserve_expected_sha }}
-      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
-      FLEET_RELEASE_TARGETS_JSON: ${{ vars.FLEET_RELEASE_TARGETS_JSON }}
-      FLEET_RELEASE_OPS_TARGET_JSON: ${{ vars.FLEET_RELEASE_OPS_TARGET_JSON }}
+      OPS_OBSERVATION_PUBLIC_HEALTH: "true"
     steps:
       - uses: actions/checkout@v5
         with:
@@ -617,6 +615,16 @@ jobs:
               import { healthPayloadMismatch, healthReleaseValidationMismatch } from "./scripts/railway-smoke.mjs";
               const health = JSON.parse(fs.readFileSync(0, "utf8"));
               const expected = process.env.EXPECTED_BAKED_SHA;
+              if (!expected) {
+                const { opsHealthEvidence } = await import("./scripts/ops-public-health.mjs");
+                console.error(opsHealthEvidence({ ok: true }, health).reason);
+                // Report only observed metadata. Never substitute the CI SHA or
+                // synthesize release labels for an older Ops runtime.
+                console.log(health?.release?.gitSha ?? "");
+                console.log(health?.release?.imageTag ?? "");
+                console.log(health?.release?.version ?? "");
+                process.exit(0);
+              }
               if (expected && (!/^[a-f0-9]{40}$/.test(expected)
                 || healthPayloadMismatch({ ok: true }, health)
                 || healthReleaseValidationMismatch(health, expected, { requireConfiguredMatch: true })
@@ -642,11 +650,12 @@ jobs:
           } <<< "$selfserve_release"
           test "$selfserve_git_sha" = "$SELFSERVE_VALIDATION_EXPECTED_SHA"
 
+          ops_release="$(read_health_release "https://ops.corgtex.com/api/health")"
           {
-            read -r ops_git_sha
-            read -r ops_image_tag
-            read -r ops_version
-          } < <(read_health_release "https://ops.corgtex.com/api/health")
+            read -r ops_git_sha || true
+            read -r ops_image_tag || true
+            read -r ops_version || true
+          } <<< "$ops_release"
 
           manifest_json="$(
             SELFSERVE_GIT_SHA="$selfserve_git_sha" \
@@ -664,7 +673,7 @@ jobs:
               console.log(JSON.stringify({ gitSha, targetManifests }));
             '
           )"
-          echo "Observation uses live target releases from selfserve and ops health"
+          echo "Observation uses baked selfserve identity and reported Ops metadata; Ops availability is checked by public HTTPS health"
           observation_script="scripts/post-deploy-observation-gate.mjs"
           observation_targets=azure-selfserve,ops
           node "$observation_script" \
