@@ -463,6 +463,25 @@ describe("POST /api/workspaces/[workspaceId]/actions", () => {
     expect(readBoundary.admit).not.toHaveBeenCalled();
   });
 
+  // PUN-90: current behavior only, not a privacy guarantee. The missing-read
+  // fallback skips canonical admission/release and needs review before extraction.
+  it("falls back to the created action when its canonical read is missing", async () => {
+    prisma.action.findFirst.mockResolvedValueOnce(null);
+    const { POST } = await import("./route");
+    const response = await POST(actionCreateRequest({ title: "Follow up" }), context());
+
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body.action).toMatchObject({
+      id: "action-1", title: "Follow up", status: "DRAFT", priorityLabel: "Important",
+      assigneeMemberId: "member-2", assigneeMemberName: null, inputRequestCount: null,
+    });
+    expect(body.action).not.toHaveProperty("contentWithheld");
+    expect(readBoundary.admit).not.toHaveBeenCalled();
+    expect(loadAdviceRequestCountSummaries).not.toHaveBeenCalled();
+    expect(readBoundary.finish).not.toHaveBeenCalled();
+  });
+
   it("returns only the id and contentWithheld when the created action is unreadable", async () => {
     readBoundary.admit.mockResolvedValueOnce({ ids: new Set(), roots: [], heads: new Map() });
     const { POST } = await import("./route");
@@ -555,6 +574,31 @@ describe("PATCH /api/workspaces/[workspaceId]/actions/[actionId]", () => {
         version: 3,
       },
     });
+  });
+
+  it.each(["missing", "denied"] as const)("characterizes a %s canonical read after action update", async outcome => {
+    if (outcome === "missing") prisma.action.findFirst.mockResolvedValueOnce(null);
+    else readBoundary.admit.mockResolvedValueOnce({ ids: new Set(), roots: [], heads: new Map() });
+    const { PATCH } = await import("./[actionId]/route");
+    const response = await PATCH(actionPatchRequest({ priority: 3, expectedVersion: 2 }), {
+      params: Promise.resolve({ workspaceId: "workspace-1", actionId: "action-1" }),
+    });
+
+    expect(updateAction).toHaveBeenCalledOnce();
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    if (outcome === "denied") expect(body).toEqual({ action: { id: "action-1", contentWithheld: true } });
+    else {
+      // Same potentially unsafe fallback as POST; denied reads must never use it.
+      expect(body.action).toMatchObject({
+        id: "action-1", status: "OPEN", version: 3, priorityLabel: "Urgent",
+        assigneeMemberId: "member-2", assigneeMemberName: null, inputRequestCount: null,
+      });
+      expect(body.action).not.toHaveProperty("contentWithheld");
+      expect(readBoundary.admit).not.toHaveBeenCalled();
+    }
+    expect(loadAdviceRequestCountSummaries).not.toHaveBeenCalled();
+    expect(readBoundary.finish).not.toHaveBeenCalled();
   });
 
   it("preserves date-only due date updates", async () => {

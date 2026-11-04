@@ -85,6 +85,15 @@ it.each(["vote", "voter"] as const)("filters independently hidden %s from respon
   expect(await f.read()).toMatchObject({ id: f.row.id, upvotes: [], inputRequestCount: 1 });
 });
 
+it.each(["Action", "Tension"] as const)("returns null for a missing %s canonical row", async kind => {
+  const f = await fixture(kind);
+  const missingId = randomUUID();
+  const value = kind === "Action"
+    ? await loadActionWorkItemResponse(f.actor, f.workspace.id, missingId)
+    : await loadTensionWorkItemResponse(f.actor, f.workspace.id, missingId);
+  expect(value).toBeNull();
+});
+
 it.each(["Action", "Tension"] as const)("retains the denied %s parent envelope", async kind => {
   const f = await fixture(kind);
   await f.hide(kind, f.row);
