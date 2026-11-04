@@ -180,12 +180,12 @@ export function ChatInterface({
     }
     draft ??= { input: "", attachedFile: null };
     const questionId = draft.questionId === undefined
-      ? (id ? initialCompanyQuestions.find(question => question.relatedConversationId === id && !questionWritesRef.current.has(question.id))?.id ?? null : null)
+      ? (id ? initialCompanyQuestions.find(question => question.relatedConversationId === id && !questionWritesRef.current.has(question.id))?.id : undefined)
       : draft.questionId;
     draft = { ...draft, questionId };
     draftsRef.current.set(id, draft);
     draftRef.current = draft;
-    setActiveQuestionId(questionId);
+    setActiveQuestionId(questionId ?? null);
     setInput(draft.uncertainSend ? "" : draft.input);
     setAttachedFile(draft.uncertainSend ? null : draft.attachedFile);
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -395,9 +395,17 @@ export function ChatInterface({
       }
     }
     setCompanyQuestions(initialCompanyQuestions.filter(question => !questionWritesRef.current.has(question.id)));
+    if (sessionId && draftSessionRef.current === sessionId && draftRef.current.questionId === undefined) {
+      const related = initialCompanyQuestions.find(question => question.relatedConversationId === sessionId && !questionWritesRef.current.has(question.id));
+      if (related) {
+        draftRef.current = { ...draftRef.current, questionId: related.id };
+        draftsRef.current.set(sessionId, draftRef.current);
+        setActiveQuestionId(related.id);
+      }
+    }
     if (activeQuestionId && draftRef.current.questionId !== activeQuestionId && !questionWritesRef.current.has(activeQuestionId)
       && !initialCompanyQuestions.some(question => question.id === activeQuestionId)) setActiveQuestionId(null);
-  }, [initialCompanyQuestions, activeQuestionId]);
+  }, [initialCompanyQuestions, activeQuestionId, sessionId]);
 
   function openNewConversation() {
     cancelRequest();
@@ -746,11 +754,12 @@ export function ChatInterface({
           questionPending: true, questionsRevision: questionRevisionRef.current, reconciled: false,
         } };
         draftsRef.current.set(currentSessionId, draftRef.current);
-        const settleQuestionDraft = (uncertain: boolean) => {
+        const settleQuestionDraft = (outcome: "committed" | "rejected" | "unknown") => {
+          const uncertain = outcome === "unknown";
           if (questionWritesRef.current !== questionWrites || workspaceRef.current !== workspaceId) return;
           const draft = draftsRef.current.get(currentSessionId);
           if (!draft || !draft.uncertainSend || draft.uncertainSend.token !== questionToken) return;
-          const next = { ...draft, questionId: uncertain ? draft.questionId : null, uncertainSend: uncertain ? {
+          const next = { ...draft, questionId: outcome === "committed" ? null : draft.questionId, uncertainSend: uncertain ? {
             ...draft.uncertainSend, questionPending: false,
             questionsRevision: questionRevisionRef.current, reconciled: false,
           } : undefined };
@@ -786,7 +795,7 @@ export function ChatInterface({
             throw new Error(data?.error?.message || t("errorFailedToSend"));
           }
           if (data?.checkIn?.id !== answeredQuestionId) throw new Error(t("errorFailedToSend"));
-          settleQuestionDraft(false);
+          settleQuestionDraft("committed");
           if (questionWritesRef.current === questionWrites && workspaceRef.current === workspaceId) {
             setActiveQuestionId(previous => previous === answeredQuestionId ? null : previous);
           }
@@ -795,7 +804,7 @@ export function ChatInterface({
             return;
           }
         } catch (err) {
-          settleQuestionDraft(!rejected);
+          settleQuestionDraft(rejected ? "rejected" : "unknown");
           refreshQuestionsWhenIdle();
           if (!isCurrentRequest(request)) return;
           if (rejected) setError(err instanceof Error ? err.message : t("errorFailedToSend"));

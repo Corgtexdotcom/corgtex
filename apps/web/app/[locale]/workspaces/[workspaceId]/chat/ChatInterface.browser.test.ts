@@ -562,6 +562,26 @@ describe.runIf(process.env.PERSONAL_CHAT_BROWSER_QA === "1")("personal chat inte
     });
   }
 
+  it("preserves the linked question after a known rejection and history reselection", async () => {
+    await configure(page, { questions: true }); await page.locator(".chat-unread-question-open").click(); await requestAt(0);
+    await reply(page, 0, { conversation: conversation("q") }); await input().fill("Rejected linked answer"); await send().click(); await requestAt(1);
+    await reply(page, 1, { error: { code: "INVALID_INPUT", message: "Synthetic rejected answer" } }, 400);
+    await load("b", 2); await select("q"); await requestAt(3); await reply(page, 3, { conversation: conversation("q") });
+    expect(await input().inputValue()).toBe("Rejected linked answer"); await send().click();
+    expect((await requestAt(4)).url).toBe("/api/workspaces/alpha/check-ins");
+    expect(JSON.parse((await requests(page))[4].body!)).toMatchObject({ checkInId: "question", responseMd: "Rejected linked answer" });
+  });
+
+  it("infers a delayed exact question link without resetting the selected draft", async () => {
+    await configure(page, { activeSessionId: "q" }); await requestAt(0); await reply(page, 0, { conversation: conversation("q") });
+    await input().fill("Draft before related metadata");
+    await configure(page, { questions: true, relatedQuestion: true });
+    expect(await input().inputValue()).toBe("Draft before related metadata");
+    expect(await page.locator(".chat-question-policy").count()).toBe(1); expect(await requests(page)).toHaveLength(1);
+    await send().click(); expect((await requestAt(1)).url).toBe("/api/workspaces/alpha/check-ins");
+    expect(JSON.parse((await requests(page))[1].body!)).toMatchObject({ checkInId: "question", responseMd: "Draft before related metadata" });
+  });
+
   it("does not relink a draft to a question after a known skip receipt", async () => {
     await configure(page, { questions: true }); await page.locator(".chat-unread-question-open").click(); await requestAt(0);
     await reply(page, 0, { conversation: conversation("q") }); await input().fill("Retained ordinary chat prompt");
