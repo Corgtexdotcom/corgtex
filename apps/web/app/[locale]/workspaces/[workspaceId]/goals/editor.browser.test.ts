@@ -118,8 +118,9 @@ describe.runIf(process.env.GOAL_EDITOR_BROWSER_QA === "1")("Goal editor browser 
   });
 
   const row = (title: string) => page.locator(".shadow-sm.mb-3").filter({ has: page.getByRole("heading", { name: title, exact: true }) });
-  const editSummary = () => page.getByRole("menu").locator("summary").filter({ hasText: /^Edit$/ });
-  const form = () => page.getByRole("menu").locator("form").filter({ has: page.locator("input[name=expectedVersion]") });
+  const editPopover = () => page.getByRole("dialog", { name: "More actions", exact: true });
+  const editSummary = () => editPopover().locator("summary").filter({ hasText: /^Edit$/ });
+  const form = () => editPopover().locator("form").filter({ has: page.locator("input[name=expectedVersion]") });
   async function openEdit(title: string) {
     await row(title).getByRole("button", { name: "More actions", exact: true }).click();
     await editSummary().click();
@@ -129,7 +130,7 @@ describe.runIf(process.env.GOAL_EDITOR_BROWSER_QA === "1")("Goal editor browser 
   it("materializes no selectors until Edit opens, then preserves collapse drafts and resets on cancel/edit B", async () => {
     await page.goto(origin);
     await row("Goal A").getByRole("button", { name: "More actions", exact: true }).click();
-    expect(await page.getByRole("menu").locator("select[name=parentGoalId]").count()).toBe(0);
+    expect(await editPopover().locator("select[name=parentGoalId]").count()).toBe(0);
     await editSummary().click();
     const parent = form().locator("select[name=parentGoalId]");
     await parent.waitFor();
