@@ -6,6 +6,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { queryOpsPublicHealth } from "./ops-public-health.mjs";
+
 import { parseArgs } from "./ops/ops-core.mjs";
 
 const FAILURE_EVENTS = [
@@ -187,10 +189,23 @@ async function collectObservationData({ env = process.env, manifest = {}, since,
     });
   }
 
-  const railwayTargets = railwayTargetsFromEnv(env, targets, { requireExactDeploymentEvidence: Boolean(targetDeploymentId) });
+  // Main CI opts into public Ops availability; release workflows retain their
+  // exact provider/deployment observation contract.
+  const publicOpsHealth = env.OPS_OBSERVATION_PUBLIC_HEALTH === "true";
+  if (publicOpsHealth && targetDeploymentId) {
+    throw new Error("Public Ops health cannot prove an exact deployment target");
+  }
+  const selectedTargets = normalizeObservationTargets(targets) ?? new Set(TARGET_GROUPS);
+  const providerTargets = publicOpsHealth ? [...selectedTargets].filter((target) => target !== "ops").join(",") : targets;
+  if (publicOpsHealth && selectedTargets.has("ops")) {
+    sourceChecks.push(await queryOpsPublicHealth({ fetchImpl: deps.fetchImpl ?? fetch }));
+    queriedSources.add("ops_health");
+  }
+  const railwayTargets = publicOpsHealth && !providerTargets ? []
+    : railwayTargetsFromEnv(env, providerTargets, { requireExactDeploymentEvidence: Boolean(targetDeploymentId) });
   if (safeText(env.RAILWAY_API_TOKEN) && railwayTargets.length > 0) {
     try {
-      const railwayRows = await queryRailwayRows({ env, manifest, since, until, targets, targetDeploymentId, deps });
+      const railwayRows = await queryRailwayRows({ env, manifest, since, until, targets: providerTargets, targetDeploymentId, deps });
       rows.push(...railwayRows);
       for (const group of new Set(railwayTargets.map((target) => target.group).filter(Boolean))) {
         queriedSources.add(`railway:${group}`);
@@ -205,7 +220,7 @@ async function collectObservationData({ env = process.env, manifest = {}, since,
     } catch (error) {
       sourceErrors.set("railway", error);
     }
-  } else if (railwayTargets.length > 0 || selectedRailwayTargetGroups(targets).size > 0) {
+  } else if (railwayTargets.length > 0 || (!publicOpsHealth || providerTargets) && selectedRailwayTargetGroups(providerTargets).size > 0) {
     addSourceNote({
       source: "railway",
       status: "skipped",
@@ -234,7 +249,7 @@ async function collectObservationData({ env = process.env, manifest = {}, since,
     });
   }
 
-  const missingSourceGroups = requiredObservationSourceGroupsForTargets(targets, targetDeploymentId)
+  const missingSourceGroups = requiredObservationSourceGroupsForTargets(targets, targetDeploymentId, { publicOpsHealth })
     .filter((group) => !group.sources.some((source) => queriedSources.has(source)));
 
   for (const [source, error] of sourceErrors) {
@@ -857,7 +872,7 @@ function requiresObservationSource(env) {
   return /^(1|true|yes)$/i.test(String(env.OBSERVATION_REQUIRE_SOURCE ?? ""));
 }
 
-function requiredObservationSourceGroupsForTargets(targets, targetDeploymentId = null) {
+function requiredObservationSourceGroupsForTargets(targets, targetDeploymentId = null, { publicOpsHealth = false } = {}) {
   const selectedTargets = normalizeObservationTargets(targets);
   const targetList = selectedTargets ? [...selectedTargets] : TARGET_GROUPS;
   const groups = [];
@@ -865,6 +880,10 @@ function requiredObservationSourceGroupsForTargets(targets, targetDeploymentId =
     groups.push({ label: "azure_monitor", sources: ["azure_monitor"] });
   }
   for (const target of targetList.filter((target) => RAILWAY_TARGET_GROUPS.includes(target))) {
+    if (target === "ops" && publicOpsHealth) {
+      groups.push({ label: "ops: public HTTPS health", sources: ["ops_health"] });
+      continue;
+    }
     const sources = [`railway:${target}`];
     if (!targetDeploymentId) sources.push("posthog");
     groups.push({ label: targetDeploymentId ? `${target}: railway target` : `${target}: railway or posthog`, sources });
