@@ -60,7 +60,7 @@ export async function POST(request: NextRequest) {
       assigneeMemberId: body.assigneeMemberId ?? null,
       priority: workItemPriorityFromBody(body),
     });
-    const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, tension.id) ?? tension;
+    const tensionForResponse = await loadTensionWorkItemResponse(actor, workspaceId, tension.id) ?? { id: tension.id, contentWithheld: true };
     const item = serializeTensionWorkItem(tensionForResponse);
     if ("contentWithheld" in item) return NextResponse.json(item);
 
