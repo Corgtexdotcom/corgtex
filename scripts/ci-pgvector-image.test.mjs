@@ -114,7 +114,7 @@ describe("pinned public CI image supply", () => {
     await startDatabase("corgtex_test", { run });
     expect(run.mock.calls[0]).toEqual(["docker", ["run", "--detach", "--pull=never", "--name", CONTAINER,
       "--publish", "127.0.0.1:5432:5432", "--env", "POSTGRES_USER=postgres", "--env", "POSTGRES_PASSWORD=postgres",
-      "--env", "POSTGRES_DB=corgtex_test", LOCAL_IMAGE]]);
+      "--env", "POSTGRES_DB=corgtex_test", LOCAL_IMAGE, "postgres", "-c", "shared_preload_libraries=pg_stat_statements"]]);
     expect(run.mock.calls[2][1].at(-1)).toContain("::vector");
     await expect(startDatabase("production", { run })).rejects.toThrow("Invalid isolated");
     expect(() => imageArchitecture("X86")).toThrow("Unsupported");

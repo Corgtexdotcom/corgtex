@@ -49,15 +49,16 @@ function normalizeCategory(value: string | string[] | undefined): AgreementCateg
   return AGREEMENT_CATEGORIES.includes(category as AgreementCategory) ? category as AgreementCategory : "all";
 }
 
-function normalizeScope(value: string | string[] | undefined, validScopeIds: Set<string>): AgreementScope {
+function normalizeScope(value: string | string[] | undefined): AgreementScope {
   const scope = firstSearchValue(value);
-  return scope && validScopeIds.has(scope) ? scope : "all";
+  return scope && scope.length <= 256 ? scope : "all";
 }
 
-function agreementsHref(workspaceId: string, params: { category?: AgreementCategory; scope?: AgreementScope }) {
+function agreementsHref(workspaceId: string, params: { category?: AgreementCategory; scope?: AgreementScope; policyCursor?: string }) {
   const search = new URLSearchParams();
   if (params.category && params.category !== "all") search.set("category", params.category);
   if (params.category === "policies" && params.scope && params.scope !== "all") search.set("scope", params.scope);
+  if (params.policyCursor) search.set("policyCursor", params.policyCursor);
   const query = search.toString();
   return `/workspaces/${workspaceId}/agreements${query ? `?${query}` : ""}`;
 }
@@ -73,7 +74,11 @@ export default async function AgreementsPage({
   const resolvedSearch = searchParams ? await searchParams : {};
   const actor = await requirePageActor();
   const t = await getTranslations("agreements");
-  const agreements = await listWorkspaceAgreements(actor, { workspaceId });
+  const category = normalizeCategory(resolvedSearch.category);
+  const scope = category === "policies" ? normalizeScope(resolvedSearch.scope) : "all";
+  const agreements = await listWorkspaceAgreements(actor, { workspaceId, policyScope: scope,
+    policyCursor: firstSearchValue(resolvedSearch.policyCursor),
+  });
   const currentConstitution = agreements.currentConstitution;
   const constitutionSources = Array.from(
     (currentConstitution?.sourceReferences ?? []).reduce((points, source) => {
@@ -83,7 +88,6 @@ export default async function AgreementsPage({
       return points;
     }, new Map<number, NonNullable<typeof currentConstitution>["sourceReferences"]>()),
   );
-  const category = normalizeCategory(resolvedSearch.category);
   const workspacePolicyCount = agreements.policyCorpus.filter((policy) => !policy.circle).length;
   const circleScopes = Array.from(
     agreements.policyCorpus.reduce((scopes, policy) => {
@@ -96,8 +100,6 @@ export default async function AgreementsPage({
       count: agreements.policyCorpus.filter((policy) => policy.circle?.id === id).length,
     }),
   );
-  const validScopeIds = new Set(["all", "workspace", ...circleScopes.map((scope) => scope.id)]);
-  const scope = normalizeScope(resolvedSearch.scope, validScopeIds);
   const filteredPolicies = agreements.policyCorpus.filter((policy) => {
     if (scope === "all") return true;
     if (scope === "workspace") return !policy.circle;
@@ -117,6 +119,8 @@ export default async function AgreementsPage({
     { id: "all", label: t("scopeAll"), count: agreements.policyCorpus.length },
     ...(workspacePolicyCount > 0 ? [{ id: "workspace", label: t("scopeWorkspace"), count: workspacePolicyCount }] : []),
     ...circleScopes.map((circle) => ({ id: circle.id, label: circle.name, count: circle.count })),
+    ...(scope !== "all" && scope !== "workspace" && !circleScopes.some(circle => circle.id === scope)
+      ? [{id: scope, label: t("selectedCircle"), count: 0}] : []),
   ];
 
   return (
@@ -127,6 +131,8 @@ export default async function AgreementsPage({
           <span>{t("pageDescription")}</span>
         </div>
       </header>
+
+      <p role="status" className="nr-item-meta">{t("windowCounts")}</p>
 
       <div className="nr-stat-bar">
         <span><strong>{currentConstitution ? `v${currentConstitution.version}` : "-"}</strong> {t("statConstitution")}</span>
@@ -197,7 +203,7 @@ export default async function AgreementsPage({
           <div className="work-conversation-header">
             <h2 className="nr-section-header">{t("sectionPolicies", { count: agreements.policyCorpus.length })}</h2>
           </div>
-          {category === "policies" && agreements.policyCorpus.length > 0 && (
+          {category === "policies" && (
             <div className="nr-filter-bar nr-filter-bar-wrap agreements-scope-filter">
               {scopeItems.map((item) => (
                 <Link
@@ -211,7 +217,7 @@ export default async function AgreementsPage({
             </div>
           )}
           {agreements.policyCorpus.length === 0 ? (
-            <p className="work-conversation-empty">{t("noPolicies")}</p>
+            <p className="work-conversation-empty">{t(agreements.policyWindow.complete && !agreements.policyWindow.continued ? "noPolicies" : "noPoliciesInWindow")}</p>
           ) : filteredPolicies.length === 0 ? (
             <p className="work-conversation-empty">{t("noPoliciesForScope")}</p>
           ) : (
@@ -244,6 +250,12 @@ export default async function AgreementsPage({
               ))}
             </div>
           )}
+          {agreements.policyWindow.nextCursor && (
+            <Link className="nr-link" href={agreementsHref(workspaceId, {category, scope, policyCursor: agreements.policyWindow.nextCursor})}>
+              {t("olderPolicies")}
+            </Link>
+          )}
+          {agreements.policyWindow.continued && <Link className="nr-link" href={agreementsHref(workspaceId, {category, scope})}>{t("latestPolicies")}</Link>}
         </section>
       )}
 

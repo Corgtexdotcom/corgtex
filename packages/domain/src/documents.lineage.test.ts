@@ -164,7 +164,7 @@ describe("Document source receipts with real lineage gates", () => {
       duplicateGuard: { resolution: "use_existing", targetEntityId: visible.id } });
     expect(result.id).toBe(visible.id); expect(fixture.tables.document).toHaveLength(106);
     expect((await listDocuments(general, ws)).map(row => row.id)).toEqual([visible.id]);
-    expect(fixture.prisma.document.findMany.mock.calls.some(([args]: any[]) => args.where.id?.gt)).toBe(true);
+    expect(fixture.prisma.document.findMany.mock.calls.some(([args]: any[]) => args.take === 10001 && args.where.id?.gt === undefined)).toBe(true);
   });
   it("preserves native prior document revisions and unknown legacy source bodies before complete regeneration", async () => {
     const doc = await native("existing");

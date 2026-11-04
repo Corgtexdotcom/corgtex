@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { prisma } from "@corgtex/shared";
 import { assertDemoCredentialsScoped, assertDemoWorkspaceDisconnected, revokeDemoCredentials } from "../../../scripts/lib/demo-credentials.mjs";
@@ -31,14 +31,20 @@ describe("demo legacy credential retirement", () => {
       const meeting = await prisma.meeting.create({ data: { workspaceId: workspace.id, title: "Synthetic scheduled recorder", source: "synthetic", recordedAt: new Date(), participantIds: [] } });
       const recording = await prisma.meetingRecording.create({ data: { workspaceId: workspace.id, meetingId: meeting.id, provider: "RECALL_AI", externalBotId: key, meetingUrl: "https://example.test", status: "SCHEDULED" } });
       await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("recording authority");
-      await prisma.meetingRecording.delete({ where: { id: recording.id } });
+      const recordingEventId = await prisma.$transaction(async tx => {
+        const [{ transactionId }] = await tx.$queryRaw<{ transactionId: string }[]>`SELECT txid_current()::text AS "transactionId"`;
+        await tx.meetingRecording.delete({ where: { id: recording.id } });
+        return createHash("md5").update(`pun68-permission:${workspace.id}:${transactionId}`).digest("hex");
+      });
       // Recorder retirement emits real permission work; neither pending nor
       // dispatched history may be treated as a disconnected workspace.
       await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("asynchronous authority");
       const recordingEvents = await prisma.event.findMany({ where: { workspaceId: workspace.id,
-        type: "source-permission.changed", status: "PENDING",
-        payload: { path: ["governors"], array_contains: [{ kind: "MeetingRecording", id: recording.id }] } } });
-      expect(recordingEvents.length).toBeGreaterThan(0);
+        type: "source-permission.changed", status: "PENDING", id: recordingEventId } });
+      expect(recordingEvents).toMatchObject([{ id: recordingEventId, aggregateType: "SourcePermissionEpoch",
+        aggregateId: workspace.id, payload: { version: 2, scope: "WORKSPACE" } }]);
+      expect(recordingEvents).toHaveLength(1);
+      expect(recordingEvents[0].payload).toEqual({ version: 2, scope: "WORKSPACE" });
       const recordingEventIds = recordingEvents.map(event => event.id);
       const dispatched = await prisma.event.updateMany({ where: { workspaceId: workspace.id, type: "source-permission.changed",
         id: { in: recordingEventIds }, status: "PENDING" }, data: { status: "DISPATCHED", dispatchedAt: new Date() } });

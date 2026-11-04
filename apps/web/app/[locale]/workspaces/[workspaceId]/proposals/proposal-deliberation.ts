@@ -1,4 +1,4 @@
-export type ProposalDeliberationEntryType = "REACTION" | "OBJECTION";
+type ProposalDeliberationEntryType = "REACTION" | "OBJECTION";
 
 export type ProposalDeliberationComposerState = {
   visible: boolean;

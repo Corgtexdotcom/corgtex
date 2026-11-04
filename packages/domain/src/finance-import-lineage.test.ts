@@ -9,10 +9,12 @@ const fixture = vi.hoisted(() => {
     if (key === "OR") return value.some((clause: any) => match(row, clause));
     if (value && typeof value === "object" && !(value instanceof Date)) {
       if (value.in) return value.in.includes(row[key]);
+      if ("gt" in value) return row[key] > value.gt;
+      if ("lt" in value) return row[key] < value.lt;
       if ("not" in value) return row[key] !== value.not;
       return Object.entries(value).every(([nested, expected]) => row[nested] === expected);
     }
-    return row[key] === value;
+    return value instanceof Date ? row[key]?.valueOf() === value.valueOf() : row[key] === value;
   });
   const project = (row: any, args: any): any => {
     if (!row) return null;
@@ -32,6 +34,14 @@ const fixture = vi.hoisted(() => {
   const epochKey = (workspaceId: unknown, kind: unknown, id: unknown) => JSON.stringify([workspaceId, kind, id]);
   const rawSql = (query: any) => Array.isArray(query?.strings) ? query.strings.join("?") : String(query);
   const prisma: any = { $queryRaw: vi.fn(async (query: any) => {
+    if (rawSql(query).includes('SELECT DISTINCT ON ("artifactId")')) {
+      const [workspaceId, artifactType, ...ids] = query.values;
+      return ids.flatMap((artifactId: string) => {
+        const head = tables.artifactInputLineage.filter(row => row.workspaceId === workspaceId
+          && row.artifactType === artifactType && row.artifactId === artifactId).sort((left, right) => right.revision-left.revision)[0];
+        return head ? [{artifactId, contentHash: head.contentHash, rootsJson: head.rootsJson}] : [];
+      });
+    }
     if (!rawSql(query).includes('FROM "SourcePermissionEpoch"')) return [];
     const [workspaceId, ...identities] = query.values as unknown[];
     const rows: Array<{ sourceKind: string; sourceId: string; epoch: bigint }> = [];
@@ -65,6 +75,15 @@ const fixture = vi.hoisted(() => {
       findMany: vi.fn(async (args: any) => {
         const rows = tables[name].filter((row) => match(row, args.where));
         if (name === "artifactInputLineage") rows.sort((left, right) => right.revision - left.revision);
+        if (args.orderBy) rows.sort((left, right) => {
+          for (const order of Array.isArray(args.orderBy) ? args.orderBy : [args.orderBy]) {
+            for (const [key, direction] of Object.entries(order)) {
+              const comparison = left[key] < right[key] ? -1 : left[key] > right[key] ? 1 : 0;
+              if (comparison) return direction === "desc" ? -comparison : comparison;
+            }
+          }
+          return 0;
+        });
         const start = args.cursor ? rows.findIndex((row) => row.id === args.cursor.id) + (args.skip ?? 0) : args.skip ?? 0;
         return rows.slice(start, start + (args.take ?? rows.length)).map((row) => project(row, args));
       }),

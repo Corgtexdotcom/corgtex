@@ -5,22 +5,22 @@ export const saveToBrainTool = {
   type: "function" as const,
   function: {
     name: "save_to_brain",
-    description: "Explain how to save an answer to Brain. This tool does not save content or authorize sharing. Direct the user to Save to Brain on a persisted answer, where they choose transcript metadata and confirm sharing.",
+    description: "Explain how to save an answer to Brain. This tool does not save content or authorize sharing. Direct the user to Save to Brain on a persisted answer, where they choose no transcript, selected turns, or the full transcript and confirm sharing. A chat request alone does not authorize sharing; never report this tool call as a successful save.",
     parameters: {
       type: "object",
       properties: {
         content: {
           type: "string",
-          description: "The content to save. Can be the full conversation, a transcript the user pasted, or specific information the user wants stored.",
+          description: "Content supplied for the guidance request. It is not saved or accepted as a transcript selection.",
         },
         title: {
           type: "string",
-          description: "A descriptive title for the brain source.",
+          description: "Suggested title for the guidance request. No Brain source is created.",
         },
         sourceType: {
           type: "string",
           enum: ["CONVERSATION", "MEETING", "DOC", "ARTICLE"],
-          description: "The type of content being saved. Use MEETING for transcripts, DOC for documents, CONVERSATION for chat content.",
+          description: "Requested content category for compatibility. It does not authorize ingestion or replace meeting-transcript and file-attachment flows.",
         },
       },
       required: ["content", "title"],

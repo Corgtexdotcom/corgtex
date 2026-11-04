@@ -12,6 +12,8 @@ import {
 } from "./managed-azure-container-app-transport.mjs";
 import { managedAzureFailureDetail, managedAzureCliResultAccepted, managedAzureHealthReady, runManagedAzureReleaseTransaction, writeManagedAzureCliResult } from "./managed-azure-release-transaction.mjs";
 
+import { SELFSERVE_RELEASE_HOST_ID, SELFSERVE_RELEASE_ORIGIN, SELFSERVE_RELEASE_PROFILE } from "./managed-azure-selfserve-profile.mjs";
+
 const deploymentId = "123e4567-e89b-42d3-a456-426614174001";
 const inventoryRef = "123e4567-e89b-42d3-a456-426614174002";
 const leaseId = "123e4567-e89b-42d3-a456-426614174003";
@@ -119,6 +121,7 @@ function transportResponse(status, body, headers = {}) {
 }
 
 function dependencies(options = {}) {
+  const deploymentId = options.selfserve ? SELFSERVE_RELEASE_HOST_ID : "123e4567-e89b-42d3-a456-426614174001";
   const events = [];
   const current = { web: "BASELINE", worker: "BASELINE" };
   const currentTemplates = { web: null, worker: null };
@@ -126,10 +129,10 @@ function dependencies(options = {}) {
   const intents = new Map();
   const pendingRoles = new Set();
   const releaseKind = (sha) => sha === baseSha ? "BASELINE" : sha === recoverySha ? "RECOVERY" : "FORWARD";
-  const hosted = options.hosted !== false;
+  const hosted = !options.selfserve && options.hosted !== false;
   const targetDigest = "7".repeat(64);
   const deployment = { deploymentId, deploymentKind: hosted ? "HOSTED_DEDICATED" : "REMOTE_MANAGED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: true, provider: "azure", group: hosted ? "hosted-dedicated" : "managed-customers", workload: hosted ? "hosted-dedicated" : "managed-customers", workloadClass: "ACTIVE_CLIENT_PRIMARY" };
-  const preflight = { ...(Object.hasOwn(options, "protocolVersion") && options.protocolVersion === undefined ? {} : { writeIntentProtocolVersion: options.protocolVersion ?? 2 }), deploymentId, deployment, authorityDigest: "e".repeat(64), origin: "https://customer.example", release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" }, target };
+  const preflight = { ...(Object.hasOwn(options, "protocolVersion") && options.protocolVersion === undefined ? {} : { writeIntentProtocolVersion: options.protocolVersion ?? 2 }), deploymentId, deployment, authorityDigest: "e".repeat(64), origin: options.selfserve ? SELFSERVE_RELEASE_ORIGIN : "https://customer.example", ...(options.selfserve && !options.oldServer ? { protectedReleaseProfile: SELFSERVE_RELEASE_PROFILE, targetDigest } : {}), release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" }, target };
   const modes = { web: "Single", worker: "Single" };
   const inactive = new Set();
   const deps = {
@@ -230,6 +233,84 @@ function dependencies(options = {}) {
 }
 
 describe("managed Azure single-target transaction", () => {
+  it("rejects the old REMOTE server even when its generic write-intent protocol is current", async () => {
+    const { deps } = dependencies({ selfserve: true, oldServer: true, activationPolicy: "EXCLUSIVE" });
+    await expect(runManagedAzureReleaseTransaction({ ...input, deploymentId: SELFSERVE_RELEASE_HOST_ID, execute: true }, deps))
+      .rejects.toMatchObject({ code: "SELFSERVE_PROTECTED_RELEASE_PROTOCOL_REQUIRED" });
+    expect(deps.lease.mock.calls.map(([operation]) => operation)).toEqual(["preflight"]);
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+    expect(deps.resolveRelease).not.toHaveBeenCalled();
+  });
+
+  it("protects configured REMOTE selfserve with persisted ownership and both drained roles before migration", async () => {
+    const { deps, events } = dependencies({ selfserve: true, activationPolicy: "EXCLUSIVE" });
+    const deactivate = deps.setRevisionActive.getMockImplementation();
+    deps.setRevisionActive.mockImplementation(async (request) => { events.push(`active:${request.role}:${request.active}`); return deactivate(request); });
+    const result = await runManagedAzureReleaseTransaction({ ...input, deploymentId: SELFSERVE_RELEASE_HOST_ID, execute: true }, deps);
+    expect(result.status).toBe("SUCCEEDED");
+    expect(events.indexOf("lease:record_rollback")).toBeLessThan(events.indexOf("mode:web:Multiple"));
+    expect(events.indexOf("mode:worker:Multiple")).toBeLessThan(events.indexOf("active:worker:false"));
+    expect(events.indexOf("active:worker:false")).toBeLessThan(events.indexOf("active:web:false"));
+    expect(events.indexOf("active:web:false")).toBeLessThan(events.indexOf("patch:web:forward"));
+    expect(events.indexOf("patch:worker:forward")).toBeLessThan(events.indexOf("mode:web:Single"));
+    expect(deps.lease.mock.calls.find(([op]) => op === "record_rollback")[1].rollback.schemaVersion).toBe(3);
+    expect(deps.lease).toHaveBeenCalledWith("acquire", expect.objectContaining({ expectedTargetDigest: "7".repeat(64) }));
+    expect(deps.authPreflight).toHaveBeenCalled();
+    expect(deps.acceptanceProbe).toHaveBeenCalled();
+  });
+
+  it("fences migration191 importer index replacement before migrate-and-web activation", async () => {
+    const migration = readFileSync(new URL("../../prisma/migrations/20261014070000_transcript_source_native_authority/migration.sql", import.meta.url), "utf8");
+    expect(migration).toContain('DROP INDEX "MeetingTranscriptSourceRecord_workspaceId_provider_external_key"');
+    expect(migration).toContain('CREATE UNIQUE INDEX "MeetingTranscriptSourceRecord_published_content_key"');
+    const { deps, events } = dependencies({ selfserve: true, activationPolicy: "EXCLUSIVE" });
+    const inspect = deps.readExclusiveState.getMockImplementation();
+    const patch = deps.patchTemplate.getMockImplementation();
+    let migrationStartupObserved = false;
+    deps.patchTemplate.mockImplementation(async request => {
+      if (request.role === "web") {
+        expect(request.template.containers[0].env).toContainEqual({ name: "CORGTEX_STARTUP_MODE", value: "migrate-and-web" });
+        for (const role of ["web", "worker"]) {
+          const inventory = await inspect({ role });
+          expect(inventory.mode).toBe("Multiple");
+          expect(inventory.revisions.every(revision => !revision.active && revision.replicaCount === 0)).toBe(true);
+        }
+        migrationStartupObserved = true;
+      }
+      return patch(request);
+    });
+    const result = await runManagedAzureReleaseTransaction({ ...input, deploymentId: SELFSERVE_RELEASE_HOST_ID, execute: true }, deps);
+    expect(result.status).toBe("SUCCEEDED");
+    expect(migrationStartupObserved).toBe(true);
+    expect(events.indexOf("lease:record_rollback")).toBeLessThan(events.indexOf("patch:web:forward"));
+    expect(deps.lease.mock.calls.find(([op]) => op === "record_rollback")[1].rollback.schemaVersion).toBe(3);
+  });
+
+  it.each(["unknown", "pending"])("blocks migration191 promotion when importer revision inventory is %s", async scenario => {
+    const { deps } = dependencies({ selfserve: true, activationPolicy: "EXCLUSIVE" });
+    const inspect = deps.readExclusiveState.getMockImplementation();
+    deps.readExclusiveState.mockImplementation(async request => {
+      const inventory = await inspect(request);
+      if (request.role !== "worker") return inventory;
+      return scenario === "unknown"
+        ? { ...inventory, revisions: [...inventory.revisions, { revisionName: "unowned-importer", active: true, replicaCount: 1 }] }
+        : { ...inventory, latestReadyRevisionName: "pending-importer" };
+    });
+    await expect(runManagedAzureReleaseTransaction({ ...input, deploymentId: SELFSERVE_RELEASE_HOST_ID, execute: true }, deps))
+      .rejects.toMatchObject({ code: "AZURE_EXCLUSIVE_BASELINE_NOT_QUIESCENT" });
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+    expect(deps.setRevisionActive).not.toHaveBeenCalled();
+    expect(deps.setRevisionMode).not.toHaveBeenCalled();
+  });
+
+  it.each([{ activationPolicy: "STANDARD" }, { activationPolicy: "EXCLUSIVE", targetDigest: "8".repeat(64) }])("rejects selfserve policy or configuration drift before provider effects: %j", async (options) => {
+    const { deps } = dependencies({ selfserve: true, ...options });
+    await expect(runManagedAzureReleaseTransaction({ ...input, deploymentId: SELFSERVE_RELEASE_HOST_ID, execute: true }, deps))
+      .rejects.toMatchObject({ code: "SELFSERVE_PROTECTED_RELEASE_PROTOCOL_REQUIRED" });
+    expect(deps.resolveRelease).not.toHaveBeenCalled();
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+  });
+
   it("retains a structured failure when compensation observation throws, without disclosing its message", async () => {
     const { deps } = dependencies();
     deps.acceptanceProbe.mockResolvedValueOnce({ accepted: false }).mockImplementation(async ({ operationId, release }) => ({

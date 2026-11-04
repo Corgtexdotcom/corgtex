@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
+import type { Prisma } from "@prisma/client";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { prisma, type AppActor } from "@corgtex/shared";
+import { getPrismaClient } from "../../shared/src/db";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { recordArtifactInputLineage } from "./source-lineage";
 import { getBrainStatus, listArticles } from "./brain";
 import { hasWorkspaceInitialKnowledgeSource } from "./workspace-initial-knowledge";
-import { listNotifications, countUnreadNotifications, markAllNotificationsRead } from "./notifications";
+import { listNotificationPage, listNotifications, getUnreadNotificationSummary, countUnreadNotifications, markAllNotificationsRead } from "./notifications";
 
 beforeEach(truncateAllTables);
 afterEach(() => vi.restoreAllMocks());
@@ -24,8 +26,8 @@ it("counts beyond 5000 canonical sources, replenishes hidden pages, and withhold
   })) });
   const queries = vi.spyOn(prisma.brainSource, "findMany");
   expect((await getBrainStatus(f.actor, f)).unabsorbedSources).toBe(0);
-  expect(queries.mock.calls.length).toBeGreaterThan(50);
-  expect(queries.mock.calls.every(([args]) => args?.take === 100 && args.select === undefined)).toBe(true);
+  expect(queries.mock.calls.length).toBe(1);
+  expect(queries.mock.calls.every(([args]) => args?.take === 10001 && args.select === undefined)).toBe(true);
   expect(await hasWorkspaceInitialKnowledgeSource(f.actor, f.workspaceId)).toBe(false);
   const source = await prisma.brainSource.create({ data: { id: "visible-last", workspaceId: f.workspaceId,
     sourceType: "DOC", tier: 1, content: "Authenticated original" } });
@@ -61,15 +63,48 @@ it("pages notification bodies, applies visible skip, stops early and counts only
     type: "SYNTHETIC", title: "Older hidden", createdAt: new Date("2025-01-01"),
   })) });
   const queries = vi.spyOn(prisma.notification, "findMany");
-  expect((await listNotifications(f.actor, f.workspaceId, { skip: 1, take: 1 })).map(row => row.id)).toEqual(["v2"]);
-  expect(queries).toHaveBeenCalledTimes(4);
-  expect(queries.mock.calls.every(([args]) => args?.take === 100 && args.select === undefined)).toBe(true);
+  const first = await listNotificationPage(f.actor, f.workspaceId, { skip: 1, take: 1 });
+  expect(first).toMatchObject({ items: [], complete: false, hasMore: true });
+  expect(first.nextCursor).toEqual(expect.any(String));
+  expect(queries).toHaveBeenCalledTimes(2);
+  expect(JSON.parse(Buffer.from(first.nextCursor!, "base64url").toString("utf8")).id).toBe("z-hidden-0150");
   queries.mockClear();
-  expect(await countUnreadNotifications(f.actor, f.workspaceId)).toBe(3);
+  // No readable rows were consumed in the first window, so the visible skip is
+  // still outstanding when the caller explicitly continues.
+  const second = await listNotificationPage(f.actor, f.workspaceId, { cursor: first.nextCursor!, skip: 1, take: 1 });
+  expect(second.items.map(row => row.id)).toEqual(["v2"]);
+  expect(second).toMatchObject({ complete: false, hasMore: true });
+  expect(queries).toHaveBeenCalledTimes(2);
+  expect(queries.mock.calls.every(([args]) => args?.take === 100 && args.select === undefined)).toBe(true);
+  const next = await listNotificationPage(f.actor, f.workspaceId, { cursor: second.nextCursor!, take: 1 });
+  expect(next.items.map(row => row.id)).toEqual(["v1"]);
+  // Bounded summaries must not fabricate a global zero from a hidden prefix.
+  expect(await getUnreadNotificationSummary(f.actor, f.workspaceId)).toEqual({ count: 0, complete: false, available: true });
+  await expect(countUnreadNotifications(f.actor, f.workspaceId)).rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
+  await expect(listNotifications(f.actor, f.workspaceId, { skip: 1, take: 1 }))
+    .rejects.toMatchObject({ code: "SOURCE_READ_SCAN_LIMIT" });
+  const collectUnreadWindows = async () => {
+    const ids: string[] = [];
+    let cursor: string | undefined;
+    for (let window = 0; window < 4; window++) {
+      const before = queries.mock.calls.length;
+      const page = await listNotificationPage(f.actor, f.workspaceId, { unreadOnly: true, take: 100, cursor });
+      expect(queries.mock.calls.length - before).toBeLessThanOrEqual(2);
+      ids.push(...page.items.map(row => row.id));
+      if (page.complete) { expect(page.nextCursor).toBeNull(); return ids; }
+      expect(page.nextCursor).toEqual(expect.any(String));
+      expect(page.nextCursor).not.toBe(cursor);
+      cursor = page.nextCursor!;
+    }
+    throw new Error("Expected this synthetic history to finish within four explicit windows.");
+  };
+  queries.mockClear();
+  expect(await collectUnreadWindows()).toEqual(["v3", "v2", "v1"]);
   expect(queries).toHaveBeenCalledTimes(7);
   await prisma.notification.update({ where: { id: "v2" }, data: { bodyMd: "Unproved replacement" } });
-  expect(await countUnreadNotifications(f.actor, f.workspaceId)).toBe(2);
-  expect((await listNotifications(f.actor, f.workspaceId, { skip: 1, take: 1 })).map(row => row.id)).toEqual(["v1"]);
+  expect(await collectUnreadWindows()).toEqual(["v3", "v1"]);
+  expect((await listNotificationPage(f.actor, f.workspaceId,
+    { cursor: first.nextCursor!, skip: 1, take: 1 })).items.map(row => row.id)).toEqual(["v1"]);
 }, 120_000);
 
 it("bases initial context on admitted Documents and Meetings beyond hidden first pages", async () => {
@@ -172,12 +207,37 @@ it("marks admitted notification history in awaited100-row batches without skippi
       artifact: { kind: "Notification", id: row.id }, content: row, origin: "DERIVED", inputs: [{kind: "BrainSource", id: source.id}] }));
   }
   const reads = vi.spyOn(prisma.notification, "findMany");
-  const writes = vi.spyOn(prisma.notification, "updateMany");
-  await markAllNotificationsRead(f.actor, f.workspaceId);
+  const writeBatches: number[] = [];
+  const client = getPrismaClient();
+  const transaction = client.$transaction.bind(client);
+  const observeTransaction = async (work: (tx: Prisma.TransactionClient) => Promise<unknown>,
+    options?: { isolationLevel?: Prisma.TransactionIsolationLevel; timeout?: number }) => transaction(async tx => {
+    const write = tx.notification.updateMany.bind(tx.notification);
+    vi.spyOn(tx.notification, "updateMany").mockImplementation(args => {
+      writeBatches.push((args.where?.id as { in: string[] }).in.length);
+      return write(args);
+    });
+    return work(tx);
+  }, options);
+  vi.spyOn(client, "$transaction").mockImplementation(observeTransaction as typeof client.$transaction);
+  const first = await markAllNotificationsRead(f.actor, f.workspaceId);
+  expect(first).toMatchObject({ updatedCount: 80, complete: false });
+  expect(first.nextCursor).toEqual(expect.any(String));
+  expect(reads).toHaveBeenCalledTimes(2);
+  expect(writeBatches).toEqual([80]);
+  // The resolved request includes committed writes, but does not claim that the
+  // remaining 125 admitted rows have already been updated.
+  expect(await prisma.notification.count({ where: { workspaceId: f.workspaceId, readAt: { not: null } } })).toBe(80);
+  expect(await prisma.notification.count({ where: { workspaceId: f.workspaceId, readAt: null } })).toBe(245);
+  reads.mockClear();
+  const second = await markAllNotificationsRead(f.actor, f.workspaceId, { cursor: first.nextCursor! });
+  expect(second).toEqual({ updatedCount: 125, complete: true, nextCursor: null });
+  expect(reads).toHaveBeenCalledTimes(2);
+  expect(first.updatedCount + second.updatedCount).toBe(205);
   expect(await prisma.notification.count({ where: { workspaceId: f.workspaceId, readAt: { not: null } } })).toBe(205);
   expect(await prisma.notification.count({ where: { workspaceId: f.workspaceId, readAt: null } })).toBe(120);
   expect(reads.mock.calls.every(([args]) => args?.take === 100 && args.select === undefined)).toBe(true);
-  expect(writes.mock.calls.map(([args]) => (args.where?.id as {in: string[]}).in.length)).toEqual([80, 100, 25]);
+  expect(writeBatches).toEqual([80, 100, 25]);
   expect(await countUnreadNotifications(f.actor, f.workspaceId)).toBe(0);
 }, 120_000);
 

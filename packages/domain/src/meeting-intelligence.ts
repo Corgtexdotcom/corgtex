@@ -6,7 +6,7 @@ import { prisma, type AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { AppError, invariant } from "./errors";
-import { defaultModelGateway } from "@corgtex/models";
+import { defaultModelGateway, type ModelAttemptGuard } from "@corgtex/models";
 import { createAction, meetingInsightActionSourcePayload, publishAction, updateAction } from "./actions";
 import type { DuplicateGuardOptions } from "./duplicate-guard";
 import { createTension, updateTension } from "./tensions";
@@ -509,7 +509,7 @@ export async function extractMeetingInsights(
   invariant(meetingContext.lineageInputs && meetingContext.lineageRoots?.length && meetingContext.sourceStateHash,
     409, "UNKNOWN_LINEAGE", "Meeting insights require the complete prompt receipt.");
   const lineageInputs = meetingContext.lineageInputs;
-  const lineageRoots = meetingContext.lineageRoots;
+  const lineageRoots = structuredClone(meetingContext.lineageRoots);
   invariant(await isArtifactInputProofReadable(actor, params.workspaceId, lineageRoots),
     409, "SOURCE_CHANGED", "Meeting insight inputs changed before generation.");
 
@@ -635,10 +635,27 @@ Be conservative — only extract items you're confident about.
   const transcriptChunks = transcriptChunksForExtraction(transcript);
   const transcriptChunkedForExtraction = transcriptChunks.length > 1;
   const extractedItems: Array<Record<string, unknown>> = [];
+  const controller = new AbortController();
+  const authorizeAttempt: ModelAttemptGuard = async ({ signal }) => {
+    try {
+      controller.signal.throwIfAborted();
+      signal.throwIfAborted();
+      await assertMeetingTranscriptWorkerCurrent(actor, params.workspaceId);
+      invariant(await isArtifactInputProofReadable(actor, params.workspaceId, lineageRoots),
+        409, "SOURCE_CHANGED", "Meeting insight inputs changed during generation.");
+      // Proof replay can await external authority. Recheck the original worker
+      // purpose afterward; never recapture a replacement claim or input receipt.
+      await assertMeetingTranscriptWorkerCurrent(actor, params.workspaceId);
+      signal.throwIfAborted();
+      controller.signal.throwIfAborted();
+    } catch (error) {
+      controller.abort(error);
+      throw error;
+    }
+  };
 
   for (const chunk of transcriptChunks) {
-    invariant(await isArtifactInputProofReadable(actor, params.workspaceId, lineageRoots),
-      409, "SOURCE_CHANGED", "Meeting insight inputs changed during generation.");
+    await authorizeAttempt({ signal: controller.signal });
     await recordMeetingTranscriptProcessingStage({
           workerActor: actor,
       workspaceId: params.workspaceId,
@@ -653,6 +670,8 @@ Be conservative — only extract items you're confident about.
       chunkCount: transcriptChunkedForExtraction ? chunk.chunkCount : null,
     });
     const extraction = await defaultModelGateway.extract({
+      signal: controller.signal,
+      authorizeAttempt,
       workspaceId: params.workspaceId,
       instruction,
       input: JSON.stringify({
@@ -680,6 +699,7 @@ Be conservative — only extract items you're confident about.
           followUps: meetingContext.followUps,
           recentDeliberation: meetingContext.deliberationEntries,
           knowledge: meetingContext.knowledge,
+          knowledgeComplete: meetingContext.knowledgeComplete ?? false,
           attendees: meetingContext.attendees,
         } : null,
         automationPolicy: {
@@ -691,6 +711,7 @@ Be conservative — only extract items you're confident about.
       schemaHint,
     });
 
+    controller.signal.throwIfAborted();
     const parsed = extraction.output as { insights?: Array<Record<string, unknown>> };
     if (Array.isArray(parsed.insights)) {
       extractedItems.push(...parsed.insights);

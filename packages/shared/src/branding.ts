@@ -1,5 +1,4 @@
 export const PLATFORM_NAME = "Corgtex";
-export const PLATFORM_TAGLINE = "AI-native workspace operating system";
 
 /**
  * Returns branding info for a given workspace.

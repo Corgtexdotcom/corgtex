@@ -66,23 +66,6 @@ export async function createExpertiseTag(
   });
 }
 
-export async function getMemberExpertiseProfile(actor: AppActor, workspaceId: string, memberId: string) {
-  await requireWorkspaceMembership({ actor, workspaceId });
-  
-  const member = await prisma.member.findFirst({
-    where: { id: memberId, workspaceId },
-    include: {
-      expertise: {
-        include: { expertiseTag: true },
-        orderBy: { endorsedCount: "desc" },
-      },
-    },
-  });
-
-  invariant(member, 404, "NOT_FOUND", "Member not found");
-  return member.expertise;
-}
-
 export async function addMemberExpertise(
   actor: AppActor,
   params: { 
@@ -143,78 +126,3 @@ export async function addMemberExpertise(
   });
 }
 
-export async function endorseMemberExpertise(
-  actor: AppActor,
-  params: { workspaceId: string; memberId: string; tagId: string }
-) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  
-  // You cannot endorse yourself
-  if (actor.kind === "user") {
-    const targetMember = await prisma.member.findUnique({ where: { id: params.memberId } });
-    invariant(targetMember?.userId !== actor.user.id, 400, "INVALID_ACTION", "You cannot endorse your own expertise");
-  }
-
-  return prisma.$transaction(async (tx) => {
-    // Ensure the expertise exists first; if not, create it with PEER_ENDORSED source
-    let expertise = await tx.memberExpertise.findUnique({
-      where: {
-        memberId_expertiseTagId: {
-          memberId: params.memberId,
-          expertiseTagId: params.tagId,
-        },
-      },
-    });
-
-    if (!expertise) {
-      expertise = await tx.memberExpertise.create({
-        data: {
-          memberId: params.memberId,
-          expertiseTagId: params.tagId,
-          level: "PRACTITIONER",
-          source: "PEER_ENDORSED",
-          endorsedCount: 1,
-        },
-      });
-    } else {
-      expertise = await tx.memberExpertise.update({
-        where: { id: expertise.id },
-        data: {
-          endorsedCount: { increment: 1 },
-        },
-      });
-    }
-
-    await tx.auditLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "memberExpertise.endorsed",
-        entityType: "MemberExpertise",
-        entityId: expertise.id,
-        meta: { tagId: params.tagId },
-      },
-    });
-
-    return expertise;
-  });
-}
-
-export async function findExpertsByTag(actor: AppActor, workspaceId: string, tagSlug: string) {
-  await requireWorkspaceMembership({ actor, workspaceId });
-
-  return prisma.memberExpertise.findMany({
-    where: {
-      expertiseTag: { workspaceId, slug: tagSlug, archivedAt: null },
-    },
-    include: {
-      member: {
-        include: { user: { select: { id: true, displayName: true } } },
-      },
-      expertiseTag: true,
-    },
-    orderBy: [
-      { endorsedCount: "desc" },
-    ],
-  });
-}

@@ -175,6 +175,15 @@ describe("pending CRM operation permission receipts and execution capabilities",
     expect(crmPendingOperationIntent(`confirm ${id}`)).toEqual(confirm(id));
     expect(crmPendingOperationIntent(`cancel ${id}`)).toEqual({ kind: "cancel", pendingOperationId: id });
     for (const message of ["what changed today?", `what if I confirm ${id}?`, `don't confirm ${id}`, `yes ${id}`]) expect(crmPendingOperationIntent(message)).toBeNull();
+    for (const message of [`approve pending operation ${id}`, `  Confirm ${id}.  `, `confirm ${id}!`]) expect(crmPendingOperationIntent(message)).toEqual(confirm(id));
+    for (const message of [
+      `confirm ${id}, but do not execute it yet`,
+      `confirm ${id}? Is that what I should type?`,
+      `confirm ${id} if the account is still active`,
+      `confirm ${id} and ${"00000000-0000-4000-8000-000000000002"}`,
+      `confirm ${id}, but call it Different follow up`,
+      `approve ${id} not`,
+    ]) expect(crmPendingOperationIntent(message)).toBeNull();
   });
 
   it("persists every model input and all referenced CRM records before displaying exact committed arguments", async () => {

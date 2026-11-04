@@ -8,12 +8,14 @@ const fixture = vi.hoisted(() => ({ goals: [] as any[], editable: 0 }));
 const actor = { kind: "user", user: { id: "synthetic-author" } };
 const listCircles = vi.hoisted(() => vi.fn(async () => [{ id: "circle-1", name: "Synthetic circle" }]));
 vi.mock("@corgtex/domain", () => ({
-  listGoals: async () => fixture.goals,
-  getGoalTree: async () => fixture.goals,
+  DigestReadRelease: class { async finish() {} },
+  ArchiveMetadataReadRelease: class { async finish() {} },
+  listGoalsPage: async () => ({ items: fixture.goals, complete: true, nextCursor: null }),
+  buildGoalTree: (goals: any[]) => goals,
   listCircles,
   listHumanMembers: async () => [{ id: "member-1", user: { displayName: "Synthetic owner", email: "owner@example.test" } }],
   requireWorkspaceMembership: async () => ({ id: "member-1", role: "MEMBER" }),
-  getGoal: vi.fn(), getWorkspaceArchiveRecord: vi.fn(), getMyGoalSlice: vi.fn(), listRecognitions: vi.fn(),
+  getGoal: vi.fn(), getWorkspaceArchiveRecord: vi.fn(), getMyGoalSlicePage: vi.fn(), listRecognitionsPage: vi.fn(),
 }));
 vi.mock("@/lib/auth", () => ({ requirePageActor: async () => actor }));
 vi.mock("@/lib/workspace-feature-flags", () => ({ requireWorkspaceFeature: vi.fn() }));

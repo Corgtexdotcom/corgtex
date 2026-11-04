@@ -1,22 +1,27 @@
-import { listBuildArtifacts, requireWorkspaceMembership } from "@corgtex/domain";
+import { listBuildArtifactPage, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { getTranslations } from "next-intl/server";
 import { BuiltArtifactsClient } from "./BuiltArtifactsClient";
 
+import { HistoryWindowNavigation } from "@/lib/components/HistoryWindowNavigation";
+
 export const dynamic = "force-dynamic";
 
 export default async function BuiltPage({
-  params,
+  params, searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
+  searchParams?: Promise<{cursor?: string}>;
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
   await requireWorkspaceFeature(workspaceId, "BUILD_ARTIFACTS");
   const t = await getTranslations("built");
-  const artifacts = await listBuildArtifacts(actor, { workspaceId });
+  const cursor = (await searchParams)?.cursor;
+  const window = await listBuildArtifactPage(actor, { workspaceId, cursor });
+  const artifacts = window.items;
 
   return (
     <>
@@ -31,7 +36,13 @@ export default async function BuiltPage({
         </div>
       </header>
 
+      <HistoryWindowNavigation limited={!window.complete || Boolean(cursor)}
+        nextHref={window.nextCursor ? `?cursor=${encodeURIComponent(window.nextCursor)}` : null}
+        latestHref={cursor ? "?" : null}
+        labels={{limited: t("historyLimited"), unavailable: t("historyUnavailable"), older: t("historyOlder"), latest: t("historyLatest")}} />
       <BuiltArtifactsClient
+        key={cursor ?? "latest"}
+        historyLimited={!window.complete || Boolean(cursor)}
         workspaceId={workspaceId}
         initialArtifacts={artifacts.map((artifact) => ({
           ...artifact,

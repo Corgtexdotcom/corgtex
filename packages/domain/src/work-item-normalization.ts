@@ -47,6 +47,7 @@ type TensionLike = PriorityLike & AdviceRequestCountsLike & {
 };
 
 type ProposalLike = PriorityLike & AdviceRequestCountsLike & {
+  relationWindow?: {adviceRequestsComplete: boolean};
   ownerMemberId?: string | null;
   ownerMember?: WorkItemMemberLike;
 };
@@ -151,7 +152,9 @@ export function normalizeProposalWorkItem<T extends ProposalLike>(proposal: T) {
   return {
     ...proposal,
     ...workItemPriorityFields(proposal),
-    ...adviceRequestFields(proposal),
+    ...(proposal.relationWindow?.adviceRequestsComplete === false
+      ? {adviceRequestCount: null, activeAdviceRequestCount: null, inputRequestCount: null, activeInputRequestCount: null}
+      : adviceRequestFields(proposal)),
     ownerMemberId,
     ownerMemberName,
     owner: ownerMemberName,

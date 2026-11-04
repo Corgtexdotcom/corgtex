@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderMarkdown } from "./markdown";
+import { markdownToPlainText, renderMarkdown } from "./markdown";
 
 describe("renderMarkdown", () => {
   it("renders common document formatting", () => {
@@ -57,5 +57,57 @@ block code
     expect(defaultHtml).toContain("src=\"https://example.com/pixel.png\"");
     expect(imageFreeHtml).not.toContain("<img");
     expect(imageFreeHtml).not.toContain("https://example.com/pixel.png");
+  });
+});
+
+describe("markdownToPlainText", () => {
+  it.each([
+    ["J&J and R&D", "J&J and R&D"],
+    ["J&amp;J &copy; &eacute; &quot;quoted&quot; &apos;text&apos;", "J&J © é \"quoted\" 'text'"],
+    ["&#38; &#x26; &#169; &#x1D11E; &NotEqualTilde;", "& & © 𝄞 ≂̸"],
+    ["2 &lt; 3 &gt; 1", "2 < 3 > 1"],
+    ["Español — 日本語 𝄞", "Español — 日本語 𝄞"],
+  ])("returns display text for %s", (markdown, expected) => {
+    expect(markdownToPlainText(markdown)).toBe(expected);
+  });
+
+  it("strips formatting, unsafe tags and their non-text content", () => {
+    const markdown = `# **Pipeline & Clinical Trials**
+
+<script>alert("unsafe")</script><style>body { color: red; }</style>
+<textarea>hidden text</textarea><option>hidden option</option>
+
+<b>Research &amp; Development</b> [details](https://example.com)
+<img src="x" onerror="alert(1)">`;
+
+    expect(markdownToPlainText(markdown)).toBe("Pipeline & Clinical Trials Research & Development details");
+  });
+
+  it.each([
+    ["`&amp; <b>literal</b>`", "&amp; <b>literal</b>"],
+    ["```html\n&amp; <script>example</script>\n```", "&amp; <script>example</script>"],
+    ["&amp;amp; &amp;lt;b&amp;gt; &unknown;", "&amp; &lt;b&gt; &unknown;"],
+    ["&lt;script&gt;example&lt;/script&gt;", "<script>example</script>"],
+  ])("preserves intentional literal text in %s", (markdown, expected) => {
+    expect(markdownToPlainText(markdown)).toBe(expected);
+  });
+
+  it("normalizes decoded whitespace", () => {
+    expect(markdownToPlainText("  R&amp;D&nbsp;\t&#160;team\n\nnext  ")).toBe("R&D team next");
+  });
+
+  it("truncates decoded text with the existing ellipsis convention", () => {
+    expect(markdownToPlainText("J&amp;J &copy; team", 5)).toBe("J&J...");
+    expect(markdownToPlainText("J&amp;J", 3)).toBe("J&J");
+    expect(markdownToPlainText("J&amp;J", 0)).toBe("...");
+    expect(markdownToPlainText("J&amp;J", 1)).toBe("...");
+    expect(markdownToPlainText("&lt;b&gt;literal&lt;/b&gt;", 5)).toBe("<b>l...");
+    expect(markdownToPlainText("x".repeat(360))).toBe("x".repeat(360));
+    expect(markdownToPlainText("x".repeat(361))).toBe(`${"x".repeat(359)}...`);
+  });
+
+  it("returns empty text for empty or discarded content", () => {
+    expect(markdownToPlainText(" \n\t")).toBe("");
+    expect(markdownToPlainText("<script>unsafe</script>")).toBe("");
   });
 });

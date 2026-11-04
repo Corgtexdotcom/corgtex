@@ -263,6 +263,24 @@ describe("auth domain", () => {
       });
     });
 
+    it("rejects an inactive membership without looking up workspace details", async () => {
+      prismaMock.member.findUnique.mockResolvedValue({
+        id: "member-1", workspaceId: "workspace-1", userId: "user-1", role: "ADMIN", isActive: false,
+      });
+      const { requireWorkspaceMembership } = await import("./auth");
+      await expect(requireWorkspaceMembership({ actor: userActor, workspaceId: "workspace-1" })).rejects.toMatchObject({
+        status: 403, code: "NOT_A_MEMBER",
+      });
+      expect(prismaMock.workspace.findFirst).not.toHaveBeenCalled();
+    });
+
+    it("preserves a membership lookup failure", async () => {
+      const error = new Error("synthetic database failure");
+      prismaMock.member.findUnique.mockRejectedValueOnce(error);
+      const { requireWorkspaceMembership } = await import("./auth");
+      await expect(requireWorkspaceMembership({ actor: userActor, workspaceId: "workspace-1" })).rejects.toBe(error);
+    });
+
     it("allows an agent for an allowed workspace", async () => {
       const { requireWorkspaceMembership } = await import("./auth");
       await expect(requireWorkspaceMembership({ actor: agentActor, workspaceId: "workspace-1" })).resolves.toBeNull();

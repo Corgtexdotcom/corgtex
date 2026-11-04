@@ -187,3 +187,60 @@ for (const [label, change] of [
   const f = postgresStateFixture(); change(f.options);
   await assert.rejects(retainOpsCoreRuntimeConfig(f.options)); assert.equal(f.calls.length, 0);
 });
+
+test("Azure-only guard is opt-in and staged migration retains legacy origins by default", () => {
+  for (const policy of [undefined, { enabled: false }]) {
+    const f = fixture(); f.options.plan.azureOnly = policy;
+    for (const role of ["web", "worker"]) f.options.sourceEnvironments[role].MCP_PUBLIC_URL = "https://fixture.up.railway.app/mcp";
+    const result = prepareOpsCoreRuntimeValues(f.options);
+    assert.equal(result.roles.web.values.MCP_PUBLIC_URL, "https://fixture.up.railway.app/mcp");
+  }
+});
+
+test("Azure-only guard rejects retained provider URLs before any secret writes with redacted findings", async () => {
+  const f = fixture(); f.options.plan.azureOnly = { enabled: true };
+  f.options.sourceEnvironments.worker.MCP_PUBLIC_URL = `https://fixture:${encodeURIComponent(f.credential)}@fixture.up.railway.app:8443/mcp`;
+  await assert.rejects(retainOpsCoreRuntimeConfig(f.options), error => {
+    assert.equal(error.message, "RUNTIME_AZURE_ONLY_CONFIGURATION_INVALID");
+    assert.deepEqual(error.findings, [{ role: "worker", setting: "MCP_PUBLIC_URL", code: "RAILWAY_HOST" }]);
+    assert.equal(String(error.stack).includes(f.credential), false);
+    assert.equal(JSON.stringify(error).includes(f.credential), false);
+    return true;
+  });
+  assert.equal(f.calls.length, 0);
+});
+
+test("Azure-only guard checks projected infrastructure and keeps legitimate external origins", () => {
+  const f = fixture(); f.options.plan.azureOnly = { enabled: true };
+  for (const role of ["web", "worker"]) {
+    f.options.sourceEnvironments[role].DATABASE_URL = "postgresql://fixture:fixture@source.railway.internal/source";
+    f.options.sourceEnvironments[role].REDIS_URL = "redis://fixture:fixture@cache.railway.internal:6379/0";
+  }
+  const result = prepareOpsCoreRuntimeValues(f.options);
+  assert.equal(result.roles.web.values.DATABASE_URL, f.options.databaseUrl);
+  assert.equal(result.roles.worker.values.REDIS_URL, f.options.redisUrl);
+  assert.equal(result.roles.web.values.MCP_PUBLIC_URL, "https://mcp.example.test");
+  assert.equal(result.roles.web.values.RAILWAY_SERVICE_ID, undefined);
+});
+
+test("Azure-only guard rejects explicitly listed custom legacy origins and binds policy to the plan", async () => {
+  const f = fixture(); f.options.plan.azureOnly = { enabled: true, legacyOrigins: ["https://mcp.example.test"] };
+  await assert.rejects(retainOpsCoreRuntimeConfig(f.options), error => {
+    assert.deepEqual(error.findings, [{ role: "web", setting: "MCP_PUBLIC_URL", code: "LEGACY_ORIGIN" }]);
+    return true;
+  });
+  assert.equal(f.calls.length, 0);
+  f.options.plan.azureOnly.legacyOrigins = [];
+  const result = await retainOpsCoreRuntimeConfig(f.options);
+  assert.deepEqual(prepareOpsCoreRuntimeValues(f.options).plan.azureOnly, { enabled: true, legacyOrigins: [] });
+  const staged = fixture();
+  assert.notEqual(result.planSha256, (await retainOpsCoreRuntimeConfig(staged.options)).planSha256);
+});
+
+test("Azure-only guard cannot silently accept a malformed opt-in policy", () => {
+  const f = fixture(); f.options.plan.azureOnly = { enabled: "true" };
+  assert.throws(() => prepareOpsCoreRuntimeValues(f.options), error => {
+    assert.deepEqual(error.findings, [{ role: "web", code: "POLICY_INVALID" }]);
+    return true;
+  });
+});

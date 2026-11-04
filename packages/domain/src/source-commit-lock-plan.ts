@@ -28,7 +28,7 @@ declare const planBrand: unique symbol;
 declare const ownerBrand: unique symbol;
 export type SourceCommitLockPlan = { readonly [planBrand]: true };
 export type SourceCommitOwnerAttestation = { readonly [ownerBrand]: true };
-export const SOURCE_COMMIT_CONTROL_TABLES = ["NativeTranscriptPublication", "MeetingTranscriptSourceRecord", "FinanceReportFact", "MeetingRecording", "MeetingRecorderProviderEvent", "MeetingRecorderSmokeRun", "MeetingTranscriptProcessingProgress", "AuditLog", "Event", "RecorderTranscriptPublication", "RecorderTranscriptAttempt"] as const;
+const SOURCE_COMMIT_CONTROL_TABLES = ["NativeTranscriptPublication", "MeetingTranscriptSourceRecord", "FinanceReportFact", "MeetingRecording", "MeetingRecorderProviderEvent", "MeetingRecorderSmokeRun", "MeetingTranscriptProcessingProgress", "AuditLog", "Event", "RecorderTranscriptPublication", "RecorderTranscriptAttempt"] as const;
 /** Typed exact before/after control projections. These confer no semantic input authority. */
 export type SourceCommitControlWriteTarget = { table: typeof SOURCE_COMMIT_CONTROL_TABLES[number]; id: string;
   before: Record<string, unknown> | null; after: Record<string, unknown> | null };
@@ -378,9 +378,20 @@ async function discover(state: Omit<PlanState,"discovered">, db: SourceAuthority
         if (manifest.origin !== "HUMAN_ORIGINAL") { invariant(manifest.epochProofVersion === 1,409,"SOURCE_LOCK_INCOMPLETE","Consumed manifest has no original vector."); addVector(manifest.permissionEpochsJson); }
         for (const ancestor of upstream) { remaining.consume(`ancestor:${logicalKey(ancestor)}:${ancestor.fingerprint}`); pending.push({input:ancestor,root:ancestor}); }
       }
+      if (input.kind === "ConversationOperationOutcome" && loaded.operation === "LEGACY_RECOVERY_PUBLICATION") {
+        // Only an exact consumed receipt carries these dynamic original inputs.
+        // Permission-only governors and declared outputs must not grant semantics.
+        const { currentLegacyRecoveryPublication } = await import("./legacy-recovery");
+        const recovery = await currentLegacyRecoveryPublication(actor, workspaceId, loaded, db);
+        invariant(recovery, 409, "SOURCE_CHANGED", "Consumed recovery authority changed before locking.");
+        for (const ancestor of roots(recovery.roots)) {
+          remaining.consume(`ancestor:${logicalKey(ancestor)}:${ancestor.fingerprint}`);
+          pending.push({input: ancestor, root: ancestor});
+        }
+      }
       if (input.kind === "KnowledgeChunk") {
         const metadata = authorityRecord(loaded.metadata);
-        const sources:Record<string,LineageKind> = {BRAIN_ARTICLE:"BrainArticle",DOCUMENT:"Document",MEETING:"Meeting",PROPOSAL:"Proposal",EXTERNAL_CONTENT:"ExternalContentSource",EXTERNAL_DATABASE:"SqlNativeRunInput"};
+        const sources:Record<string,LineageKind> = {BRAIN_ARTICLE:"BrainArticle",DOCUMENT:"Document",MEETING:"Meeting",PROPOSAL:"Proposal",EXTERNAL_CONTENT:"ExternalContentSource",EXTERNAL_DATABASE:"SqlNativeRunInput",TENSION:"Tension",ACTION:"Action",CIRCLE:"Circle",ROLE:"Role",SLACK:"CommunicationMessage"};
         const kind = sources[String(loaded.sourceType)]; invariant(kind && typeof metadata?.sourceContentHash === "string",409,"SOURCE_LOCK_INCOMPLETE","Knowledge parent proof is unavailable.");
         const ancestor = {kind,id:authorityIdentity(loaded.sourceType === "EXTERNAL_DATABASE" ? metadata.nativeInputId : loaded.sourceId),fingerprint:metadata.sourceContentHash};
         remaining.consume(`synthetic:${logicalKey(ancestor)}:${ancestor.fingerprint}`); pending.push({input:ancestor,root:ancestor});
@@ -686,11 +697,6 @@ export function assertSourceCommitAmbientPolicyCovered(tx:Prisma.TransactionClie
   const rows=[...scope.state.discovered.originalEpochs!.entries,...(scope.state.discovered.structuralEpochs?.entries??[]),...scope.state.discovered.ambientEpochs];
   invariant(scope.state.workspaceId===workspaceId&&rows.some(entry=>entry.kind===identity.kind&&entry.id===identity.id&&entry.epoch===identity.epoch),
     409,"SOURCE_LOCK_UNCOVERED","Commit requested an unplanned ambient policy fence.");
-}
-export function assertSourceCommitPredicateCovered(tx:Prisma.TransactionClient,key:string,table:string,where:Record<string,unknown>,ids:readonly string[]) {
-  const scope=currentScope(tx);
-  const saved=scope.state.discovered.ledger.find(([entry])=>entry===`predicate:${key}`);
-  invariant(saved?.[1]===hash({key,table,where,ids:[...ids].sort(compare)}),409,"SOURCE_LOCK_UNCOVERED","Commit requested an unplanned authority predicate.");
 }
 /** New preallocated outputs may capture their OWN newly inserted epoch after DML.
  * This cannot add older ancestor epochs or grant historical source authority. */

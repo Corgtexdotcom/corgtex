@@ -19,6 +19,8 @@ const ALLOWED_ATTRIBUTES: sanitizeHtml.IOptions["allowedAttributes"] = {
   img: ["src", "alt", "title"],
 };
 
+const PLAIN_TEXT_ENTITIES: Record<string, string> = { "&amp;": "&", "&lt;": "<", "&gt;": ">" };
+
 export function renderMarkdown(md: string, opts?: { allowImages?: boolean }): string {
   const html = marked.parse(md, { async: false }) as string;
   const allowImages = opts?.allowImages ?? true;
@@ -37,7 +39,11 @@ export function markdownToPlainText(md: string, maxLength = 360): string {
   const text = sanitizeHtml(html, {
     allowedTags: [],
     allowedAttributes: {},
-  }).replace(/\s+/g, " ").trim();
+  })
+    // sanitize-html decodes input entities, then escapes &, < and > for HTML.
+    // Undo only that serialization, once; consumers render this as React text.
+    .replace(/&(?:amp|lt|gt);/g, (entity) => PLAIN_TEXT_ENTITIES[entity] ?? entity)
+    .replace(/\s+/g, " ").trim();
 
   if (text.length <= maxLength) return text;
   return `${text.slice(0, Math.max(0, maxLength - 1)).trim()}...`;

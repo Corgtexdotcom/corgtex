@@ -20,13 +20,17 @@ export function createSqlIngestionRunner(ports: SqlIngestionAttemptPort & SqlKno
   return async function syncExternalDataSource(sourceId: string, execution?: SqlIngestionExecution) {
     await execution?.assertCurrent();
     const source = await prisma.externalDataSource.findUnique({ where: { id: sourceId } });
-    if (!source || !source.isActive || source.archivedAt) {
+    if (!source || source.archivedAt) {
       throw new Error(`Data source not found or inactive: ${sourceId}`);
     }
     if (source.driverType !== "postgres") throw new Error(`Unsupported driver: ${source.driverType}`);
     if (execution && source.workspaceId !== execution.workspaceId) {
       throw new Error("SQL source workspace does not match admitted execution.");
     }
+    if (!source.selectedTables.length || source.selectedTables.some(table => !table.trim())) {
+      return {skipped: true, reason: "table_selection_required"} as const;
+    }
+    if (!source.isActive) throw new Error(`Data source not found or inactive: ${sourceId}`);
     const log = await prisma.externalDataSyncLog.create({ data: { sourceId } });
     const fingerprint = sqlIngestionConfigurationFingerprint(source);
     let attempt: SqlIngestionAttempt | undefined;

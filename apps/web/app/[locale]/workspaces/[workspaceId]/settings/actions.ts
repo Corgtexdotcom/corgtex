@@ -316,8 +316,9 @@ export async function markAllNotificationsReadAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
-  await markAllNotificationsRead(actor, workspaceId);
+  const result = await markAllNotificationsRead(actor, workspaceId, { cursor: asOptional(formData, "cursor") ?? undefined });
   refresh(workspaceId);
+  return result;
 }
 
 export async function markNotificationReadAction(formData: FormData) {

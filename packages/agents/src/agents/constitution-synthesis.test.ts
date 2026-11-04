@@ -58,8 +58,8 @@ describe("runConstitutionSynthesisAgent", () => {
       const helpers = {
         plannedInputReceipt: { kind: "agent-input-receipt" }, behaviorContext: null, behaviorLineageRoots: [],
         captureInputs: async () => ({ kind: "agent-input-receipt" }),
-        tool: async (_name: string, _meta: unknown, callback: () => Promise<unknown>) => callback(),
-        step: async (_name: string, _meta: unknown, callback: () => Promise<unknown>) => callback(),
+        tool: async (_name: string, _meta: unknown, callback: (operation: import("../runtime").AgentOperationContext) => Promise<unknown>) => callback({modelRequest: request => request}),
+        step: async (_name: string, _meta: unknown, callback: (operation: import("../runtime").AgentOperationContext) => Promise<unknown>) => callback({modelRequest: request => request}),
       };
       const context = await config.buildContext(helpers);
       return config.execute(context, helpers, "run-1", "model-1");

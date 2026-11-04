@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 import { createHash } from "node:crypto";
+import { markAsUntransferable } from "node:worker_threads";
 
 const { prismaMock, defaultStorageMock, defaultModelGatewayMock, intakeMeetingTranscriptMock,
   captureAudioUploadInputMock, createAudioWorkerMock, captureAudioTranscriptReceiptMock,
@@ -94,6 +95,7 @@ const actor: AppActor = {
 };
 
 describe("meeting audio assets", () => {
+  afterEach(() => vi.useRealTimers());
   beforeEach(() => {
     vi.clearAllMocks();
     prismaMock.$transaction.mockImplementation((callback) => callback(prismaMock));
@@ -113,7 +115,7 @@ describe("meeting audio assets", () => {
     prismaMock.workflowJob.upsert.mockResolvedValue({ id: "job-1" });
     prismaMock.workflowJob.findFirst.mockResolvedValue({ id: "job-1", workspaceId: "ws-1",
       type: "meeting-audio.transcribe", status: "RUNNING", attempts: 1,
-      lockedBy: "worker-1", lockedAt: new Date("2026-10-13T10:00:00.000Z"),
+      lockedBy: "worker-1", lockedAt: new Date(), startedAt: new Date(),
       payload: { audioAssetId: "audio-1" } });
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.meetingAudioAsset.update.mockImplementation(({ data }) => Promise.resolve({
@@ -193,6 +195,57 @@ describe("meeting audio assets", () => {
     } finally { copy.mockRestore(); }
   });
 
+  it("transfers owned audio without a full-file copy and detaches every uploader alias before admission", async () => {
+    const { createMeetingAudioAsset } = await import("./meeting-audio-assets");
+    const size = 64 * 1024;
+    const bytes = Buffer.from(new ArrayBuffer(size)).fill(73); // Same dedicated backing as File.arrayBuffer().
+    const alias = new Uint8Array(bytes.buffer);
+    const expectedHash = createHash("sha256").update(bytes).digest("hex");
+    const from = vi.spyOn(Buffer, "from");
+    const clone = vi.spyOn(globalThis, "structuredClone");
+    try {
+      prismaMock.member.findUnique.mockImplementationOnce(async () => {
+        expect(alias.byteLength).toBe(0);
+        alias[0] = 0;
+        return { id: "member-1", workspaceId: "ws-1", userId: "user-1", role: "ADMIN", isActive: true };
+      });
+      const pending = createMeetingAudioAsset(actor, { workspaceId: "ws-1", fileName: "owned.m4a", fileBuffer: bytes });
+      expect.soft(bytes.byteLength).toBe(0);
+      expect.soft(alias.byteLength).toBe(0);
+      await pending;
+      const stored = defaultStorageMock.put.mock.calls[0][1] as Buffer;
+      expect(stored.byteLength).toBe(size);
+      expect(createHash("sha256").update(stored).digest("hex")).toBe(expectedHash);
+      expect(from.mock.calls.filter(args => ArrayBuffer.isView(args[0]))).toHaveLength(0);
+      expect(clone).toHaveBeenCalledOnce();
+      expect(stored.buffer).toBe(clone.mock.results[0].value);
+      expect(prismaMock.meetingAudioAsset.create).toHaveBeenCalledWith({ data: expect.objectContaining({ sizeBytes: size }) });
+      expect(captureAudioUploadInputMock.mock.calls[0][1].fileBuffer).toBe(stored);
+    } finally { from.mockRestore(); clone.mockRestore(); }
+  });
+
+  it.each(["slice", "shared", "untransferable"] as const)("isolates %s backing with exactly one fallback copy", async kind => {
+    const { createMeetingAudioAsset } = await import("./meeting-audio-assets");
+    const backing = kind === "shared" ? new SharedArrayBuffer(64 * 1024) : new ArrayBuffer(64 * 1024);
+    const whole = Buffer.from(backing).fill(73);
+    const bytes = kind === "slice" ? whole.subarray(512, 4096) : whole;
+    if (kind === "untransferable") markAsUntransferable(backing);
+    const size = bytes.byteLength;
+    const expectedHash = createHash("sha256").update(bytes).digest("hex");
+    const from = vi.spyOn(Buffer, "from");
+    try {
+      const pending = createMeetingAudioAsset(actor, { workspaceId: "ws-1", fileName: "fallback.m4a", fileBuffer: bytes });
+      whole.fill(0);
+      await pending;
+      const stored = defaultStorageMock.put.mock.calls[0][1] as Buffer;
+      expect(stored.byteLength).toBe(size);
+      expect(createHash("sha256").update(stored).digest("hex")).toBe(expectedHash);
+      expect(from.mock.calls.filter(args => args[0] === bytes)).toHaveLength(1);
+      expect(whole.byteLength).toBe(64 * 1024);
+      expect(captureAudioUploadInputMock.mock.calls[0][1].fileBuffer).toBe(stored);
+    } finally { from.mockRestore(); }
+  });
+
   it("keeps one isolated storage copy across uploader mutation", async () => {
     const { createMeetingAudioAsset } = await import("./meeting-audio-assets");
     const bytes = Buffer.from("audio");
@@ -247,7 +300,7 @@ describe("meeting audio assets", () => {
     };
     prismaMock.meetingAudioAsset.findFirst.mockResolvedValue(asset);
     prismaMock.meeting.findFirst.mockResolvedValue(null);
-    createAudioWorkerMock.mockResolvedValue({ actor: { kind: "agent", label: "meeting-audio-transcription-worker" },
+    createAudioWorkerMock.mockResolvedValue({ renewLease: vi.fn().mockResolvedValue(undefined), actor: { kind: "agent", label: "meeting-audio-transcription-worker" },
       asset, input: { id: "native-1", fileHash: createHash("sha256").update("audio").digest("hex") },
       roots: [{ kind: "NativeTranscriptInput", id: "native-1", fingerprint: "a".repeat(64) }] });
     defaultStorageMock.get.mockResolvedValue({
@@ -289,6 +342,8 @@ describe("meeting audio assets", () => {
       mimeType: "audio/mp4",
       data: Buffer.from("audio"),
       prompt: "Meeting title: Team Sync",
+      authorizeAttempt: expect.any(Function),
+      signal: expect.any(AbortSignal),
     }));
     expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.objectContaining({
       kind: "agent",
@@ -326,7 +381,7 @@ describe("meeting audio assets", () => {
     prismaMock.meetingAudioAsset.findFirst.mockResolvedValue(asset);
     prismaMock.meeting.findFirst.mockResolvedValue({ id: "meeting-1", workspaceId: "ws-1",
       transcript, status: "COMPLETED", recordedAt: asset.recordedAt });
-    createAudioWorkerMock.mockResolvedValue({ actor: { kind: "agent", label: "meeting-audio-transcription-worker" },
+    createAudioWorkerMock.mockResolvedValue({ renewLease: vi.fn().mockResolvedValue(undefined), actor: { kind: "agent", label: "meeting-audio-transcription-worker" },
       asset, input: { id: "native-1", fileHash },
       roots: [{ kind: "NativeTranscriptInput", id: "native-1", fingerprint: "a".repeat(64) }] });
     captureArtifactInputProofMock.mockResolvedValue([{ kind: "MeetingTranscript", id: "meeting-1", fingerprint: "b".repeat(64) },
@@ -346,7 +401,7 @@ describe("meeting audio assets", () => {
     const asset = { id: "audio-1", workspaceId: "ws-1", status: "UPLOADED", transcriptText: null,
       fileName: "meeting.m4a", mimeType: "audio/mp4", storageKey: "stored/audio", title: null };
     prismaMock.meetingAudioAsset.findFirst.mockResolvedValue(asset);
-    createAudioWorkerMock.mockResolvedValue({ actor: { kind: "agent", label: "meeting-audio-transcription-worker" },
+    createAudioWorkerMock.mockResolvedValue({ renewLease: vi.fn().mockResolvedValue(undefined), actor: { kind: "agent", label: "meeting-audio-transcription-worker" },
       asset, input: { id: "native-1", fileHash: "a".repeat(64) },
       roots: [{ kind: "NativeTranscriptInput", id: "native-1", fingerprint: "b".repeat(64) }] });
     prismaMock.workflowJob.findFirst.mockResolvedValue({ id: "job-1", workspaceId: "ws-1",
@@ -369,7 +424,7 @@ describe("meeting audio assets", () => {
         audioFileHash: "a".repeat(64), transcriptHash: createHash("sha256").update(transcript).digest("hex") },
       fileName: "meeting.m4a", mimeType: "audio/mp4", storageKey: "stored/audio", title: null };
     prismaMock.meetingAudioAsset.findFirst.mockResolvedValue(asset);
-    createAudioWorkerMock.mockResolvedValue({ actor: { kind: "agent", label: "meeting-audio-transcription-worker" },
+    createAudioWorkerMock.mockResolvedValue({ renewLease: vi.fn().mockResolvedValue(undefined), actor: { kind: "agent", label: "meeting-audio-transcription-worker" },
       asset, input: { id: "native-1", fileHash: "a".repeat(64) },
       roots: [{ kind: "NativeTranscriptInput", id: "native-1", fingerprint: "b".repeat(64) }] });
     const { runMeetingAudioAssetTranscription } = await import("./meeting-audio-assets");
@@ -381,4 +436,62 @@ describe("meeting audio assets", () => {
     expect(recordArtifactInputLineageMock).not.toHaveBeenCalled();
     expect(defaultModelGatewayMock.transcribeAudio).not.toHaveBeenCalled();
   });
+  it.each(["retry", "ignored-abort", "long-storage"] as const)("keeps the original attempt fence through %s", async mode => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    const start = new Date();
+    const job = { id: "job-1", workspaceId: "ws-1", type: "meeting-audio.transcribe", status: "RUNNING",
+      attempts: 1, lockedBy: "worker-1", lockedAt: start, startedAt: start, payload: { audioAssetId: "audio-1" } };
+    const asset = { id: "audio-1", workspaceId: "ws-1", meetingId: "meeting-1", fileName: "meeting.m4a",
+      mimeType: "audio/mp4", storageKey: "stored/audio", sizeBytes: 5, title: null, recordedAt: null,
+      participantEmails: [], transcriptText: null, status: "UPLOADED", intakeMeetingId: null };
+    const sourceChanged = new Error("Original source or lease no longer current");
+    let renewalCount = 0;
+    const renewLease = vi.fn(async () => {
+      renewalCount++;
+      if (mode !== "long-storage" && renewalCount > 1) throw sourceChanged;
+      job.lockedAt = new Date();
+    });
+    prismaMock.workflowJob.findFirst.mockImplementation(async () => job);
+    prismaMock.meetingAudioAsset.findFirst.mockResolvedValue(asset);
+    prismaMock.meeting.findFirst.mockResolvedValue(null);
+    createAudioWorkerMock.mockResolvedValue({ actor: { kind: "agent", label: "audio-worker" }, asset,
+      input: { id: "native-1", fileHash: createHash("sha256").update("audio").digest("hex") },
+      roots: [{ kind: "NativeTranscriptInput", id: "native-1", fingerprint: "a".repeat(64) }], renewLease });
+    defaultStorageMock.get.mockImplementation(async () => {
+      if (mode === "long-storage") await vi.advanceTimersByTimeAsync(6 * 60_000);
+      return { data: Buffer.from("audio"), contentType: "audio/mp4" };
+    });
+    const sends: string[] = [];
+    defaultModelGatewayMock.transcribeAudio.mockImplementation(async request => {
+      await request.authorizeAttempt();
+      sends.push("first provider send");
+      if (mode === "retry") {
+        await request.authorizeAttempt();
+        sends.push("forbidden retry");
+      } else if (mode === "ignored-abort") {
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(request.signal.aborted).toBe(true);
+      }
+      return { text: "Synthetic transcript", usage: { provider: "fake", model: "fake", outputTokens: 2, latencyMs: 1 } };
+    });
+    intakeMeetingTranscriptMock.mockResolvedValue({ status: "meeting_matched", meeting: { id: "meeting-1" } });
+    const { runMeetingAudioAssetTranscription } = await import("./meeting-audio-assets");
+    const run = runMeetingAudioAssetTranscription({ workspaceId: "ws-1", audioAssetId: "audio-1", workflowJobId: "job-1",
+      expectedLease: { attempts: 1, lockedBy: "worker-1", lockedAt: start } });
+    if (mode === "long-storage") {
+      await expect(run).resolves.toMatchObject({ status: "ingested" });
+      expect(renewLease).toHaveBeenCalledTimes(7);
+    } else {
+      await expect(run).rejects.toBe(sourceChanged);
+      expect(intakeMeetingTranscriptMock).not.toHaveBeenCalled();
+      expect(prismaMock.meetingAudioAsset.update.mock.calls.some(([args]) => args.data.status === "TRANSCRIBED"
+        || args.data.status === "INGESTED" || args.data.status === "FAILED")).toBe(false);
+    }
+    expect(sends).toEqual(["first provider send"]);
+    const finalRenewalCount = renewLease.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    expect(renewLease).toHaveBeenCalledTimes(finalRenewalCount);
+    expect(revokeAudioWorkerMock).toHaveBeenCalledTimes(1);
+  });
+
 });

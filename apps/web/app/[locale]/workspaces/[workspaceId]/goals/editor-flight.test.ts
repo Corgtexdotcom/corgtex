@@ -58,13 +58,16 @@ describe.runIf(process.env.GOAL_EDITOR_FLIGHT_QA === "1")("Goals Flight construc
         });
         build.onLoad({ filter: /.*/, namespace: "fixture" }, args => {
           const modules: Record<string, string> = {
-            "@corgtex/domain": `export const listGoals = async () => globalThis.goals;
-              export const getGoalTree = async () => globalThis.goals;
+            "@corgtex/domain": `export class DigestReadRelease { async finish() {} }
+              export class ArchiveMetadataReadRelease { async finish() {} }
+              export const listGoalsPage = async () => ({ items: globalThis.goals, complete: true, nextCursor: null });
+              export const buildGoalTree = goals => goals;
               export const listCircles = async () => [{ id: "circle-1", name: "Synthetic circle" }];
               export const listHumanMembers = async () => [{ id: "member-1", user: { displayName: "Synthetic owner", email: "owner@example.test" } }];
               export const requireWorkspaceMembership = async () => ({ id: "member-1", role: "MEMBER" });
               export const getGoal = async () => null; export const getWorkspaceArchiveRecord = async () => null;
-              export const getMyGoalSlice = async () => []; export const listRecognitions = async () => [];`,
+              export const getMyGoalSlicePage = async () => ({ items: [], complete: true, nextCursor: null });
+              export const listRecognitionsPage = async () => ({ items: [], complete: true, nextCursor: null });`,
             "@/lib/auth": `export const requirePageActor = async () => ({ kind: "user", user: { id: "synthetic-author" } });`,
             "@/lib/workspace-feature-flags": "export const requireWorkspaceFeature = async () => {};",
             "@/lib/components/MarkdownRenderer": "export const MarkdownRenderer = () => null;",

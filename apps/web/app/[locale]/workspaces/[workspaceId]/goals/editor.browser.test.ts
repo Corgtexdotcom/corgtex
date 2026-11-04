@@ -58,15 +58,17 @@ describe.runIf(process.env.GOAL_EDITOR_BROWSER_QA === "1")("Goal editor browser 
         build.onResolve({ filter: /^\.\/actions$/ }, (args) => args.importer.includes("/goals/") ? { path: "actions", namespace: "fixture" } : undefined);
         build.onLoad({ filter: /.*/, namespace: "fixture" }, (args) => {
           const modules: Record<string, string> = {
-            "@corgtex/domain": `export const listGoals = async () => window.fixture.goals;
-              export const getGoalTree = async () => window.fixture.goals.filter(g => g.cadence === "QUARTERLY");
+            "@corgtex/domain": `export class DigestReadRelease { async finish() {} }
+              export class ArchiveMetadataReadRelease { async finish() {} }
+              export const listGoalsPage = async () => ({ items: window.fixture.goals, complete: true, nextCursor: null });
+              export const buildGoalTree = goals => goals;
               export const listCircles = async () => [{ id: "circle-1", name: "Synthetic circle" }];
               export const listHumanMembers = async () => [{ id: "member-1", user: { displayName: null, email: "owner@example.test" } }];
               export const requireWorkspaceMembership = async () => ({ id: "member-1", role: window.fixture.role });
               export const getGoal = async () => null;
               export const getWorkspaceArchiveRecord = async () => null;
-              export const getMyGoalSlice = async () => [];
-              export const listRecognitions = async () => [];`,
+              export const getMyGoalSlicePage = async () => ({ items: [], complete: true, nextCursor: null });
+              export const listRecognitionsPage = async () => ({ items: [], complete: true, nextCursor: null });`,
             "@/lib/auth": `export const requirePageActor = async () => ({ kind: "user", user: { id: "synthetic-author" } });`,
             "@/lib/workspace-feature-flags": "export const requireWorkspaceFeature = async () => {};",
             "@/lib/components/MarkdownRenderer": "export const MarkdownRenderer = () => null;",

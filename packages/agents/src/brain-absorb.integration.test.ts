@@ -133,3 +133,40 @@ it("excludes unknown legacy article labels and bodies from model and proposal pr
     expect((await prisma.brainArticle.findUniqueOrThrow({where: {id: legacy.id}})).bodyMd).toBe("Unknown legacy body");
   } finally {extract.mockRestore(); chat.mockRestore();}
 });
+
+it.each([
+  ["credentials", "source"], ["retry", "source"],
+  ["credentials", "caller"], ["retry", "caller"],
+  ["retry", "source-restore"], ["retry", "caller-restore"],
+] as const)("fences original absorption provider attempts after %s/%s", async (boundary, authority) => {
+  const workspace = await prisma.workspace.create({ data: { name: "Synthetic absorption attempts", slug: randomUUID() } });
+  const user = await prisma.user.create({ data: { email: `${randomUUID()}@absorb.test`, passwordHash: "synthetic" } });
+  const member = await prisma.member.create({ data: { workspaceId: workspace.id, userId: user.id, role: "ADMIN" } });
+  const actor: AppActor = { kind: "user", user };
+  const source = await ingestSource(actor, { workspaceId: workspace.id, sourceType: "RESEARCH", tier: 2, title: "Original source", content: "Captured private company knowledge" });
+  let sends = 0, changed = false;
+  async function revoke() {
+    if (authority.startsWith("source")) {
+      await prisma.brainSource.update({ where: { id: source.id }, data: { archivedAt: new Date() } });
+      if (authority.endsWith("restore")) await prisma.brainSource.update({ where: { id: source.id }, data: { archivedAt: null } });
+    } else {
+      await prisma.member.update({ where: { id: member.id }, data: { isActive: false } });
+      if (authority.endsWith("restore")) await prisma.member.update({ where: { id: member.id }, data: { isActive: true } });
+    }
+    changed = true;
+  }
+  const extract = vi.spyOn(defaultModelGateway, "extract").mockImplementation(async request => {
+    if (boundary === "credentials") await revoke();
+    await request.authorizeAttempt?.({ signal: new AbortController().signal }); sends++;
+    if (boundary === "retry") { await revoke(); await request.authorizeAttempt?.({ signal: new AbortController().signal }); sends++; }
+    return { output: { articleType: "PROJECT", createNew: null, summary: "No output" } } as never;
+  });
+  const chat = vi.spyOn(defaultModelGateway, "chat").mockResolvedValue({ content: "Unexpected output" } as never);
+  try {
+    await expect(absorbSource({ workspaceId: workspace.id, sourceId: source.id, agentRunId: "attempt-fixture", actor })).rejects.toThrow();
+    expect(changed).toBe(true); expect(sends).toBe(boundary === "credentials" ? 0 : 1);
+    expect(chat).not.toHaveBeenCalled();
+    expect((await prisma.brainSource.findUniqueOrThrow({ where: { id: source.id } })).absorbedAt).toBeNull();
+    expect(await prisma.brainArticle.count({ where: { workspaceId: workspace.id, sourceIds: { has: source.id } } })).toBe(0);
+  } finally { extract.mockRestore(); chat.mockRestore(); }
+});

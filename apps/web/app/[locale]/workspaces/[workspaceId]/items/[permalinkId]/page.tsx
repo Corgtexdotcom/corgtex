@@ -1,5 +1,5 @@
-import { redirect } from "next/navigation";
-import { resolveWorkspacePermalink } from "@corgtex/domain";
+import { notFound, redirect } from "next/navigation";
+import { AppError, resolveWorkspacePermalink } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
 
@@ -12,7 +12,13 @@ export default async function WorkspacePermanentItemPage({
 }) {
   const { workspaceId, permalinkId } = await params;
   const actor = await requirePageActor();
-  const resolved = await resolveWorkspacePermalink(actor, { workspaceId, permalinkId });
+  let resolved: Awaited<ReturnType<typeof resolveWorkspacePermalink>>;
+  try {
+    resolved = await resolveWorkspacePermalink(actor, { workspaceId, permalinkId });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "NOT_FOUND") notFound();
+    throw error;
+  }
 
   if (resolved.status === "ACTIVE" || resolved.status === "ARCHIVED") {
     redirect(resolved.canonicalPath);

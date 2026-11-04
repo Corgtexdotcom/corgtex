@@ -52,7 +52,7 @@ vi.mock("./external-mcp", async original => ({
 
 import { captureMcpOAuthGrantEpoch, mcpCredentialVersion, mcpScopesHash, runWithMcpOrigin } from "../../shared/src/mcp-context";
 import { captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifactInputProofReadable,
-  recordArtifactInputLineage, readableArtifactIds, lineageContentFingerprint, withArtifactInputReadCapture, type LineageKind, type LineageRoot } from "./source-lineage";
+  recordArtifactInputLineage, readableArtifactIds, lineageContentFingerprint, withArtifactInputReadCapture, withArtifactCountReleaseSnapshot, type LineageKind, type LineageRoot } from "./source-lineage";
 import { externalMcpNativeReadRequest, externalMcpConnectionGrantHash } from "./external-mcp";
 import { externalMcpResponseHash } from "./external-mcp-response-input";
 import { capturePermissionEpochs } from "./source-permission-epochs";
@@ -413,5 +413,36 @@ describe("complete local admission before native query replay", () => {
         .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
     });
     expect(replay.sdk.mock.calls.length).toBeGreaterThan(successfulReplays);
+  });
+});
+
+describe("batched complete count release", () => {
+  it("checks more than ten thousand compact roots in one final repeatable-read snapshot", async () => {
+    await original("BrainArticle", "count-original");
+    const captured = await proof(owner, "ws-a", "BrainArticle", "count-original");
+    const roots = Array.from({length: 10002}, () => captured[0]);
+    f.base.$transaction.mockClear();
+    const remote = vi.fn(async () => undefined);
+    expect(await withArtifactCountReleaseSnapshot(owner, "ws-a", roots, remote, async tx => {
+      expect(tx === f.db).toBe(false); return 5001;
+    })).toBe(5001);
+    expect(remote).toHaveBeenCalledTimes(1);
+    expect(f.base.$transaction).toHaveBeenCalledTimes(1);
+    expect(f.base.$transaction.mock.calls[0][1]).toEqual({isolationLevel: "RepeatableRead", timeout: 30000});
+  });
+
+  it.each(["body", "head"])("rejects an early original's %s change during the remote phase", async change => {
+    const source = await original("BrainArticle", "count-original");
+    const captured = await proof(owner, "ws-a", "BrainArticle", source.id);
+    const roots = Array.from({length: 101}, () => captured[0]);
+    const finish = vi.fn();
+    await expect(withArtifactCountReleaseSnapshot(owner, "ws-a", roots, async () => {
+      if (change === "body") source.bodyMd = "Changed original";
+      else {
+        const manifest = [...f.tables.get("artifactInputLineage")!.values()][0];
+        f.insert("artifactInputLineage", {...manifest, id: "changed-head", revision: manifest.revision + 1});
+      }
+    }, finish)).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    expect(finish).not.toHaveBeenCalled();
   });
 });

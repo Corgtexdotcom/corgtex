@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, inspectLegacyRecovery, recoverLegacyArtifact } from "@corgtex/domain";
+import { AppError, inspectLegacyRecovery, recoverLegacyArtifact, LEGACY_RECOVERY_KINDS, type LegacyRecoveryKind } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 type Context = { params: Promise<{ workspaceId: string }> };
 function selection(workspaceId: string, kind: unknown, id: unknown) {
-  if (!["Action", "ConversationSession", "ConversationTurn", "Document", "BrainSource"].includes(String(kind))
+  if (!LEGACY_RECOVERY_KINDS.includes(kind as LegacyRecoveryKind)
     || typeof id !== "string" || !id || id.length > 191) throw new AppError(400, "INVALID_INPUT", "Select a supported historical record.");
-  return {workspaceId,kind:kind as "Action" | "ConversationSession" | "ConversationTurn" | "Document" | "BrainSource",id};
+  return {workspaceId,kind:kind as LegacyRecoveryKind,id};
 }
 /** Inspect metadata/fingerprint only; original private bodies never enter URLs or responses. */
 export async function GET(request: NextRequest, context: Context) {

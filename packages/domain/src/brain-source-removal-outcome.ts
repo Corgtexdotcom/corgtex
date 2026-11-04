@@ -29,7 +29,7 @@ type Prepared = { actor: AppActor; tx: Prisma.TransactionClient; workspaceId: st
   mode: Mode; jobId: string | null; planIdentityHash: string; priorSourceGeneration: string | null;
   sourceIdentityHash: string; principal: Principal; originIdentity: string | null; archiveLinkedDocumentRequested: boolean };
 export type BrainSourceRemovalControlToken = Readonly<{ readonly purpose: "BRAIN_SOURCE_REMOVAL_CONTROL" }>;
-export type BrainSourceRemovalOutcome = { id: string; status: "archived" }
+type BrainSourceRemovalOutcome = { id: string; status: "archived" }
   | { status: "applied"; sourceId: string; pendingSourceId: string | null };
 const tokens = new WeakMap<BrainSourceRemovalControlToken, Prepared>();
 export type ArchivedBrainSourceRetirementToken = Readonly<{ purpose: "ARCHIVED_SOURCE_EXCLUSION" }>;

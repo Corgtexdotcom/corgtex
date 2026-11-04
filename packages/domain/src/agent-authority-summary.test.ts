@@ -62,3 +62,16 @@ describe("buildAgentAuthoritySummaries", () => {
     });
   });
 });
+
+it("uses exact grouped pending counts beyond the bounded recent window, including pending-only agents", () => {
+  const summaries = buildAgentAuthoritySummaries({
+    configs: [{ agentKey: "empty" }],
+    recentRuns: [{ id: "recent", agentKey: "busy", status: "WAITING_APPROVAL" }],
+    pendingApprovalCountsByAgent: [{ agentKey: "busy", count: 5001 }, { agentKey: "pending-only", count: 200 }],
+  });
+  expect(summaries.find(row => row.agentKey === "busy")?.approval.pendingApprovalCount).toBe(5001);
+  expect(summaries.find(row => row.agentKey === "pending-only")?.approval.pendingApprovalCount).toBe(200);
+  expect(summaries.find(row => row.agentKey === "empty")?.approval.pendingApprovalCount).toBe(0);
+  expect(buildAgentAuthoritySummaries({ recentRuns: [{ id: "stale", agentKey: "done", status: "WAITING_APPROVAL" }],
+    pendingApprovalCountsByAgent: [] })[0].approval).toMatchObject({ pendingApprovalCount: 0, latestApprovalRequiredRun: null });
+});

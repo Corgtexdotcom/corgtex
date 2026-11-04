@@ -91,9 +91,11 @@ function initialSelectedId(artifacts: BuildArtifact[]) {
 export function BuiltArtifactsClient({
   workspaceId,
   initialArtifacts,
+  historyLimited = false,
 }: {
   workspaceId: string;
   initialArtifacts: BuildArtifact[];
+  historyLimited?: boolean;
 }) {
   const router = useRouter();
   const t = useTranslations("built");
@@ -285,7 +287,7 @@ export function BuiltArtifactsClient({
           </div>
         ) : (
           <div className="nr-empty" style={{ padding: 18 }}>
-            <p style={{ margin: 0 }}>{emptyText}</p>
+            <p style={{ margin: 0 }}>{historyLimited ? t("historyEmptySection") : emptyText}</p>
           </div>
         )}
       </section>
@@ -426,15 +428,15 @@ export function BuiltArtifactsClient({
           <span className="tag info">{t("mergedCount", { count: groupedArtifacts.merged.length })}</span>
           {groupedArtifacts.closed.length > 0 && <span className="tag">{t("closedCount", { count: groupedArtifacts.closed.length })}</span>}
         </div>
-        <div className="nr-item-meta">{t("artifactCount", { count: artifacts.length })}</div>
+        <div className="nr-item-meta">{t(historyLimited ? "historyCount" : "artifactCount", { count: artifacts.length })}</div>
       </div>
 
       {error && <div className="form-message form-message-error">{error}</div>}
 
       {artifacts.length === 0 ? (
         <div className="nr-empty">
-          <h2>{t("emptyTitle")}</h2>
-          <p>{t("emptyDescription")}</p>
+          <h2>{t(historyLimited ? "historyEmpty" : "emptyTitle")}</h2>
+          <p>{t(historyLimited ? "historyLimited" : "emptyDescription")}</p>
         </div>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))", gap: 24, alignItems: "start" }}>

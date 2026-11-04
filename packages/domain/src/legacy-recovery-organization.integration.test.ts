@@ -1,0 +1,94 @@
+import { randomUUID } from "node:crypto";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { prisma as db, type AppActor } from "@corgtex/shared";
+import { NextRequest } from "next/server";
+import { truncateAllTables } from "../../shared/src/db-test-utils";
+import { inspectLegacyRecovery, recoverLegacyArtifact, type LegacyRecoveryKind } from "./legacy-recovery";
+import { captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, recordArtifactInputLineage } from "./source-lineage";
+import { listRoles } from "./roles";
+import { listCircles } from "./circles";
+const auth = vi.hoisted(() => ({ actor: vi.fn() }));
+vi.mock("@/lib/auth", () => ({ resolveRequestActor: auth.actor }));
+beforeEach(async () => { await truncateAllTables(); auth.actor.mockReset(); });
+async function fixture() {
+  const workspace = await db.workspace.create({ data: { name: "Legacy organization", slug: randomUUID() } });
+  const users = await Promise.all(["admin", "peer"].map(name => db.user.create({ data: { email: `${name}-${randomUUID()}@organization.test`, passwordHash: "synthetic" } })));
+  const members = await Promise.all(users.map((user, index) => db.member.create({ data: { workspaceId: workspace.id, userId: user.id, role: index === 0 ? "ADMIN" : "CONTRIBUTOR" } })));
+  const admin: AppActor = { kind: "user", user: users[0] }, peer: AppActor = { kind: "user", user: users[1] };
+  const circle = await db.circle.create({ data: { workspaceId: workspace.id, name: "Old circle", purposeMd: "Original purpose" } });
+  const role = await db.role.create({ data: { circleId: circle.id, name: "Old role", accountabilities: ["Original accountability"], artifacts: [] } });
+  const selection = (kind: LegacyRecoveryKind, id: string) => ({ workspaceId: workspace.id, kind, id });
+  const request = async (kind: LegacyRecoveryKind, id: string) => ({ ...selection(kind, id), expectedFingerprint: (await inspectLegacyRecovery(admin, selection(kind, id))).fingerprint, requestId: randomUUID(), consent: "RESTORE_SELECTED_HISTORY" as const });
+  return { workspace, users, members, admin, peer, circle, role, selection, request };
+}
+describe("selected legacy organization recovery", () => {
+  it("restores Circle then Role through the actual recovery route and normal readers without rewriting originals", async () => {
+    const f = await fixture();
+    expect(await listRoles(f.peer, f.workspace.id)).toEqual([]);
+    expect(await listCircles(f.peer, f.workspace.id)).toEqual([]);
+    auth.actor.mockResolvedValue(f.admin);
+    const { GET, POST } = await import("../../../apps/web/app/api/workspaces/[workspaceId]/history-recovery/route");
+    const context = { params: Promise.resolve({ workspaceId: f.workspace.id }) };
+    for (const [kind, row] of [["Circle", f.circle], ["Role", f.role]] as const) {
+      const inspected = await GET(new NextRequest(`http://localhost/recovery?kind=${kind}&id=${row.id}`), context);
+      expect(inspected.status).toBe(200);
+      const choice = await inspected.json();
+      const body = { kind, id: row.id, expectedFingerprint: choice.fingerprint, requestId: randomUUID(), consent: "RESTORE_SELECTED_HISTORY" };
+      const post = () => POST(new NextRequest("http://localhost/recovery", { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" } }), context);
+      const response = await post();
+      expect(response.status).toBe(200);
+      const recovered = await response.json();
+      expect(recovered).toMatchObject({ kind, id: row.id, basis: "CURRENT_ATTESTATION", projection: { status: "NOT_REQUIRED" } });
+      expect(await (await post()).json()).toEqual(recovered);
+      const manifests = await db.artifactInputLineage.findMany({ where: { workspaceId: f.workspace.id, artifactType: kind, artifactId: row.id } });
+      expect(manifests.map(manifest => manifest.origin)).toEqual(["DERIVED"]);
+    }
+    expect(await db.circle.findUniqueOrThrow({ where: { id: f.circle.id } })).toEqual(f.circle);
+    expect(await db.role.findUniqueOrThrow({ where: { id: f.role.id } })).toEqual(f.role);
+    expect(await listRoles(f.peer, f.workspace.id)).toMatchObject([{ id: f.role.id, circle: { id: f.circle.id } }]);
+    expect(await listCircles(f.peer, f.workspace.id)).toMatchObject([{ id: f.circle.id, roles: [{ id: f.role.id }] }]);
+    expect(await db.conversationOperationOutcome.count()).toBe(2);
+    await db.member.update({ where: { id: f.members[0].id }, data: { isActive: false } });
+    expect(await listRoles(f.peer, f.workspace.id)).toHaveLength(1);
+    expect(await listCircles(f.peer, f.workspace.id)).toHaveLength(1);
+  });
+  it("requires same-tenant current admin and readable Circle, preserves request identity and withholds archive/restore", async () => {
+    const f = await fixture();
+    await expect(inspectLegacyRecovery(f.peer, f.selection("Circle", f.circle.id))).rejects.toMatchObject({ code: "RECOVERY_ADMIN_REQUIRED" });
+    await expect(f.request("Role", f.role.id)).rejects.toThrow();
+    const circleRequest = await f.request("Circle", f.circle.id);
+    await recoverLegacyArtifact(f.admin, circleRequest);
+    const roleRequest = await f.request("Role", f.role.id);
+    await recoverLegacyArtifact(f.admin, roleRequest);
+    await expect(recoverLegacyArtifact(f.admin, { ...roleRequest, requestId: circleRequest.requestId })).rejects.toMatchObject({ code: "RECOVERY_CONFLICT" });
+    const otherWorkspace = await db.workspace.create({ data: { name: "Foreign", slug: randomUUID() } });
+    await db.member.create({ data: { workspaceId: otherWorkspace.id, userId: f.users[0].id, role: "ADMIN" } });
+    await expect(inspectLegacyRecovery(f.admin, { ...f.selection("Role", f.role.id), workspaceId: otherWorkspace.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(inspectLegacyRecovery(f.admin, { ...f.selection("Circle", f.circle.id), workspaceId: otherWorkspace.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    const proof = await captureArtifactInputProof(f.peer, f.workspace.id, [{ kind: "Role", id: f.role.id }]);
+    await db.circle.update({ where: { id: f.circle.id }, data: { archivedAt: new Date() } });
+    expect(await listRoles(f.peer, f.workspace.id)).toEqual([]);
+    await db.circle.update({ where: { id: f.circle.id }, data: { archivedAt: null } });
+    expect(await isArtifactInputProofReadable(f.peer, f.workspace.id, proof)).toBe(false);
+    expect(await listRoles(f.peer, f.workspace.id)).toEqual([]);
+    await expect(recoverLegacyArtifact(f.admin, roleRequest)).rejects.toThrow();
+  });
+  it("retains known private contributors and their original revocation epochs", async () => {
+    const f = await fixture();
+    const input = await db.action.create({ data: { workspaceId: f.workspace.id, authorUserId: f.users[0].id, title: "Private input", status: "DRAFT", isPrivate: true } });
+    await db.$transaction(tx => recordArtifactInputLineage({ tx, actor: f.admin, workspaceId: f.workspace.id, artifact: { kind: "Action", id: input.id }, content: input, origin: "HUMAN_ORIGINAL", inputs: [] }));
+    const roots = await captureArtifactInputProof(f.admin, f.workspace.id, [{ kind: "Action", id: input.id }]);
+    await db.artifactInputLineage.create({ data: { workspaceId: f.workspace.id, artifactType: "Circle", artifactId: f.circle.id, revision: 1, origin: "UNKNOWN", contentHash: lineageContentFingerprint("Circle", f.circle), inputsJson: [], rootsJson: JSON.parse(JSON.stringify(roots)) } });
+    await recoverLegacyArtifact(f.admin, await f.request("Circle", f.circle.id));
+    await recoverLegacyArtifact(f.admin, await f.request("Role", f.role.id));
+    expect(await listRoles(f.admin, f.workspace.id)).toHaveLength(1);
+    expect(await listCircles(f.admin, f.workspace.id)).toHaveLength(1);
+    expect(await listRoles(f.peer, f.workspace.id)).toEqual([]);
+    expect(await listCircles(f.peer, f.workspace.id)).toEqual([]);
+    await db.action.update({ where: { id: input.id }, data: { archivedAt: new Date() } });
+    await db.action.update({ where: { id: input.id }, data: { archivedAt: null } });
+    expect(await listRoles(f.admin, f.workspace.id)).toEqual([]);
+    expect(await listCircles(f.admin, f.workspace.id)).toEqual([]);
+    await expect(f.request("Circle", f.circle.id)).rejects.toThrow();
+  });
+});

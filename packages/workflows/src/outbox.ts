@@ -1,4 +1,8 @@
 import { startSqlJobLease, withSqlJobAdmission } from "./sql-job-admission";
+import { createEventKnowledgeSyncLease } from "./handlers/event-knowledge-sync-lease";
+import { invariant } from "../../domain/src/errors";
+import { createOAuthKnowledgeSyncLease } from "../../domain/src/oauth-knowledge-sync-lease";
+import { BRAIN_MAINTENANCE_JOB, MaintenanceDeferred } from "./brain-maintenance-jobs";
 import { registerClaimedMeetingTranscriptWorkflow, revokeMeetingTranscriptWorkflowClaim, type MeetingTranscriptWorkflowClaim } from "../../domain/src/native-meeting-workflow-claim";
 import { captureCurrentAdviceNotification } from "./notification-event-lineage";
 import { enqueueCrmLineageJob } from "./crm-job-lineage";
@@ -85,6 +89,7 @@ type ClaimedEvent = {
 
 type ClaimedJob = {
   meetingClaim?: MeetingTranscriptWorkflowClaim;
+  startedAt: Date;
   lockedBy: string;
   lockedAt: Date;
   mcpOrigin?: unknown;
@@ -521,12 +526,12 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
   const staleBefore = new Date(Date.now() - LOCK_TIMEOUT_MS);
   const claimable = Prisma.sql`(
     (job.status = 'PENDING' AND (
-      (job.type IN ('agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction') AND job."runAfter" <= (NOW() AT TIME ZONE 'UTC'))
-      OR (job.type NOT IN ('agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction') AND job."runAfter" <= NOW())
+      (job.type IN ('agent.brain-maintenance', 'agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction', 'meeting-audio.transcribe') AND job."runAfter" <= (NOW() AT TIME ZONE 'UTC'))
+      OR (job.type NOT IN ('agent.brain-maintenance', 'agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction', 'meeting-audio.transcribe') AND job."runAfter" <= NOW())
     ))
     OR (job.status = 'RUNNING' AND job."lockedAt" IS NOT NULL AND (
-      (job.type IN ('agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction') AND job."lockedAt" < (clock_timestamp() AT TIME ZONE 'UTC') - interval '5 minutes')
-      OR (job.type NOT IN ('agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction') AND job."lockedAt" < ${staleBefore})
+      (job.type IN ('agent.brain-maintenance', 'agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction', 'meeting-audio.transcribe') AND job."lockedAt" < (clock_timestamp() AT TIME ZONE 'UTC') - interval '5 minutes')
+      OR (job.type NOT IN ('agent.brain-maintenance', 'agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction', 'meeting-audio.transcribe') AND job."lockedAt" < ${staleBefore})
     ))
   )`;
 
@@ -559,7 +564,7 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
       SET
         status = 'RUNNING',
         "startedAt" = NOW(),
-        "lockedAt" = CASE WHEN job.type IN ('agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction')
+        "lockedAt" = CASE WHEN job.type IN ('agent.brain-maintenance', 'agent.brain-absorb', 'agent.meeting-summary', 'meeting.insights.extract', 'agent.action-extraction', 'meeting-audio.transcribe')
           THEN (clock_timestamp() AT TIME ZONE 'UTC') ELSE NOW()::timestamp END,
         "lockedBy" = ${workerId},
         "attempts" = job."attempts" + 1,
@@ -576,13 +581,22 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
         job.payload,
         job.attempts,
         job."lockedBy",
-        job."lockedAt"
+        job."lockedAt",
+        job."startedAt"
     `;
     for (const job of claimed) {
       if (isMeetingTranscriptWorkerJob(job.type)) job.meetingClaim = registerClaimedMeetingTranscriptWorkflow(job);
     }
     return claimed;
   });
+}
+
+function isClaimFencedKnowledgeSyncJob(type: string) {
+  return type === "oauth.documents.sync" || type === "oauth.email.sync" || type === "knowledge.sync.event";
+}
+
+function isSourceRegenerationJob(type: string) {
+  return type === "agent.brain-source-regenerate" || type === "agent.brain-article-variant" || type === "agent.graph-source-variant";
 }
 
 function executionAuthorizationRevoked(error: unknown) {
@@ -843,15 +857,19 @@ async function handleJob(job: ClaimedJob, workerId: string, sqlLease?: ReturnTyp
   }
 
   if (job.type === "knowledge.sync.event") {
-    await handleEventKnowledgeSync(job.id, payload as { eventId?: string }, job.workspaceId);
+    await handleEventKnowledgeSync(job.id, payload as { eventId?: string }, job.workspaceId, structuredClone(job));
     return;
   }
 
   if (job.type === "data-source.sync") {
     const { syncExternalDataSource } = await import("@corgtex/connectors-sql");
     if (!sqlLease) throw new Error("SQL workflow has no exclusive admission lease.");
-    await syncExternalDataSource((payload as { sourceId: string }).sourceId, sqlLease);
-    return;
+    const sourceId = (payload as { sourceId: string }).sourceId;
+    const result = await syncExternalDataSource(sourceId, sqlLease);
+    if (result && "skipped" in result && result.skipped) {
+      logger.info("sql_ingestion_skipped", {jobId: job.id, sourceId, reason: result.reason});
+    }
+    return result;
   }
 
   if (job.type === "knowledge.sync.tension") {
@@ -907,12 +925,12 @@ async function handleJob(job: ClaimedJob, workerId: string, sqlLease?: ReturnTyp
   }
 
   if (job.type === "oauth.documents.sync") {
-    await handleOAuthDocumentsSync(job.id, payload as { connectionId?: string }, job.workspaceId);
+    await handleOAuthDocumentsSync(job.id, payload as { connectionId?: string }, job.workspaceId, structuredClone(job));
     return;
   }
 
   if (job.type === "oauth.email.sync") {
-    await handleOAuthEmailSync(job.id, payload as { connectionId?: string }, job.workspaceId);
+    await handleOAuthEmailSync(job.id, payload as { connectionId?: string }, job.workspaceId, structuredClone(job));
     return;
   }
 
@@ -1176,12 +1194,12 @@ async function handleJob(job: ClaimedJob, workerId: string, sqlLease?: ReturnTyp
     return;
   }
 
-  if (job.type === "agent.brain-source-regenerate" || job.type === "agent.brain-article-variant" || job.type === "agent.graph-source-variant") {
+  if (isSourceRegenerationJob(job.type)) {
     return runAgentWorkflowJob(job, workerId);
   }
 
   if (job.type.startsWith("agent.")) {
-    const result = job.type === "agent.brain-absorb" || isMeetingTranscriptWorkerJob(job.type)
+    const result = job.type === "agent.brain-absorb" || job.type === BRAIN_MAINTENANCE_JOB || isMeetingTranscriptWorkerJob(job.type)
       ? await runAgentWorkflowJob(job, workerId, meetingActor) : await runAgentWorkflowJob(job);
     if (result && typeof result === "object" && "skipped" in result && result.reason === "concurrency_limit") {
       throw new RetryableWorkflowJobError("Agent concurrency limit reached.");
@@ -1264,6 +1282,10 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
   let failure: unknown = null;
   let superseded = false;
   let sqlLease: ReturnType<typeof startSqlJobLease> | undefined;
+  const knowledgeLease = ["oauth.documents.sync", "oauth.email.sync"].includes(job.type) ? createOAuthKnowledgeSyncLease(job)
+    : job.type === "knowledge.sync.event" ? createEventKnowledgeSyncLease(job) : null;
+  const settleClaimedJob = (args: Prisma.WorkflowJobUpdateManyArgs) => knowledgeLease
+    ? knowledgeLease.settle(args.data) : prisma.workflowJob.updateMany(args);
   try {
     if (job.type === "data-source.sync") {
       const sourceId = (job.payload as { sourceId?: unknown } | null)?.sourceId;
@@ -1275,12 +1297,12 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
       await sqlLease.assertCurrent();
     }
     const diagnostic = job.type === RELEASE_DIAGNOSTIC_JOB_TYPE;
-    await withWorkspaceSupportExecution(job, () => withMcpConnectionExecution(job, async () => {
+    const executeWithOrigins = () => withWorkspaceSupportExecution(job, () => withMcpConnectionExecution(job, async () => {
       const execute = async (actor?: AppActor) => {
         try {
           await recordMeetingProgressForJob(job, "ACTIVE", {actor});
           const result = await (diagnostic ? handleReleaseDiagnostic(job, workerId) : handleJob(job, workerId, sqlLease, actor));
-          superseded = job.type === "agent.brain-source-regenerate"
+          superseded = isSourceRegenerationJob(job.type)
             && !!result && typeof result === "object" && "phase" in result && result.phase === "SUPERSEDED";
           await recordMeetingProgressForJob(job, resultWasSkipped(result) ? "SKIPPED" : "COMPLETED", {actor});
         } catch (error) {
@@ -1296,15 +1318,21 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
           owner: workerId, attempt: job.attempts, claim: job.meetingClaim}, execute);
       } else await execute();
     }));
+    if (knowledgeLease) await knowledgeLease.run(executeWithOrigins); else await executeWithOrigins();
+    await knowledgeLease?.stopAndDrain();
     if (!diagnostic) {
-      if ((job.type === "agent.brain-source-regenerate" || job.type === "agent.brain-absorb" || isMeetingTranscriptWorkerJob(job.type)) && !superseded) {
+      if ((isClaimFencedKnowledgeSyncJob(job.type) || isSourceRegenerationJob(job.type) || job.type === "agent.brain-absorb" || job.type === BRAIN_MAINTENANCE_JOB || isMeetingTranscriptWorkerJob(job.type) || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) && !superseded) {
         // A reclaimed job may still have an older model call in flight.
-        await prisma.workflowJob.updateMany({
+        const settled = await settleClaimedJob({
           where: { id: job.id, workspaceId: job.workspaceId, type: job.type,
             status: "RUNNING", lockedBy: workerId, attempts: job.attempts,
-            ...(isMeetingTranscriptWorkerJob(job.type) ? {payload: {equals: job.payload as Prisma.InputJsonValue}, lockedAt: {gt: new Date(Date.now() - LOCK_TIMEOUT_MS)}} : {}) },
+            ...((isClaimFencedKnowledgeSyncJob(job.type) || isMeetingTranscriptWorkerJob(job.type) || job.type === BRAIN_MAINTENANCE_JOB || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) ? {payload: {equals: job.payload as Prisma.InputJsonValue}, lockedAt: {gt: new Date(Date.now() - LOCK_TIMEOUT_MS)}} : {}),
+            ...(isClaimFencedKnowledgeSyncJob(job.type) ? {lockedAt: {equals: job.lockedAt, gt: new Date(Date.now() - LOCK_TIMEOUT_MS)}, startedAt: job.startedAt} : {}),
+            ...(job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE ? { startedAt: job.startedAt } : {}),
+            },
           data: { status: "COMPLETED", completedAt: new Date(), error: null, lockedAt: null, lockedBy: null },
         });
+        invariant(!knowledgeLease || settled.count === 1, 409, "SOURCE_CHANGED", "Knowledge ingestion lease changed before completion.");
       } else if (job.type === "data-source.sync") {
         await sqlLease?.stop();
         await prisma.workflowJob.updateMany({
@@ -1317,6 +1345,18 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
       }
     }
   } catch (error) {
+    await sqlLease?.stop();
+    await knowledgeLease?.dispose();
+    if (job.type === BRAIN_MAINTENANCE_JOB && error instanceof MaintenanceDeferred) {
+      const delay = error.reason === "daily_rate_limit" ? 24 * 60 * 60_000
+        : ["hourly_rate_limit", "budget_exceeded"].includes(error.reason) ? 60 * 60_000 : 60_000;
+      await prisma.workflowJob.updateMany({where: {id: job.id, workspaceId: job.workspaceId, type: job.type,
+        status: "RUNNING", lockedBy: workerId, attempts: job.attempts, lockedAt: {equals: job.lockedAt, gt: new Date(Date.now() - LOCK_TIMEOUT_MS)},
+        payload: {equals: job.payload as Prisma.InputJsonValue}}, data: {status: "PENDING", attempts: {decrement: 1},
+        runAfter: new Date(Date.now() + delay), lockedAt: null, lockedBy: null, error: error.message}});
+      logger.info("workflow_job_deferred", {jobId: job.id, type: job.type, reason: error.reason});
+      return;
+    }
     failed = true;
     failure = error;
     if (!isMeetingTranscriptWorkerJob(job.type) && job.attempts >= MAX_ATTEMPTS && !executionAuthorizationRevoked(error)) {
@@ -1329,12 +1369,15 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
         where: { id: job.id, workspaceId: job.workspaceId, type: RELEASE_DIAGNOSTIC_JOB_TYPE, status: "RUNNING", lockedBy: workerId },
         data: { status: "FAILED", lockedAt: null, lockedBy: null, error: "Release diagnostic failed; reconcile the exact operation." },
       });
-    } else if (job.type === "agent.brain-source-regenerate" || job.type === "agent.brain-absorb" || job.type === "data-source.sync" || isMeetingTranscriptWorkerJob(job.type)) {
+    } else if (job.type === "data-source.sync" || isClaimFencedKnowledgeSyncJob(job.type) || isSourceRegenerationJob(job.type) || job.type === "agent.brain-absorb" || job.type === BRAIN_MAINTENANCE_JOB || isMeetingTranscriptWorkerJob(job.type) || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) {
       const status: WorkflowJobStatus = job.attempts >= MAX_ATTEMPTS || executionAuthorizationRevoked(error) ? "FAILED" : "PENDING";
-      await prisma.workflowJob.updateMany({
+      await settleClaimedJob({
         where: { id: job.id, workspaceId: job.workspaceId, type: job.type,
           status: "RUNNING", lockedBy: workerId, attempts: job.attempts,
-            ...(isMeetingTranscriptWorkerJob(job.type) ? {payload: {equals: job.payload as Prisma.InputJsonValue}, lockedAt: {gt: new Date(Date.now() - LOCK_TIMEOUT_MS)}} : {}) },
+            ...((isClaimFencedKnowledgeSyncJob(job.type) || isMeetingTranscriptWorkerJob(job.type) || job.type === BRAIN_MAINTENANCE_JOB || job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE) ? {payload: {equals: job.payload as Prisma.InputJsonValue}, lockedAt: {gt: new Date(Date.now() - LOCK_TIMEOUT_MS)}} : {}),
+            ...(isClaimFencedKnowledgeSyncJob(job.type) ? {lockedAt: {equals: job.lockedAt, gt: new Date(Date.now() - LOCK_TIMEOUT_MS)}, startedAt: job.startedAt} : {}),
+            ...(job.type === MEETING_AUDIO_TRANSCRIPTION_JOB_TYPE ? { startedAt: job.startedAt } : {}),
+            },
         data: { status, error: error instanceof Error ? error.message : "Unknown worker error.",
           completedAt: status === "FAILED" ? new Date() : null,
           runAfter: status === "PENDING" ? nextRetryTime(job.attempts) : undefined,
@@ -1345,6 +1388,7 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
     }
   } finally {
     await sqlLease?.stop();
+    await knowledgeLease?.dispose();
     revokeMeetingTranscriptWorkflowClaim(job.meetingClaim);
   }
 
@@ -1458,7 +1502,7 @@ export async function schedulePeriodicJobs() {
   const aiUsageLedgerEntryDelegate = (prisma as typeof prisma & { aiUsageLedgerEntry?: typeof prisma.aiUsageLedgerEntry }).aiUsageLedgerEntry;
   const [sources, slackInstallations, customerDeployments, appRuntimes, pendingAiUsage] = await Promise.all([
     prisma.externalDataSource.findMany({
-      where: { isActive: true },
+      where: { isActive: true, archivedAt: null, selectedTables: { isEmpty: false } },
       select: { id: true, workspaceId: true, pullCadenceMinutes: true, lastSyncAt: true }
     }),
     prisma.communicationInstallation.findMany({

@@ -41,13 +41,13 @@ export async function runCrmEmailExtractionAgent(params: {
         409, "SOURCE_CHANGED", "Qualification inputs changed during extraction.");
       await revalidate();
       const receipt = await helpers.captureInputs(mergeArtifactInputProofs(context.lineageRoots, [...helpers.behaviorLineageRoots]));
-      const extracted = await helpers.tool("model.extract", {}, async () => {
+      const extracted = await helpers.tool("model.extract", {}, async (operation) => {
         await revalidate();
-        return defaultModelGateway.extract({ model, workspaceId: params.workspaceId, agentRunId: runId,
+        return defaultModelGateway.extract(operation.modelRequest({ model, workspaceId: params.workspaceId, agentRunId: runId,
           instruction: `${helpers.behaviorContext ?? ""}\n\nExtract companyName, website, aiExperience, and helpNeeded from the following raw email reply.`,
           input: context.rawEmailReply,
           schemaHint: JSON.stringify({ companyName: "string | null", website: "string | null", aiExperience: "string | null", helpNeeded: "string | null" }),
-        });
+        }));
       }, { receipt });
       await helpers.step("update-qualification", {}, async () => {
         await revalidate();

@@ -9,6 +9,13 @@ const f = vi.hoisted(() => {
   const matches = (row:any,where:any):boolean=>Object.entries(where??{}).every(([key,value]:[string,any])=>
     value && typeof value==="object" && "in" in value ? value.in.includes(row[key]) : row[key]===value);
   const base:any={$transaction:vi.fn(async(work:any)=>work(db)), $executeRaw:vi.fn(async()=>1),$queryRaw:vi.fn(async(query:any)=>{
+    if (query.sql?.includes('FROM "ArtifactInputLineage"') && query.sql.includes("DISTINCT ON")) {
+      const [workspaceId, artifactType, ...ids] = query.values;
+      const rows = [...(tables.get("artifactInputLineage")?.values() ?? [])]
+        .filter(row => row.workspaceId === workspaceId && row.artifactType === artifactType && ids.includes(row.artifactId))
+        .sort((left, right) => right.revision - left.revision);
+      return [...new Set(rows.map(row => row.artifactId))].map(id => structuredClone(rows.find(row => row.artifactId === id)));
+    }
     if (!query.sql?.includes('"SourcePermissionEpoch"')) return [];
     const values=query.values, workspaceId=values[0], result=[];
     for(let index=1;index<values.length;index+=2) result.push({sourceKind:values[index],sourceId:values[index+1],

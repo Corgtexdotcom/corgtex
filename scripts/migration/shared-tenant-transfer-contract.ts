@@ -82,7 +82,7 @@ export const historicalAuthorityTables: ReadonlySet<string> = new Set([
   "CommunicationIngressInput", "CommunicationMessageNativeInput", "NativeTranscriptInput", "NativeTranscriptPublication", "TranscriptTransportArchive",
   "RecorderTranscriptBinding", "RecorderTranscriptClaim", "RecorderTranscriptAttempt", "RecorderTranscriptPublication",
   "SqlIngestionSourceClaim", "SqlIngestionAttempt", "SqlNativeRunInput", "SqlNativeCapturePart",
-  "SqlKnowledgePublication", "SqlKnowledgeStagedChunk", "ExternalProviderFetchInput", "ExternalMcpResponseInput",
+  "SqlKnowledgePublication", "SqlKnowledgeStagedChunk", "ExternalProviderFetchInput", "OAuthProviderFetchInput", "ExternalMcpResponseInput",
   "ConversationIngressInput", "McpToolInput", "ConversationOperationOutcome", "CrmQualificationFormInput", "FinanceReportUploadInput", "FinanceReportFactRevision",
 ]);
 
@@ -120,6 +120,7 @@ const scalarReferenceFields: Record<string, readonly string[]> = {
   SqlKnowledgePublication: ["sourceId", "attemptId", "nativeInputId"],
   ExternalDataSyncLog: ["sqlAttemptId"],
   ExternalProviderFetchInput: ["externalContentSourceId", "connectionId", "localUserId", "providerAccountId", "externalId"],
+  OAuthProviderFetchInput: ["connectionId", "localUserId", "ownerMemberId", "providerAccountId", "externalId", "sourceKey"],
   ExternalMcpResponseInput: ["connectionId", "localUserId", "providerAccountId"],
   ConversationIngressInput: ["userId", "credentialId"],
   McpToolInput: ["userId", "credentialId"],
@@ -266,6 +267,7 @@ const scalarSecretFields: Record<string, readonly string[]> = {
   SqlNativeRunInput: ["encryptedPayload"],
   SqlNativeCapturePart: ["ciphertextPart"],
   ExternalProviderFetchInput: ["encryptedResponseJson"],
+  OAuthProviderFetchInput: ["encryptedPayload"],
   ExternalMcpResponseInput: ["encryptedResponseJson"],
   DemoLead: ["qualifyToken"],
   CommunicationInstallation: ["botTokenEnc"],

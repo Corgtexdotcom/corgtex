@@ -56,15 +56,15 @@ export async function runInboxTriageAgent(params: {
       await revalidate();
       const receipt = await helpers.captureInputs(lineageRoots);
       const metrics = { openActions: context.openActions, openTensions: context.openTensions, submittedProposals: context.submittedProposals };
-      const summary = await helpers.tool("model.chat", { purpose: "workspace-triage" }, async () => {
+      const summary = await helpers.tool("model.chat", { purpose: "workspace-triage" }, async (operation) => {
         await revalidate();
-        return defaultModelGateway.chat({ model,
+        return defaultModelGateway.chat(operation.modelRequest({ model,
           workspaceId: params.workspaceId, agentRunId: runId, taskType: "AGENT",
           messages: [
             { role: "system", content: `${helpers.behaviorContext ?? ""}\n\nSummarize the workspace operating state for an internal operator inbox.` },
             { role: "user", content: JSON.stringify(metrics) },
           ],
-        });
+        }));
       }, { receipt });
       await revalidate();
       return { lineageReceipt: receipt, resultJson: { summary: summary.content, metrics } };

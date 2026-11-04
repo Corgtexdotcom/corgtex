@@ -1,3 +1,5 @@
+import type { ModelAttemptGuard } from "@corgtex/models";
+import { installSourcePermissionEpochFixture } from "../../../domain/src/source-permission-epochs.test-fixture";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fixture, workspaceId, alpha, beta, resetFixture, known, knownCopiedDocument, sharedEnv, domainExports } from "./model-consumer.test-fixture";
 vi.mock("@corgtex/shared", () => ({ prisma: fixture.prisma, env: sharedEnv,
@@ -68,5 +70,97 @@ describe("Inbox triage actual runtime receipts", () => {
     expect(await readableArtifactIds(alpha, workspaceId, "AgentRun", [run])).toEqual(new Set([run.id]));
     await expect(runInboxTriageAgent({ workspaceId: "ws-b", triggerRef: "foreign-trigger", lineageActor: alpha })).rejects.toMatchObject({ code: "NOT_A_MEMBER" });
     expect(fixture.chat).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("receipt-backed model provider attempts", () => {
+  it.each(["credentials", "retry"].flatMap(boundary => ["input", "caller"].map(authority => ({boundary, authority}))))(
+    "denies $authority revoke/restore during $boundary before another provider send", async ({boundary, authority}) => {
+      await seedCounts(); const epochs = installSourcePermissionEpochFixture(fixture.prisma); let sends = 0;
+      fixture.chat.mockImplementationOnce(async ({authorizeAttempt, signal}: {authorizeAttempt?: ModelAttemptGuard; signal?: AbortSignal}) => {
+        const attempt = {signal: signal ?? new AbortController().signal};
+        if (boundary === "retry") { await authorizeAttempt?.(attempt); sends++; }
+        const kind = authority === "input" ? "Action" : "MemberUserPolicy";
+        const id = authority === "input" ? "action-public" : "alpha";
+        epochs.bump(workspaceId, kind, id); epochs.bump(workspaceId, kind, id);
+        await authorizeAttempt?.(attempt); sends++;
+        return {content: "Should never release", usage: {model: "synthetic", inputTokens: 1, outputTokens: 1}};
+      });
+      await runInboxTriageAgent({workspaceId, triggerRef: "attempt-test", lineageActor: alpha}).catch(() => undefined);
+      expect(sends).toBe(boundary === "retry" ? 1 : 0);
+      expect(fixture.rows.agentRun[0].status).toBe("FAILED");
+    });
+  it.each([1, 2])("allows %s current authorized attempt(s) through the real receipt evaluator", async attempts => {
+    await seedCounts(); installSourcePermissionEpochFixture(fixture.prisma); let sends = 0;
+    fixture.chat.mockImplementationOnce(async ({authorizeAttempt, signal}: {authorizeAttempt: ModelAttemptGuard; signal: AbortSignal}) => {
+      expect(authorizeAttempt).toBeTypeOf("function"); expect(signal).toBeInstanceOf(AbortSignal);
+      for (let i = 0; i < attempts; i++) { await authorizeAttempt({signal}); sends++; }
+      return {content: "Proven summary", usage: {model: "synthetic", inputTokens: 1, outputTokens: 1}};
+    });
+    const result = await runInboxTriageAgent({workspaceId, triggerRef: "positive-attempt", lineageActor: alpha}) as any;
+    expect(result.status).toBe("COMPLETED"); expect(sends).toBe(attempts);
+  });
+});
+
+async function exerciseReceiptOperation(work: (operation: import("../runtime").AgentOperationContext) => Promise<unknown>) {
+  const {executeAgentRun} = await import("../runtime");
+  const {captureArtifactInputProof} = await import("../../../domain/src/source-lineage");
+  const roots = await captureArtifactInputProof(alpha, workspaceId, [{kind: "Workspace", id: workspaceId}]);
+  return executeAgentRun({agentKey: "inbox-triage", workspaceId, triggerType: "EVENT", triggerRef: "composed-attempt",
+    goal: "Synthetic test", payload: {}, plan: ["model"], lineageActor: alpha, lineageRoots: roots,
+    contextLineageRoots: () => roots, buildContext: async () => ({}),
+    execute: async (_context, helpers) => {
+      const receipt = await helpers.captureInputs(roots);
+      await helpers.tool("model.test", {}, work, {receipt});
+      return {resultJson: {done: true}, lineageReceipt: receipt};
+    },
+  });
+}
+
+describe("receipt model request composition", () => {
+  it("forwards the exact gateway context to the prior guard before checking original authority", async () => {
+    const epochs = installSourcePermissionEpochFixture(fixture.prisma);
+    const context = {signal: new AbortController().signal};
+    const upstream = vi.fn(async (actual: Parameters<ModelAttemptGuard>[0]) => {
+      expect(actual).toBe(context);
+      epochs.bump(workspaceId, "MemberUserPolicy", "alpha");
+      epochs.bump(workspaceId, "MemberUserPolicy", "alpha");
+    });
+    await expect(exerciseReceiptOperation(async operation => {
+      const request = operation.modelRequest({authorizeAttempt: upstream, marker: "retained"});
+      expect(request.marker).toBe("retained");
+      // Even an adapter swallowing the authorization error cannot release output.
+      await expect(request.authorizeAttempt!(context)).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+      expect(request.signal?.aborted).toBe(true);
+      return "Swallowed denial";
+    })).rejects.toMatchObject({code: "SOURCE_CHANGED"});
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it("preserves a prior guard failure and never permits a later retry", async () => {
+    const failure = new Error("Synthetic upstream denial");
+    const upstream = vi.fn(async () => {throw failure;});
+    await expect(exerciseReceiptOperation(async operation => {
+      const request = operation.modelRequest({authorizeAttempt: upstream});
+      const context = {signal: new AbortController().signal};
+      await expect(request.authorizeAttempt!(context)).rejects.toBe(failure);
+      await expect(request.authorizeAttempt!(context)).rejects.toBe(failure);
+      return "Swallowed failure";
+    })).rejects.toBe(failure);
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it.each(["caller-before", "deadline-before", "deadline-during", "caller-without-guard"])("preserves %s cancellation", async boundary => {
+    const caller = new AbortController(), deadline = new AbortController();
+    const failure = new Error("Synthetic cancellation");
+    const upstream = vi.fn(async () => { if (boundary === "deadline-during") deadline.abort(failure); });
+    await expect(exerciseReceiptOperation(async operation => {
+      const request = operation.modelRequest({signal: caller.signal, authorizeAttempt: upstream});
+      if (boundary.startsWith("caller")) caller.abort(failure);
+      if (boundary === "deadline-before") deadline.abort(failure);
+      if (boundary !== "caller-without-guard") await expect(request.authorizeAttempt!({signal: deadline.signal})).rejects.toBe(failure);
+      return "Adapter ignored cancellation";
+    })).rejects.toBe(failure);
+    expect(upstream).toHaveBeenCalledTimes(boundary === "deadline-during" ? 1 : 0);
   });
 });

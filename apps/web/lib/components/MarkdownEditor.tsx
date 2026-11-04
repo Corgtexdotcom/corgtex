@@ -194,10 +194,10 @@ export function MarkdownEditor({
         <div className="md-editor-toolbar" aria-label={t("toolbar")}>
           <button type="button" title={t("bold")} aria-label={t("bold")} disabled={disabled} onClick={() => wrapSelection("**")}>B</button>
           <button type="button" title={t("italic")} aria-label={t("italic")} disabled={disabled} onClick={() => wrapSelection("_")}>I</button>
-          <button type="button" title={t("headingOne")} aria-label={t("headingOne")} disabled={disabled} onClick={() => insertHeading(1)}>H1</button>
-          <button type="button" title={t("headingTwo")} aria-label={t("headingTwo")} disabled={disabled} onClick={() => insertHeading(2)}>H2</button>
+          <button type="button" title={t("headingOne")} aria-label={`H1: ${t("headingOne")}`} disabled={disabled} onClick={() => insertHeading(1)}>H1</button>
+          <button type="button" title={t("headingTwo")} aria-label={`H2: ${t("headingTwo")}`} disabled={disabled} onClick={() => insertHeading(2)}>H2</button>
           <button type="button" title={t("bulletedList")} aria-label={t("bulletedList")} disabled={disabled} onClick={() => prefixLines("- ")}>•</button>
-          <button type="button" title={t("numberedList")} aria-label={t("numberedList")} disabled={disabled} onClick={() => prefixLines("1. ")}>1.</button>
+          <button type="button" title={t("numberedList")} aria-label={`1. ${t("numberedList")}`} disabled={disabled} onClick={() => prefixLines("1. ")}>1.</button>
           <button type="button" title={t("quote")} aria-label={t("quote")} disabled={disabled} onClick={() => prefixLines("> ")}>&gt;</button>
           <button type="button" title={t("link")} aria-label={t("link")} disabled={disabled} onClick={insertLink}>[]</button>
           <button type="button" title={t("code")} aria-label={t("code")} disabled={disabled} onClick={() => wrapSelection("`")}>{"{}"}</button>

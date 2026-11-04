@@ -74,10 +74,19 @@ export async function settleFreshDemoInitialization(tx, token, fixture) {
     && !event.supportOriginUserId && event.supportGrantVersion == null && await tx.workflowJob.count({ where: { eventId } }) === 0,
   "notification is not this unclaimed native initialization");
   const payload = event.payload;
-  require(payload && Object.keys(payload).sort().join(",") === "governors,version" && payload.version === 1
-    && Array.isArray(payload.governors) && payload.governors.length > 0 && payload.governors.length <= 1000,
-  "native notification payload is invalid");
-  for (const governor of payload.governors) {
+  const legacy = payload && Object.keys(payload).sort().join(",") === "governors,version" && payload.version === 1
+    && Array.isArray(payload.governors) && payload.governors.length > 0 && payload.governors.length <= 1000;
+  const workspaceNotice = payload && Object.keys(payload).sort().join(",") === "scope,version"
+    && payload.version === 2 && payload.scope === "WORKSPACE";
+  require(legacy || workspaceNotice, "native notification payload is invalid");
+  // V2 deliberately carries no row inventory. The still-open native scope and
+  // exact fixture checks above remain mandatory; verify every actual fixture
+  // assignment and flag's epoch rather than inferring authority from the notice.
+  const governors = legacy ? payload.governors : [
+    ...assignments.map(row => ({kind: "RoleAssignment", id: row.id})),
+    ...flags.map(row => ({kind: "WorkspaceFeatureFlag", id: row.id})),
+  ];
+  for (const governor of governors) {
     require(governor && Object.keys(governor).sort().join(",") === "id,kind" && typeof governor.id === "string"
       && (governor.kind === "RoleAssignment" ? assignments.some(row => row.id === governor.id)
         : governor.kind === "WorkspaceFeatureFlag" && flags.some(row => row.id === governor.id)), "governor is not a fixture initialization row");

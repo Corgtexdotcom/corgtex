@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 
 const { prismaMock, storageDeleteMock, appendEventsMock } = vi.hoisted(() => {
@@ -746,6 +747,16 @@ describe("workspace archive domain", () => {
     prismaMock.brainArticle.findMany.mockResolvedValue([{ id: "article-1", slug: "notes", title: "Notes", isPrivate: false,
       ownerMemberId: null, sourceIds: ["source-1"], derivationJson: { version: 1, origin: "brain-absorb",
         agentRunId: "run-1", sources: [{ sourceId: "source-1", fingerprint: "a".repeat(64) }] } }]);
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql | TemplateStringsArray) => {
+      if ("sql" in query && query.sql.includes('SELECT a.id,') && query.sql.includes('AS candidate')) {
+        expect(query.sql).toContain('a."workspaceId" =');
+        expect(query.sql).toContain('ORDER BY a.id LIMIT 100');
+        expect(query.values).toContain("workspace-1");
+        expect(query.values).toContain("source-1");
+        return [{id: "article-1", candidate: true}];
+      }
+      return [];
+    });
     const { archiveWorkspaceArtifact } = await import("./archive");
 
     await expect(archiveWorkspaceArtifact(actor, { workspaceId: "workspace-1", entityType: "BrainSource", entityId: source.id }))
@@ -763,6 +774,16 @@ describe("workspace archive domain", () => {
     prismaMock.brainSource.findMany.mockResolvedValue([{ id: "source-1" }]);
     prismaMock.brainArticle.findMany.mockResolvedValue([{ id: "article-1", slug: "notes", title: "Notes", isPrivate: false,
       ownerMemberId: null, sourceIds: ["source-1"], derivationJson: null }]);
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql | TemplateStringsArray) => {
+      if ("sql" in query && query.sql.includes('SELECT a.id,') && query.sql.includes('AS candidate')) {
+        expect(query.sql).toContain('a."workspaceId" =');
+        expect(query.sql).toContain('ORDER BY a.id LIMIT 100');
+        expect(query.values).toContain("workspace-1");
+        expect(query.values).toContain("source-1");
+        return [{id: "article-1", candidate: true}];
+      }
+      return [];
+    });
     const { archiveWorkspaceArtifact } = await import("./archive");
 
     await expect(archiveWorkspaceArtifact(actor, { workspaceId: "workspace-1", entityType: "Document", entityId: document.id }))
@@ -1107,10 +1128,13 @@ describe("workspace archive domain", () => {
     expect(detail).toBeNull();
     expect(JSON.stringify({ list, detail })).not.toContain("-canary");
     expect(prismaMock.workspacePermalink.findMany).not.toHaveBeenCalled();
-    for (const query of [prismaMock.workspaceArchiveRecord.findMany.mock.calls.at(-1)?.[0], prismaMock.workspaceArchiveRecord.findFirst.mock.calls.at(-1)?.[0]]) {
+    for (const query of [prismaMock.workspaceArchiveRecord.findMany.mock.calls.at(-1)?.[0], prismaMock.workspaceArchiveRecord.findFirst.mock.calls.find(([query]) => !query.where.previousState)?.[0]]) {
       expect(query.select).toMatchObject({ id: true, entityId: true, purgedAt: true });
       for (const field of ["previousState", "entityLabel", "archivedByLabel", "archiveReason", "purgeReason"]) expect(query.select).not.toHaveProperty(field);
     }
+    expect(prismaMock.workspaceArchiveRecord.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ previousState: { path: ["purgedMetadata", "version"], equals: 1 } }),
+    }));
     expect(prismaMock.brainArticle.findFirst).not.toHaveBeenCalled();
   });
 

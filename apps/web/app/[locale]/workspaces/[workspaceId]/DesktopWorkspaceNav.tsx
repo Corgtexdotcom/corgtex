@@ -30,12 +30,14 @@ export function DesktopWorkspaceNav({
   workspaceId,
   navGroups,
   unreadCount,
+  unreadCountLabel,
   showPlatformAdmin,
   controlPlaneHref,
 }: {
   workspaceId: string;
   navGroups: NavGroup[];
   unreadCount: number;
+  unreadCountLabel?: string;
   showPlatformAdmin: boolean;
   controlPlaneHref: string;
 }) {
@@ -61,8 +63,8 @@ export function DesktopWorkspaceNav({
               >
                 <WorkspaceNavIcon name={item.icon} />
                 {tNav(item.labelKey as any)}
-                {item.href === "/notifications" && unreadCount > 0 && (
-                  <span className="ws-notif-badge">{unreadCount}</span>
+                {item.href === "/notifications" && (unreadCount > 0 || unreadCountLabel === "…") && (
+                  <span className="ws-notif-badge">{unreadCountLabel ?? unreadCount}</span>
                 )}
               </a>
             );

@@ -22,7 +22,7 @@ function mockChunkReads(fallback: any[] | ((args: any) => Promise<any[]>)) {
 async function syncKnowledgeForSource(params: Parameters<typeof syncKnowledgeForSourceImpl>[0]) {
   sourceSnapshots.set(params.sourceId, { id: params.sourceId, workspaceId: params.workspaceId,
     title: params.sourceTitle?.trim() || null, textContent: params.content, bodyMd: params.content,
-    accessDomain: params.accessDomain, archivedAt: null, isPrivate: false, storageKey: params.metadata?.storageKey,
+    accessDomain: params.accessDomain, archivedAt: null, isPrivate: false, updatedAt: params.sourceUpdatedAt ?? new Date("2026-10-05T00:00:00Z"), storageKey: params.metadata?.storageKey,
     metadata: { materializedContent: params.content, ...params.metadata } });
   return syncKnowledgeForSourceImpl(params);
 }
@@ -91,9 +91,36 @@ vi.mock("@corgtex/domain", async (importOriginal) => {
     scanSourceReadableRecords: vi.fn(async (params) => await params.load(undefined, 100) ?? []),
   };
 });
+vi.mock("../../domain/src/source-lineage", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../domain/src/source-lineage")>();
+  return {...actual, currentArtifactInputRootsBatch: vi.fn(async (_db, _workspace, _kind, rows: Array<{id: string}>) =>
+    new Map(rows.map(row => [row.id, []])))};
+});
+// These chunking/routing fixtures already supply synthetic proof boundaries.
+// Forward the collection release through those same gates; real PG and lineage
+// suites exercise the actual original-head/epoch snapshot implementation.
+vi.mock("../../domain/src/digest-lineage", () => ({DigestReadRelease: class {
+  constructor(readonly actor: import("@corgtex/shared").AppActor, readonly workspaceId: string) {}
+  async capture(kind: import("@corgtex/domain").LineageKind, rows: Array<{id: string}>) {
+    const domain = await import("@corgtex/domain");
+    const ids = await domain.readableArtifactIds(this.actor, this.workspaceId, kind, rows);
+    const records = rows.filter(row => ids.has(row.id));
+    const roots = await domain.captureArtifactInputProof(this.actor, this.workspaceId, records.map(row => ({kind, id: row.id, snapshot: row})));
+    return {records, roots};
+  }
+  async finish<T>(value: T) {
+    await (await import("@corgtex/domain")).requireWorkspaceMembership({actor: this.actor, workspaceId: this.workspaceId});
+    return value;
+  }
+}}));
 vi.mock("./counts", () => ({ countReadableKnowledgeChunks: vi.fn(async () => (prisma as any).knowledgeChunk.count()) }));
 
 beforeEach(() => {
+  sourceSnapshots.clear();
+  syncAzureKnowledgeSourceMock.mockReset().mockResolvedValue({ skipped: true, deleted: 0, uploaded: 0 });
+  for (const delegate of [prisma.document, prisma.brainArticle, prisma.externalContentSource]) {
+    vi.mocked(delegate.findFirst).mockReset().mockImplementation((async (query: any) => sourceSnapshots.get(query.where.id) ?? null) as any);
+  }
   storedChunks.clear();
   vi.mocked(prisma.knowledgeChunk.createMany).mockImplementation((async ({ data }: any) => {
     const rows = Array.isArray(data) ? data : [data];
@@ -228,7 +255,7 @@ describe("syncKnowledgeForSource", () => {
     });
     expect(syncAzureKnowledgeSourceMock).toHaveBeenCalledWith(expect.objectContaining({
       chunks: [expect.objectContaining({ sourceId: "report-1", accessDomain: "FINANCE" })],
-    }));
+    }), expect.objectContaining({ signal: expect.any(AbortSignal), authorizeAttempt: expect.any(Function) }));
   });
 
   it("does not let an old document sync restore superseded chunks", async () => {
@@ -266,9 +293,9 @@ describe("syncKnowledgeForSource", () => {
 
   it("does not reindex an archived article and retires its old search entries", async () => {
     vi.mocked(prisma.brainArticle.findUnique).mockResolvedValueOnce({
-      id: "article-old", workspaceId: "ws_1", bodyMd: "Old terms", isPrivate: false, archivedAt: new Date(),
+      id: "article-old", workspaceId: "ws_1", bodyMd: "Old terms", isPrivate: false, archivedAt: new Date(), updatedAt: new Date("2026-10-05T00:00:00Z"),
     } as any);
-    vi.mocked(prisma.brainArticle.findFirst).mockResolvedValueOnce(null);
+    vi.mocked(prisma.brainArticle.findFirst).mockImplementation((async () => vi.mocked(prisma.brainArticle.findUnique).mock.results[0]?.value) as any);
 
     expect(await syncBrainArticleKnowledge({ workspaceId: "ws_1", articleId: "article-old" })).toBe(0);
     expect(prisma.knowledgeChunk.deleteMany).toHaveBeenCalledWith({
@@ -276,7 +303,7 @@ describe("syncKnowledgeForSource", () => {
     });
     expect(syncAzureKnowledgeSourceMock).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "ws_1", sourceType: "BRAIN_ARTICLE", sourceId: "article-old", chunks: [],
-    }));
+    }), expect.objectContaining({ signal: expect.any(AbortSignal), authorizeAttempt: expect.any(Function) }));
   });
 
   it.each(["DOCUMENT", "BRAIN_ARTICLE"] as const)("rejects stale empty %s cleanup after restoration", async (sourceType) => {
@@ -288,22 +315,22 @@ describe("syncKnowledgeForSource", () => {
     expect(prisma.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
     expect(syncAzureKnowledgeSourceMock).not.toHaveBeenCalled();
     expect(delegate.findFirst).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ updatedAt }),
+      where: expect.objectContaining({ id: "restored-source", workspaceId: "ws_1" }),
     }));
   });
 
   it.each(["DOCUMENT", "BRAIN_ARTICLE"] as const)("publishes current empty %s cleanup after archive", async (sourceType) => {
     const updatedAt = new Date("2026-10-05T00:00:00Z");
     const delegate = sourceType === "DOCUMENT" ? prisma.document : prisma.brainArticle;
-    vi.mocked(delegate.findFirst).mockResolvedValueOnce({ id: "archived-source" } as any);
+    vi.mocked(delegate.findFirst).mockImplementation((async () => ({...sourceSnapshots.get("archived-source"), archivedAt: updatedAt, updatedAt})) as any);
     await syncKnowledgeForSource({ workspaceId: "ws_1", sourceType, accessDomain: "WORKSPACE",
       sourceId: "archived-source", content: "", sourceUpdatedAt: updatedAt, metadata: { storageKey: "fixture" } });
     expect(prisma.knowledgeChunk.deleteMany).toHaveBeenCalled();
-    expect(syncAzureKnowledgeSourceMock).toHaveBeenCalledWith(expect.objectContaining({ chunks: [] }));
+    expect(syncAzureKnowledgeSourceMock).toHaveBeenCalledWith(expect.objectContaining({ chunks: [] }), expect.objectContaining({ signal: expect.any(AbortSignal), authorizeAttempt: expect.any(Function) }));
     expect(vi.mocked(prisma.$queryRaw).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[0]);
   });
 
-  it("repairs an older Azure write from current SQL chunks before its worker completes", async () => {
+  it("rejects an older Azure write without adopting the newer generation", async () => {
     process.env.KNOWLEDGE_SEARCH_PROVIDER = "azure";
     process.env.AZURE_SEARCH_ENDPOINT = "https://corgtex-search.search.windows.net";
     process.env.AZURE_SEARCH_INDEX_NAME = "client-knowledge";
@@ -334,14 +361,12 @@ describe("syncKnowledgeForSource", () => {
       sourceId: "doc-1", content: "Current policy", metadata: { storageKey: "new-blob" },
     });
     releaseOld();
-    await oldWorker;
+    await expect(oldWorker).rejects.toMatchObject({code: "SOURCE_CHANGED"});
 
-    expect(syncAzureKnowledgeSourceMock).toHaveBeenCalledTimes(3);
+    expect(syncAzureKnowledgeSourceMock).toHaveBeenCalledTimes(2);
     expect(syncAzureKnowledgeSourceMock.mock.calls[0]?.[0].chunks[0].content).toBe("Old policy");
     expect(syncAzureKnowledgeSourceMock.mock.calls[1]?.[0].chunks[0].content).toBe("Current policy");
-    expect(syncAzureKnowledgeSourceMock.mock.calls[2]?.[0].chunks).toEqual([expect.objectContaining({
-      id: current[0].id, content: "Current policy", metadata: expect.objectContaining({ storageKey: "new-blob" }),
-    })]);
+
   });
 });
 
@@ -351,7 +376,7 @@ describe("Brain article archive indexing", () => {
     vi.mocked(prisma.brainArticle.findUnique).mockResolvedValue({
       id: "article-1", workspaceId: "ws-1", isPrivate: false, archivedAt: new Date(), updatedAt: new Date("2026-10-05T00:00:00Z"),
     } as any);
-    vi.mocked(prisma.brainArticle.findFirst).mockResolvedValue({ id: "current" } as any);
+    vi.mocked(prisma.brainArticle.findFirst).mockImplementation((async () => vi.mocked(prisma.brainArticle.findUnique).mock.results.at(-1)?.value) as any);
     vi.mocked(prisma.knowledgeChunk.findMany).mockReset().mockResolvedValue([]);
     await expect(syncBrainArticleKnowledge({ workspaceId: "ws-1", articleId: "article-1" })).resolves.toBe(0);
     expect(prisma.knowledgeChunk.deleteMany).toHaveBeenCalledWith({ where: {
@@ -360,7 +385,7 @@ describe("Brain article archive indexing", () => {
     expect(defaultModelGateway.embed).not.toHaveBeenCalled();
     expect(syncAzureKnowledgeSourceMock).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "ws-1", sourceType: "BRAIN_ARTICLE", sourceId: "article-1", chunks: [],
-    }));
+    }), expect.objectContaining({ signal: expect.any(AbortSignal), authorizeAttempt: expect.any(Function) }));
   });
 });
 
@@ -434,7 +459,7 @@ describe("Workspace Reindex", () => {
     vi.mocked(prisma.document.findMany).mockResolvedValue([]);
     vi.mocked(prisma.knowledgeChunk.findMany).mockResolvedValue([]);
 
-    vi.mocked(prisma.brainArticle.findFirst).mockResolvedValue({ id: "current" } as any);
+    vi.mocked(prisma.brainArticle.findFirst).mockImplementation((async () => vi.mocked(prisma.brainArticle.findUnique).mock.results.at(-1)?.value) as any);
     const result = await reindexWorkspace("ws_1");
     expect(result.errors).toEqual([]);
     expect(defaultModelGateway.embed).not.toHaveBeenCalled();
@@ -453,7 +478,7 @@ describe("Workspace Reindex", () => {
     } as any);
     vi.mocked(prisma.knowledgeChunk.findMany).mockResolvedValue([]);
 
-    vi.mocked(prisma.document.findFirst).mockResolvedValue({ id: "current" } as any);
+    vi.mocked(prisma.document.findFirst).mockImplementation((async () => vi.mocked(prisma.document.findUnique).mock.results.at(-1)?.value) as any);
     const result = await reindexWorkspace("ws_1");
     expect(result.reindexedDocuments).toBe(0);
     expect(defaultModelGateway.embed).not.toHaveBeenCalled();

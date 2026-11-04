@@ -1,5 +1,5 @@
 import type { Prisma } from "@prisma/client";
-import { prisma, type AppActor, type EmailSendResult } from "@corgtex/shared";
+import { prisma, type AppActor, type EmailSendResult, type EmailAttemptControls } from "@corgtex/shared";
 import { activeCrmParentWhere, lockCrmLinkClosure } from "./crm-archive-guards";
 import { mergeArtifactInputProofs } from "./digest-lineage";
 import { requireWorkspaceMembership } from "./auth";
@@ -17,7 +17,7 @@ export async function recordDripFollowUp(
     expectedFollowUpNumber?: number;
     operationId?: string;
     /** Called only after the durable effect reservation and current source/recipient checks. */
-    send?: (recipient: string, operationId: string) => Promise<EmailSendResult>;
+    send?: (recipient: string, operationId: string, controls: EmailAttemptControls) => Promise<EmailSendResult>;
   } = {},
 ) {
   const actor: AppActor = options.actor ?? { kind: "agent", authProvider: "bootstrap", label: "crm-drip-followup", workspaceIds: [workspaceId] };
@@ -91,7 +91,24 @@ export async function recordDripFollowUp(
       // Fence the active worker lease immediately before the irreversible operation.
       await assertArtifactInputWriteFence(tx);
       invariant(await isArtifactInputProofPubliclyShareable(actor, workspaceId, roots, tx), 403, "SOURCE_RESTRICTED", "Recipient inputs are no longer public.");
-      delivery = await options.send(lead.email, options.operationId!);
+      const originalRoots = structuredClone(roots);
+      const controller = new AbortController();
+      const controls: EmailAttemptControls = {
+        signal: controller.signal,
+        authorizeAttempt: async ({ signal }) => {
+          try {
+            controller.signal.throwIfAborted(); signal.throwIfAborted();
+            await requireWorkspaceMembership({ actor, workspaceId, tx });
+            await assertArtifactInputWriteFence(tx);
+            invariant(await isArtifactInputProofPubliclyShareable(actor, workspaceId, originalRoots, tx),
+              403, "SOURCE_RESTRICTED", "Original follow-up inputs are no longer public.");
+            controller.signal.throwIfAborted(); signal.throwIfAborted();
+          } catch (error) { controller.abort(error); throw error; }
+        },
+      };
+      delivery = await options.send(lead.email, options.operationId!, controls);
+      // A transport wrapper cannot turn a swallowed authority failure into SENT.
+      controller.signal.throwIfAborted();
       invariant(delivery.status === "SENT" && delivery.providerMessageId, 409, "DELIVERY_UNCERTAIN", "Delivery is skipped or uncertain; its reservation requires inspection.");
     }
     if (!await currentArtifactInputRoots(tx, workspaceId, { kind: "DemoLead", id: demoLeadId }, lead)) {

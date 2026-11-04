@@ -57,16 +57,20 @@ export function MeetingAudioUploadForm({
   const [state, setState] = useState<SubmitState>({ status: "idle" });
   const [recentAssets, setRecentAssets] = useState<AudioAsset[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [historyCursor, setHistoryCursor] = useState<string | null>(null);
+  const [historyComplete, setHistoryComplete] = useState(true);
 
-  const refreshAssets = useCallback(async () => {
+  const refreshAssets = useCallback(async (cursor?: string) => {
     setIsRefreshing(true);
     try {
-      const response = await fetch(`/api/workspaces/${workspaceId}/meeting-audio-assets?take=5`);
+      const response = await fetch(`/api/workspaces/${workspaceId}/meeting-audio-assets?take=5${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
       const body = await response.json().catch(() => ({}));
       if (!response.ok || !Array.isArray(body.audioAssets)) {
         throw new Error(errorMessage(body, "Could not load audio status."));
       }
       setRecentAssets(body.audioAssets.filter(isAudioAsset));
+      setHistoryCursor(typeof body.nextCursor === "string" ? body.nextCursor : null);
+      setHistoryComplete(body.complete !== false);
     } catch (error) {
       setState({ status: "error", message: error instanceof Error ? error.message : "Could not load audio status." });
     } finally {
@@ -160,12 +164,14 @@ export function MeetingAudioUploadForm({
       <section className="nr-form-section stack" aria-label="Recent audio uploads">
         <div className="actions-inline" style={{ justifyContent: "space-between", marginTop: 0 }}>
           <h2 className="nr-section-header" style={{ margin: 0 }}>Recent audio uploads</h2>
-          <button type="button" className="secondary small" onClick={refreshAssets} disabled={isRefreshing}>
+          <button type="button" className="secondary small" onClick={() => void refreshAssets()} disabled={isRefreshing}>
             {isRefreshing ? "Refreshing..." : "Refresh"}
           </button>
         </div>
+        {!historyComplete && <p className="nr-item-meta">Showing a limited history window.</p>}
+        {historyCursor && <button type="button" className="secondary small" disabled={isRefreshing} onClick={() => void refreshAssets(historyCursor)}>Older uploads</button>}
         {recentAssets.length === 0 ? (
-          <p className="nr-item-meta">No audio uploads yet.</p>
+          <p className="nr-item-meta">{historyComplete ? "No audio uploads in this history window." : "No visible uploads in this window. Check older uploads to continue."}</p>
         ) : (
           recentAssets.map((asset) => (
             <div key={asset.id} style={{ borderTop: "1px solid var(--line)", paddingTop: 12 }}>

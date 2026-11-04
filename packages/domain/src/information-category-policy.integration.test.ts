@@ -4,7 +4,7 @@ import { captureRecorderProviderWire, prepareRecorderTranscript, publishRecorder
 import { getPrismaClient, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { classifyInformationSource, configureInformationCategory } from "./information-category-policy";
-import { captureArtifactInputProof, isArtifactInputProofReadable, isArtifactInputProofPubliclyShareable, recordArtifactInputLineage, type LineageInput } from "./source-lineage";
+import { captureArtifactInputProof, isArtifactInputProofReadable, isArtifactInputProofPubliclyShareable, lineageContentFingerprint, recordArtifactInputLineage, type LineageInput } from "./source-lineage";
 const db = getPrismaClient();
 beforeEach(async () => {await truncateAllTables();});
 afterAll(() => vi.unstubAllEnvs());
@@ -23,7 +23,15 @@ describe("company category current and original authority", () => {
     const input: LineageInput = {kind, id: source.id};
     await db.$transaction(tx => recordArtifactInputLineage({tx, actor: owner, workspaceId: workspace.id, artifact: input, content: source, origin: "HUMAN_ORIGINAL", inputs: []}));
     await configureInformationCategory(owner, {workspaceId: workspace.id, category: "SALARY", isRestricted: false, allowedRoleIds: [], allowedCircleIds: []});
+    const originalHash = lineageContentFingerprint(kind, source);
+    const originalManifests = await db.artifactInputLineage.findMany({where: {workspaceId: workspace.id, artifactType: kind, artifactId: source.id}});
     await classifyInformationSource(owner, {workspaceId: workspace.id, ...input, kind, category: "SALARY"});
+    const classified = kind === "BrainSource" ? await db.brainSource.findUniqueOrThrow({where: {id: source.id}})
+      : kind === "Document" ? await db.document.findUniqueOrThrow({where: {id: source.id}})
+      : await db.meeting.findUniqueOrThrow({where: {id: source.id}});
+    expect(classified.informationCategory).toBe("SALARY");
+    expect(lineageContentFingerprint(kind, classified)).toBe(originalHash);
+    expect(await db.artifactInputLineage.findMany({where: {workspaceId: workspace.id, artifactType: kind, artifactId: source.id}})).toEqual(originalManifests);
     // Human originals remain readable under their current policy; derived saved proofs never refresh.
     const before = await captureArtifactInputProof(owner, workspace.id, [input]);
     expect(await isArtifactInputProofReadable(other, workspace.id, before)).toBe(true);

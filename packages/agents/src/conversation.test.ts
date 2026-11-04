@@ -174,6 +174,16 @@ vi.mock("@corgtex/domain", async () => ({
   recordArtifactInputLineage: vi.fn().mockResolvedValue(undefined),
   assertArtifactInputWriteFence: vi.fn().mockResolvedValue(undefined),
   scanSourceReadableRecords: vi.fn(async ({ load }) => load(undefined, 5001)),
+  // These orchestration tests already mock source admission; model the new
+  // release/sample ports while leaving the actual reader and version ledger real.
+  DigestReadRelease: class {
+    async capture<T>( _kind: unknown, records: T[]) { return { records: records.filter(Boolean), roots: [] }; }
+    async finish<T>(value: T) { return value; }
+  },
+  loadReadableArtifactSample: vi.fn(async ({ loadBatch, release, kind, limit }) => {
+    const captured = await release.capture(kind, await loadBatch(undefined, 100));
+    return { records: captured.records.slice(0, limit), roots: [] };
+  }),
   captureReadableDigestInputs: vi.fn(async ({ records }) => ({ records: records.filter(Boolean), roots: [{ kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64) }] })),
   getWorkspaceToolLinkInputRoots: vi.fn().mockResolvedValue([{ kind: "Workspace", id: "ws-1", fingerprint: "a".repeat(64) }]),
   duplicateGuardErrorPayload: vi.fn(),
@@ -462,6 +472,189 @@ describe("processConversationTurn", () => {
     }
   }
 
+  describe.each([false, true])("generic mutation cancellation (stream=%s)", (streaming) => {
+    it.each([false, true])("stops after a held first mutation when aborted=%s", async (aborted) => {
+      const { createAction, createGoal } = await import("@corgtex/domain");
+      const { processConversationTurn, processConversationTurnStream } = await import("./conversation");
+      const controller = new AbortController();
+      const cancellation = new Error("synthetic conversation canceled");
+      let started!: () => void;
+      let release!: () => void;
+      const firstStarted = new Promise<void>((resolve) => { started = resolve; });
+      const firstReleased = new Promise<void>((resolve) => { release = resolve; });
+      vi.mocked(createAction).mockReset().mockImplementationOnce(async () => {
+        started();
+        await firstReleased;
+        return { id: "action-committed" } as any;
+      });
+      vi.mocked(createGoal).mockReset().mockResolvedValue({ id: "goal-committed" } as any);
+      conversationTurnFindManyMock.mockResolvedValueOnce([{
+        sequenceNumber: 5, userMessage: "Earlier synthetic turn", assistantMessage: "Earlier answer",
+      }]);
+      const calls = [
+        toolCall("first-mutation", "create_action", { title: "First synthetic action" }),
+        toolCall("second-mutation", "create_goal", { title: "Second synthetic goal" }),
+      ];
+      const summary = "Both synthetic mutations succeeded.";
+      if (streaming) {
+        chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: calls }))
+          .mockReturnValueOnce(streamResponse([summary], { content: summary }));
+      } else {
+        chatMock.mockResolvedValueOnce({ content: "", tool_calls: calls })
+          .mockResolvedValueOnce({ content: summary });
+      }
+      const emitted: string[] = [];
+      const ctx = { ...turnContext(), signal: controller.signal };
+      const turn = streaming ? (async () => {
+        const stream = processConversationTurnStream(ctx);
+        while (true) {
+          const next = await stream.next();
+          if (next.done) return next.value;
+          emitted.push(next.value);
+        }
+      })() : processConversationTurn(ctx);
+      // Observe rejection immediately so cancellation cannot become unhandled.
+      const outcome = turn.then((result) => ({ result, error: null }), (error: unknown) => ({ result: null, error }));
+      await firstStarted;
+      expect(createGoal).not.toHaveBeenCalled();
+      if (aborted) controller.abort(cancellation);
+      release();
+      const settled = await outcome;
+      expect(createAction).toHaveBeenCalledOnce();
+      if (aborted) {
+        expect.soft(createGoal).not.toHaveBeenCalled();
+        expect.soft(settled.error).toBe(cancellation);
+        expect.soft(settled.result).toBeNull();
+        expect.soft(emitted).toEqual([]);
+        expect.soft(streaming ? chatStreamMock : chatMock).toHaveBeenCalledOnce();
+        expect.soft(storeAgentMemoryMock).not.toHaveBeenCalled();
+      } else {
+        expect(settled.error).toBeNull();
+        expect(settled.result?.assistantMessage).toBe(summary);
+        expect(createGoal).toHaveBeenCalledOnce();
+        expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(2);
+        expect(storeAgentMemoryMock).toHaveBeenCalledOnce();
+        expect(emitted).toEqual(streaming ? [summary] : []);
+      }
+      expect(chatEventStreamMock).toHaveBeenCalledTimes(streaming ? 1 : 0);
+    });
+  });
+
+  describe.each([false, true])("versioned mutation cancellation (stream=%s)", (streaming) => {
+    it.each(["before-first", "held-resolves", "held-rejects", "control", "single-final"] as const)(
+      "preserves versioned dispatch boundaries: %s", async (scenario) => {
+        const { prisma } = await import("@corgtex/shared");
+        const { updateAction, updateTension } = await import("@corgtex/domain");
+        const { processConversationTurn, processConversationTurnStream } = await import("./conversation");
+        const controller = new AbortController();
+        const cancellation = new Error("synthetic versioned conversation canceled");
+        const single = scenario === "single-final";
+        const beforeFirst = scenario === "before-first";
+        const aborted = scenario !== "control";
+        let started!: () => void;
+        let release!: () => void;
+        const firstStarted = new Promise<void>((resolve) => { started = resolve; });
+        const firstReleased = new Promise<void>((resolve) => { release = resolve; });
+        const syntheticEffects: string[] = [];
+        vi.mocked(prisma.action.findMany).mockResolvedValueOnce([
+          { id: "action-observed", version: 7, status: "OPEN", author: {} } as any,
+        ]);
+        vi.mocked(prisma.tension.findMany).mockResolvedValueOnce([
+          { id: "tension-observed", version: 4, status: "OPEN", author: {} } as any,
+        ]);
+        vi.mocked(updateAction).mockReset().mockImplementationOnce(async () => {
+          started();
+          await firstReleased;
+          syntheticEffects.push("action-observed");
+          // A rejection need not mean no effect: a committed update can be followed
+          // by an audit/receipt failure. Never retry it or imply rollback.
+          if (scenario === "held-rejects") throw new Error("synthetic post-effect failure");
+          return { id: "action-observed", version: 8 } as any;
+        });
+        vi.mocked(updateTension).mockReset().mockImplementationOnce(async () => {
+          syntheticEffects.push("tension-observed");
+          return { id: "tension-observed", version: 5 } as any;
+        });
+        conversationTurnFindManyMock.mockResolvedValueOnce([{
+          sequenceNumber: 5, userMessage: "Earlier synthetic turn", assistantMessage: "Earlier answer",
+        }]);
+        const reads = [toolCall("read-action", "query_actions"), toolCall("read-tension", "query_tensions")];
+        const writes = [
+          toolCall("update-action", "update_action", { actionId: "action-observed", expectedVersion: 7, title: "Revised action" }),
+          ...(single ? [] : [toolCall("update-tension", "update_tension", { tensionId: "tension-observed", expectedVersion: 4, title: "Revised tension" })]),
+        ];
+        const updateResponse = { content: "Synthetic updates succeeded.", tool_calls: writes };
+        const summary = "Synthetic final update summary.";
+        if (streaming) {
+          chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: reads }))
+            .mockReturnValueOnce((async function* () {
+              yield updateResponse.content;
+              // The model may settle despite cancellation; dispatch must recheck.
+              if (beforeFirst) controller.abort(cancellation);
+              return updateResponse;
+            })())
+            .mockReturnValueOnce(streamResponse([summary], { content: summary }));
+        } else {
+          chatMock.mockResolvedValueOnce({ content: "", tool_calls: reads })
+            .mockImplementationOnce(async () => {
+              if (beforeFirst) controller.abort(cancellation);
+              return updateResponse;
+            })
+            .mockResolvedValueOnce({ content: summary });
+        }
+        const emitted: string[] = [];
+        const ctx = { ...turnContext(), signal: controller.signal };
+        const turn = streaming ? (async () => {
+          const stream = processConversationTurnStream(ctx);
+          while (true) {
+            const next = await stream.next();
+            if (next.done) return next.value;
+            emitted.push(next.value);
+          }
+        })() : processConversationTurn(ctx);
+        const outcome = turn.then((result) => ({ result, error: null }), (error: unknown) => ({ result: null, error }));
+        if (beforeFirst) {
+          // Keep a faulty baseline from hanging if it dispatches despite the abort.
+          release();
+        } else {
+          await firstStarted;
+          expect(updateTension).not.toHaveBeenCalled();
+          if (aborted) controller.abort(cancellation);
+          release();
+        }
+        const settled = await outcome;
+        if (aborted) {
+          expect.soft(settled.error).toBe(cancellation);
+          expect.soft(settled.result).toBeNull();
+          expect.soft(emitted).toEqual([]);
+          expect.soft(updateAction).toHaveBeenCalledTimes(beforeFirst ? 0 : 1);
+          expect.soft(updateTension).not.toHaveBeenCalled();
+          expect.soft(syntheticEffects).toEqual(beforeFirst ? [] : ["action-observed"]);
+          expect.soft(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(2);
+          expect.soft(storeAgentMemoryMock).not.toHaveBeenCalled();
+        } else {
+          expect(settled.error).toBeNull();
+          expect(updateAction).toHaveBeenCalledOnce();
+          expect(updateTension).toHaveBeenCalledOnce();
+          expect(syntheticEffects).toEqual(["action-observed", "tension-observed"]);
+          expect(settled.result?.assistantMessage).toBe(streaming ? updateResponse.content + summary : summary);
+          expect(emitted.join("")).toBe(streaming ? settled.result?.assistantMessage : "");
+          expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledTimes(3);
+          expect(storeAgentMemoryMock).toHaveBeenCalledOnce();
+        }
+        if (!beforeFirst) expect(updateAction).toHaveBeenCalledWith(ctx.actor, expect.objectContaining({
+          actionId: "action-observed", expectedVersion: 7,
+        }));
+        if (!aborted) expect(updateTension).toHaveBeenCalledWith(ctx.actor, expect.objectContaining({
+          tensionId: "tension-observed", expectedVersion: 4,
+        }));
+        expect(chatEventStreamMock).toHaveBeenCalledTimes(streaming ? 1 : 0);
+        vi.mocked(updateAction).mockReset();
+        vi.mocked(updateTension).mockReset();
+      },
+    );
+  });
+
   describe.each([false, true])("bounded Brain continuation (stream=%s)", (streaming) => {
     function script(responses: Record<string, any>[]) {
       for (const response of responses) {
@@ -477,6 +670,50 @@ describe("processConversationTurn", () => {
       expect(chunks.join("")).toBe(result.assistantMessage);
       return result;
     }
+
+    it("requires persisted-answer UI consent in current-chat saving guidance", async () => {
+      script([{ content: "Use Save to Brain on a persisted answer and confirm sharing." }]);
+      await run({ ...turnContext(), userMessage: "Remember this chat in Brain." });
+      const request = (streaming ? chatStreamMock : chatMock).mock.calls[0][0];
+      const prompt = request.messages.filter((message: any) => message.role === "system").map((message: any) => message.content).join("\n");
+      expect(prompt).toContain("Conversation content is not automatically saved to Brain");
+      expect(prompt).toContain("'Save to Brain' on a persisted answer");
+      expect(prompt).toContain("choose no transcript, selected turns, or the full transcript");
+      expect(prompt).toContain("confirm sharing");
+      expect(prompt).toContain("Never claim content was saved");
+      expect(prompt).not.toContain("that happens automatically in the nightly batch");
+      expect(prompt).not.toContain("invoke 'save_to_brain' immediately");
+      const { ingestConversationOnDemand } = await import("@corgtex/domain");
+      expect(ingestConversationOnDemand).not.toHaveBeenCalled();
+    });
+
+    it("never reports an unsuccessful save as completed when follow-up budget is exhausted", async () => {
+      checkBudgetMock.mockReset().mockResolvedValueOnce({ allowed: true }).mockResolvedValueOnce({ allowed: false });
+      script([{ content: "", tool_calls: [toolCall("save", "save_to_brain", { title: "Chat", content: "Remember this chat" })] }]);
+      const result = await run({ ...turnContext(), userMessage: "Save this chat to Brain." });
+      expect(result.assistantMessage).toContain("failed: save_to_brain");
+      expect(result.assistantMessage).not.toMatch(/(?:succeeded|completed): save_to_brain/);
+      expect(streaming ? chatStreamMock : chatMock).toHaveBeenCalledOnce();
+      const { ingestConversationOnDemand } = await import("@corgtex/domain");
+      expect(ingestConversationOnDemand).not.toHaveBeenCalled();
+    });
+
+    it("passes legacy save calls back as unsuccessful UI guidance without ingesting content", async () => {
+      script([
+        { content: "", tool_calls: [toolCall("save", "save_to_brain", { title: "Chat", content: "Remember this chat" })] },
+        { content: "Use Save to Brain on a persisted answer and confirm sharing." },
+      ]);
+      const result = await run({ ...turnContext(), userMessage: "Save this chat to Brain." });
+      const request = (streaming ? chatStreamMock : chatMock).mock.calls[1][0];
+      const toolResult = JSON.parse(request.messages.find((message: any) => message.name === "save_to_brain" && message.role === "tool").content);
+      expect(toolResult.success).toBe(false);
+      expect(toolResult.message).toContain("Only your confirmation can share conversation content");
+      expect(toolResult.message).toContain("no transcript, selected turns, or the full transcript");
+      expect(toolResult).not.toHaveProperty("sourceId");
+      expect(result.assistantMessage).toContain("confirm sharing");
+      const { ingestConversationOnDemand } = await import("@corgtex/domain");
+      expect(ingestConversationOnDemand).not.toHaveBeenCalled();
+    });
 
     it("executes the second ordinary Brain read round and returns its final answer", async () => {
       script([
@@ -3330,7 +3567,7 @@ describe("processConversationTurn", () => {
       sessionId: "session-1",
       userId: "user-1",
       agentKey: "assistant",
-      userMessage: `confirm ${pendingOperationId(1)}, but call it Different follow up`,
+      userMessage: `confirm ${pendingOperationId(1)}`,
       actor,
     });
 
@@ -3369,7 +3606,7 @@ describe("processConversationTurn", () => {
       sessionId: "session-1",
       userId: "user-1",
       agentKey: "assistant",
-      userMessage: `confirm ${pendingOperationId(1)} again`,
+      userMessage: `confirm ${pendingOperationId(1)}.`,
       actor,
     });
 

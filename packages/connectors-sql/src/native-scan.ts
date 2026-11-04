@@ -9,7 +9,7 @@ import type { CapturedSqlDefinition } from "./native-definition";
 const PAGE_SIZE = 1000;
 const MAX_PAGES_PER_RUN = 10;
 
-export interface PlannedSqlRow {
+interface PlannedSqlRow {
   row: Record<string, unknown>;
   table: string;
   definition: CapturedSqlDefinition;

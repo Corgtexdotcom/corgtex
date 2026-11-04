@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { DigestReadRelease } from "./digest-lineage";
 import { Prisma, type ContextGraphObject, type ContextGraphRelationship, type ContextGraphEvidenceRef, type ContextGraphProposedDiff } from "@prisma/client";
 import { GRAPH_SOURCE_VARIANT_JOB_TYPE, captureGraphReviewApproval, getReadableGraphSourceVariants, requestGraphSourceVariant, revalidateGraphSourceVariants, type GraphTargetKind, type GraphVariantScope } from "./derived-artifact-variants";
 import { prisma } from "@corgtex/shared";
@@ -12,6 +13,7 @@ import { getMcpToolInputRoots } from "./mcp-tool-input-context";
 import { prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./artifact-commit-preflight";
 import {
   currentArtifactInputRoots,
+  currentArtifactInputRootsBatch,
   captureArtifactInputProof,
   captureImmutableArtifactInputProof,
   advanceHumanArtifactInputLineage,
@@ -700,7 +702,6 @@ async function upsertObjectWithTx(
     ...data,
     ...creatorData(actor, agentRunId),
     recordedAt: new Date(),
-    createdAt: new Date(),
     supersededByObjectId: null,
   };
 
@@ -722,10 +723,11 @@ async function upsertObjectWithTx(
     create: {
       workspaceId,
       ...writeData,
+      createdAt: writeData.recordedAt,
       dedupeKey,
     },
   }) : await tx.contextGraphObject.create({
-    data: { workspaceId, ...writeData },
+    data: { workspaceId, ...writeData, createdAt: writeData.recordedAt },
   });
   await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphObject", id: object.id }, object, prepared);
   return object;
@@ -808,7 +810,6 @@ async function upsertRelationshipWithTx(
     targetObjectId,
     ...creatorData(actor, agentRunId),
     recordedAt: new Date(),
-    createdAt: new Date(),
     supersededByRelationshipId: null,
   };
 
@@ -829,6 +830,7 @@ async function upsertRelationshipWithTx(
     create: {
       workspaceId,
       ...writeData,
+      createdAt: writeData.recordedAt,
     },
   });
   await captureGraphLineage(tx, actor, workspaceId, { kind: "ContextGraphRelationship", id: relationship.id }, relationship, prepared);
@@ -988,12 +990,16 @@ function rebuildScopeForMap(mapView?: { id: string; query: Prisma.JsonValue; cre
 
 /** Queue only fresh recipes for denied server-discovered identities; no denied fields are forwarded. */
 function graphReadWithRebuild(actor: AppActor, workspaceId: string,
-  mapView?: { id: string; query: Prisma.JsonValue; createdByUserId?: string | null } | null) {
+  mapView?: { id: string; query: Prisma.JsonValue; createdByUserId?: string | null } | null,
+  release?: DigestReadRelease) {
   const attempted = new Set<string>();
   const kinds = new Set<LineageInput["kind"]>(["ContextGraphObject", "ContextGraphRelationship", "ContextGraphEvidenceRef", "ContextGraphProposedDiff"]);
   const scope = rebuildScopeForMap(mapView);
   return async <T extends { id: string }>(kind: LineageInput["kind"], candidates: T[]): Promise<T[]> => {
-    const readable = await readableGraphRecords(actor, workspaceId, kind, candidates);
+    const heads = release && kinds.has(kind) && candidates.length
+      ? await currentArtifactInputRootsBatch(prisma, workspaceId, kind, candidates) : null;
+    const readable = release ? (await release.capture(kind, heads ? candidates.filter(row => heads.get(row.id) != null) : candidates)).records
+      : await readableGraphRecords(actor, workspaceId, kind, candidates);
     if (actor.kind !== "user" || !kinds.has(kind)) return readable;
     const ids = new Set(readable.map(row => row.id));
     const denied = candidates.filter(row => !ids.has(row.id));
@@ -1507,28 +1513,47 @@ export async function markStaleContextGraphFacts(actor: AppActor, params: {
     ],
   };
 
-  return prisma.$transaction(async (tx) => {
-    const objectRows = await tx.contextGraphObject.findMany({ where: staleWhere, take: 5001 });
-    const relationshipRows = await tx.contextGraphRelationship.findMany({ where: staleWhere, take: 5001 });
-    invariant(objectRows.length <= 5000 && relationshipRows.length <= 5000, 409, "SOURCE_READ_SCAN_LIMIT", "Graph transition exceeds its scan limit.");
-    const objects = await readableGraphRecords(actor, params.workspaceId, "ContextGraphObject", objectRows, tx);
-    const relationships = await readableGraphRecords(actor, params.workspaceId, "ContextGraphRelationship", relationshipRows, tx);
-    for (const before of objects) {
-      await tx.$queryRaw`SELECT id FROM "ContextGraphObject" WHERE id = ${before.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
-      await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "ContextGraphObject", id: before.id, snapshot: before }], tx);
-      const after = await tx.contextGraphObject.update({ where: { id: before.id }, data: { status: "stale" } });
-      await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
-        artifact: { kind: "ContextGraphObject", id: before.id }, before, after, allowSystemTransition: true });
+  let staleObjects = 0, staleRelationships = 0;
+  for (const kind of ["ContextGraphObject", "ContextGraphRelationship"] as const) {
+    let afterId: string | undefined;
+    for (;;) {
+      const where = {...staleWhere, ...(afterId ? {id: {gt: afterId}} : {})};
+      const page = kind === "ContextGraphObject"
+        ? await prisma.contextGraphObject.findMany({where, orderBy: {id: "asc"}, take: 100})
+        : await prisma.contextGraphRelationship.findMany({where, orderBy: {id: "asc"}, take: 100});
+      invariant(page.length <= 100 && page.every(row => !afterId || row.id > afterId), 409, "SOURCE_CHANGED", "Graph maintenance discovery changed.");
+      // Missing/stale heads are negative discovery, never permission to write.
+      const heads = await currentArtifactInputRootsBatch(prisma, params.workspaceId, kind, page);
+      for (const candidate of page) {
+        if (heads.get(candidate.id) == null) continue;
+        const changed = await prisma.$transaction(async tx => {
+          requireAgentScope(actor, "context-graph:approve");
+          await requireWorkspaceMembership({actor, workspaceId: params.workspaceId, tx,
+            ...(actor.kind === "user" ? {allowedRoles: ["ADMIN", "FACILITATOR"] as Array<"ADMIN" | "FACILITATOR">} : {})});
+          if (kind === "ContextGraphObject") {
+            await tx.$queryRaw`SELECT id FROM "ContextGraphObject" WHERE id = ${candidate.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+            const before = await tx.contextGraphObject.findFirst({where: {...staleWhere, id: candidate.id}});
+            if (!before || !(await readableGraphRecords(actor, params.workspaceId, kind, [before], tx)).length) return false;
+            await captureArtifactInputProof(actor, params.workspaceId, [{kind, id: before.id, snapshot: before}], tx);
+            const after = await tx.contextGraphObject.update({where: {id: before.id}, data: {status: "stale"}});
+            await advanceHumanArtifactInputLineage({tx, actor, workspaceId: params.workspaceId, artifact: {kind, id: before.id}, before, after, allowSystemTransition: true});
+          } else {
+            await tx.$queryRaw`SELECT id FROM "ContextGraphRelationship" WHERE id = ${candidate.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+            const before = await tx.contextGraphRelationship.findFirst({where: {...staleWhere, id: candidate.id}});
+            if (!before || !(await readableGraphRecords(actor, params.workspaceId, kind, [before], tx)).length) return false;
+            await captureArtifactInputProof(actor, params.workspaceId, [{kind, id: before.id, snapshot: before}], tx);
+            const after = await tx.contextGraphRelationship.update({where: {id: before.id}, data: {status: "stale"}});
+            await advanceHumanArtifactInputLineage({tx, actor, workspaceId: params.workspaceId, artifact: {kind, id: before.id}, before, after, allowSystemTransition: true});
+          }
+          return true;
+        });
+        if (changed) { if (kind === "ContextGraphObject") staleObjects++; else staleRelationships++; }
+      }
+      if (page.length < 100) break;
+      afterId = page.at(-1)!.id;
     }
-    for (const before of relationships) {
-      await tx.$queryRaw`SELECT id FROM "ContextGraphRelationship" WHERE id = ${before.id} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
-      await captureArtifactInputProof(actor, params.workspaceId, [{ kind: "ContextGraphRelationship", id: before.id, snapshot: before }], tx);
-      const after = await tx.contextGraphRelationship.update({ where: { id: before.id }, data: { status: "stale" } });
-      await advanceHumanArtifactInputLineage({ tx, actor, workspaceId: params.workspaceId,
-        artifact: { kind: "ContextGraphRelationship", id: before.id }, before, after, allowSystemTransition: true });
-    }
-    return { staleObjects: objects.length, staleRelationships: relationships.length, cutoff };
-  });
+  }
+  return {staleObjects, staleRelationships, cutoff};
 }
 
 /** Retire obsolete projections without re-certifying their historical bodies. */
@@ -1568,6 +1593,7 @@ export async function getContextMapData(actor: AppActor, params: {
   includeStale?: boolean;
 }) {
   const membership = await requireGraphRead(actor, params.workspaceId);
+  const release = new DigestReadRelease(actor, params.workspaceId);
   const userId = actorUserId(actor);
   const defaultViews = await ensureDefaultContextMapViewsForWorkspace(actor, params.workspaceId);
   const mapView = params.mapViewId
@@ -1575,111 +1601,129 @@ export async function getContextMapData(actor: AppActor, params: {
     : (await readableMapViews(actor, params.workspaceId, defaultViews)).find((view) => view.viewType === "process")
       ?? (await readableMapViews(actor, params.workspaceId, defaultViews))[0];
   invariant(mapView, 404, "NOT_FOUND", "Context map not found.");
-  invariant((await readableMapViews(actor, params.workspaceId, [mapView])).length,
+  invariant((await release.capture("ContextMapView", [mapView])).records.length,
     404, "NOT_FOUND", "Context map not found.");
 
-  const readGraph = graphReadWithRebuild(actor, params.workspaceId, mapView);
-  const candidateObjects = await prisma.contextGraphObject.findMany({
-    where: objectWhereForMapView(params.workspaceId, mapView, params.includeStale),
-    include: {
-      evidenceRefs: {
-        orderBy: { createdAt: "desc" },
-      },
-    },
-    orderBy: [{ objectType: "asc" }, { updatedAt: "desc" }],
-  });
-  const readableObjects = await readGraph("ContextGraphObject", candidateObjects);
+  const readGraph = graphReadWithRebuild(actor, params.workspaceId, mapView, release);
+  const completeness = {objectsComplete: true, relationshipsComplete: true, evidenceComplete: true,
+    proposedDiffsComplete: true, variantsComplete: true};
+  // A parent cap alone would still allow thousands of denied evidence pages.
+  // This shared budget bounds discovery across every displayed object and edge.
+  const evidenceBudget = {remaining: 2500};
+  async function window<R extends {id: string}>(kind: LineageInput["kind"], limit: number,
+    load: (after: R | undefined, take: number) => Promise<R[]>,
+    options?: {maxCandidates: number; shared: {remaining: number}}) {
+    const result: R[] = [];
+    let after: R | undefined;
+    let examined = 0, complete = false;
+    const maxCandidates = options?.maxCandidates ?? Math.max(200, limit);
+    while (result.length < limit && examined < maxCandidates && (options?.shared.remaining ?? 1) > 0) {
+      const take = Math.min(100, limit - result.length, maxCandidates - examined, options?.shared.remaining ?? Infinity);
+      const rows = await load(after, take);
+      invariant(rows.length <= take && (!rows.length || rows.at(-1)!.id !== after?.id), 409, "SOURCE_CHANGED", "Graph window changed during pagination.");
+      examined += rows.length;
+      if (options) options.shared.remaining -= rows.length;
+      // Keep the originally admitted proofs through all later map/evidence awaits.
+      result.push(...await readGraph(kind, rows));
+      if (rows.length < take) { complete = true; break; }
+      after = rows.at(-1);
+    }
+    if (kind === "ContextGraphObject") completeness.objectsComplete = complete;
+    else if (kind === "ContextGraphRelationship") completeness.relationshipsComplete = complete;
+    else if (kind === "ContextGraphEvidenceRef") completeness.evidenceComplete &&= complete;
+    else if (kind === "ContextGraphProposedDiff") completeness.proposedDiffsComplete = complete;
+    return result;
+  }
+  const nativeObjects = await window("ContextGraphObject", 200, (after: ContextGraphObject | undefined, take) => prisma.contextGraphObject.findMany({
+    where: {AND: [objectWhereForMapView(params.workspaceId, mapView, params.includeStale), ...(after ? [{OR: [
+      {objectType: {gt: after.objectType}}, {objectType: after.objectType, updatedAt: {lt: after.updatedAt}},
+      {objectType: after.objectType, updatedAt: after.updatedAt, id: {lt: after.id}},
+    ]}] : [])]}, orderBy: [{objectType: "asc"}, {updatedAt: "desc"}, {id: "desc"}], take,
+  }));
+  async function evidenceFor(objectId?: string, relationshipId?: string) {
+    return window("ContextGraphEvidenceRef", 5, (after: ContextGraphEvidenceRef | undefined, take) => prisma.contextGraphEvidenceRef.findMany({
+      where: {workspaceId: params.workspaceId, ...(objectId ? {objectId} : {relationshipId}), knowledgeChunkId: null,
+        ...(after ? {OR: [{createdAt: {lt: after.createdAt}}, {createdAt: after.createdAt, id: {lt: after.id}}]} : {})},
+      orderBy: [{createdAt: "desc"}, {id: "desc"}], take,
+    }), {maxCandidates: 20, shared: evidenceBudget});
+  }
+  const readableObjects = [];
+  for (const object of nativeObjects) readableObjects.push({...object, evidenceRefs: await evidenceFor(object.id)});
   const variantProjection = await effectiveGraphVariantProjection(actor, params.workspaceId, mapView);
-  const allEvidence = readableObjects.flatMap((object) => object.evidenceRefs).filter((ref) => !ref.knowledgeChunkId);
-  const readableEvidenceIds = new Set((await readGraph("ContextGraphEvidenceRef", allEvidence)).map((ref) => ref.id));
   // A display window can omit a bundle, but must never split its object dictionary.
   let remainingVariantSlots = Math.max(0, 200 - readableObjects.length);
   const admittedVariantObjectIds = new Set<string>();
   for (const bundle of variantProjection.bundles.values()) {
     const ids = variantProjection.objects.filter(object => bundle.childIds.has(object.id)).map(object => object.id);
-    if (ids.length > remainingVariantSlots) continue;
+    if (ids.length > remainingVariantSlots) { completeness.variantsComplete = false; continue; }
     ids.forEach(id => admittedVariantObjectIds.add(id)); remainingVariantSlots -= ids.length;
   }
   const variantObjects = variantProjection.objects.filter(object => admittedVariantObjectIds.has(object.id)).map(object => ({ ...object,
     evidenceRefs: variantProjection.evidenceRefs.filter(ref => ref.objectId === object.id),
   }));
+  if ([...readableObjects, ...variantObjects].some(object => object.evidenceRefs.length > 5)) completeness.evidenceComplete = false;
   const objects = [...readableObjects, ...variantObjects].slice(0, 200).map((object) => ({ ...object,
-    evidenceRefs: object.evidenceRefs.filter((ref) => readableEvidenceIds.has(ref.id) || variantProjection.virtualIds.has(ref.id)).slice(0, 5),
+    evidenceRefs: object.evidenceRefs.slice(0, 5),
   }));
   const objectIds = objects.map((object) => object.id);
   const relationshipTypes = stringArrayFromQuery(mapView.query, "relationshipTypes");
-  const [candidateRelationships, mapViews, candidateLayoutItems, candidateDiffs] = await Promise.all([
-    prisma.contextGraphRelationship.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        status: params.includeStale ? { not: "archived" } : { notIn: ["archived", "stale"] },
-        sourceObjectId: { in: objectIds },
-        targetObjectId: { in: objectIds },
-        ...(relationshipTypes.length ? { relationshipType: { in: relationshipTypes } } : {}),
-      },
-      include: {
-        evidenceRefs: {
-          orderBy: { createdAt: "desc" },
-        },
-      },
-    }),
-    prisma.contextMapView.findMany({
-      where: visibleMapViewWhere(params.workspaceId, userId),
-      orderBy: [{ createdByUserId: "asc" }, { viewType: "asc" }, { createdAt: "asc" }],
-    }),
-    prisma.contextMapLayoutItem.findMany({
-      where: { mapViewId: mapView.id },
-    }),
-    prisma.contextGraphProposedDiff.findMany({
-      where: { workspaceId: params.workspaceId, status: { in: ["pending", "approved"] } },
-      orderBy: { createdAt: "desc" },
-    }),
+  const nativeRelationships = await window("ContextGraphRelationship", 300, (after: ContextGraphRelationship | undefined, take) => prisma.contextGraphRelationship.findMany({
+    where: {workspaceId: params.workspaceId, status: params.includeStale ? {not: "archived"} : {notIn: ["archived", "stale"]},
+      sourceObjectId: {in: objectIds}, targetObjectId: {in: objectIds}, ...(relationshipTypes.length ? {relationshipType: {in: relationshipTypes}} : {}),
+      ...(after ? {id: {gt: after.id}} : {})}, orderBy: {id: "asc"}, take,
+  }));
+  const readableRelationships = [];
+  for (const relationship of nativeRelationships) readableRelationships.push({...relationship, evidenceRefs: await evidenceFor(undefined, relationship.id)});
+  const [mapViews, candidateLayoutItems] = await Promise.all([
+    prisma.contextMapView.findMany({where: visibleMapViewWhere(params.workspaceId, userId), orderBy: [{createdByUserId: "asc"}, {viewType: "asc"}, {createdAt: "asc"}]}),
+    prisma.contextMapLayoutItem.findMany({where: {mapViewId: mapView.id, objectId: {in: objectIds}}}),
   ]);
-
-  const readableRelationships = await readGraph("ContextGraphRelationship", candidateRelationships);
-  const relationshipEvidenceIds = new Set((await readGraph("ContextGraphEvidenceRef",
-    readableRelationships.flatMap((relationship) => relationship.evidenceRefs).filter((ref) => !ref.knowledgeChunkId))).map((ref) => ref.id));
+  const candidateDiffs = await window("ContextGraphProposedDiff", 20, (after: ContextGraphProposedDiff | undefined, take) => prisma.contextGraphProposedDiff.findMany({
+    where: {workspaceId: params.workspaceId, status: {in: ["pending", "approved"]}, ...(after ? {OR: [
+      {createdAt: {lt: after.createdAt}}, {createdAt: after.createdAt, id: {lt: after.id}},
+    ]} : {})}, orderBy: [{createdAt: "desc"}, {id: "desc"}], take,
+  }));
   const visibleObjectIds = new Set(objectIds);
   const variantRelationships = variantProjection.relationships.map(relationship => ({ ...relationship,
     evidenceRefs: variantProjection.evidenceRefs.filter(ref => ref.relationshipId === relationship.id),
   }));
-  const relationships = [...readableRelationships, ...variantRelationships].filter((relationship) => visibleObjectIds.has(relationship.sourceObjectId)
-    && visibleObjectIds.has(relationship.targetObjectId)).slice(0, 300).map((relationship) => ({ ...relationship,
-    evidenceRefs: relationship.evidenceRefs.filter((ref) => relationshipEvidenceIds.has(ref.id) || variantProjection.virtualIds.has(ref.id)).slice(0, 5),
+  const eligibleRelationships = [...readableRelationships, ...variantRelationships].filter(relationship => visibleObjectIds.has(relationship.sourceObjectId)
+    && visibleObjectIds.has(relationship.targetObjectId));
+  if (eligibleRelationships.length > 300) completeness.relationshipsComplete = false;
+  if (variantRelationships.some(relationship => !visibleObjectIds.has(relationship.sourceObjectId) || !visibleObjectIds.has(relationship.targetObjectId))) completeness.variantsComplete = false;
+  if (eligibleRelationships.some(relationship => relationship.evidenceRefs.length > 5)) completeness.evidenceComplete = false;
+  const relationships = eligibleRelationships.slice(0, 300).map((relationship) => ({ ...relationship,
+    evidenceRefs: relationship.evidenceRefs.slice(0, 5),
   }));
   const layoutItems = (await readGraph("ContextMapLayoutItem",
     candidateLayoutItems.filter((item) => visibleObjectIds.has(item.objectId))));
-  const proposedDiffs = [...await readGraph("ContextGraphProposedDiff", candidateDiffs), ...variantProjection.proposedDiffs].slice(0, 20);
-  const visibleMapViews = await readableMapViews(actor, params.workspaceId, mapViews);
-  const releaseInputs = [
-    ...[mapView, ...visibleMapViews].map(row => ({ kind: "ContextMapView" as const, id: row.id, snapshot: row })),
-    ...readableObjects.map(row => ({ kind: "ContextGraphObject" as const, id: row.id, snapshot: row })),
-    ...readableRelationships.map(row => ({ kind: "ContextGraphRelationship" as const, id: row.id, snapshot: row })),
-    ...[...allEvidence.filter(row => readableEvidenceIds.has(row.id)), ...readableRelationships.flatMap(row => row.evidenceRefs).filter(row => relationshipEvidenceIds.has(row.id))]
-      .map(row => ({ kind: "ContextGraphEvidenceRef" as const, id: row.id, snapshot: row })),
-    ...layoutItems.map(row => ({ kind: "ContextMapLayoutItem" as const, id: row.id, snapshot: row })),
-    ...proposedDiffs.filter(row => !variantProjection.virtualIds.has(row.id)).map(row => ({ kind: "ContextGraphProposedDiff" as const, id: row.id, snapshot: row })),
-  ];
-  const releaseRoots = [...await captureArtifactInputProof(actor, params.workspaceId, releaseInputs), ...variantProjection.lineageRoots];
+  if (candidateDiffs.length + variantProjection.proposedDiffs.length > 20) completeness.proposedDiffsComplete = false;
+  const proposedDiffs = [...candidateDiffs, ...variantProjection.proposedDiffs].slice(0, 20);
+  const readWindow = {scope: "WINDOW" as const, complete: Object.values(completeness).every(Boolean), ...completeness};
+  const visibleMapViews = (await release.capture("ContextMapView", mapViews)).records;
+  release.add(variantProjection.lineageRoots);
   await assertEffectiveGraphVariantProjection(actor, params.workspaceId, variantProjection);
-  invariant(await isArtifactInputProofReadable(actor, params.workspaceId, releaseRoots), 409, "SOURCE_CHANGED", "Graph inputs changed before release.");
-  return {
+  return release.finish({
     mapView,
     mapViews: visibleMapViews,
     objects,
     relationships,
     layoutItems,
     proposedDiffs,
-    guidance: contextMapGuidance(mapView, {
+    readWindow,
+    guidance: {...contextMapGuidance(mapView, {
       objectCount: objects.length,
       proposedDiffCount: proposedDiffs.length,
-    }),
+    }), ...(!readWindow.complete && objects.length === 0 ? {
+      emptyTitle: "No visible facts in this window",
+      emptyDescription: "This limited window does not establish that the map is empty. Choose another view to inspect a different scope.",
+    } : {})},
     permissions: {
       canSavePersonalView: actor.kind === "user",
       canUpdateMasterView: canApproveContextGraph(actor, membership),
       canRequestMasterUpdate: actor.kind === "user",
     },
-  };
+  });
 }
 
 export async function updateContextMapLayout(actor: AppActor, params: {

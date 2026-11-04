@@ -70,20 +70,20 @@ export async function runCrmDripFollowupAgent(params: {
         403, "SOURCE_RESTRICTED", "Private, unknown, or changed inputs cannot enter external follow-up email.");
       await revalidate();
       const receipt = await helpers.captureInputs(mergeArtifactInputProofs(context.lineageRoots, [...helpers.behaviorLineageRoots]));
-      const emailContent = await helpers.tool("model.generate", {}, async () => {
+      const emailContent = await helpers.tool("model.generate", {}, async (operation) => {
         await revalidate();
-        const response = await defaultModelGateway.chat({ model, workspaceId: params.workspaceId, agentRunId: runId, taskType: "AGENT",
+        const response = await defaultModelGateway.chat(operation.modelRequest({ model, workspaceId: params.workspaceId, agentRunId: runId, taskType: "AGENT",
           messages: [{ role: "system", content: `${helpers.behaviorContext ?? ""}\n\n${buildCrmDripFollowupSystemPrompt(payload.followUpNumber)}` },
             { role: "user", content: `Lead context: ${JSON.stringify({ email: context.email, companyHint: context.companyHint, source: context.source, utmSource: context.utmSource, followUpNumber: payload.followUpNumber })}` }],
-        });
+        }));
         return response.content;
       }, { receipt });
       const delivery = await helpers.step("send-and-record", {}, async () => {
         await revalidate();
         return recordDripFollowUp(params.workspaceId, payload.demoLeadId, emailContent, { actor, lineageRoots,
           expectedFollowUpNumber: payload.followUpNumber, operationId: job.id,
-          send: (recipient, operationId) => sendEmail({ to: recipient, subject: "A quick follow-up from Corgtex", html: emailBodyToHtml(emailContent),
-            idempotencyKey: `crm-drip/${operationId}` }),
+          send: (recipient, operationId, controls) => sendEmail({ to: recipient, subject: "A quick follow-up from Corgtex", html: emailBodyToHtml(emailContent),
+            idempotencyKey: `crm-drip/${operationId}` }, controls),
         });
       }, { receipt });
       return { lineageReceipt: receipt, resultJson: { emailContent, delivery: delivery as Prisma.InputJsonValue } };

@@ -54,6 +54,25 @@ export type AzureKnowledgeSearchTrace = {
   fallbackReason?: string;
 };
 
+export type AzureKnowledgeAttemptControls = Readonly<{
+  signal: AbortSignal;
+  authorizeAttempt: (context: Readonly<{ signal: AbortSignal }>) => Promise<void>;
+}>;
+
+// Keep an authority denial fatal when the caller retries with the same original
+// controls. Ordinary transport failures remain retryable.
+const attemptStates = new WeakMap<AzureKnowledgeAttemptControls, { controller: AbortController; signal: AbortSignal }>();
+function attemptState(controls?: AzureKnowledgeAttemptControls) {
+  if (!controls) return undefined;
+  let state = attemptStates.get(controls);
+  if (!state) {
+    const controller = new AbortController();
+    state = { controller, signal: AbortSignal.any([controls.signal, controller.signal]) };
+    attemptStates.set(controls, state);
+  }
+  return state;
+}
+
 type AzureSearchKeyKind = "query" | "admin";
 
 const AZURE_SEARCH_SCOPE = "https://search.azure.com/.default";
@@ -117,7 +136,7 @@ function requireAzureSearchConfig(kind: AzureSearchKeyKind) {
   };
 }
 
-async function azureSearchHeaders(kind: AzureSearchKeyKind) {
+async function azureSearchHeaders(kind: AzureSearchKeyKind, signal?: AbortSignal) {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json",
@@ -127,7 +146,7 @@ async function azureSearchHeaders(kind: AzureSearchKeyKind) {
     azureCredential ??= new DefaultAzureCredential({
       managedIdentityClientId: env.AZURE_CLIENT_ID,
     });
-    const token = await azureCredential.getToken(AZURE_SEARCH_SCOPE);
+    const token = await azureCredential.getToken(AZURE_SEARCH_SCOPE, signal ? { abortSignal: signal } : undefined);
     if (!token?.token) {
       throw new Error("Unable to acquire Azure Search managed identity token.");
     }
@@ -156,25 +175,35 @@ async function readAzureError(response: Response) {
   }
 }
 
-async function azureSearchRequest<T>(path: string, init: RequestInit, kind: AzureSearchKeyKind) {
+async function azureSearchRequest<T>(path: string, init: RequestInit, kind: AzureSearchKeyKind,
+  controls?: AzureKnowledgeAttemptControls) {
+  const state = attemptState(controls);
+  const signal = state ? (init.signal ? AbortSignal.any([state.signal, init.signal]) : state.signal) : init.signal;
+  signal?.throwIfAborted();
   const { endpoint } = requireAzureSearchConfig(kind);
-  const response = await fetch(`${endpoint}${path}`, {
-    ...init,
-    headers: {
-      ...(await azureSearchHeaders(kind)),
-      ...(init.headers ?? {}),
-    },
-  });
-
+  const headers = { ...(await azureSearchHeaders(kind, signal ?? undefined)), ...(init.headers ?? {}) };
+  signal?.throwIfAborted();
+  if (controls && state && signal) {
+    try {
+      await controls.authorizeAttempt({ signal });
+      signal.throwIfAborted();
+    } catch (error) {
+      state.controller.abort(error);
+      throw error;
+    }
+  }
+  // No await between the original-authority guard and the actual data-plane send.
+  const response = await fetch(`${endpoint}${path}`, { ...init, headers, ...(signal ? { signal } : {}) });
+  signal?.throwIfAborted();
   if (!response.ok) {
-    throw new Error(`Azure Search request failed: ${await readAzureError(response)}`);
+    const error = await readAzureError(response);
+    signal?.throwIfAborted();
+    throw new Error(`Azure Search request failed: ${error}`);
   }
-
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  return response.json() as Promise<T>;
+  if (response.status === 204) return undefined as T;
+  const result = await response.json() as T;
+  signal?.throwIfAborted();
+  return result;
 }
 
 function indexPath(suffix: string) {
@@ -327,7 +356,7 @@ export function mapKnowledgeChunkToAzureDocument(chunk: AzureKnowledgeChunkInput
   };
 }
 
-export async function uploadAzureKnowledgeDocuments(documents: AzureKnowledgeDocument[]) {
+export async function uploadAzureKnowledgeDocuments(documents: AzureKnowledgeDocument[], controls?: AzureKnowledgeAttemptControls) {
   if (documents.length === 0) {
     return { uploaded: 0 };
   }
@@ -348,6 +377,7 @@ export async function uploadAzureKnowledgeDocuments(documents: AzureKnowledgeDoc
         }),
       },
       "admin",
+      controls,
     );
     const failed = response.value?.filter((entry) => !entry.status) ?? [];
     if (failed.length > 0) {
@@ -363,7 +393,7 @@ async function listAzureKnowledgeDocumentIds(params: {
   workspaceId: string;
   sourceType: KnowledgeSourceType;
   sourceId: string;
-}) {
+}, controls?: AzureKnowledgeAttemptControls) {
   const response = await azureSearchRequest<{ value?: Array<{ id: string }> }>(
     indexPath("/docs/search"),
     {
@@ -380,12 +410,13 @@ async function listAzureKnowledgeDocumentIds(params: {
       }),
     },
     "query",
+    controls,
   );
 
   return response.value?.map((entry) => entry.id).filter(Boolean) ?? [];
 }
 
-async function requireAzureKnowledgeAccessDomainField() {
+async function requireAzureKnowledgeAccessDomainField(controls?: AzureKnowledgeAttemptControls) {
   await azureSearchRequest(
     indexPath("/docs/search"),
     {
@@ -398,6 +429,7 @@ async function requireAzureKnowledgeAccessDomainField() {
       }),
     },
     "query",
+    controls,
   );
 }
 
@@ -405,12 +437,12 @@ export async function deleteAzureKnowledgeSourceDocuments(params: {
   workspaceId: string;
   sourceType: KnowledgeSourceType;
   sourceId: string;
-}) {
+}, controls?: AzureKnowledgeAttemptControls) {
   requireAzureSearchConfig("admin");
   let deleted = 0;
 
   for (;;) {
-    const ids = await listAzureKnowledgeDocumentIds(params);
+    const ids = await listAzureKnowledgeDocumentIds(params, controls);
     if (ids.length === 0) {
       return { deleted };
     }
@@ -427,6 +459,7 @@ export async function deleteAzureKnowledgeSourceDocuments(params: {
         }),
       },
       "admin",
+      controls,
     );
     const failed = response.value?.filter((entry) => !entry.status) ?? [];
     if (failed.length > 0) {
@@ -441,7 +474,7 @@ export async function syncAzureKnowledgeSource(params: {
   sourceType: KnowledgeSourceType;
   sourceId: string;
   chunks: AzureKnowledgeChunkInput[];
-}) {
+}, controls?: AzureKnowledgeAttemptControls) {
   if (!isAzureKnowledgeSearchConfigured("admin")) {
     return { skipped: true, deleted: 0, uploaded: 0 };
   }
@@ -449,14 +482,14 @@ export async function syncAzureKnowledgeSource(params: {
   // Verify the additive field through the data plane before deleting anything.
   // Index upgrades stay in the controlled setup/backfill path, so query-only
   // managed identities never need index-management permission.
-  await requireAzureKnowledgeAccessDomainField();
+  await requireAzureKnowledgeAccessDomainField(controls);
   const deleted = await deleteAzureKnowledgeSourceDocuments({
     workspaceId: params.workspaceId,
     sourceType: params.sourceType,
     sourceId: params.sourceId,
-  });
+  }, controls);
   const documents = params.chunks.map(mapKnowledgeChunkToAzureDocument);
-  const uploaded = await uploadAzureKnowledgeDocuments(documents);
+  const uploaded = await uploadAzureKnowledgeDocuments(documents, controls);
   return { skipped: false, deleted: deleted.deleted, uploaded: uploaded.uploaded };
 }
 

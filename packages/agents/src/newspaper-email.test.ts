@@ -118,6 +118,93 @@ describe("newspaper email rendering", () => {
     ]);
   });
 
+  it.each(["Due", "Deadline"] as const)("preserves structured %s and item links past both prose limits", (label) => {
+    const deadline = `${label}: 2026-10-20`;
+    const digest = withNewspaperAdviceRequests(normalizeNewspaperDigestPayload({}), [{
+      text: `Review <script>alert('x')</script> [the detail](/workspaces/ws-1/actions/detail) ${"Long synthetic prose ".repeat(80)}\n${deadline}\nOpen: /lost-by-the-prose-cap`,
+      href: "/workspaces/ws-1/actions/action-1?x=1&y=2",
+      deadline: { label, value: "2026-10-20" },
+    }]);
+    // A JSON round trip must not turn canonical metadata back into prose parsing.
+    const html = renderWorkspaceBriefingEmailHtml({
+      briefing: { title: "Synthetic newspaper", briefingJson: { leadMd: "Shared workspace context." } },
+      workspaceName: "Synthetic workspace",
+      recipientName: "Pat",
+      workspaceUrl: "https://app.example.com/workspaces/ws-1",
+      digest: JSON.parse(JSON.stringify(digest)),
+    });
+
+    expect(html).toContain(deadline);
+    expect(html.split(deadline)).toHaveLength(2);
+    expect(html).toContain('href="https://app.example.com/workspaces/ws-1/actions/action-1?x=1&amp;y=2"');
+    expect(html).toContain('href="https://app.example.com/workspaces/ws-1/actions/detail"');
+    expect(html).toContain("&lt;script&gt;alert('x')&lt;/script&gt;");
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain("lost-by-the-prose-cap");
+    const note = html.match(/For you: (.*?)<a href="[^\"]+" style="[^\"]+">Open it<\/a>/s)?.[1] ?? "";
+    const visibleText = note.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+    expect(visibleText).toContain(deadline);
+    expect(visibleText.trim().length).toBeLessThanOrEqual(420);
+  });
+
+  it("preserves a short deadline once and leaves undated source wording unqualified", () => {
+    const digest = withNewspaperAdviceRequests(normalizeNewspaperDigestPayload({
+      adviceRequests: ["General request: read the source wording before the end of July."],
+    }), [
+      { text: "Assigned action: Review\nDue: 2026-10-19\nOpen: /old", href: "/actions/dated", deadline: { label: "Due", value: "2026-10-19" } },
+      { text: "Input request: Prepare before October 5\nOpen: javascript:alert(1)", href: "javascript:alert(1)", deadline: null },
+    ]);
+    const html = renderWorkspaceBriefingEmailHtml({
+      briefing: { title: "Synthetic newspaper", briefingJson: { leadMd: "Shared workspace context." } },
+      workspaceName: "Synthetic workspace",
+      recipientName: "Pat",
+      workspaceUrl: "https://app.example.com/workspaces/ws-1",
+      digest,
+    });
+
+    expect(html.split("Due: 2026-10-19")).toHaveLength(2);
+    expect(html).toContain("Prepare before October 5");
+    expect(html).toContain("before the end of July");
+    expect(html).not.toContain("Deadline:");
+    expect(html).not.toContain("overdue");
+    expect(html).not.toContain("javascript:");
+    expect(html).toContain('href="https://app.example.com/actions/dated"');
+  });
+
+  it("keeps metadata aligned after empty items and section caps", () => {
+    const digest = withNewspaperAdviceRequests(normalizeNewspaperDigestPayload({}), [
+      " ",
+      "General request without metadata",
+      ...Array.from({ length: 8 }, (_, index) => ({
+        text: `Personal request ${index}: ${"long text ".repeat(60)}`,
+        href: `/actions/personal-${index}`,
+        deadline: { label: "Deadline" as const, value: `2026-10-${20 + index}` },
+      })),
+    ]);
+    const retainedCount = digest.sections[0]?.items.length ?? 0;
+    expect(retainedCount).toBeLessThan(9);
+    const html = renderWorkspaceBriefingEmailHtml({
+      briefing: { title: "Synthetic newspaper", briefingJson: { leadMd: "Shared workspace context." } },
+      workspaceName: "Synthetic workspace",
+      recipientName: "Pat",
+      workspaceUrl: "https://app.example.com/workspaces/ws-1",
+      digest,
+    });
+
+    expect(html).toContain("General request without metadata");
+    for (let index = 0; index < 8; index++) {
+      if (index < retainedCount - 1) {
+        expect(html).toContain(`Personal request ${index}`);
+        expect(html).toContain(`Deadline: 2026-10-${20 + index}`);
+        expect(html).toContain(`href="https://app.example.com/actions/personal-${index}"`);
+      } else {
+        expect(html).not.toContain(`Personal request ${index}`);
+        expect(html).not.toContain(`2026-10-${20 + index}`);
+        expect(html).not.toContain(`/actions/personal-${index}`);
+      }
+    }
+  });
+
   it("escapes model-provided text in email html", () => {
     const digest = normalizeNewspaperDigestPayload({
       keyDecisions: ["Use <script>alert('x')</script> safely."],

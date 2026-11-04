@@ -1,3 +1,4 @@
+import { createVariantModelControls } from "./variant-model-attempt";
 import { getMeetingTranscriptWorkerPurpose, isMeetingTranscriptWorkerCurrent } from "./native-meeting-workflow-principal";
 import { randomUUID } from "node:crypto";
 import { Prisma, type MeetingTranscriptSourceConnection, type NativeTranscriptInput } from "@prisma/client";
@@ -48,7 +49,7 @@ export type TranscriptSourceTransport = { readonly [transportBrand]: true };
 const transports = new WeakMap<object, Transport>();
 const originals = new WeakMap<object, { transport: Transport; artifact: MeetingTranscriptSourceArtifact; wires: Wire[] }>();
 
-export function transcriptConnectionHash(connection: MeetingTranscriptSourceConnection) {
+function transcriptConnectionHash(connection: MeetingTranscriptSourceConnection) {
   return hash({ id: connection.id, workspaceId: connection.workspaceId, provider: connection.provider,
     status: connection.status, authMode: connection.authMode, apiKeyEnc: connection.apiKeyEnc,
     accessTokenEnc: connection.accessTokenEnc, refreshTokenEnc: connection.refreshTokenEnc,
@@ -189,7 +190,7 @@ async function archiveWires(state: Transport, wires: Wire[]): Promise<TransportA
   const promise = create(); state.archives.set(wires, promise); return promise;
 }
 
-export type ProviderTranscriptPayload = {
+type ProviderTranscriptPayload = {
   version: 1; connectionId: string; provider: string; externalId: string; workspaceId: string;
   recordId: string; meetingId: string; manifestId: string; configHash: string; epochs: PermissionEpochProof;
   archive: TransportArchiveHeader; artifact: NormalizedMeetingTranscriptSourceArtifact; record: Record<string, unknown>;
@@ -320,7 +321,12 @@ export async function publishTranscriptSourceArtifact(params: {
       const prior = before ? await captureArtifactInputProof(actor, workspaceId, [{ kind: "Meeting", id: meetingId, snapshot: before }], tx) : [];
       return [...native, ...(prior.length ? await captureImmutableArtifactInputProof(actor, workspaceId, prior, tx) : [])];
     });
-    const inferred = await inferMeetingTranscriptMetadata({ workspaceId, transcript: artifact.transcript,
+    const modelRoots = structuredClone(roots);
+    const modelAttempt = createVariantModelControls(async () => {
+      invariant(await isArtifactInputProofReadable(actor, workspaceId, modelRoots),
+        409, "SOURCE_CHANGED", "Provider transcript metadata authority changed.");
+    });
+    const inferred = await inferMeetingTranscriptMetadata({ modelControls: modelAttempt.controls, workspaceId, transcript: artifact.transcript,
       title: before?.title ?? artifact.title, recordedAt: before?.recordedAt ?? artifact.recordedAt,
       participantEmails: [...(before?.participantEmails ?? []), ...artifact.participantEmails], source: `meeting-transcript:${artifact.provider.toLowerCase()}` });
     invariant(inferred.recordedAt && await isArtifactInputProofReadable(actor, workspaceId, roots), 409, "SOURCE_CHANGED", "Transcript sources changed during metadata preparation.");

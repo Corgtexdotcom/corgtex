@@ -40,7 +40,7 @@ export {
   captureArtifactPermissionEpochs, recordArtifactInputLineage, copyArtifactInputLineage,
   advanceHumanArtifactInputLineage, advanceArchivedArtifactEnvelopeLineage, invalidateArtifactInputLineage,
   hasCurrentArtifactInputLineage, currentArtifactInputRoots, isArtifactArchiveMetadataReadable,
-  readableArtifactIds, readableBrainSourceIds,
+  readableArtifactIds, readableBrainSourceIds, captureArtifactReadHeadObservation, withArtifactCountReleaseSnapshot,
 } from "./source-lineage";
 export type { ArtifactInputWriteFence, LineageKind, LineageInput, LineageRoot } from "./source-lineage";
 export { prepareArtifactSourceCommit, withArtifactSourceCommit } from "./artifact-source-commit";
@@ -166,8 +166,6 @@ export * from "./admin";
 export * from "./railway-client";
 export * from "./member-briefing";
 export * from "./goals";
-export * from "./admin";
-export * from "./meeting-intelligence";
 export * from "./agent-identity";
 export * from "./deliberation";
 export * from "./user-profile";
@@ -219,6 +217,9 @@ export { withMeetingTranscriptWorker, getMeetingTranscriptWorkerPurpose, isMeeti
 export * from "./workspace-initial-knowledge";
 export { captureManualTranscriptSourceArtifact } from "./manual-transcript-source-input";
 
-export { inspectLegacyRecovery, recoverLegacyArtifact, legacyRecoveryFileBinding } from "./legacy-recovery";
+export { inspectLegacyRecovery, recoverLegacyArtifact, legacyRecoveryFileBinding, LEGACY_RECOVERY_KINDS, type LegacyRecoveryKind } from "./legacy-recovery";
 
 export { isLegacyRecoveryProofWorkspaceShareable } from "./source-lineage";
+
+export { WorkItemReadRelease } from "./work-item-readable-page";
+export { captureReadableDigestInputs } from "./digest-lineage";

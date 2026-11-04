@@ -84,7 +84,18 @@ vi.mock("./events", () => ({
 }));
 
 vi.mock("./source-lineage", () => ({
+  collectWorkItemReadSnapshot: vi.fn(async (_workspaceId: string, read: (tx: typeof prismaMock) => Promise<unknown>) => read(prismaMock)),
+  captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
+  captureReadableWorkItemInputs: vi.fn(async (reader: import("@corgtex/shared").AppActor, workspaceId: string,
+    kind: "Action" | "Proposal" | "Tension", records: Array<{id: string; [key: string]: unknown}>) => {
+    const lineage = await import("./source-lineage");
+    const ids = await lineage.readableArtifactIds(reader, workspaceId, kind, records);
+    const roots = await lineage.captureArtifactInputProof(reader, workspaceId,
+      records.filter(row => ids.has(row.id)).map(row => ({kind,id:row.id,snapshot:row})));
+    return {ids,roots,heads:new Map<string,string>()};
+  }),
   isArtifactInputProofReadable: vi.fn().mockResolvedValue(true),
+  withArtifactCountReleaseSnapshot: vi.fn(async (_actor, _workspaceId, _roots, _remote, finish) => finish({})),
   captureArtifactInputProof: vi.fn().mockResolvedValue([]),
   readableArtifactIds: vi.fn(async (_actor, _workspaceId, _kind, records) =>
     new Set(records.map((record: { id: string }) => record.id))),
@@ -574,7 +585,7 @@ describe("action domain lifecycle", () => {
   });
 
   it("combines member filters with the existing privacy filter", async () => {
-    prismaMock.action.findMany.mockResolvedValueOnce([{ id: "action-1" }]);
+    prismaMock.action.findMany.mockResolvedValue([{ id: "action-1" }]);
     prismaMock.action.count.mockResolvedValueOnce(0);
     prismaMock.adviceProcess.findMany.mockResolvedValueOnce([
       {
@@ -651,8 +662,16 @@ describe("action domain lifecycle", () => {
     ["due_asc", [{ dueAt: { sort: "asc", nulls: "last" } }, { createdAt: "desc" }, { id: "desc" }]],
     ["due_desc", [{ dueAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }, { id: "desc" }]],
   ] as const)("orders the full filtered Action query by %s before limiting the page", async (sort, orderBy) => {
-    const permitted = Array.from({ length: 237 }, (_, index) => ({ id: `action-${String(index).padStart(3, "0")}`, status: "OPEN" }));
-    prismaMock.action.findMany.mockResolvedValueOnce([{ id: "hidden-earlier", lineageDenied: true }, ...permitted]);
+    const permitted = Array.from({ length: 237 }, (_, index) => ({ id: `action-${String(index).padStart(3, "0")}`, status: "OPEN", title: "Title", priority: 0, createdAt: new Date("2026-01-01"), dueAt: null }));
+    const rows = [{ ...permitted[0], id: "hidden-earlier", lineageDenied: true }, ...permitted];
+    let offset = 0;
+    prismaMock.action.findMany.mockImplementation(async query => {
+      if (query.include) {
+        const ids = query.where.AND.find((clause: { id?: { in?: string[] } }) => clause.id?.in)?.id.in;
+        return rows.filter(row => ids.includes(row.id));
+      }
+      const page = rows.slice(offset, offset + query.take); offset += query.take; return page;
+    });
 
     const { listActions } = await import("./actions");
     const result = await listActions(actor, "workspace-1", { sort, take: 25, skip: 50 });
@@ -661,7 +680,7 @@ describe("action domain lifecycle", () => {
     expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ workspaceId: "workspace-1" }),
       orderBy,
-      take: 5001,
+      take: 100,
     }));
     expect(prismaMock.action.findMany.mock.calls[0][0]).not.toHaveProperty("skip");
     expect(result.items.map((item) => item.id)).toEqual(permitted.slice(50, 75).map((item) => item.id));
@@ -689,15 +708,46 @@ describe("action domain lifecycle", () => {
     expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ status: { in: ["OPEN"] } }),
       orderBy: [{ dueAt: { sort: "asc", nulls: "last" } }, { createdAt: "desc" }, { id: "desc" }],
-      take: 5001,
+      take: 100,
     }));
     expect(prismaMock.action.groupBy).not.toHaveBeenCalled();
     expect(prismaMock.action.count).not.toHaveBeenCalled();
     expect(counts).toEqual({ DRAFT: 0, OPEN: 1, IN_PROGRESS: 0, COMPLETED: 205, ALL: 206 });
   });
 
+  it.each([true, false])("keeps the exact 10,000-candidate status total when readable is %s", async visible => {
+    const records = Array.from({length: 10_000}, (_, index) => ({id: `action-${String(index).padStart(5, "0")}`,
+      status: index % 2 ? "COMPLETED" : "OPEN", lineageDenied: !visible}));
+    prismaMock.action.findMany.mockImplementation(async query => {
+      const after = query.where.AND.find((clause: {id?: {gt?: string}}) => clause.id?.gt)?.id.gt;
+      return records.filter(record => !after || record.id > after).slice(0, query.take);
+    });
+    const {countActionsByStatus} = await import("./actions");
+    expect(await countActionsByStatus(actor, "workspace-1")).toEqual({DRAFT: 0, OPEN: visible ? 5_000 : 0,
+      IN_PROGRESS: 0, COMPLETED: visible ? 5_000 : 0, ALL: visible ? 10_000 : 0});
+    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(101);
+  });
+
+  it.each([true, false])("bounds the combined Actions count pass before page selection when readable is %s", async visible => {
+    const records = Array.from({length: 10_001}, (_, index) => ({id: `action-${String(index).padStart(5, "0")}`,
+      status: "COMPLETED", lineageDenied: !visible}));
+    prismaMock.action.findMany.mockImplementation(async query => {
+      const after = query.where.AND.find((clause: {id?: {gt?: string}}) => clause.id?.gt)?.id.gt;
+      return records.filter(record => !after || record.id > after).slice(0, query.take);
+    });
+    const {listActionsWithStatusCounts} = await import("./actions");
+    await expect(listActionsWithStatusCounts(actor, "workspace-1", {statuses: ["OPEN"], sort: "alpha", take: 1, page: 999}))
+      .rejects.toMatchObject({code: "SOURCE_READ_SCAN_LIMIT"});
+    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(101);
+    // All reads belong to the bounded status pass: the sorted list/hydration
+    // must never start even though the requested status has no matching rows.
+    expect(prismaMock.action.findMany.mock.calls.every(([query]) => query.take === 100
+      && query.orderBy.id === "asc" && !query.include && !query.select)).toBe(true);
+    expect(vi.mocked(readableArtifactIds).mock.calls).toHaveLength(100);
+  });
+
   it("returns checklist progress only as action summary counts", async () => {
-    prismaMock.action.findMany.mockResolvedValueOnce([
+    prismaMock.action.findMany.mockResolvedValue([
       { id: "action-1" },
       { id: "action-2" },
     ]);
@@ -2093,6 +2143,12 @@ describe("action domain lifecycle", () => {
     ]);
     vi.mocked(readableArtifactIds).mockImplementation(async (_actor, _workspaceId, kind, rows) =>
       new Set(rows.filter((row) => kind !== "ActionChecklistItem" || row.id === "item-safe").map((row) => row.id)));
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor, _workspaceId, inputs) => {
+      if (inputs.some(input => input.kind === "ActionChecklistItem" && input.id !== "item-safe")) {
+        throw new AppError(409, "UNKNOWN_LINEAGE", "Unproven checklist fixture");
+      }
+      return [];
+    });
     const { listActions, listActionChecklistItems } = await import("./actions");
     await expect(listActions(actor, "workspace-1")).resolves.toMatchObject({
       items: [{ id: "action-1", checklistItemCount: 1, checklistCompletedCount: 0 }],
@@ -2119,7 +2175,8 @@ describe("action domain lifecycle", () => {
     vi.mocked(captureArtifactInputProof).mockImplementation(async (reader, workspaceId, inputs) => {
       expect(reader).toBe(actor); expect(workspaceId).toBe("workspace-1");
       if (inputs.some((input) => input.kind === "Circle")) throw new AppError(409, "UNKNOWN_LINEAGE", "Unknown circle inputs.");
-      throw new AppError(403, "SOURCE_RESTRICTED", "Membership withdrawn.");
+      if (inputs.some(input=>["User","Member"].includes(input.kind))) throw new AppError(403, "SOURCE_RESTRICTED", "Membership withdrawn.");
+      return [];
     });
     const output = await read();
     expect(output).toMatchObject({ id: publicAction.id, title: publicAction.title, bodyMd: publicAction.bodyMd,

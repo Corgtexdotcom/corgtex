@@ -98,6 +98,7 @@ const {
 }));
 
 const lineage = vi.hoisted(() => {
+  const epochs = new Map<string, number>();
   const revoked = new Set<string>();
   const unknown = new Set<string>();
   const privateIds = new Set<string>();
@@ -106,13 +107,13 @@ const lineage = vi.hoisted(() => {
   const recorded: any[] = [];
   const invalidated: any[] = [];
   const behaviorRoots: any[] = [];
-  const root = (input: any) => ({ kind: input.kind, id: input.id, fingerprint: JSON.stringify(input.snapshot ?? input) });
+  const root = (input: any) => ({ kind: input.kind, id: input.id, fingerprint: JSON.stringify(input.snapshot ?? input), epoch: epochs.get(input.id) ?? 0 });
   const capture = vi.fn(async (_actor: any, _ws: string, inputs: any[]) => {
     if (inputs.some(input => unknown.has(input.id) || revoked.has(input.id))) throw Object.assign(new Error("Unavailable source"), { code: "UNKNOWN_LINEAGE" });
     for (const input of inputs) if (input.snapshot) rows.set(input.id, input.snapshot);
     return inputs.map(root);
   });
-  const readable = vi.fn(async (_actor: any, _ws: string, roots: any[]) => roots.every(root => !revoked.has(root.id) && !unknown.has(root.id)
+  const readable = vi.fn(async (_actor: any, _ws: string, roots: any[]) => roots.every(root => !revoked.has(root.id) && !unknown.has(root.id) && (root.epoch ?? 0) === (epochs.get(root.id) ?? 0)
     && (!rows.has(root.id) || JSON.stringify(rows.get(root.id)) === root.fingerprint)));
   const publicProof = vi.fn(async (_actor: any, _ws: string, roots: any[]) => roots.every(root => !revoked.has(root.id) && !unknown.has(root.id) && !privateIds.has(root.id) && root.kind !== "AgentRequestInput"));
   const merge = (...proofs: any[][]) => [...new Map(proofs.flat().map(root => [`${root.kind}:${root.id}`, root])).values()];
@@ -125,7 +126,7 @@ const lineage = vi.hoisted(() => {
   const target = vi.fn(async (_install: string, channelId: string) => ({ ok: true, channelId }));
   const knowledgeRoots = vi.fn(async (_actor: any, _ws: string, rows: any[]) => rows.map(row => ({ kind: "KnowledgeChunk", id: row.chunkId, fingerprint: row.snippet })));
   const run = vi.fn();
-  return { revoked, unknown, privateIds, rows, operations, recorded, invalidated, behaviorRoots, capture, readable, publicProof, merge, captureRows, target, knowledgeRoots, run };
+  return { epochs, revoked, unknown, privateIds, rows, operations, recorded, invalidated, behaviorRoots, capture, readable, publicProof, merge, captureRows, target, knowledgeRoots, run };
 });
 
 vi.mock("../runtime", () => ({
@@ -230,7 +231,7 @@ async function runTrustedSlackAgent(run: (payload: any) => Promise<any>, payload
 describe("runSlackAgent", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    lineage.revoked.clear(); lineage.unknown.clear(); lineage.privateIds.clear(); lineage.rows.clear();
+    lineage.epochs.clear(); lineage.revoked.clear(); lineage.unknown.clear(); lineage.privateIds.clear(); lineage.rows.clear();
     lineage.operations.length = 0; lineage.recorded.length = 0; lineage.invalidated.length = 0; lineage.behaviorRoots.length = 0;
     lineage.target.mockResolvedValue({ ok: true, channelId: "C1" });
     lineage.run.mockImplementation(async params => {
@@ -240,11 +241,11 @@ describe("runSlackAgent", () => {
           if (!await lineage.readable(params.lineageActor, params.workspaceId, roots)) throw Object.assign(new Error("Revoked captured input"), { code: "SOURCE_CHANGED" });
           return { kind: "agent-input-receipt", roots };
         },
-        tool: async (name: string, input: unknown, work: () => Promise<any>, proof: any) => {
+        tool: async (name: string, input: unknown, work: (operation: import("../runtime").AgentOperationContext) => Promise<any>, proof: any) => {
           expect(proof?.receipt?.roots.length).toBeGreaterThan(0);
           if (!await lineage.readable(params.lineageActor, params.workspaceId, proof.receipt.roots)) throw Object.assign(new Error("Revoked operation input"), { code: "SOURCE_CHANGED" });
           lineage.operations.push({ name, input, roots: proof.receipt.roots });
-          return work();
+          return work({modelRequest: (request: any) => request});
         },
       };
       const context = await params.buildContext(helpers, "run-1");
@@ -350,7 +351,7 @@ describe("runSlackAgent", () => {
     }));
     expect(deliverSlackAgentResponseMock).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
       text: expect.stringContaining("Done:"),
-    }));
+    }), expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
   });
 
   it("keeps an Action private and asks for a human owner when Slack names none", async () => {
@@ -368,7 +369,7 @@ describe("runSlackAgent", () => {
     }));
     expect(deliverSlackAgentResponseMock).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
       text: expect.stringContaining("Assign an active Corgtex member"),
-    }));
+    }), expect.objectContaining({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) }));
   });
 
   it("does not assign an Action to a system member matched in Slack", async () => {
@@ -813,11 +814,15 @@ describe("runSlackAgent", () => {
     for (const row of hidden.slice(0, 70)) lineage.unknown.add(row.id);
     for (const row of hidden.slice(70)) lineage.privateIds.add(row.id);
     const publicRows = Array.from({ length: 7 }, (_, index) => ({ id: `public-${index}`, title: `Public action ${index}`, bodyMd: "Public body", status: "OPEN", createdAt: new Date() }));
-    prismaMock.action.findMany.mockImplementation(async ({ take, skip }) => [...hidden, ...publicRows].slice(skip, skip + take));
+    prismaMock.action.findMany.mockImplementation(async ({ take, cursor }) => {
+      const rows = [...hidden, ...publicRows];
+      const start = cursor ? rows.findIndex(row => row.id === cursor.id) + 1 : 0;
+      return rows.slice(start, start + take);
+    });
     extractMock.mockResolvedValueOnce({ output: { intent: "brief", confidence: 0.9 } });
     const { runSlackAgent } = await import("./slack-agent");
     await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention", prompt: "brief" });
-    expect(prismaMock.action.findMany.mock.calls.map(([query]) => query.skip)).toEqual([0, 50, 100]);
+    expect(prismaMock.action.findMany.mock.calls.map(([query]) => query.cursor?.id)).toEqual([undefined, "hidden-49", "hidden-99"]);
     const prompt = JSON.parse(extractMock.mock.calls[0][0].input);
     expect(prompt.openActions.map((row: any) => row.id)).toEqual(publicRows.slice(0, 5).map(row => row.id));
     expect(JSON.stringify(prompt)).not.toContain("PRIVATE");
@@ -939,14 +944,19 @@ describe("runSlackAgent", () => {
   });
 
 
-  it("fails the bounded candidate scan before any model when it cannot establish a permitted sample", async () => {
-    const hidden = Array.from({ length: 5_000 }, (_, index) => ({ id: `unknown-${index}`, title: "UNKNOWN body", status: "OPEN" }));
+  it("fails explicitly when Slack context exhausts its raw candidate budget", async () => {
+    const hidden = Array.from({ length: 5_001 }, (_, index) => ({ id: `unknown-${index}`, title: "UNKNOWN body", status: "OPEN" }));
     for (const row of hidden) lineage.unknown.add(row.id);
-    prismaMock.action.findMany.mockImplementation(async ({ take, skip }) => hidden.slice(skip, skip + take));
+    const rows = [...hidden, { id: "readable-tail", title: "Readable tail", status: "OPEN" }];
+    prismaMock.action.findMany.mockImplementation(async ({ take, skip = 0, cursor }) => {
+      const start = cursor ? rows.findIndex(row => row.id === cursor.id) + skip : skip;
+      return rows.slice(start, start + take);
+    });
     const { runSlackAgent } = await import("./slack-agent");
-    await expect(runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention" })).rejects.toMatchObject({ code: "INPUT_SCAN_LIMIT" });
-    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(100);
-    expect(extractMock).not.toHaveBeenCalled();
+    await expect(runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention" })).rejects.toMatchObject({code: "SLACK_CONTEXT_SCAN_LIMIT"});
+    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(5);
+    expect(prismaMock.action.findMany.mock.calls.at(-1)![0].take).toBe(1);
+    expect(extractMock).not.toHaveBeenCalled(); expect(chatMock).not.toHaveBeenCalled();
     expect(deliverSlackAgentResponseMock).not.toHaveBeenCalled();
   });
 
@@ -958,6 +968,152 @@ describe("runSlackAgent", () => {
     expect(outcome.lineageReceipt).toBeUndefined();
     expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toBe("I completed the request. Review the result in Corgtex.");
     expect(JSON.stringify(deliverSlackAgentResponseMock.mock.calls)).not.toMatch(/Derived title|action-1/);
+  });
+
+  describe("reply transport attempt authority", () => {
+    beforeEach(() => {
+      lineage.target.mockReset().mockResolvedValue({ ok: true, channelId: "C1" });
+      deliverSlackAgentResponseMock.mockReset().mockResolvedValue(undefined);
+    });
+    it.each([
+      ["credentials", "incoming-message"], ["retry", "incoming-message"],
+      ["credentials", "actor-member-1"], ["retry", "actor-member-1"],
+      ["credentials", "behavior-1"], ["retry", "behavior-1"],
+    ] as const)("blocks original %s/%s revoke-restore even if transport swallows denial", async (boundary, revokedId) => {
+      lineage.behaviorRoots.push({ kind: "AgentIdentity", id: "behavior-1", fingerprint: "original-behavior", epoch: 0 });
+      let sent = 0;
+      let denied: unknown;
+      let aborted = false;
+      let capturesAtTransport = 0;
+      deliverSlackAgentResponseMock.mockImplementationOnce(async (_payload, _response, controls) => {
+        capturesAtTransport = lineage.capture.mock.calls.length;
+        if (boundary === "retry") {
+          await controls?.authorizeAttempt({ signal: controls.signal });
+          sent++;
+        }
+        lineage.epochs.set(revokedId, 1); // revoked and restored: current bytes look unchanged
+        try { await controls?.authorizeAttempt({ signal: controls.signal }); sent++; } catch (error) { denied = error; }
+        aborted = Boolean(controls?.signal.aborted);
+        // A transport may translate failure or resolve after its retry engine.
+        return { delivered: false };
+      });
+      const { runSlackAgent } = await import("./slack-agent");
+      await expect(runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention", prompt: "help" })).rejects.toThrow();
+      expect(denied).toMatchObject({ code: "SOURCE_CHANGED" });
+      expect(aborted).toBe(true);
+      expect(sent).toBe(boundary === "retry" ? 1 : 0);
+      expect(lineage.capture).toHaveBeenCalledTimes(capturesAtTransport);
+    });
+
+    it.each(["mapping", "membership", "public audience", "destination"] as const)("blocks late %s loss at a transport attempt", async mutation => {
+      let sent = 0;
+      let denied: unknown;
+      deliverSlackAgentResponseMock.mockImplementationOnce(async (_payload, _response, controls) => {
+        if (mutation === "mapping") prismaMock.communicationExternalUser.findUnique.mockResolvedValue({ id: "external-user-1", userId: "another-user", isDeleted: false });
+        else if (mutation === "membership") prismaMock.member.findUnique.mockResolvedValue({ id: "actor-member-1", userId: "user-1", isActive: false });
+        else if (mutation === "public audience") lineage.privateIds.add("incoming-message");
+        else lineage.target.mockResolvedValue({ ok: true, channelId: "C2" });
+        try { await controls?.authorizeAttempt({ signal: controls.signal }); sent++; } catch (error) { denied = error; }
+      });
+      const { runSlackAgent } = await import("./slack-agent");
+      await expect(runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention", prompt: "help" })).rejects.toThrow();
+      expect(denied).toBeDefined();
+      expect(sent).toBe(0);
+    });
+
+    it.each(["mapping", "source"] as const)("rechecks %s after the destination await within the transport attempt", async mutation => {
+      let sent = 0;
+      let denied: unknown;
+      deliverSlackAgentResponseMock.mockImplementationOnce(async (_payload, _response, controls) => {
+        lineage.target.mockImplementationOnce(async () => {
+          if (mutation === "mapping") prismaMock.communicationExternalUser.findUnique.mockResolvedValue({ id: "external-user-1", userId: "another-user", isDeleted: false });
+          else lineage.epochs.set("incoming-message", 1);
+          return { ok: true, channelId: "C1" };
+        });
+        try { await controls?.authorizeAttempt({ signal: controls.signal }); sent++; } catch (error) { denied = error; }
+      });
+      const { runSlackAgent } = await import("./slack-agent");
+      await expect(runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention", prompt: "help" })).rejects.toThrow();
+      expect(denied).toBeDefined();
+      expect(sent).toBe(0);
+    });
+
+    it("latches cancellation through a caught attempt and a later retry", async () => {
+      let sent = 0;
+      const failures: unknown[] = [];
+      let aborted = false;
+      deliverSlackAgentResponseMock.mockImplementationOnce(async (_payload, _response, controls) => {
+        const cancelled = new AbortController(); cancelled.abort(new Error("Synthetic cancellation"));
+        for (const signal of [cancelled.signal, controls?.signal]) {
+          try { await controls?.authorizeAttempt({ signal }); sent++; } catch (error) { failures.push(error); }
+        }
+        aborted = Boolean(controls?.signal.aborted);
+      });
+      const { runSlackAgent } = await import("./slack-agent");
+      await expect(runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention", prompt: "help" })).rejects.toThrow();
+      expect(failures).toHaveLength(2);
+      expect(aborted).toBe(true);
+      expect(sent).toBe(0);
+    });
+
+    it.each(["public", "private"] as const)("permits current %s reply attempts over the same original proof", async audience => {
+      let sent = 0;
+      let capturesAtTransport = 0;
+      deliverSlackAgentResponseMock.mockImplementationOnce(async (_payload, _response, controls) => {
+        capturesAtTransport = lineage.capture.mock.calls.length;
+        for (let attempt = 0; attempt < 2; attempt++) { await controls?.authorizeAttempt({ signal: controls.signal }); sent++; }
+      });
+      const { runSlackAgent } = await import("./slack-agent");
+      const outcome = await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: audience === "public" ? "app_mention" : "slash_command", prompt: "help" });
+      expect(outcome.resultJson.delivery).toEqual({ delivered: true });
+      expect(sent).toBe(2);
+      expect(deliverSlackAgentResponseMock.mock.calls[0][2]).toMatchObject({ authorizeAttempt: expect.any(Function), signal: expect.any(AbortSignal) });
+      expect(lineage.capture).toHaveBeenCalledTimes(capturesAtTransport);
+    });
+
+    it("preserves ordinary delivery failure without an authorization latch", async () => {
+      deliverSlackAgentResponseMock.mockRejectedValueOnce(new Error("Synthetic transport unavailable"));
+      const { runSlackAgent } = await import("./slack-agent");
+      const outcome = await runTrustedSlackAgent(runSlackAgent, { ...basePayload(), source: "app_mention", prompt: "help" });
+      expect(outcome.resultJson.delivery).toEqual({ delivered: false, error: "Slack delivery failed." });
+    });
+  });
+
+  it.each(["app_mention", "slash_command"] as const)("bounds private audience context without denying its owner (%s)", async source => {
+    const rows = Array.from({length: 201}, (_, index) => ({id: `private-window-${index}`, title: `Private title ${index}`, status: "OPEN"}));
+    rows.forEach(row => lineage.privateIds.add(row.id));
+    prismaMock.action.findMany.mockImplementation(async ({take, skip = 0, cursor}) => {
+      const start = cursor ? rows.findIndex(row => row.id === cursor.id) + skip : skip;
+      return rows.slice(start, start + take);
+    });
+    extractMock.mockResolvedValueOnce({output: {intent: "brief", confidence: 0.9}});
+    const {runSlackAgent} = await import("./slack-agent");
+    const run = runTrustedSlackAgent(runSlackAgent, {...basePayload(), source});
+    if (source === "app_mention") {
+      await expect(run).rejects.toMatchObject({code: "SLACK_CONTEXT_SCAN_LIMIT"});
+      expect(prismaMock.action.findMany).toHaveBeenCalledTimes(5);
+      expect(extractMock).not.toHaveBeenCalled(); expect(deliverSlackAgentResponseMock).not.toHaveBeenCalled();
+    } else {
+      await run;
+      expect(prismaMock.action.findMany).toHaveBeenCalledOnce();
+      expect(extractMock.mock.calls[0][0].input).toContain("Private title 0");
+      expect(deliverSlackAgentResponseMock).toHaveBeenCalledOnce();
+    }
+  });
+
+  it.each([false, true])("distinguishes exhausted Slack context at the raw boundary (readable=%s)", async readable => {
+    const rows = Array.from({length: 200}, (_, index) => ({id: `boundary-${index}`, title: `Boundary title ${index}`, status: "OPEN"}));
+    rows.slice(0, readable ? 199 : 200).forEach(row => lineage.unknown.add(row.id));
+    prismaMock.action.findMany.mockImplementation(async ({take, skip = 0, cursor}) => {
+      const start = cursor ? rows.findIndex(row => row.id === cursor.id) + skip : skip;
+      return rows.slice(start, start + take);
+    });
+    extractMock.mockResolvedValueOnce({output: {intent: "brief", confidence: 0.9}});
+    const {runSlackAgent} = await import("./slack-agent");
+    await runTrustedSlackAgent(runSlackAgent, {...basePayload(), source: "app_mention"});
+    expect(prismaMock.action.findMany).toHaveBeenCalledTimes(5);
+    expect(prismaMock.action.findMany.mock.calls.at(-1)![0].take).toBe(1);
+    expect(JSON.parse(extractMock.mock.calls[0][0].input).openActions).toHaveLength(readable ? 1 : 0);
   });
 
 });

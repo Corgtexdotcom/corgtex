@@ -34,7 +34,7 @@ describe("durable permission change events", () => {
       expect(await epoch()).toBe(before + 1n);
       const rows = await events();
       expect(rows).toHaveLength(1);
-      expect(rows[0].payload).toEqual({ version: 1, governors: [{ kind: "InformationCategoryPolicy", id: "SALARY" }] });
+      expect(rows[0].payload).toEqual({ version: 2, scope: "WORKSPACE" });
       expect(planSourceLineageRebuild(rows[0])).toHaveLength(4);
       await prisma.event.deleteMany();
     }
@@ -47,18 +47,18 @@ describe("durable permission change events", () => {
     await prisma.event.deleteMany();
     for (const data of [{ allowedRoleIds: ["synthetic-role"] }, { allowedCircleIds: ["synthetic-circle"] }]) {
       await prisma.informationCategoryPolicy.update({ where: { id: policy.id }, data });
-      expect((await events())[0].payload).toEqual({ version: 1, governors: [{ kind: "InformationCategoryPolicy", id: "HR" }] });
+      expect((await events())[0].payload).toEqual({ version: 2, scope: "WORKSPACE" });
       await prisma.event.deleteMany();
     }
     await prisma.informationCategoryPolicy.update({ where: { id: policy.id }, data: { workspaceId: other.id, category: "PEOPLE" } });
     expect((await events()).map(row => ({ workspaceId: row.workspaceId, payload: row.payload }))).toEqual(expect.arrayContaining([
-      { workspaceId: f.workspace.id, payload: { version: 1, governors: [{ kind: "InformationCategoryPolicy", id: "HR" }] } },
-      { workspaceId: other.id, payload: { version: 1, governors: [{ kind: "InformationCategoryPolicy", id: "PEOPLE" }] } },
+      { workspaceId: f.workspace.id, payload: { version: 2, scope: "WORKSPACE" } },
+      { workspaceId: other.id, payload: { version: 2, scope: "WORKSPACE" } },
     ]));
     expect(await events()).toHaveLength(2);
     await prisma.event.deleteMany();
     await prisma.informationCategoryPolicy.delete({ where: { id: policy.id } });
-    expect((await events())[0].payload).toEqual({ version: 1, governors: [{ kind: "InformationCategoryPolicy", id: "PEOPLE" }] });
+    expect((await events())[0].payload).toEqual({ version: 2, scope: "WORKSPACE" });
   });
 
   it("rolls category epoch and rebuild scheduling back with the policy transaction", async () => {
@@ -88,16 +88,12 @@ describe("durable permission change events", () => {
     const rows = await events();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ workspaceId: f.workspace.id, aggregateType: "SourcePermissionEpoch",
-      aggregateId: f.workspace.id, status: "PENDING", payload: { version: 1, governors: expect.any(Array) } });
-    const payload = rows[0].payload as { version: number; governors: Array<{ kind: string; id: string }> };
-    expect(Object.keys(payload).sort()).toEqual(["governors", "version"]);
-    expect(payload.governors).toEqual(expect.arrayContaining([
-      { kind: "BrainSource", id: f.source.id }, { kind: "BrainSource", id: second.id },
-    ]));
-    for (const governor of payload.governors) {
-      expect(Object.keys(governor).sort()).toEqual(["id", "kind"]);
-      expect(governor.kind).toBe("BrainSource");
-      expect([f.source.id, second.id]).toContain(governor.id);
+      aggregateId: f.workspace.id, status: "PENDING", payload: { version: 2, scope: "WORKSPACE" } });
+    const payload = rows[0].payload;
+    expect(payload).toEqual({version: 2, scope: "WORKSPACE"});
+    for (const id of [f.source.id, second.id]) {
+      expect(await prisma.sourcePermissionEpoch.findFirst({where:{workspaceId:f.workspace.id,sourceKind:"BrainSource",sourceId:id}}))
+        .toMatchObject({sourceId:id});
     }
     expect(JSON.stringify(payload)).not.toContain("Synthetic");
     const recipes = planSourceLineageRebuild(rows[0]);
@@ -115,8 +111,8 @@ describe("durable permission change events", () => {
     await prisma.brainSource.update({ where: { id: f.source.id }, data: { id: nextId, workspaceId: other.id } });
     const rows = await events();
     expect(rows).toHaveLength(2);
-    expect(rows.find(row => row.workspaceId === f.workspace.id)?.payload).toEqual({ version: 1, governors: [{ kind: "BrainSource", id: f.source.id }] });
-    expect(rows.find(row => row.workspaceId === other.id)?.payload).toEqual({ version: 1, governors: [{ kind: "BrainSource", id: nextId }] });
+    expect(rows.find(row => row.workspaceId === f.workspace.id)?.payload).toEqual({ version: 2, scope: "WORKSPACE" });
+    expect(rows.find(row => row.workspaceId === other.id)?.payload).toEqual({ version: 2, scope: "WORKSPACE" });
     for (const row of rows) expect(planSourceLineageRebuild(row).every(recipe => recipe.workspaceId === row.workspaceId)).toBe(true);
   });
 
@@ -157,8 +153,9 @@ describe("durable permission change events", () => {
     });
     const rows = await events();
     expect(rows).toHaveLength(1);
-    expect(rows[0].payload).toEqual({ version: 1, governors: expect.arrayContaining(inserted) });
-    expect((rows[0].payload as { governors: unknown[] }).governors).toHaveLength(inserted.length);
+    expect(rows[0].payload).toEqual({version: 2, scope: "WORKSPACE"});
+    for (const governor of inserted) expect(await prisma.sourcePermissionEpoch.findFirst({where:{workspaceId:f.workspace.id,
+      sourceKind:governor.kind,sourceId:governor.id}})).toMatchObject({sourceKind:governor.kind,sourceId:governor.id});
     expect(JSON.stringify(rows[0].payload)).not.toContain("never-copy");
   });
 
@@ -190,4 +187,61 @@ describe("durable permission change events", () => {
     expect(await events()).toEqual([]);
     expect(await prisma.sourcePermissionEpoch.count({ where: { workspaceId: f.workspace.id, sourceKind: "ContextGraphObject" } })).toBe(2);
   });
+});
+
+it("bounds event payload for a 5001-row permission update without losing epoch changes", async () => {
+  const f=await fixture();
+  await prisma.brainSource.createMany({data:Array.from({length:5000},()=>({id:randomUUID(),workspaceId:f.workspace.id,sourceType:"ARTICLE" as const,tier:1,title:"Synthetic bulk source",content:"Never in event",accessDomain:"WORKSPACE" as const}))});
+  await prisma.event.deleteMany();
+  const before=await prisma.sourcePermissionEpoch.aggregate({where:{workspaceId:f.workspace.id,sourceKind:"BrainSource"},_sum:{epoch:true}});
+  const started=performance.now();
+  const changed=await prisma.brainSource.updateMany({where:{workspaceId:f.workspace.id},data:{accessDomain:"FINANCE"}});
+  const durationMs=Math.round(performance.now()-started);
+  const rows=await events();
+  const after=await prisma.sourcePermissionEpoch.aggregate({where:{workspaceId:f.workspace.id,sourceKind:"BrainSource"},_sum:{epoch:true}});
+  expect(changed.count).toBe(5001);expect(after._sum.epoch!>before._sum.epoch!).toBe(true);
+  expect(rows).toHaveLength(1);
+  console.log(JSON.stringify({rows:changed.count,durationMs,eventBytes:Buffer.byteLength(JSON.stringify(rows[0].payload))}));
+  expect(rows[0].payload).toEqual({version:2,scope:"WORKSPACE"});
+  expect(Buffer.byteLength(JSON.stringify(rows[0].payload))).toBeLessThan(64);
+  expect(planSourceLineageRebuild(rows[0])).toHaveLength(4);
+},180_000);
+
+it("replays retained historical v1 events and v2 events with the same workspace-only recipe contract", async () => {
+  const f=await fixture();
+  const legacy=await prisma.event.create({data:{workspaceId:f.workspace.id,type:"source-permission.changed",aggregateType:"SourcePermissionEpoch",
+    aggregateId:f.workspace.id,payload:{version:1,governors:[{kind:"BrainSource",id:f.source.id}]}}});
+  await prisma.brainSource.update({where:{id:f.source.id},data:{accessDomain:"FINANCE"}});
+  const current=(await events()).find(row=>row.id!==legacy.id)!;
+  expect(current.payload).toEqual({version:2,scope:"WORKSPACE"});
+  const sameIdentityNewPayload={...legacy,payload:current.payload};
+  expect(planSourceLineageRebuild(sameIdentityNewPayload)).toEqual(planSourceLineageRebuild(legacy));
+  expect(planSourceLineageRebuild(current)).toHaveLength(4);
+  expect(await prisma.event.findUnique({where:{id:legacy.id}})).toEqual(legacy);
+});
+
+it.each([false,true])("runs actual fresh demo initialization disposal with missing epoch=%s", async missingEpoch => {
+  const {createFreshDemoSeedWorkspace,settleFreshDemoInitialization}=await import("../../../scripts/lib/demo-seed-lifecycle.mjs");
+  const run=()=>prisma.$transaction(async tx=>{
+    const user=await tx.user.create({data:{email:"demo@jnj-demo.corgtex.app",passwordHash:"synthetic"}});
+    const {workspace,token}=await createFreshDemoSeedWorkspace(tx,{slug:"jnj-demo",name:"Synthetic disconnected demo",description:"Isolated fixture"});
+    const member=await tx.member.create({data:{workspaceId:workspace.id,userId:user.id,role:"CONTRIBUTOR"}});
+    const circle=await tx.circle.create({data:{workspaceId:workspace.id,name:"Synthetic circle"}});
+    const role=await tx.role.create({data:{circleId:circle.id,name:"Synthetic role",accountabilities:[],artifacts:[]}});
+    const assignment=await tx.roleAssignment.create({data:{roleId:role.id,memberId:member.id}});
+    for(const flag of ["AI_WORKSPACES","CONTEXT_MAPS","FINANCE","RELATIONSHIPS"] as const)
+      await tx.workspaceFeatureFlag.create({data:{workspaceId:workspace.id,flag,enabled:true,...(flag==="FINANCE"?{config:{financeCapabilities:{reports:true,reportImports:true}}}:{})}});
+    const notice=await tx.event.findFirstOrThrow({where:{workspaceId:workspace.id}});
+    expect(notice.payload).toEqual({version:2,scope:"WORKSPACE"});
+    const epochs=await tx.sourcePermissionEpoch.count({where:{workspaceId:workspace.id}});
+    if(missingEpoch)await tx.sourcePermissionEpoch.deleteMany({where:{workspaceId:workspace.id,sourceKind:"RoleAssignment",sourceId:assignment.id}});
+    await settleFreshDemoInitialization(tx,token,{userIds:[user.id],emails:[user.email],circleIds:[circle.id],roleIds:[role.id],assignments:[{roleId:role.id,memberId:member.id}]});
+    expect(await tx.event.count({where:{workspaceId:workspace.id}})).toBe(0);
+    expect(await tx.sourcePermissionEpoch.count({where:{workspaceId:workspace.id}})).toBe(epochs);
+    return workspace.id;
+  },{timeout:30_000});
+  if(missingEpoch){
+    await expect(run()).rejects.toThrow("native epoch was not applied");
+    expect(await prisma.workspace.count({where:{slug:"jnj-demo"}})).toBe(0);
+  }else expect(await run()).toEqual(expect.any(String));
 });

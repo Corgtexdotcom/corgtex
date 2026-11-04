@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
-import { AppError, MAX_AUDIO_FILE_BYTES, createMeetingAudioAsset, isPlausibleMeetingRecordedAt, readableArtifactIds, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, MAX_AUDIO_FILE_BYTES, createMeetingAudioAsset, isPlausibleMeetingRecordedAt, readableArtifactIds, captureReadableDigestInputs, captureArtifactReadHeadObservation, mergeArtifactInputProofs, withArtifactCountReleaseSnapshot, requireWorkspaceMembership, type LineageRoot } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
@@ -12,7 +12,18 @@ type RouteContext = {
 const DEFAULT_LIST_TAKE = 25;
 const MAX_LIST_TAKE = 50;
 const LIST_SCAN_PAGE = 100;
-const LIST_SCAN_LIMIT = 5_000;
+const LIST_SCAN_LIMIT = 200;
+
+function audioHistoryCursor(value: string | null) {
+  if (value === null) return undefined;
+  try {
+    if (value.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("cursor");
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (typeof parsed.id !== "string" || !parsed.id || parsed.id.length > 256
+      || typeof parsed.createdAt !== "string" || !Number.isFinite(Date.parse(parsed.createdAt))) throw new Error("cursor");
+    return { id: parsed.id, createdAt: new Date(parsed.createdAt) };
+  } catch { throw new AppError(400, "INVALID_INPUT", "Invalid audio history cursor."); }
+}
 
 const audioAssetSelect = {
   id: true,
@@ -166,39 +177,59 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
     const ownerUserId = actor.user.id;
     await requireWorkspaceMembership({ actor, workspaceId: authorizedWorkspaceId });
     const requestedTake = clampTake(request.nextUrl.searchParams.get("take"));
-    const audioAssets = await prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT "id" FROM "Workspace" WHERE "id" = ${authorizedWorkspaceId} FOR SHARE`;
-      await tx.$queryRaw`SELECT "id" FROM "Member" WHERE "workspaceId" = ${authorizedWorkspaceId}
-        AND "userId" = ${ownerUserId} FOR SHARE`;
+    const admitted: MeetingAudioAssetSummary[] = [];
+    let roots: LineageRoot[] = [];
+    const heads = new Map<string, string>();
+    let after = audioHistoryCursor(request.nextUrl.searchParams.get("cursor"));
+    let examined = 0;
+    let complete = false;
+    while (admitted.length < requestedTake && examined < LIST_SCAN_LIMIT) {
+      const page = await prisma.meetingAudioAsset.findMany({
+        where: { workspaceId: authorizedWorkspaceId, uploadedByUserId: ownerUserId,
+          ...(after ? { OR: [{createdAt: {lt: after.createdAt}}, {createdAt: after.createdAt, id: {lt: after.id}}] } : {}) },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: LIST_SCAN_PAGE,
+        select: audioAssetProofSelect,
+      });
+      if (page.length > LIST_SCAN_PAGE) throw new AppError(409, "SOURCE_CHANGED", "Audio history exceeded its bound.");
+      examined += page.length;
+      if (!page.length) { complete = true; break; }
+      if (after && page.some(asset => asset.createdAt > after!.createdAt ||
+        (asset.createdAt.getTime() === after!.createdAt.getTime() && asset.id >= after!.id))) {
+        throw new AppError(409, "SOURCE_CHANGED", "Audio history changed during pagination.");
+      }
+      // Batched discovery skips unknown/revoked history cheaply. Selected rows
+      // still receive original proofs and fresh final admission before release.
+      const readable = await readableArtifactIds(actor, authorizedWorkspaceId, "MeetingAudioAsset", page);
+      const candidates = page.filter(asset => readable.has(asset.id));
+      const observed = await captureArtifactReadHeadObservation(() => captureReadableDigestInputs({
+        actor, workspaceId: authorizedWorkspaceId, kind: "MeetingAudioAsset", records: candidates,
+      }));
+      for (const [key, stamp] of observed.heads) {
+        if (heads.has(key) && heads.get(key) !== stamp) throw new AppError(409, "SOURCE_CHANGED", "Audio source changed during collection.");
+        heads.set(key, stamp);
+      }
+      const selected = observed.value.records.slice(0, requestedTake - admitted.length);
+      admitted.push(...selected);
+      roots = mergeArtifactInputProofs(roots, ...selected.map(asset => observed.value.proofs.get(asset.id)!));
+      // Do not skip readable rows fetched beyond the requested display slots.
+      const lastIndex = admitted.length === requestedTake && selected.length
+        ? page.findIndex(asset => asset.id === selected[selected.length - 1].id) : page.length - 1;
+      after = {id: page[lastIndex].id, createdAt: page[lastIndex].createdAt};
+      complete = page.length < LIST_SCAN_PAGE && lastIndex === page.length - 1;
+      if (complete) break;
+    }
+    const audioAssets = await withArtifactCountReleaseSnapshot(actor, authorizedWorkspaceId, roots, async () => {}, async tx => {
       const currentMembership = await requireWorkspaceMembership({ actor, workspaceId: authorizedWorkspaceId, tx });
-      if (!currentMembership || currentMembership.id === "global-operator"
-        || currentMembership.userId !== ownerUserId) {
+      if (!currentMembership || currentMembership.id === "global-operator" || currentMembership.userId !== ownerUserId) {
         throw new AppError(403, "SOURCE_RESTRICTED", "Audio uploads require their active human owner.");
       }
-      const admitted: MeetingAudioAssetSummary[] = [];
-      let cursor: string | undefined;
-      let scanned = 0;
-      while (admitted.length < requestedTake) {
-        const pageTake = Math.min(LIST_SCAN_PAGE, LIST_SCAN_LIMIT + 1 - scanned);
-        const page = await tx.meetingAudioAsset.findMany({
-          where: { workspaceId: authorizedWorkspaceId, uploadedByUserId: ownerUserId },
-          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-          take: pageTake,
-          ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-          select: audioAssetProofSelect,
-        });
-        if (!page.length) break;
-        scanned += page.length;
-        if (scanned > LIST_SCAN_LIMIT) throw new AppError(409, "SOURCE_PROOF_SCAN_LIMIT", "Audio history exceeds the safe source scan limit.");
-        const readable = await readableArtifactIds(actor, authorizedWorkspaceId, "MeetingAudioAsset", page, tx);
-        admitted.push(...page.filter(asset => readable.has(asset.id)).slice(0, requestedTake - admitted.length));
-        cursor = page[page.length - 1]?.id;
-        if (page.length < pageTake) break;
-      }
       return admitted;
-    });
+    }, heads);
 
-    return NextResponse.json({ audioAssets: audioAssets.map(serializeAudioAsset) });
+    return NextResponse.json({ audioAssets: audioAssets.map(serializeAudioAsset), complete,
+      nextCursor: complete || !after ? null : Buffer.from(JSON.stringify({id: after.id, createdAt: after.createdAt.toISOString()})).toString("base64url"),
+    });
   } catch (error) {
     return handleRouteError(error, { request, surface: "meeting_audio_assets", workspaceId });
   }

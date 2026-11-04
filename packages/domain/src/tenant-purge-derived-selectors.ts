@@ -13,7 +13,7 @@ export const TENANT_PURGE_TARGET_DIMENSIONS = Object.freeze(["WORKSPACE", "DEPLO
 export const TENANT_PURGE_TARGET_MODES = Object.freeze(["ACCOUNT_WORKSPACE", "SELF_SERVE_TRIAL_WORKSPACE"] as const);
 export const TENANT_PURGE_DERIVED_EVIDENCE_KINDS = Object.freeze(["RESEND_TRACKED_EMAIL", "BOOTSTRAP_EXACT_WORKSPACE_SLUG", "SCHEMA_ONLY_NO_CURRENT_WRITER"] as const);
 export type TenantPurgeTargetDimension = typeof TENANT_PURGE_TARGET_DIMENSIONS[number];
-export type TenantPurgeTargetMode = typeof TENANT_PURGE_TARGET_MODES[number];
+type TenantPurgeTargetMode = typeof TENANT_PURGE_TARGET_MODES[number];
 
 type PathSelectorKind = "DIRECT_SCALAR" | "RELATION_PATH" | "SHARED_PRESERVE";
 export type TenantPurgeDerivedSelector =
@@ -100,7 +100,7 @@ export function decodeTenantPurgeDerivedSelectors(dsl: string): readonly TenantP
 export const TENANT_PURGE_DERIVED_SELECTORS = decodeTenantPurgeDerivedSelectors(SELECTOR_DSL);
 export const TENANT_PURGE_INDIRECT_MODELS = Object.freeze(["AdviceRequestRecipient", "AgentStep", "AgentToolCall", "ApprovalDecision", "BrainArticleVersion", "BrainDiscussionComment", "BrainDiscussionThread", "BuildArtifactAsset", "CircleAgentAssignment", "ContextMapLayoutItem", "ConversationTurn", "CrmConversationMessage", "ExternalDataSyncLog", "GoalLink", "GoalUpdate", "KeyResult", "MemberExpertise", "Objection", "Role", "RoleAssignment", "SqlKnowledgeStagedChunk", "TensionUpvote", "WebhookDelivery", "WorkspaceToolLinkCircleTag"] as const satisfies readonly Prisma.ModelName[]);
 
-export interface TenantPurgeSchemaField { name: string; kind: string; type: string; isId?: boolean; isUnique?: boolean; relationFromFields?: readonly string[] }
+interface TenantPurgeSchemaField { name: string; kind: string; type: string; isId?: boolean; isUnique?: boolean; relationFromFields?: readonly string[] }
 export interface TenantPurgeSchemaModel { name: string; fields: readonly TenantPurgeSchemaField[] }
 
 export function assertTenantPurgeDerivedSelectorRegistry(models: readonly TenantPurgeSchemaModel[], selectors: readonly TenantPurgeDerivedSelector[] = TENANT_PURGE_DERIVED_SELECTORS) {

@@ -4,12 +4,14 @@ import React, { useEffect, useId, useRef, useCallback } from "react";
 import { useTranslations } from "next-intl";
 
 export function Dialog({
+  id,
   open,
   onClose,
   title,
   children,
   className = "",
 }: {
+  id?: string;
   open: boolean;
   onClose: () => void;
   title: string;
@@ -35,9 +37,23 @@ export function Dialog({
     }
   }, [open]);
 
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    return () => {
+      // Close before removal so native modal state and the opener are restored.
+      if (dialog?.open) dialog.close();
+      returnFocusRef.current?.focus();
+      returnFocusRef.current = null;
+    };
+  }, []);
+
   const handleClick = useCallback(
     (e: React.MouseEvent<HTMLDialogElement>) => {
-      if (e.target === dialogRef.current) {
+      const dialog = dialogRef.current;
+      if (!dialog || e.target !== dialog) return;
+      const rect = dialog.getBoundingClientRect();
+      if (e.clientX < rect.left || e.clientX > rect.right ||
+          e.clientY < rect.top || e.clientY > rect.bottom) {
         onClose();
       }
     },
@@ -47,6 +63,7 @@ export function Dialog({
   const handleCancel = useCallback(
     (e: React.SyntheticEvent<HTMLDialogElement>) => {
       e.preventDefault();
+      e.stopPropagation();
       onClose();
     },
     [onClose],
@@ -54,6 +71,7 @@ export function Dialog({
 
   return (
     <dialog
+      id={id}
       ref={dialogRef}
       className={`dialog ${className}`}
       aria-labelledby={titleId}

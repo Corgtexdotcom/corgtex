@@ -91,6 +91,9 @@ vi.mock("./source-lineage", async (original) => ({
   brainSourceNeedsLineage: (source: { sourceType?: string; channel?: string | null }) =>
     source.sourceType === "CONVERSATION" || source.sourceType === "CONVERSATION_INSIGHT"
       || ["chat-demand", "daily-batch", "daily-digest", "daily-question"].includes(source.channel ?? ""),
+  captureArtifactInputProof: vi.fn().mockResolvedValue([]),
+  collectWorkItemReadSnapshot: vi.fn(async (_workspaceId, collect) => collect(prismaMock)),
+  withArtifactCountReleaseSnapshot: vi.fn(async (_actor, _workspaceId, _roots, _remote, finish) => finish({})),
   recordArtifactInputLineage: vi.fn(),
   copyArtifactInputLineage: vi.fn().mockResolvedValue(true),
   createBrainArticleHistoryVersion: vi.fn(async ({tx, article, version, reason, preserveKnownHistory}) => ({
@@ -623,7 +626,7 @@ describe("Brain status access domains", () => {
 
     expect(resolveKnowledgeAccessDomains).toHaveBeenCalledWith(ownerActor, "ws-1");
     expect(prismaMock.brainSource.findMany).toHaveBeenCalledWith({
-      orderBy: { id: "asc" }, take: 100,
+      orderBy: { id: "asc" }, take: 10001,
       where: {
         workspaceId: "ws-1",
         accessDomain: { in: domains },
@@ -692,7 +695,7 @@ describe("brain source ingestion", () => {
       skip: 0,
     });
 
-    expect(resolveKnowledgeAccessDomains).toHaveBeenCalledWith(ownerActor, "ws-1");
+    expect(resolveKnowledgeAccessDomains).toHaveBeenCalledWith(ownerActor, "ws-1", prismaMock);
     const where = {
       workspaceId: "ws-1",
       accessDomain: { in: ["WORKSPACE"] },
@@ -995,7 +998,7 @@ describe("Brain discussions with actual complete lineage receipts", () => {
     vi.clearAllMocks();
     source = await vi.importActual<typeof import("./source-lineage")>("./source-lineage");
     const mocked = await import("./source-lineage");
-    for (const name of ["readableArtifactIds", "recordArtifactInputLineage", "copyArtifactInputLineage", "createBrainArticleHistoryVersion", "currentArtifactInputRoots", "captureArtifactInputSnapshotProof"] as const) vi.mocked(mocked[name]).mockImplementation(source[name] as any);
+    for (const name of ["readableArtifactIds", "recordArtifactInputLineage", "copyArtifactInputLineage", "createBrainArticleHistoryVersion", "currentArtifactInputRoots", "captureArtifactInputSnapshotProof", "captureArtifactInputProof", "withArtifactCountReleaseSnapshot"] as const) vi.mocked(mocked[name]).mockImplementation(source[name] as any);
     for (const name of ["brainArticle", "brainArticleVersion", "auditLog", "brainSource", "brainDiscussionThread", "brainDiscussionComment", "member", "user", "action", "artifactInputLineage", "artifactInputSnapshot"]) {
       rows[name] = [];
       const delegate: any = (prismaMock as any)[name];
@@ -1024,7 +1027,17 @@ describe("Brain discussions with actual complete lineage receipts", () => {
       return 1;
     });
     prismaMock.$queryRaw.mockImplementation(async (query: any) => {
-      if (!query.strings?.join("").includes('FROM "SourcePermissionEpoch"')) return [];
+      const sql = query.strings?.join("") ?? "";
+      if (sql.includes('DISTINCT ON ("artifactId")') && sql.includes('FROM "ArtifactInputLineage"')) {
+        const [workspaceId, artifactType, ...ids] = query.values;
+        const heads = new Map<string, typeof rows.artifactInputLineage[number]>();
+        for (const row of [...rows.artifactInputLineage].sort((a, b) => b.revision - a.revision)) {
+          if (row.workspaceId === workspaceId && row.artifactType === artifactType && ids.includes(row.artifactId)
+            && !heads.has(row.artifactId)) heads.set(row.artifactId, row);
+        }
+        return [...heads.values()].map(row => structuredClone(row));
+      }
+      if (!sql.includes('FROM "SourcePermissionEpoch"')) return [];
       const [workspaceId, ...pairs] = query.values; const result = [];
       for (let index = 0; index < pairs.length; index += 2) {
         const [sourceKind, sourceId] = pairs.slice(index, index + 2); const epoch = epochs.get(JSON.stringify([workspaceId, sourceKind, sourceId]));

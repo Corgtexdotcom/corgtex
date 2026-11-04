@@ -1,6 +1,6 @@
 import {
-  listAuditLogs,
-  listArchivedWorkspaceArtifacts,
+  listAuditLogsPage,
+  listArchivedWorkspaceArtifactsPage,
   listNewspaperDeliveryDetails,
   listNewspaperDeliverySummaries,
   requireWorkspaceMembership,
@@ -42,11 +42,13 @@ export default async function AuditPage({
 }: {
   params: Promise<{ workspaceId: string }>;
   searchParams: Promise<{
+    auditCursor?: string;
     entityType?: string;
     entityId?: string;
     agentRunId?: string;
     tab?: string;
     archiveEntityType?: string;
+    archiveCursor?: string;
     archiveActor?: string;
     archiveReason?: string;
     archiveDateFrom?: string;
@@ -65,23 +67,37 @@ export default async function AuditPage({
     notFound();
   }
 
-  const auditLogs = await listAuditLogs(actor, workspaceId, {
+  const auditPage = await listAuditLogsPage(actor, workspaceId, {
+    cursor: search.auditCursor,
     take: 50,
     entityType: search.entityType,
     entityId: search.entityId,
   });
 
-  const archivedArtifacts = tab === "archive" && canViewArchive ? await listArchivedWorkspaceArtifacts(actor, {
+  const auditLogs = auditPage.items;
+  const nextAuditQuery = new URLSearchParams({ tab: "audit", ...(search.entityType ? { entityType: search.entityType } : {}),
+    ...(search.entityId ? { entityId: search.entityId } : {}), ...(auditPage.nextCursor ? { auditCursor: auditPage.nextCursor } : {}) });
+
+  const archivePage = tab === "archive" && canViewArchive ? await listArchivedWorkspaceArtifactsPage(actor, {
     workspaceId,
     entityType: search.archiveEntityType,
+    cursor: search.archiveCursor,
     take: 100,
-  }) : [];
-  const [newspaperSummaries, newspaperDetails] = tab === "newspapers"
+  }) : { items: [], complete: true, nextCursor: null };
+  const archivedArtifacts = archivePage.items;
+  const archiveQuery = new URLSearchParams({ tab: "archive" });
+  for (const key of ["archiveEntityType", "archiveActor", "archiveReason", "archiveDateFrom"] as const) {
+    if (search[key]) archiveQuery.set(key, search[key]);
+  }
+  const archiveStartHref = `?${archiveQuery.toString()}`;
+  if (archivePage.nextCursor) archiveQuery.set("archiveCursor", archivePage.nextCursor);
+  const [newspaperWindow, newspaperDetails] = tab === "newspapers"
     ? await Promise.all([
       listNewspaperDeliverySummaries(actor, workspaceId, { take: 20 }),
       listNewspaperDeliveryDetails(actor, workspaceId, { take: 100 }),
     ])
-    : [[], []];
+    : [{items: [], complete: true, deliveriesComplete: true, linksComplete: true, scope: "WINDOW" as const}, []];
+  const newspaperSummaries = newspaperWindow.items;
   const archiveActorQuery = search.archiveActor?.trim().toLowerCase() ?? "";
   const archiveReasonQuery = search.archiveReason?.trim().toLowerCase() ?? "";
   const archiveDateFrom = search.archiveDateFrom ? new Date(search.archiveDateFrom) : null;
@@ -143,7 +159,8 @@ export default async function AuditPage({
             )}
           </p>
           <div>
-            {auditLogs.length === 0 && <p className="nr-item-meta">{t("noAuditEntries")}</p>}
+            {auditPage.scanLimited && <p className="nr-item-meta">{t("scanLimited")}</p>}
+            {auditLogs.length === 0 && !auditPage.nextCursor && <p className="nr-item-meta">{t("noAuditEntries")}</p>}
             {auditLogs.map((log) => (
               <div className="nr-item" key={log.id} style={{ padding: "12px 0" }}>
                 <div className="row">
@@ -179,6 +196,7 @@ export default async function AuditPage({
                 )}
               </div>
             ))}
+            {auditPage.nextCursor && <a href={`?${nextAuditQuery.toString()}`} className="nr-btn">{t("nextWindow")}</a>}
           </div>
         </section>
       )}
@@ -190,14 +208,15 @@ export default async function AuditPage({
             {t("newspapersDesc")}
           </p>
 
+          {!newspaperWindow.complete && <p className="nr-item-meta" role="status">{t("newspaperWindowLimited")}</p>}
           {newspaperSummaries.length === 0 && (
-            <p className="nr-item-meta">{t("noNewspaperDeliveries")}</p>
+            <p className="nr-item-meta">{t(newspaperWindow.complete ? "noNewspaperDeliveries" : "noNewspaperDeliveriesInWindow")}</p>
           )}
 
           {newspaperSummaries.map((summary) => (
             <div className="nr-item" key={summary.runKey} style={{ padding: "16px 0" }}>
-              <div className="row" style={{ alignItems: "flex-start", gap: 16 }}>
-                <div style={{ flex: 1 }}>
+              <div className="row" style={{ alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
+                <div style={{ flex: "1 1 240px" }}>
                   <strong className="nr-item-title">{summary.subject}</strong>
                   <div className="nr-item-meta" style={{ marginTop: 4 }}>
                     {summary.kind === "DEMO_WELCOME" ? t("newspaperKindDemo") : t("newspaperKindMember")}
@@ -205,7 +224,7 @@ export default async function AuditPage({
                     {" · "}{formatDateTime(summary.createdAt)}
                   </div>
                   <div className="nr-item-meta" style={{ marginTop: 8 }}>
-                    {t("newspaperSummaryCounts", {
+                    {t(newspaperWindow.deliveriesComplete ? "newspaperSummaryCounts" : "newspaperWindowCounts", {
                       sent: summary.sentCount,
                       failed: summary.failedCount,
                       skipped: summary.skippedCount,
@@ -213,16 +232,16 @@ export default async function AuditPage({
                     })}
                   </div>
                   <div className="nr-item-meta" style={{ marginTop: 4 }}>
-                    {t("newspaperClickCounts", {
+                    {t(newspaperWindow.linksComplete ? "newspaperClickCounts" : "newspaperWindowClicks", {
                       clicks: summary.totalClickCount,
                       clickedLinks: summary.clickedLinkCount,
                       links: summary.trackedLinkCount,
                     })}
                   </div>
                 </div>
-                <div className="nr-item-meta" style={{ textAlign: "right", minWidth: 180 }}>
-                  <div>{t("newspaperFirstSent", { date: formatDateTime(summary.firstSentAt) })}</div>
-                  <div>{t("newspaperLastSent", { date: formatDateTime(summary.lastSentAt) })}</div>
+                <div className="nr-item-meta md:text-right" style={{ minWidth: 180 }}>
+                  <div>{t(newspaperWindow.deliveriesComplete ? "newspaperFirstSent" : "newspaperWindowFirstSent", { date: formatDateTime(summary.firstSentAt) })}</div>
+                  <div>{t(newspaperWindow.deliveriesComplete ? "newspaperLastSent" : "newspaperWindowLastSent", { date: formatDateTime(summary.lastSentAt) })}</div>
                 </div>
               </div>
             </div>
@@ -286,9 +305,14 @@ export default async function AuditPage({
             <a className="button secondary" href={`/workspaces/${workspaceId}/audit?tab=archive`}>{t("btnClear")}</a>
           </form>
 
+          {!archivePage.complete && <p role="status" className="nr-item-meta">{t("archiveWindowLimited")}</p>}
           {filteredArchivedArtifacts.length === 0 && (
-            <p className="nr-item-meta" style={{ marginTop: 16 }}>{t("noArchivedRecords")}</p>
+            <p className="nr-item-meta" style={{ marginTop: 16 }}>{t(!archivePage.complete || search.archiveCursor ? "archiveWindowEmpty" : "noArchivedRecords")}</p>
           )}
+          <div className="actions-inline">
+            {archivePage.nextCursor && <a className="button secondary" href={`?${archiveQuery.toString()}`}>{t("archiveWindowNext")}</a>}
+            {search.archiveCursor && <a className="button secondary" href={archiveStartHref}>{t("archiveWindowStart")}</a>}
+          </div>
 
           {filteredArchivedArtifacts.map((item) => (
             <div className="nr-item" key={item.id} style={{ padding: "16px 0" }}>

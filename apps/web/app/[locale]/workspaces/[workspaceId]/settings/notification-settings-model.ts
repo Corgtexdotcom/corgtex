@@ -1,4 +1,4 @@
-export type NotificationPreferenceSection = "urgent" | "activity";
+type NotificationPreferenceSection = "urgent" | "activity";
 
 export type NotificationPreferenceRow = {
   type: string;

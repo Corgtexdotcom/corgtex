@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@corgtex/shared";
-import { requireWorkspaceMembership, respondToCheckIn, skipCompanyUnderstandingQuestion, startCompanyUnderstandingQuestionConversation } from "@corgtex/domain";
+import { listCheckInsPage, respondToCheckIn, skipCompanyUnderstandingQuestion, startCompanyUnderstandingQuestionConversation } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 
@@ -22,33 +21,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
-    
-    // Ensure membership and get the memberId
-    const membership = await requireWorkspaceMembership({ actor, workspaceId });
-
-    // Agent actors get null membership (by design) — they don't have personal check-ins
-    if (!membership) {
-      return NextResponse.json({ checkIns: [], nextCursor: null });
-    }
-
     const take = boundedTake(request.nextUrl.searchParams.get("take"));
     const cursor = optionalCursor(request.nextUrl.searchParams.get("cursor"));
-
-    // Return the member's check-ins
-    const checkIns = await prisma.checkIn.findMany({
-      where: {
-        workspaceId,
-        memberId: membership.id,
-      },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: take + 1,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-    });
-
-    const page = checkIns.slice(0, take);
-    const nextCursor = checkIns.length > take ? page.at(-1)?.id ?? null : null;
-
-    return NextResponse.json({ checkIns: page, nextCursor });
+    return NextResponse.json(await listCheckInsPage(actor, { workspaceId, take, cursor }));
   } catch (error) {
     return handleRouteError(error);
   }

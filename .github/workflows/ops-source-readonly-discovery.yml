@@ -1,0 +1,82 @@
+name: Ops source preliminary read-only catalogs
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/ops-source-readonly-discovery.yml
+      - scripts/migration/ops-source-readonly-discovery.py
+      - scripts/migration/test_ops_source_readonly_discovery.py
+      - scripts/migration/ops-source-readonly-discovery.md
+  workflow_dispatch:
+    inputs:
+      reviewed_sha:
+        description: Exact independently reviewed main/workflow commit
+        required: true
+        type: string
+      provider_binding_sha256:
+        description: Hash of fresh independently reconciled exact Ops provider/proxy evidence
+        required: true
+        type: string
+      provider_observed_at:
+        description: UTC timestamp of that provider observation (maximum age one hour)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ops-source-preliminary-readonly
+  cancel-in-progress: false
+
+jobs:
+  synthetic:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Run standalone synthetic tests without source credentials
+        run: python3 -I -B scripts/migration/test_ops_source_readonly_discovery.py
+
+  observe:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'Corgtexdotcom/corgtex' && github.ref == 'refs/heads/main' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: azure-migration-foundation
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate exact reviewed dispatch before exposing source credentials
+        env:
+          REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          PROVIDER_BINDING_SHA256: ${{ inputs.provider_binding_sha256 }}
+          PROVIDER_OBSERVED_AT: ${{ inputs.provider_observed_at }}
+        run: |
+          python3 -I -B - <<'PY'
+          import importlib.util, os
+          spec = importlib.util.spec_from_file_location('observer', 'scripts/migration/ops-source-readonly-discovery.py')
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          module.workflow_guard(os.environ)
+          PY
+      - name: Cache existing reviewed public PostgreSQL client before credentials
+        timeout-minutes: 2
+        run: docker pull docker.io/library/postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+      - name: Verify source TLS hostname and read bounded catalogs once
+        timeout-minutes: 2
+        env:
+          REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          PROVIDER_BINDING_SHA256: ${{ inputs.provider_binding_sha256 }}
+          PROVIDER_OBSERVED_AT: ${{ inputs.provider_observed_at }}
+          SOURCE_DATABASE_URL: ${{ secrets.RAILWAY_OPS_POSTGRES_READ_ONLY_URL }}
+          SOURCE_TLS_ROOT_CERT: ${{ secrets.RAILWAY_OPS_POSTGRES_TLS_ROOT_CERT }}
+        run: python3 -I -B scripts/migration/ops-source-readonly-discovery.py --observe-approved
+      # This repository is public. No raw catalog, credential, CA, environment,
+      # connection string, database name or role-name artifact may be uploaded.

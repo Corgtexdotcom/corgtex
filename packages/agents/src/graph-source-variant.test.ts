@@ -37,3 +37,15 @@ describe("graph source variant closed model adapter", () => {
     expect(await runGraphSourceVariantJob(lease)).toBeNull();
   });
 });
+
+  it("forwards the exact domain attempt guard and cancellation signal", async () => {
+    const controls = { signal: new AbortController().signal, authorizeAttempt: vi.fn(async (_context: Readonly<{ signal: AbortSignal }>) => {}) };
+    generate.mockImplementation(async ({ generate: callback }) => callback([{ kind: "Document", id: "doc", title: "Public", content: "Facts", ingestionGuidanceMd: null }], [], { kind: "default", mapKey: "critical-path" }, controls));
+    await runGraphSourceVariantJob({ workspaceId: "ws", jobId: "job", expectedAttempt: 1, expectedOwner: "worker" });
+    const request = extract.mock.calls[0][0];
+    expect(request.signal).toBe(controls.signal);
+    expect(request.authorizeAttempt).toBe(controls.authorizeAttempt);
+    const context = { signal: new AbortController().signal };
+    await request.authorizeAttempt(context);
+    expect(controls.authorizeAttempt).toHaveBeenCalledWith(context);
+  });
