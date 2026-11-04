@@ -3567,7 +3567,7 @@ describe("processConversationTurn", () => {
       sessionId: "session-1",
       userId: "user-1",
       agentKey: "assistant",
-      userMessage: `confirm ${pendingOperationId(1)}, but call it Different follow up`,
+      userMessage: `confirm ${pendingOperationId(1)}`,
       actor,
     });
 
@@ -3606,7 +3606,7 @@ describe("processConversationTurn", () => {
       sessionId: "session-1",
       userId: "user-1",
       agentKey: "assistant",
-      userMessage: `confirm ${pendingOperationId(1)} again`,
+      userMessage: `confirm ${pendingOperationId(1)}.`,
       actor,
     });
 
