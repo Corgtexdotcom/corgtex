@@ -131,7 +131,8 @@ jobs:
 
   test:
     name: Unit & Integration Tests (${{ matrix.shard }}/3)
-    runs-on: ubuntu-latest
+    # Keep verified image imports on the supported runner; ubuntu-latest rolls forward.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -159,7 +160,8 @@ jobs:
 
   check-native:
     name: Lint, Typecheck & Native Checks
-    runs-on: ubuntu-latest
+    # Keep verified image imports on the supported runner; ubuntu-latest rolls forward.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     env:
@@ -285,7 +287,8 @@ jobs:
 
   db-sync:
     name: Database Sync
-    runs-on: ubuntu-latest
+    # Keep verified image imports on the supported runner; ubuntu-latest rolls forward.
+    runs-on: ubuntu-24.04
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_ci?schema=public
       SHADOW_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres?schema=public
