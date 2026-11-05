@@ -61,6 +61,7 @@ const LOADERS: Record<Exclude<LineageKind, "ExternalMcpConnectionSet">, Descript
   User: { delegate: "user", table: "User", scope: (workspaceId) => ({ memberships: { some: { workspaceId, isActive: true } } }),
     select: { id: true, email: true, displayName: true, bio: true, avatarUrl: true, linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true } },
   Member: { ...direct("Member", "member"), include: { user: { select: { id: true, email: true, displayName: true } } } },
+  WorkspaceAgentGovernance: { ...direct("WorkspaceAgentConfig", "workspaceAgentConfig"), select: { id: true, workspaceId: true, agentKey: true, governancePolicy: true, archivedAt: true, createdAt: true, updatedAt: true } },
   AgentIdentity: { ...direct("AgentIdentity", "agentIdentity"), select: { id: true, workspaceId: true, agentKey: true, memberType: true,
     displayName: true, purposeMd: true, behaviorMd: true, isActive: true, archivedAt: true, createdAt: true, updatedAt: true } },
   CircleAgentAssignment: { delegate: "circleAgentAssignment", table: "CircleAgentAssignment", scope: (workspaceId) => ({ circle: { workspaceId }, agentIdentity: { workspaceId } }) },

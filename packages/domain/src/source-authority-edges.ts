@@ -48,6 +48,7 @@ export const SOURCE_AUTHORITY_REGISTRY = freezeDescriptor({
   BrainDiscussionThread: related("BrainDiscussionThread", { article: {} }), BrainDiscussionComment: related("BrainDiscussionComment", { thread: { article: {} } }),
   AgentRun: row("AgentRun"), AgentStep: related("AgentStep", { agentRun: {} }), AgentToolCall: related("AgentToolCall", { agentRun: {} }),
   Workspace: row("Workspace", "optional", { scope: "global" }), User: row("User", "optional", { scope: "global" }),
+  WorkspaceAgentGovernance: row("WorkspaceAgentConfig", "required", { projection: ["id", "workspaceId", "agentKey", "governancePolicy", "archivedAt", "createdAt", "updatedAt"] }),
   Member: row("Member", "optional"), AgentIdentity: row("AgentIdentity"),
   CircleAgentAssignment: related("CircleAgentAssignment", { circle: {}, agentIdentity: {} }, "optional"),
   Role: related("Role", { circle: {} }), Circle: row("Circle"), RoleAssignment: related("RoleAssignment", { member: {}, role: { circle: {} } }, "optional"),

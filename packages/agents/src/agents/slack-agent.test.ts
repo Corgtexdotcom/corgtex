@@ -144,6 +144,7 @@ vi.mock("@corgtex/shared", () => ({
 }));
 
 vi.mock("@corgtex/domain", () => ({
+  supportsAgentGovernancePrompt: (key: string) => key === "slack-agent",
   AGENT_REGISTRY: {
     "slack-agent": {
       defaultModelTier: "standard",

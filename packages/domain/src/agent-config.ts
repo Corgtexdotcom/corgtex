@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import { env, prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
-import { AGENT_REGISTRY, type RegisteredAgentKey } from "./agent-registry";
+import { AGENT_REGISTRY, supportsAgentGovernancePrompt, type RegisteredAgentKey } from "./agent-registry";
+import { readableArtifactIds } from "./source-lineage";
+import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 import { AppError } from "./errors";
 import type { MemberKind, NewspaperCadence, Prisma } from "@prisma/client";
 import { isHumanMemberIdentity } from "./member-identity";
@@ -25,6 +27,9 @@ export type AgentConfigSummary = {
   enabled: boolean;
   modelOverride: string | null;
   governancePolicy: string | null;
+  governancePromptSupported: boolean;
+  hasGovernancePolicy: boolean;
+  governancePolicyWithheld: boolean;
   configJson: any;
 };
 
@@ -423,6 +428,8 @@ export async function listAgentConfigs(actor: AppActor, workspaceId: string): Pr
     where: { workspaceId },
   });
 
+  const readablePolicyIds = await readableArtifactIds(actor, workspaceId, "WorkspaceAgentGovernance",
+    overrides.filter(row => Boolean(row.governancePolicy?.trim())));
   const overrideMap = new Map(overrides.map((o) => [o.agentKey, o]));
 
   const summaries: AgentConfigSummary[] = [];
@@ -444,7 +451,10 @@ export async function listAgentConfigs(actor: AppActor, workspaceId: string): Pr
       outputs: meta.outputs,
       enabled: override?.enabled ?? ("defaultEnabled" in meta ? meta.defaultEnabled : true),
       modelOverride: override?.modelOverride ?? null,
-      governancePolicy: override?.governancePolicy ?? null,
+      governancePolicy: override && readablePolicyIds.has(override.id) ? override.governancePolicy : null,
+      hasGovernancePolicy: Boolean(override?.governancePolicy?.trim()),
+      governancePolicyWithheld: Boolean(override?.governancePolicy?.trim()) && !readablePolicyIds.has(override!.id),
+      governancePromptSupported: supportsAgentGovernancePrompt(key),
       configJson,
     });
   }
@@ -480,28 +490,38 @@ export async function updateAgentConfig(
     ? undefined
     : normalizeAgentConfigJson(params.agentKey, params.configJson);
 
-  const persist = (tx: Pick<Prisma.TransactionClient, "workspaceAgentConfig">) => tx.workspaceAgentConfig.upsert({
-    where: {
-      workspaceId_agentKey: {
+  const persist = async (tx: Prisma.TransactionClient) => {
+    // A policy save replaces the entire governance projection. Never certify other
+    // config fields or launder an MCP/agent submission into human authorship.
+    const receipt = params.governancePolicy !== undefined
+      ? await prepareProducerLineage({ tx, actor, workspaceId: params.workspaceId, copied: actor.kind !== "user" })
+      : undefined;
+    const config = await tx.workspaceAgentConfig.upsert({
+      where: {
+        workspaceId_agentKey: {
+          workspaceId: params.workspaceId,
+          agentKey: params.agentKey,
+        },
+      },
+      create: {
         workspaceId: params.workspaceId,
         agentKey: params.agentKey,
+        enabled: params.enabled ?? ("defaultEnabled" in meta ? meta.defaultEnabled : true),
+        modelOverride: params.modelOverride ?? null,
+        governancePolicy: params.governancePolicy ?? null,
+        configJson: configJson ?? {},
       },
-    },
-    create: {
-      workspaceId: params.workspaceId,
-      agentKey: params.agentKey,
-      enabled: params.enabled ?? ("defaultEnabled" in meta ? meta.defaultEnabled : true),
-      modelOverride: params.modelOverride ?? null,
-      governancePolicy: params.governancePolicy ?? null,
-      configJson: configJson ?? {},
-    },
-    update: {
-      ...(params.enabled !== undefined && { enabled: params.enabled }),
-      ...(params.modelOverride !== undefined && { modelOverride: params.modelOverride }),
-      ...(params.governancePolicy !== undefined && { governancePolicy: params.governancePolicy }),
-      ...(configJson !== undefined && { configJson }),
-    },
-  });
+      update: {
+        ...(params.enabled !== undefined && { enabled: params.enabled }),
+        ...(params.modelOverride !== undefined && { modelOverride: params.modelOverride }),
+        ...(params.governancePolicy !== undefined && { governancePolicy: params.governancePolicy }),
+        ...(configJson !== undefined && { configJson }),
+      },
+    });
+    if (receipt) await finishProducerLineage({ tx, actor, workspaceId: params.workspaceId,
+      artifact: { kind: "WorkspaceAgentGovernance", id: config.id }, content: config, receipt });
+    return redactUnreadableAgentGovernance(actor, params.workspaceId, config, tx);
+  };
   if (params.agentKey === "slack-agent" && configJson !== undefined) {
     return prisma.$transaction(async (tx) => {
       const previous = await tx.workspaceAgentConfig.findUnique({
@@ -512,7 +532,7 @@ export async function updateAgentConfig(
       return persist(tx);
     });
   }
-  return persist(prisma);
+  return prisma.$transaction(persist);
 }
 
 export async function getWorkspaceNewspaperCadence(workspaceId: string): Promise<NewspaperCadence> {
@@ -746,13 +766,20 @@ export async function getAgentModelOverride(workspaceId: string, agentKey: strin
   return config?.modelOverride ?? null;
 }
 
-export async function getAgentGovernancePolicy(workspaceId: string, agentKey: string): Promise<string | null> {
+export async function getAgentGovernancePolicy(actor: AppActor, workspaceId: string, agentKey: string): Promise<string | null> {
+  await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: ["ADMIN"] });
   const config = await prisma.workspaceAgentConfig.findUnique({
-    where: {
-      workspaceId_agentKey: { workspaceId, agentKey },
-    },
-    select: { governancePolicy: true },
+    where: { workspaceId_agentKey: { workspaceId, agentKey } },
   });
+  return config ? (await redactUnreadableAgentGovernance(actor, workspaceId, config)).governancePolicy : null;
+}
 
-  return config?.governancePolicy ?? null;
+
+/** Operational config remains visible; policy bodies retain their source gates. */
+export async function redactUnreadableAgentGovernance<T extends { id: string; governancePolicy: string | null }>(
+  actor: AppActor, workspaceId: string, config: T, tx?: Prisma.TransactionClient,
+) {
+  if (!config?.governancePolicy?.trim()) return { ...config, hasGovernancePolicy: false, governancePolicyWithheld: false };
+  const readable = (await readableArtifactIds(actor, workspaceId, "WorkspaceAgentGovernance", [config], tx)).has(config.id);
+  return { ...config, hasGovernancePolicy: true, governancePolicy: readable ? config.governancePolicy : null, governancePolicyWithheld: !readable };
 }
