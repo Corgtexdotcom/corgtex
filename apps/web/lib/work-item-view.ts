@@ -1,4 +1,4 @@
-import { appendRepeatedParams, normalizeSelectedValues, selectedValuesFrom } from "@/lib/filter-query";
+import { appendRepeatedParams, normalizeSelectedValues } from "@/lib/filter-query";
 
 export type WorkItemViewMode = "list" | "kanban" | "table";
 
@@ -91,11 +91,6 @@ export function compareWorkItemSortValues(left: WorkItemSortable, right: WorkIte
   return sortableTime(right.date) - sortableTime(left.date);
 }
 
-export function normalizeWorkItemScope(value: string | string[] | undefined): WorkItemScope {
-  const candidate = firstSearchParam(value);
-  return candidate === "circle" || candidate === "member" ? candidate : "company";
-}
-
 export function normalizeDateOnly(value: string | string[] | undefined) {
   const date = firstSearchParam(value);
   if (!date || !DATE_ONLY_RE.test(date)) return undefined;
@@ -156,13 +151,6 @@ export function resolveWorkItemFilters(search: Record<string, string | string[] 
   return { circleId, circleIds, assigneeMemberId, assigneeMemberIds, memberId, memberIds, sort };
 }
 
-export function normalizeWorkItemFilterValues<TValue extends string>(
-  values: readonly TValue[] | undefined,
-  allowedValues: readonly TValue[],
-) {
-  return selectedValuesFrom(values, allowedValues);
-}
-
 export function resolveWorkItemStatusValues<TValue extends string>(
   value: string | string[] | undefined,
   allowedValues: readonly TValue[],
@@ -171,11 +159,4 @@ export function resolveWorkItemStatusValues<TValue extends string>(
   const normalized = normalizeSelectedValues(value, allowedValues);
   if (normalized.length > 0) return normalized;
   return defaultValue ? [defaultValue] : [];
-}
-
-export function resolveWorkItemScope(search: Record<string, string | string[] | undefined>) {
-  const scope = normalizeWorkItemScope(search.scope);
-  const circleIds = scope === "circle" ? normalizeSelectedValues(search.circleId) : [];
-  const memberIds = scope === "member" ? normalizeSelectedValues(search.memberId) : [];
-  return { scope, circleId: circleIds[0], circleIds, memberId: memberIds[0], memberIds };
 }

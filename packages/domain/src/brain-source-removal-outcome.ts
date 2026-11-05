@@ -11,7 +11,7 @@ import { lockFinanceImportArtifactOwnership } from "./finance-import-artifact-ow
 import { assertArtifactInputWriteFence, captureArtifactInputProof, captureArtifactPermissionEpochs,
   lineageContentFingerprint, sealArtifactInputActor } from "./source-lineage";
 
-export const BRAIN_SOURCE_REMOVAL_COMPLETED = "BRAIN_SOURCE_REMOVAL_COMPLETED";
+const BRAIN_SOURCE_REMOVAL_COMPLETED = "BRAIN_SOURCE_REMOVAL_COMPLETED";
 type Db = typeof prisma | Prisma.TransactionClient;
 type Mode = "DIRECT" | "REVIEWED";
 type SourceEnvelope = { id: string; workspaceId: string; accessDomain: string; authorMemberId: string | null;

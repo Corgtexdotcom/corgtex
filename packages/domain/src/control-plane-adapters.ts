@@ -26,7 +26,7 @@ export type ControlPlaneAdapter = {
   requiresConnectorSetup: boolean;
 };
 
-export class ManagedWorkspaceAdapter implements ControlPlaneAdapter {
+class ManagedWorkspaceAdapter implements ControlPlaneAdapter {
   readonly kind = "managed_workspace";
   readonly canReadCentralWorkspace = true;
   readonly canUseSupportConnector = false;
@@ -37,7 +37,7 @@ export class ManagedWorkspaceAdapter implements ControlPlaneAdapter {
   constructor(readonly deploymentId: string) {}
 }
 
-export class RemoteMcpAdapter implements ControlPlaneAdapter {
+class RemoteMcpAdapter implements ControlPlaneAdapter {
   readonly kind = "remote_mcp";
   readonly canReadCentralWorkspace = false;
   readonly canUseSupportConnector = true;
@@ -50,7 +50,7 @@ export class RemoteMcpAdapter implements ControlPlaneAdapter {
   ) {}
 }
 
-export class FederatedControlPlaneAdapter implements ControlPlaneAdapter {
+class FederatedControlPlaneAdapter implements ControlPlaneAdapter {
   readonly kind = "federated_control_plane";
   readonly canReadCentralWorkspace = false;
   readonly canUseSupportConnector = true;
@@ -63,7 +63,7 @@ export class FederatedControlPlaneAdapter implements ControlPlaneAdapter {
   ) {}
 }
 
-export class AzureReadModelAdapter implements ControlPlaneAdapter {
+class AzureReadModelAdapter implements ControlPlaneAdapter {
   readonly kind = "azure_read_model";
   readonly canUseSupportConnector: boolean;
   readonly canFederateControlPlane = false;
@@ -78,7 +78,7 @@ export class AzureReadModelAdapter implements ControlPlaneAdapter {
   }
 }
 
-export class UnconfiguredControlPlaneAdapter implements ControlPlaneAdapter {
+class UnconfiguredControlPlaneAdapter implements ControlPlaneAdapter {
   readonly kind = "unconfigured";
   readonly canReadCentralWorkspace = false;
   readonly canUseSupportConnector = false;

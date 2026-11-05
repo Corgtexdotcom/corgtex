@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { chromium, type Page } from "playwright";
 
-export type ChatRequest = {
+type ChatRequest = {
   id: number;
   url: string;
   method: string;
@@ -14,7 +14,7 @@ export type ChatRequest = {
   canceled: boolean;
 };
 
-export type ChatFixture = {
+type ChatFixture = {
   requests: ChatRequest[];
   canonicalReads: ChatRequest[];
   refreshes: number;
