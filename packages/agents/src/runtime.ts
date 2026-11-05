@@ -69,31 +69,6 @@ export function asString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-export function normalizeActionDrafts(value: unknown) {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  return value
-    .map((entry) => {
-      if (!entry || typeof entry !== "object") {
-        return null;
-      }
-
-      const record = entry as Record<string, unknown>;
-      const title = asString(record.title);
-      if (!title) {
-        return null;
-      }
-
-      return {
-        title,
-        rationale: asString(record.rationale) || null,
-      };
-    })
-    .filter((entry): entry is { title: string; rationale: string | null } => Boolean(entry));
-}
-
 export function normalizeProposalDraft(value: Record<string, unknown>, fallbackPrompt: string) {
   const title = asString(value.title) || fallbackPrompt.slice(0, 80) || "Draft proposal";
   const summary = asString(value.summary) || null;

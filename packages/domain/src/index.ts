@@ -158,7 +158,6 @@ export * from "./meeting-evidence-state";
 export * from "./meeting-transcript-chunks";
 export * from "./meeting-transcript-processing";
 export * from "./meeting-transcript-intake";
-export { captureDirectMemberTranscriptInput, captureCompanyMemberTranscriptInput } from "./native-transcript-input";
 export * from "./meeting-transcript-sources";
 export * from "./meeting-audio-assets";
 export * from "./meeting-recorders";
@@ -222,4 +221,3 @@ export { inspectLegacyRecovery, recoverLegacyArtifact, legacyRecoveryFileBinding
 export { isLegacyRecoveryProofWorkspaceShareable } from "./source-lineage";
 
 export { WorkItemReadRelease } from "./work-item-readable-page";
-export { captureReadableDigestInputs } from "./digest-lineage";

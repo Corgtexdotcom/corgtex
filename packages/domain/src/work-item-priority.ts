@@ -8,7 +8,6 @@ export const WORK_ITEM_PRIORITY_OPTIONS = [
 ] as const;
 
 export type WorkItemPriorityValue = typeof WORK_ITEM_PRIORITY_OPTIONS[number]["value"];
-export type WorkItemPriorityLabel = typeof WORK_ITEM_PRIORITY_OPTIONS[number]["fallbackLabel"];
 export type WorkItemPriorityLabels = Record<WorkItemPriorityValue, string>;
 
 export const DEFAULT_WORK_ITEM_PRIORITY_LABELS: WorkItemPriorityLabels = {

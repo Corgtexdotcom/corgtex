@@ -107,11 +107,6 @@ export function activeAiWorkspaceProvider(state: AiWorkspaceLaunchState | null |
   return state.providers.find((provider) => provider.key === state.activeProviderKey) ?? null;
 }
 
-export function aiWorkspaceProviderByKey(state: AiWorkspaceLaunchState | null | undefined, providerKey: string | null | undefined) {
-  if (!state || !providerKey) return null;
-  return state.providers.find((provider) => provider.key === providerKey) ?? null;
-}
-
 export function aiWorkspaceConnectionForProvider(
   state: AiWorkspaceLaunchState | null | undefined,
   providerKey: string | null | undefined,
@@ -195,11 +190,4 @@ export function buildExecutionRequestHandoffPrompt({
     "",
     "Do not write directly to unsupported destinations. If the packet requires approval, return a draft result for review.",
   ].join("\n");
-}
-
-export function createUiIdempotencyKey(prefix: string) {
-  const randomValue = typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return `${prefix}:${randomValue}`;
 }
