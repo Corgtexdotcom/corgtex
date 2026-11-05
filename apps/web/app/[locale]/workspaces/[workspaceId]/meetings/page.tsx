@@ -1,4 +1,5 @@
-import { deriveMeetingEvidenceState, getMeetingRecorderConfig, listHumanMembers, listMeetingRecordings, listMeetings, requireWorkspaceMembership } from "@corgtex/domain";
+import { getMeetingRecorderConfig, listHumanMembers, listMeetingRecordings, listMeetingDirectory, requireWorkspaceMembership } from "@corgtex/domain";
+import { boundedCountLabel } from "@/lib/bounded-count-label";
 import { requirePageActor } from "@/lib/auth";
 import {
   archiveMeetingAction,
@@ -10,7 +11,7 @@ import {
 import { getTranslations } from "next-intl/server";
 import Link from "next/link";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
-import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
+import { projectMeetingDirectoryRow, directoryMeetingEvidenceState, pageMeetingRows } from "./directory-view";
 import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { MeetingArchiveDialog } from "./MeetingArchiveDialog";
@@ -61,21 +62,27 @@ export default async function MeetingsPage({
     recordedFrom: dateValues.recordedFrom ? startOfUtcDate(dateValues.recordedFrom) : undefined,
     recordedTo: dateValues.recordedTo ? endOfUtcDate(dateValues.recordedTo) : undefined,
   };
-  const [filteredCompletedMeetings, filteredUpcomingMeetings, featureFlags, recorderConfig, members] = await Promise.all([
-    listMeetings(actor, workspaceId, { status: "COMPLETED", ...meetingFilters }),
-    listMeetings(actor, workspaceId, { status: "SCHEDULED", ...meetingFilters }),
+  const firstParam = (value: string | string[] | undefined) => Array.isArray(value) ? value[0] : value;
+  const completedCursor = firstParam(resolvedSearch.completedCursor);
+  const scheduledCursor = firstParam(resolvedSearch.scheduledCursor);
+  const [completedDirectory, upcomingDirectory, featureFlags, recorderConfig, members] = await Promise.all([
+    listMeetingDirectory(actor, workspaceId, { status: "COMPLETED", ...meetingFilters, cursor: completedCursor }, projectMeetingDirectoryRow),
+    listMeetingDirectory(actor, workspaceId, { status: "SCHEDULED", ...meetingFilters, cursor: scheduledCursor }, projectMeetingDirectoryRow),
     getWorkspaceFeatureFlags(workspaceId),
     getMeetingRecorderConfig(actor, workspaceId).catch(() => null),
     listHumanMembers(workspaceId),
   ]);
-  const scheduledMeetings = filteredUpcomingMeetings;
+  const filteredCompletedMeetings = completedDirectory.items;
+  const scheduledMeetings = upcomingDirectory.items;
+  const directoryComplete = completedDirectory.complete && upcomingDirectory.complete;
+  const countLabel = (count: number) => boundedCountLabel({ count, complete: directoryComplete });
   const now = new Date();
   const recorderEnabled = Boolean(featureFlags.MEETING_RECORDERS && recorderConfig?.featureEnabled && recorderConfig.config.enabled);
   const recordings = await listMeetingRecordings(workspaceId, scheduledMeetings.map((meeting) => meeting.id));
   const latestRecordingByMeeting = new Map(recordings.map((recording) => [recording.meetingId, recording]));
   const meetingEvidenceStateById = new Map(scheduledMeetings.map((meeting) => [
     meeting.id,
-    deriveMeetingEvidenceState({
+    directoryMeetingEvidenceState({
       now,
       recorderEnabled,
       meeting,
@@ -88,9 +95,12 @@ export default async function MeetingsPage({
     evidenceStateByMeetingId: meetingEvidenceStateById,
     statusFilter,
   });
-  const recordedMeetings = meetingListView.recordedMeetings;
-  const transcriptNeededMeetings = meetingListView.transcriptNeededMeetings;
-  const scheduledVisibleMeetings = meetingListView.scheduledMeetings;
+  const visibleRows = statusFilter === "TRANSCRIPT_NEEDED" ? meetingListView.transcriptNeededMeetings
+    : statusFilter === "SCHEDULED" ? meetingListView.scheduledMeetings : meetingListView.recordedMeetings;
+  const directoryPage = pageMeetingRows(visibleRows, resolvedSearch.page, statusFilter === "SCHEDULED");
+  const recordedMeetings = statusFilter === "ALL" || statusFilter === "COMPLETED" ? directoryPage.items : [];
+  const transcriptNeededMeetings = statusFilter === "TRANSCRIPT_NEEDED" ? directoryPage.items : [];
+  const scheduledVisibleMeetings = statusFilter === "SCHEDULED" ? directoryPage.items : [];
   const recorderSentMeetingId = Array.isArray(resolvedSearch.recorderSent)
     ? resolvedSearch.recorderSent[0] ?? null
     : resolvedSearch.recorderSent ?? null;
@@ -104,6 +114,17 @@ export default async function MeetingsPage({
   const tCommon = await getTranslations("common");
   const tWork = await getTranslations("workItems");
   const filterState = { memberIds, dates: dateValues };
+  const pageHref = (page: number, nextWindow = false, firstWindow = false) => {
+    const query = new URLSearchParams(buildWorkItemQuery({ ...filterState, status: statusFilter === "ALL" ? undefined : statusFilter }).slice(1));
+    if (page > 1) query.set("page", String(page));
+    if (!firstWindow) {
+      const completed = nextWindow ? completedDirectory.nextCursor ?? "end" : completedCursor;
+      const scheduled = nextWindow ? upcomingDirectory.nextCursor ?? "end" : scheduledCursor;
+      if (completed) query.set("completedCursor", completed);
+      if (scheduled) query.set("scheduledCursor", scheduled);
+    }
+    return `?${query}`;
+  };
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
   const archiveDialogLabels = {
     button: t("btnRemoveMeeting"),
@@ -116,9 +137,9 @@ export default async function MeetingsPage({
   };
   const renderRecorderControls = (meeting: (typeof scheduledMeetings)[number]) => {
     const recording = filterMeetingRecordingForEvidenceState(latestRecordingByMeeting.get(meeting.id), { recorderEnabled });
-    const evidenceState = meeting.status === "COMPLETED" && !meeting.transcript?.trim()
+    const evidenceState = meeting.status === "COMPLETED" && !meeting.hasTranscript
       ? { state: "needs_transcript" as const, action: "upload_transcript" as const }
-      : meetingEvidenceStateById.get(meeting.id) ?? deriveMeetingEvidenceState({
+      : meetingEvidenceStateById.get(meeting.id) ?? directoryMeetingEvidenceState({
         now,
         recorderEnabled,
         meeting,
@@ -209,11 +230,13 @@ export default async function MeetingsPage({
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">
-          <span>{t("meetingsRecorded", { count: meetingListView.counts.all })}</span>
-          <span>{t("meetingsScheduled", { count: meetingListView.counts.scheduled })}</span>
-          <span>{t("meetingsNeedTranscript", { count: meetingListView.counts.transcriptNeeded })}</span>
+          <span>{t("meetingsRecorded", { count: countLabel(meetingListView.counts.all) })}</span>
+          <span>{t("meetingsScheduled", { count: countLabel(meetingListView.counts.scheduled) })}</span>
+          <span>{t("meetingsNeedTranscript", { count: countLabel(meetingListView.counts.transcriptNeeded) })}</span>
         </div>
       </header>
+
+      {!directoryComplete && <p className="nr-item-meta" role="status">{t("directoryWindowLimited")}</p>}
 
       <MeetingPageGuidance
         title={t("meetingGuideTitle")}
@@ -251,7 +274,7 @@ export default async function MeetingsPage({
                 className={`nr-filter-item ${isActive ? "nr-filter-active" : ""}`}
                 aria-current={isActive ? "page" : undefined}
               >
-                {item.label} ({item.count})
+                {item.label} ({countLabel(item.count)})
               </a>
             );
           })}
@@ -289,7 +312,7 @@ export default async function MeetingsPage({
       {(statusFilter === "ALL" || statusFilter === "COMPLETED") && <section className="ws-section" style={{ marginBottom: 48 }}>
         <h2 className="nr-section-header">{statusFilter === "ALL" ? t("meetingsWithTranscripts") : t("completedMeetings")}</h2>
         <p className="meeting-context-help">{t("meetingGuideReviewActions")}</p>
-        {recordedMeetings.length === 0 && <p className="nr-meta">{t("noMeetingsWithTranscripts")}</p>}
+        {recordedMeetings.length === 0 && <p className="nr-meta">{t(directoryComplete ? "noMeetingsWithTranscripts" : "directoryWindowEmpty")}</p>}
         {recordedMeetings.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
             {/* Featured latest meeting */}
@@ -298,7 +321,7 @@ export default async function MeetingsPage({
                 <div className="nr-meta" style={{ marginBottom: "8px" }}>{recordedMeetings[0].source}</div>
                 <h2 className="nr-lead-headline" style={{ fontSize: "1.8rem" }}>{recordedMeetings[0].title ?? t("untitledMeeting")}</h2>
                 <div className="nr-item-meta" style={{ marginBottom: "12px" }}>{new Date(recordedMeetings[0].recordedAt).toLocaleString()}</div>
-                {recordedMeetings[0].summaryMd && <MarkdownExcerpt markdown={recordedMeetings[0].summaryMd} maxLength={520} as="p" className="nr-excerpt" />}
+                {recordedMeetings[0].leadExcerpt && <p className="markdown-excerpt nr-excerpt">{recordedMeetings[0].leadExcerpt}</p>}
               </Link>
               <ItemActions
                 moreLabel={tCommon("moreActions")}
@@ -321,9 +344,7 @@ export default async function MeetingsPage({
                   <div className="nr-item-meta">
                     {new Date(meeting.recordedAt).toLocaleString()} • {meeting.source}
                   </div>
-                  {meeting.summaryMd && (
-                    <MarkdownExcerpt markdown={meeting.summaryMd} maxLength={320} as="div" className="nr-excerpt" />
-                  )}
+                  {meeting.excerpt && <div className="markdown-excerpt nr-excerpt">{meeting.excerpt}</div>}
                 </Link>
                 <ItemActions
                   moreLabel={tCommon("moreActions")}
@@ -344,7 +365,7 @@ export default async function MeetingsPage({
 
       {statusFilter === "TRANSCRIPT_NEEDED" && <section className="ws-section" style={{ marginBottom: 48 }}>
         <h2 className="nr-section-header">{t("meetingEvidenceNeedsTranscript")}</h2>
-        {transcriptNeededMeetings.length === 0 && <p className="nr-meta">{t("noNeedsTranscriptMeetings")}</p>}
+        {transcriptNeededMeetings.length === 0 && <p className="nr-meta">{t(directoryComplete ? "noNeedsTranscriptMeetings" : "directoryWindowEmpty")}</p>}
         {transcriptNeededMeetings.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             {transcriptNeededMeetings.map((meeting) => (
@@ -377,7 +398,7 @@ export default async function MeetingsPage({
 
       {statusFilter === "SCHEDULED" && <section className="ws-section" style={{ marginBottom: 48 }}>
         <h2 className="nr-section-header">{t("scheduledMeetings")}</h2>
-        {scheduledVisibleMeetings.length === 0 && <p className="nr-meta">{t("noUpcomingMeetings")}</p>}
+        {scheduledVisibleMeetings.length === 0 && <p className="nr-meta">{t(directoryComplete ? "noUpcomingMeetings" : "directoryWindowEmpty")}</p>}
         {scheduledVisibleMeetings.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             {scheduledVisibleMeetings.map((meeting) => (
@@ -397,7 +418,7 @@ export default async function MeetingsPage({
                       <Link className="link-button small" href={`/workspaces/${workspaceId}/meetings/${meeting.id}`}>
                         {tCommon("btnView")}
                       </Link>
-                      {!meeting.transcript?.trim() && renderTranscriptUploadMenu(meeting)}
+                      {!meeting.hasTranscript && renderTranscriptUploadMenu(meeting)}
                     </>
                   }
                 />
@@ -406,6 +427,17 @@ export default async function MeetingsPage({
           </div>
         )}
       </section>}
+
+      <nav aria-label={t("paginationLabel")} className="actions-inline" style={{ marginBottom: 24 }}>
+        {directoryPage.page > 1 && <Link href={pageHref(directoryPage.page - 1)}>{t("paginationPrevious")}</Link>}
+        <span className="nr-meta">{t("paginationSummary", { page: directoryPage.page, pageCount: directoryPage.pageCount, count: directoryPage.items.length, total: countLabel(directoryPage.total) })}</span>
+        {directoryPage.page < directoryPage.pageCount && <Link href={pageHref(directoryPage.page + 1)}>{t("paginationNext")}</Link>}
+      </nav>
+
+      <div className="actions-inline" style={{ marginBottom: 24 }}>
+        {(completedCursor || scheduledCursor) && <Link href={pageHref(1, false, true)}>{t("directoryFirstWindow")}</Link>}
+        {(completedDirectory.nextCursor || upcomingDirectory.nextCursor) && <Link href={pageHref(1, true)}>{t("directoryNextWindow")}</Link>}
+      </div>
 
       {/* ── INPUT SECTIONS (collapsed by default) ────────────────── */}
 
