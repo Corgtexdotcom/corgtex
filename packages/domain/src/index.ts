@@ -221,3 +221,5 @@ export { inspectLegacyRecovery, recoverLegacyArtifact, legacyRecoveryFileBinding
 export { isLegacyRecoveryProofWorkspaceShareable } from "./source-lineage";
 
 export { WorkItemReadRelease } from "./work-item-readable-page";
+
+export * from "./manual-agent-triggers";

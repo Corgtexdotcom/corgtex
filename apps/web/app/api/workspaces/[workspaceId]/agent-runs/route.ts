@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { listAgentRuns, triggerAgentRun } from "@corgtex/domain";
+import { AppError, listAgentRuns, parseManualAgentTrigger, triggerAgentRun } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 
@@ -21,19 +21,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
-    const body = (await request.json()) as {
-      agentKey?: unknown;
-      prompt?: unknown;
-      meetingId?: unknown;
-      proposalId?: unknown;
-    };
-    const job = await triggerAgentRun(actor, {
-      workspaceId,
-      agentKey: String(body.agentKey ?? "") as "inbox-triage" | "meeting-summary" | "action-extraction" | "proposal-drafting" | "constitution-update-trigger",
-      prompt: typeof body.prompt === "string" ? body.prompt : null,
-      meetingId: typeof body.meetingId === "string" ? body.meetingId : null,
-      proposalId: typeof body.proposalId === "string" ? body.proposalId : null,
-    });
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      throw new AppError(400, "INVALID_INPUT", "Request body must be valid JSON.");
+    }
+    const job = await triggerAgentRun(actor, { workspaceId, ...parseManualAgentTrigger(body) });
     return NextResponse.json({ job }, { status: 201 });
   } catch (error) {
     return handleRouteError(error);
