@@ -1,4 +1,3 @@
-import { requireActionAttachmentTarget } from "./action-attachment-policy";
 import { WorkItemReadRelease, readWorkItemListSnapshot, readableWorkItemPage, workItemAfter } from "./work-item-readable-page";
 import { completeActionWithNativeRequest } from "./action-completion";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
@@ -37,6 +36,7 @@ import {
 } from "./work-item-versions";
 
 import { privacyFilter } from "./privacy";
+import { requireActionAttachmentTarget } from "./action-attachment-policy";
 
 export type WorkItemSort = "priority" | "date" | "alpha";
 export type ActionSort = WorkItemSort | "created_asc" | "due_asc" | "due_desc";
