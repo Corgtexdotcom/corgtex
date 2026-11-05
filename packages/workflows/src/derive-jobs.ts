@@ -1,3 +1,4 @@
+import { decodeActionEvent, isObjectRecord, isReplayEvent, readPayloadString } from "@corgtex/shared/work-item-events";
 import type { Prisma } from "@prisma/client";
 import { isSourceLineageRebuildEvent } from "@corgtex/domain";
 
@@ -25,36 +26,10 @@ const KNOWLEDGE_PULSE_EVENT_TYPES = new Set([
   "approval.finalized",
 ]);
 
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readPayloadString(payload: unknown, key: string) {
-  if (!isObjectRecord(payload)) {
-    return null;
-  }
-
-  const value = payload[key];
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}
-
 function readPayloadPositiveInteger(payload: unknown, key: string) {
   if (!isObjectRecord(payload)) return null;
   const value = payload[key];
   return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : null;
-}
-
-function isReplayEvent(payload: unknown) {
-  if (!isObjectRecord(payload)) {
-    return false;
-  }
-
-  const runtimeMeta = payload.runtimeMeta;
-  if (!isObjectRecord(runtimeMeta)) {
-    return false;
-  }
-
-  return typeof runtimeMeta.replayOfEventId === "string" && runtimeMeta.replayOfEventId.trim().length > 0;
 }
 
 export function deriveJobsForEvent(event: {
@@ -66,6 +41,11 @@ export function deriveJobsForEvent(event: {
   aggregateId?: string | null;
   aggregateType?: string | null;
 }) {
+  const actionEvent = decodeActionEvent(event);
+  // Rejected pilot payloads cannot produce ordinary jobs. Outbox lifecycle and
+  // raw webhook fan-out remain under their existing, separate contracts.
+  if (actionEvent.status === "invalid" || actionEvent.status === "unsupported-version") return [];
+
   const jobs: Array<{
     workspaceId?: string | null;
     eventId: string;
@@ -332,8 +312,8 @@ export function deriveJobsForEvent(event: {
     }
   }
 
-  if (event.type === "action.created" || event.type === "action.updated") {
-    const payload = event.payload as { actionId?: string };
+  if (actionEvent.status === "legacy" || actionEvent.status === "supported") {
+    const payload = actionEvent.event.payload;
     if (payload.actionId && event.workspaceId) {
       jobs.push({
         workspaceId: event.workspaceId,
