@@ -81,16 +81,14 @@ export const executeExternalToolTool: ModelTool = {
   type: "function",
   function: {
     name: "execute_external_tool",
-    description: "Execute a same-user delegated external MCP tool, such as a Notion tool. Normal writes auto-run when the user asked explicitly or confidence is high.",
+    description: "Execute a same-user delegated external MCP tool, such as a Notion tool. Operation is derived by the server. Normal writes require valid high confidence; user intent cannot be asserted by a tool argument.",
     parameters: {
       type: "object",
       properties: {
         providerKey: { type: "string", enum: ["notion"] },
         toolName: { type: "string" },
         argumentsJson: { type: "string", description: "JSON object string containing the external MCP tool arguments" },
-        operation: { type: "string", enum: ["read", "write"], description: "Set explicitly when known; unknown tools default to write." },
-        confidence: { type: "number", description: "Model confidence from 0 to 1 when available" },
-        explicitUserIntent: { type: "boolean", description: "Only true when the user explicitly asked for this external execution." },
+        confidence: { type: "number", description: "Model confidence from 0 to 1; missing or invalid confidence cannot authorize a write" },
       },
       required: ["providerKey", "toolName"],
     },
@@ -160,8 +158,6 @@ export async function executeExternalToolAction(actor: AppActor, ctx: ToolContex
     providerKey: args.providerKey,
     toolName: args.toolName,
     arguments: parseArgumentsJson(args.argumentsJson ?? args.arguments),
-    operation: args.operation === "read" || args.operation === "write" ? args.operation : undefined,
     confidence: typeof args.confidence === "number" ? args.confidence : undefined,
-    explicitUserIntent: args.explicitUserIntent === true,
   });
 }
