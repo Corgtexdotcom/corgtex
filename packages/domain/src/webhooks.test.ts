@@ -5,6 +5,8 @@ const { prismaMock } = vi.hoisted(() => ({
   prismaMock: {
     webhookEndpoint: { findMany: vi.fn() },
     webhookDelivery: { createManyAndReturn: vi.fn() },
+    inboundWebhook: { create: vi.fn(), update: vi.fn() },
+    event: { create: vi.fn() },
   },
 }));
 
@@ -13,7 +15,23 @@ vi.mock("@corgtex/shared", () => ({
   toInputJson: (value: unknown) => value,
 }));
 
-import { createWebhookDeliveries, signWebhookPayload } from "./webhooks";
+import { createWebhookDeliveries, processInboundWebhook, signWebhookPayload } from "./webhooks";
+
+describe("generic inbound action compatibility", () => {
+  it.each([{}, { eventVersion: 2 }])("persists arbitrary generic action.created data without an action ID %j", async (version) => {
+    prismaMock.inboundWebhook.create.mockReset().mockResolvedValue({ id: "inbound-1" });
+    prismaMock.inboundWebhook.update.mockReset().mockResolvedValue({ id: "inbound-1" });
+    prismaMock.event.create.mockReset().mockResolvedValue({ id: "event-1" });
+    const data = { message: "Synthetic external input", ...version };
+    await expect(processInboundWebhook({ workspaceId: "ws-1", source: "generic", payload: { type: "action.created", data } })).resolves.toEqual({
+      inboundId: "inbound-1", eventCreated: true, eventId: "event-1",
+    });
+    expect(prismaMock.event.create).toHaveBeenCalledExactlyOnceWith({ data: {
+      workspaceId: "ws-1", type: "action.created", aggregateType: null, aggregateId: null,
+      payload: { ...data, source: "generic", inboundWebhookId: "inbound-1" },
+    } });
+  });
+});
 
 function makeTxMock() {
   return {

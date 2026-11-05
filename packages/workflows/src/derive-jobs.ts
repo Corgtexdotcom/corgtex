@@ -42,9 +42,8 @@ export function deriveJobsForEvent(event: {
   aggregateType?: string | null;
 }) {
   const actionEvent = decodeActionEvent(event);
-  // Rejected pilot payloads cannot produce ordinary jobs. Outbox lifecycle and
-  // raw webhook fan-out remain under their existing, separate contracts.
-  if (actionEvent.status === "invalid" || actionEvent.status === "unsupported-version") return [];
+  // Validation gates action sync only. Generic inbound action.created events
+  // also trigger workspace triage without requiring a canonical action payload.
 
   const jobs: Array<{
     workspaceId?: string | null;

@@ -32,8 +32,18 @@ describe("ordinary action event characterization", () => {
     { actionId: 123, title: "Synthetic" },
     { actionId: "action-1", title: "Synthetic", eventVersion: 2 },
     { actionId: "action-1", title: "Synthetic", eventVersion: "1" },
-  ])("does not derive ordinary jobs from invalid or unsupported pilot payloads %j", (payload) => {
-    expect(deriveJobsForEvent({ ...base, type: "action.created", payload })).toEqual([]);
+  ])("withholds sync but preserves triage for rejected creation payloads %j", (payload) => {
+    expect(deriveJobsForEvent({ ...base, type: "action.created", payload })).toEqual([triage]);
+    expect(deriveJobsForEvent({ ...base, type: "action.updated", payload })).toEqual([]);
+  });
+  it.each([{}, { eventVersion: 2 }])("preserves the generic inbound envelope at version %j", (version) => {
+    const payload = { message: "Synthetic external input", inboundWebhookId: "inbound-1", source: "generic", ...version };
+    const event = { ...base, aggregateId: null, aggregateType: null, type: "action.created", payload };
+    expect(deriveJobsForEvent(event)).toEqual([triage]);
+    expect(deriveNotificationsForEvent(event)).toEqual([]);
+    expect(deriveJobsForEvent({ ...event, payload: { ...payload, runtimeMeta: { replayOfEventId: "original-1" } } })).toEqual([
+      { ...triage, payload: { ...triage.payload, replayOfEventId: "original-1" }, dedupeKey: "workspace-1:triage:replay:event-1" },
+    ]);
   });
   it("keeps publication notifications separate from creation", () => {
     expect(deriveNotificationsForEvent({ ...base, type: "action.published", payload: { title: " Synthetic ", actionId: "action-1", actorUserId: null, assigneeMemberId: null } })).toEqual([
