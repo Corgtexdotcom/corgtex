@@ -220,12 +220,20 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
   let behaviorLineageRoots: LineageRoot[] = [];
   let liveGovernanceRoots: LineageRoot[] = [];
   let governanceContext: string | null = null;
-  let governanceRevision: { id: string; updatedAt: Date } | null = null;
+  let governanceSelectionCaptured = false;
+  let governanceRevision: { id: string; updatedAt: Date; governancePolicy: string | null; archivedAt: Date | null } | null = null;
   const assertGovernanceCurrent = async (db: Prisma.TransactionClient | typeof prisma = prisma) => {
-    if (!governanceRevision) return;
-    const current = await db.workspaceAgentConfig.findUnique({ where: { id: governanceRevision.id }, select: { updatedAt: true } });
-    invariant(current && current.updatedAt.getTime() === governanceRevision.updatedAt.getTime()
-      && await isArtifactInputProofReadable(actor, params.workspaceId, liveGovernanceRoots, db),
+    if (!governanceSelectionCaptured) return;
+    const current = await db.workspaceAgentConfig.findUnique({ where: {
+      workspaceId_agentKey: { workspaceId: params.workspaceId, agentKey: params.agentKey },
+    }, select: { id: true, updatedAt: true, governancePolicy: true, archivedAt: true } });
+    const sameRevision = governanceRevision
+      ? current?.id === governanceRevision.id && current.updatedAt.getTime() === governanceRevision.updatedAt.getTime()
+        && current.governancePolicy === governanceRevision.governancePolicy
+        && current.archivedAt?.getTime() === governanceRevision.archivedAt?.getTime()
+      : current === null;
+    invariant(sameRevision && (!liveGovernanceRoots.length
+      || await isArtifactInputProofReadable(actor, params.workspaceId, liveGovernanceRoots, db)),
       409, "SOURCE_CHANGED", "Saved governance changed during execution.");
   };
   let contextRoots: LineageRoot[] | null = null;
@@ -354,8 +362,10 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
     const governance = supportsAgentGovernancePrompt(params.agentKey) ? await prisma.workspaceAgentConfig.findUnique({ where: {
       workspaceId_agentKey: { workspaceId: params.workspaceId, agentKey: params.agentKey },
     } }) : null;
+    governanceSelectionCaptured = supportsAgentGovernancePrompt(params.agentKey);
+    governanceRevision = governance ? { id: governance.id, updatedAt: governance.updatedAt,
+      governancePolicy: governance.governancePolicy, archivedAt: governance.archivedAt } : null;
     if (governance && !governance.archivedAt && governance.governancePolicy?.trim()) {
-      governanceRevision = { id: governance.id, updatedAt: governance.updatedAt };
       liveGovernanceRoots = await captureArtifactInputProof(actor, params.workspaceId,
         [{ kind: "WorkspaceAgentGovernance", id: governance.id, snapshot: governance }]);
       behaviorLineageRoots = await freezeRoots(liveGovernanceRoots);
@@ -396,8 +406,14 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
     }
 
     const finalRun = await prisma.$transaction(async (tx) => {
-      if (governanceRevision) {
-        await tx.$queryRaw`SELECT "id" FROM "WorkspaceAgentConfig" WHERE "id" = ${governanceRevision.id} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+      if (governanceSelectionCaptured) {
+        if (governanceRevision) {
+          await tx.$queryRaw`SELECT "id" FROM "WorkspaceAgentConfig" WHERE "id" = ${governanceRevision.id} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+        } else {
+          // A missing child row cannot be locked. The parent UPDATE lock conflicts
+          // with the FK's KEY SHARE lock, serializing insertion with this commit.
+          await tx.$queryRaw`SELECT "id" FROM "Workspace" WHERE "id" = ${params.workspaceId} FOR UPDATE`;
+        }
         await assertGovernanceCurrent(tx);
       }
       if (nextStatus === "COMPLETED" && params.beforeComplete) await params.beforeComplete(tx, run.id);

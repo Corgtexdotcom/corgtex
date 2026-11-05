@@ -16,6 +16,7 @@ const {
   searchIndexedKnowledgeMock,
 } = vi.hoisted(() => ({
   prismaMock: {
+    $queryRaw: vi.fn(async () => []),
     agentRun: {
       findFirst: vi.fn(),
       count: vi.fn(),

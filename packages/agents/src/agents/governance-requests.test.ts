@@ -67,6 +67,44 @@ describe("saved governance at the actual HTTP model boundary", () => {
     await request("inbox-triage", "chat");
     expect(system()).toBe("\n\nBuilt-in task.");
   });
+  const inactiveStates = ["absent", "blank", "archived"] as const;
+  async function inactivePolicy(state: typeof inactiveStates[number]) {
+    if (state === "absent") return;
+    return fixture.add("workspaceAgentConfig", { id: "inactive-config", workspaceId, agentKey: "inbox-triage",
+      governancePolicy: state === "blank" ? " \n\t" : "Use approved evidence only.", archivedAt: state === "archived" ? new Date() : null });
+  }
+  async function activatePolicy(row: Awaited<ReturnType<typeof inactivePolicy>>) {
+    if (!row) await policy();
+    else {
+      Object.assign(row, { governancePolicy: "Use approved evidence only.", archivedAt: null, updatedAt: new Date(row.updatedAt.getTime() + 1) });
+      await known("WorkspaceAgentGovernance", row, [], alpha);
+    }
+  }
+  it.each(inactiveStates.flatMap(state => ["chat", "extract"].map(mode => ({ state, mode: mode as "chat" | "extract" }))))(
+    "preserves unchanged $state policy for $mode", async ({ state, mode }) => {
+      await inactivePolicy(state);
+      await request("inbox-triage", mode);
+      expect(sends).toHaveBeenCalledOnce();
+      expect(system()).not.toContain("Saved Agent Governance");
+    });
+  it.each(inactiveStates.flatMap(state => ["authorization", "retry"].flatMap(boundary =>
+    ["chat", "extract"].map(mode => ({ state, boundary, mode: mode as "chat" | "extract" })))))(
+    "rejects $state policy activation during $boundary for $mode", async ({ state, boundary, mode }) => {
+      const row = await inactivePolicy(state);
+      if (boundary === "retry") sends.mockImplementationOnce(async () => {
+        await activatePolicy(row);
+        return new Response("retry", { status: 503 });
+      });
+      await expect(request("inbox-triage", mode, boundary === "authorization" ? () => activatePolicy(row) : undefined)).rejects.toThrow();
+      expect(sends).toHaveBeenCalledTimes(boundary === "retry" ? 1 : 0);
+    });
+  it.each(["blank", "archived"] as const)("rejects %s activation even when its timestamp is unchanged", async state => {
+    const row = (await inactivePolicy(state))!;
+    await expect(request("inbox-triage", "chat", async () => {
+      Object.assign(row, { governancePolicy: "Use approved evidence only.", archivedAt: null });
+    })).rejects.toThrow();
+    expect(sends).not.toHaveBeenCalled();
+  });
   it.each(Object.keys(AGENT_REGISTRY).filter(supportsAgentGovernancePrompt).flatMap(key =>
     ["chat", "extract"].map(mode => ({ agentKey: key as RegisteredAgentKey, mode: mode as "chat" | "extract" }))))(
     "composes proven governance and identities for $agentKey $mode", async ({ agentKey, mode }) => {
