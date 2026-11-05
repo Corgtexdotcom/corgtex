@@ -7,6 +7,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { DigestReadRelease, mergeArtifactInputProofs } from "./digest-lineage";
 import { invariant } from "./errors";
 import { getProposal } from "./proposals";
+import { MANUAL_AGENT_TRIGGERS, parseManualAgentTrigger } from "./manual-agent-triggers";
 
 export type AgentKey =
   | "inbox-triage"
@@ -23,39 +24,6 @@ export type AgentKey =
   | "crm-email-extraction"
   | "crm-drip-followup"
   | "crm-lead-enrichment";
-
-function jobTypeForAgent(agentKey: AgentKey) {
-  switch (agentKey) {
-    case "inbox-triage":
-      return "agent.inbox-triage";
-    case "meeting-summary":
-      return "agent.meeting-summary";
-    case "action-extraction":
-      return "agent.action-extraction";
-    case "proposal-drafting":
-      return "agent.proposal-drafting";
-    case "constitution-update-trigger":
-      return "agent.constitution-update-trigger";
-    case "constitution-synthesis":
-      return "agent.constitution-synthesis";
-    case "brain-absorb":
-      return "agent.brain-absorb";
-    case "company-understanding":
-      return "agent.company-understanding";
-    case "brain-maintenance":
-      return "agent.brain-maintenance";
-    case "daily-check-in":
-      return "agent.daily-check-in";
-    case "slack-agent":
-      return "communication.slack.agent";
-    case "crm-email-extraction":
-      return "agent.crm-email-extraction";
-    case "crm-drip-followup":
-      return "agent.crm-drip-followup";
-    case "crm-lead-enrichment":
-      return "agent.crm-lead-enrichment";
-  }
-}
 
 /** Operational metadata remains available; copied content requires its own complete receipt. */
 export async function redactAgentRunContent<TUsage>(actor: AppActor, workspaceId: string,
@@ -199,34 +167,24 @@ export async function triggerAgentRun(actor: AppActor, params: {
   const rateLimit = await checkRateLimit(`ws:${params.workspaceId}:agent-runs`, RATE_LIMITS.AGENT_PER_WORKSPACE);
   invariant(rateLimit.allowed, 429, "RATE_LIMITED", "Agent run rate limit exceeded.");
 
-  if (params.agentKey === "proposal-drafting") {
-    invariant(Boolean(params.prompt?.trim()), 400, "INVALID_INPUT", "Proposal drafting requires a prompt.");
-  }
-
-  if (params.agentKey === "meeting-summary" || params.agentKey === "action-extraction") {
-    invariant(Boolean(params.meetingId?.trim()), 400, "INVALID_INPUT", `${params.agentKey} requires a meeting ID.`);
-  }
-
-  if (params.agentKey === "constitution-update-trigger") {
-    invariant(Boolean(params.proposalId?.trim()), 400, "INVALID_INPUT", "Constitution update trigger requires a proposal ID.");
-  }
+  const input = parseManualAgentTrigger(params);
 
   invariant(actor.kind === "user", 403, "FORBIDDEN", "Manual agent requests require an authenticated author.");
   return prisma.$transaction(async (tx) => {
     await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN", "FACILITATOR"], tx });
     const request = await tx.agentRequestInput.create({ data: {
-      workspaceId: params.workspaceId, userId: actor.user.id, agentKey: params.agentKey,
-      prompt: params.prompt?.trim() || "", meetingId: params.meetingId?.trim() || null, proposalId: params.proposalId?.trim() || null,
+      workspaceId: params.workspaceId, userId: actor.user.id, agentKey: input.agentKey,
+      prompt: input.prompt?.trim() || "", meetingId: input.meetingId?.trim() || null, proposalId: input.proposalId?.trim() || null,
     } });
     const job = await tx.workflowJob.create({
       data: {
         workspaceId: params.workspaceId,
-        type: jobTypeForAgent(params.agentKey),
+        type: MANUAL_AGENT_TRIGGERS[input.agentKey].jobType,
         payload: {
           triggerType: "MANUAL",
           requestInputId: request.id,
-          meetingId: params.meetingId?.trim() || null,
-          proposalId: params.proposalId?.trim() || null,
+          meetingId: input.meetingId?.trim() || null,
+          proposalId: input.proposalId?.trim() || null,
         },
       },
       select: {
@@ -245,10 +203,10 @@ export async function triggerAgentRun(actor: AppActor, params: {
         entityType: "WorkflowJob",
         entityId: job.id,
         meta: {
-          agentKey: params.agentKey,
-          prompt: params.prompt?.trim() || null,
-          meetingId: params.meetingId?.trim() || null,
-          proposalId: params.proposalId?.trim() || null,
+          agentKey: input.agentKey,
+          prompt: input.prompt?.trim() || null,
+          meetingId: input.meetingId?.trim() || null,
+          proposalId: input.proposalId?.trim() || null,
         },
       },
     });
