@@ -12,7 +12,7 @@ import { refreshImpactFootprints } from "./impact-footprint";
  * - constitutionFreshness: Score based on how recently the constitution was updated
  */
 
-async function calculateGovernanceScore(workspaceId: string, periodStart: Date, periodEnd: Date) {
+export async function calculateGovernanceScore(workspaceId: string, periodStart: Date, periodEnd: Date) {
   const [
     approvalFlows,
     totalMembers,

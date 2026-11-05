@@ -3,7 +3,7 @@ import type { ModelGateway } from "./contracts";
 import { fakeModelGateway } from "./fake-gateway";
 import { openAICompatibleModelGateway } from "./openai-compatible-gateway";
 
-function createDefaultModelGateway(): ModelGateway {
+export function createDefaultModelGateway(): ModelGateway {
   if (env.MODEL_PROVIDER === "fake") {
     return fakeModelGateway;
   }
