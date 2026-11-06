@@ -3,7 +3,7 @@
 import { Camera, ImagePlus, MessageSquareText, Trash2 } from "lucide-react";
 import { usePathname, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Dialog } from "@/lib/components/Dialog";
 import { useToast } from "@/lib/components/Toast";
 import { shouldHideMobileBottomNavForWorkspacePath } from "./mobile-nav-model";
@@ -49,6 +49,9 @@ export function ProductFeedbackWidget({
   const pendingAutoCaptureRef = useRef<number | null>(null);
   const activeCaptureRef = useRef<object | null>(null);
   const screenshotsRef = useRef<ScreenshotDraft[]>([]);
+  const dialogSessionRef = useRef<object | null>(null);
+  const pendingSubmitRef = useRef<object | null>(null);
+  const mountedRef = useRef(false);
   const [open, setOpen] = useState(false);
   const [message, setMessage] = useState("");
   const [screenshots, setScreenshots] = useState<ScreenshotDraft[]>([]);
@@ -67,6 +70,17 @@ export function ProductFeedbackWidget({
   useEffect(() => {
     screenshotsRef.current = screenshots;
   }, [screenshots]);
+
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  // Retire the previous session during commit, before a settled POST can resume.
+  useLayoutEffect(() => {
+    dialogSessionRef.current = open ? {} : null;
+    return () => { dialogSessionRef.current = null; };
+  }, [open, pathname, search, workspaceId]);
 
   useEffect(() => () => {
     screenshotsRef.current.forEach((item) => URL.revokeObjectURL(item.previewUrl));
@@ -188,6 +202,8 @@ export function ProductFeedbackWidget({
 
   async function submitFeedback(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    // Dismissing a dialog does not cancel server work or permit another POST.
+    if (pendingSubmitRef.current || !dialogSessionRef.current) return;
     setError(null);
     const trimmedMessage = message.trim();
     if (!trimmedMessage) {
@@ -195,6 +211,10 @@ export function ProductFeedbackWidget({
       return;
     }
 
+    const request = {};
+    const session = dialogSessionRef.current;
+    pendingSubmitRef.current = request;
+    const isCurrentSession = () => mountedRef.current && dialogSessionRef.current === session;
     setIsSubmitting(true);
     try {
       const formData = new FormData();
@@ -215,14 +235,21 @@ export function ProductFeedbackWidget({
         throw new Error(body?.error?.message || t("submitFailed"));
       }
 
+      if (!isCurrentSession()) return;
       addToast(t("submitted"), "success");
       setMessage("");
       clearScreenshots();
       setOpen(false);
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : t("submitFailed"));
+      if (isCurrentSession()) {
+        setError(submitError instanceof Error ? submitError.message : t("submitFailed"));
+      }
     } finally {
-      setIsSubmitting(false);
+      // Release this transport's lock even when its dialog session has ended.
+      if (pendingSubmitRef.current === request) {
+        pendingSubmitRef.current = null;
+        if (mountedRef.current) setIsSubmitting(false);
+      }
     }
   }
 
