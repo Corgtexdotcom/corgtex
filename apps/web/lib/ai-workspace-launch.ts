@@ -44,13 +44,13 @@ export type AiWorkspaceLaunchState = {
   connections: AiWorkspaceLaunchConnection[];
 };
 
-export type ExecutionWritebackOption = {
+type ExecutionWritebackOption = {
   value: string;
   label: string;
   description: string;
 };
 
-export type BuildExecutionRequestPayloadParams = {
+type BuildExecutionRequestPayloadParams = {
   goal: string;
   providerKey: string;
   surface: "mobile_work" | "desktop_rail";
@@ -59,7 +59,7 @@ export type BuildExecutionRequestPayloadParams = {
   idempotencyKey: string;
 };
 
-export type BuildHandoffPromptParams = {
+type BuildHandoffPromptParams = {
   requestId: string;
   providerLabel: string;
   goal: string;
@@ -75,7 +75,7 @@ const AI_WORKSPACE_LAUNCH_URLS: Record<string, string> = {
   gemini: GEMINI_MCP_DOCS_URL,
 };
 
-export const EXECUTION_WRITEBACK_OPTIONS: ExecutionWritebackOption[] = [
+const EXECUTION_WRITEBACK_OPTIONS: ExecutionWritebackOption[] = [
   { value: "ACTION", label: "New action", description: "Turn the result into a trackable action draft." },
   { value: "TENSION", label: "New tension", description: "Capture the result as a tension for review." },
   { value: "PROPOSAL", label: "New proposal", description: "Draft a governance proposal from the result." },

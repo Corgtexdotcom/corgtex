@@ -85,10 +85,3 @@ export function filterNavGroupsByWorkspaceAccess(
     }))
     .filter((group) => group.items.length > 0);
 }
-
-export function filterNavGroupsByFeatureFlags(
-  navGroups: NavGroup[],
-  flags: WorkspaceFeatureFlagMap,
-): NavGroup[] {
-  return filterNavGroupsByWorkspaceAccess(navGroups, flags);
-}
