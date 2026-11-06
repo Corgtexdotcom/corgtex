@@ -1,3 +1,4 @@
+import { createActionEvent } from "@corgtex/shared/work-item-events";
 import { WorkItemReadRelease, readWorkItemListSnapshot, readableWorkItemPage, workItemAfter } from "./work-item-readable-page";
 import { completeActionWithNativeRequest } from "./action-completion";
 import { prepareProducerLineage, finishProducerLineage, type ProducerLineageParams } from "./producer-lineage";
@@ -886,16 +887,10 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
     });
 
     await appendEvents(tx, [
-      {
-        workspaceId: params.workspaceId,
-        type: "action.created",
-        aggregateType: "Action",
-        aggregateId: action.id,
-        payload: {
-          actionId: action.id,
-          title: action.title,
-        },
-      },
+      createActionEvent("action.created", {
+        actionId: action.id,
+        title: action.title,
+      }, params.workspaceId),
     ]);
 
     if (!isPrivate) {
@@ -1195,17 +1190,11 @@ async function updateActionRecord(actor: AppActor, params: ProducerLineageParams
     });
 
     await appendEvents(tx, [
-      {
-        workspaceId: params.workspaceId,
-        type: "action.updated",
-        aggregateType: "Action",
-        aggregateId: updated.id,
-        payload: {
-          actionId: updated.id,
-          fields: changedUpdateFields,
-          evidenceDocumentIds,
-        },
-      },
+      createActionEvent("action.updated", {
+        actionId: updated.id,
+        fields: changedUpdateFields,
+        evidenceDocumentIds,
+      }, params.workspaceId),
     ]);
 
     if (action.status !== "DRAFT" && (updated.status === "OPEN" || updated.status === "IN_PROGRESS") && !updated.isPrivate
