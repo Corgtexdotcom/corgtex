@@ -179,9 +179,7 @@ function requireConnectableProvider(provider: ExternalMcpProvider) {
 function classifyExternalMcpOperation(
   provider: ExternalMcpProvider,
   toolName: string,
-  operation?: ExternalMcpOperation | null,
 ): ExternalMcpOperation {
-  if (operation === "read" || operation === "write") return operation;
   if ((provider.searchToolName && toolName === provider.searchToolName) || (provider.fetchToolName && toolName === provider.fetchToolName)) return "read";
   if (provider.readToolNames.includes(toolName)) return "read";
   return "write";
@@ -933,20 +931,27 @@ export async function executeExternalMcpTool(actor: AppActor, params: {
   providerKey: ExternalMcpProviderKey;
   toolName: string;
   arguments: Record<string, unknown>;
+  /** Deprecated advisory input; the provider contract alone determines operation. */
   operation?: ExternalMcpOperation | null;
   confidence?: number | null;
+  /** Deprecated model claim; never establishes user authorization. */
   explicitUserIntent?: boolean;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const provider = providerForKey(params.providerKey);
-  const operation = classifyExternalMcpOperation(provider, params.toolName, params.operation);
+  const operation = classifyExternalMcpOperation(provider, params.toolName);
   requireExternalToolAllowed(provider, params.toolName, operation);
   invariant(provider.genericExecutionEnabled, 403, "EXTERNAL_TOOL_EXECUTION_DISABLED", `${provider.displayName} generic tool execution is disabled in Corgtex v1.`);
+  // Keep the established high-confidence delegated-write policy, but never
+  // turn absent/malformed confidence into its legacy null-confidence allowance.
+  // No generic external-tool approval context exists: model intent is not proof.
+  const confidence = typeof params.confidence === "number" && Number.isFinite(params.confidence)
+    && params.confidence >= 0 && params.confidence <= 1 ? params.confidence : 0;
   const policy = evaluateDelegatedActionPolicy({
     toolName: params.toolName,
     operation,
-    confidence: params.confidence,
-    explicitUserIntent: params.explicitUserIntent === true,
+    confidence,
+    explicitUserIntent: false,
   });
 
   if (!policy.autoRunAllowed) {
@@ -962,7 +967,7 @@ export async function executeExternalMcpTool(actor: AppActor, params: {
       connection,
       toolName: params.toolName,
       policyClass: policy.policyClass,
-      confidence: params.confidence,
+      confidence,
       input: params.arguments,
       result: payload,
     });
@@ -981,7 +986,7 @@ export async function executeExternalMcpTool(actor: AppActor, params: {
       connection,
       toolName: params.toolName,
       policyClass: policy.policyClass,
-      confidence: params.confidence,
+      confidence,
       input: params.arguments,
       error: message,
     });

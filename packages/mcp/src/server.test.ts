@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mcpCredentialVersion, mcpScopesHash } from "../../shared/src/mcp-context";
 import { MCP_TOOL_CAPABILITIES } from "../../domain/src/mcp-tool-capabilities";
 
@@ -342,6 +342,7 @@ vi.mock("@corgtex/shared", async () => {
     workspace: {
       findUnique: vi.fn(),
     },
+    externalMcpConnection: { findFirst: vi.fn() },
     member: { count: vi.fn(async () => 2) },
     workspaceFeatureFlag: {
       findMany: vi.fn(),
@@ -352,8 +353,11 @@ vi.mock("@corgtex/shared", async () => {
     },
   };
   return { ...await import("../../shared/src/mcp-context"), prisma: db,
+    decryptSecret: (value: string) => value.replace(/^enc:/, ""),
     env: { APP_URL: "https://app.test" }, toInputJson: (value: unknown) => value };
 });
+
+vi.mock("../../domain/src/audit-trail", () => ({ recordAudit: (...args: unknown[]) => recordAuditMock(...args) }));
 
 vi.mock("./auth", () => ({
   requireScope: vi.fn(),
@@ -3580,9 +3584,7 @@ describe("createCorgtexMcpServer", () => {
       providerKey: "notion",
       toolName: "notion-create-page",
       arguments: { title: "Decision log" },
-      operation: undefined,
       confidence: 0.95,
-      explicitUserIntent: false,
     });
     expect(JSON.parse(response.content[0].text)).toEqual(expect.objectContaining({
       skipped: false,
@@ -3592,6 +3594,52 @@ describe("createCorgtexMcpServer", () => {
     expect((server as any)._registeredTools.execute_external_tool.annotations).toMatchObject({
       readOnlyHint: false,
       openWorldHint: true,
+    });
+  });
+
+  describe("external MCP authority through the real domain executor", () => {
+    afterEach(() => vi.unstubAllGlobals());
+
+    it.each(["scope", "workspace"])("rejects a mismatched live %s before execution", async mismatch => {
+      const { createCorgtexMcpServer } = await import("./server");
+      const scopes = [mismatch === "scope" ? "external-tools:read" : "external-tools:write"];
+      const id = `external-authority-${mismatch}`;
+      liveMcpRows.set(id, { id, workspaceId: mismatch === "workspace" ? "ws-2" : "ws-1", userId: "user-1", scopes, grantEpoch: 0n, client: { isActive: true } });
+      const server = createCorgtexMcpServer({ actor: { kind: "user", user: { id: "user-1", email: "synthetic@example.test", displayName: null } },
+        workspaceId: "ws-1", authKind: "oauth", scopes,
+        mcpOrigin: { kind: "oauth", id, workspaceId: "ws-1", scopeHash: mcpScopesHash(scopes), grantEpoch: "0" } });
+      vi.stubGlobal("fetch", vi.fn());
+      await expect((server as any)._registeredTools.execute_external_tool.handler({ providerKey: "notion",
+        toolName: "notion-create-page", confidence: 1, operation: "read", explicitUserIntent: true }))
+        .rejects.toThrow("MCP_AUTHORIZATION_REVOKED");
+      expect(executeExternalMcpToolMock).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    const cases = [
+      { toolName: "notion-create-page", confidence: 0.2, skipped: true },
+      { toolName: "notion-unknown-search", confidence: 0.2, skipped: true },
+      ...[undefined, null, NaN, Infinity, "0.95", 1.1].map(confidence => ({ toolName: "notion-create-page", confidence, skipped: true })),
+      { toolName: "reveal_tool_link_credential", confidence: 1, skipped: true },
+      { toolName: "notion-search", confidence: 0.2, skipped: false },
+      { toolName: "notion-create-page", confidence: 0.95, skipped: false },
+    ];
+    it.each(cases)("$toolName confidence=$confidence skips=$skipped ignoring classification/intent claims", async ({ toolName, confidence, skipped }) => {
+      const { createCorgtexMcpServer } = await import("./server");
+      const { executeExternalMcpTool } = await import("../../domain/src/external-mcp");
+      const { prisma } = await import("@corgtex/shared");
+      vi.mocked(prisma.externalMcpConnection.findFirst).mockResolvedValue({ id: "synthetic", workspaceId: "ws-1",
+        userId: "user-1", providerKey: "notion", serverUrl: "https://notion.test/mcp", accessTokenEnc: "enc:synthetic", status: "ACTIVE" } as any);
+      vi.stubGlobal("fetch", vi.fn(async () => Response.json({ result: { structuredContent: { ok: true } } })));
+      executeExternalMcpToolMock.mockImplementationOnce(executeExternalMcpTool);
+      const server = createTestServer(createCorgtexMcpServer, { actor: { kind: "user", user: { id: "user-1" } },
+        workspaceId: "ws-1", authKind: "oauth", scopes: ["external-tools:write"] });
+      const response = await (server as any)._registeredTools.execute_external_tool.handler({ providerKey: "notion", toolName,
+        arguments: { title: "Synthetic" }, confidence, operation: "read", explicitUserIntent: true });
+      expect(JSON.parse(response.content[0].text)).toMatchObject({ skipped });
+      expect(fetch).toHaveBeenCalledTimes(skipped ? 0 : 1);
+      expect(executeExternalMcpToolMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("explicitUserIntent");
+      expect(executeExternalMcpToolMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("operation");
     });
   });
 
