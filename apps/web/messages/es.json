@@ -1,4 +1,13 @@
 {
+  "workspaceSwitcher": {
+    "title": "Cambiar espacio de trabajo",
+    "trigger": "Cambiar espacio de trabajo: {name}",
+    "search": "Buscar espacios de trabajo",
+    "current": "Espacio de trabajo actual",
+    "empty": "No hay espacios de trabajo coincidentes",
+    "switching": "Abriendo espacio de trabajo…",
+    "leaveWarning": "¿Abrir {name}? Se perderán los cambios o borradores sin guardar en este espacio de trabajo. Cancela para guardarlos primero."
+  },
   "actions": {
     "allWorkspaceActions": "Todas las acciones del espacio",
     "myActions": "Mis acciones",

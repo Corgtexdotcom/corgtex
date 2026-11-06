@@ -233,6 +233,15 @@ export function localePrefixFromUrl(value) {
   }
 }
 
+export async function readStoredMobileMode(page, workspacePath) {
+  const workspaceId = workspacePath.match(/\/workspaces\/([^/?#]+)/)?.[1];
+  if (!workspaceId) throw new Error("Mobile mode verification requires a workspace path.");
+  return page.evaluate(
+    (key) => window.localStorage.getItem(key),
+    `corgtex.mobileMode.${workspaceId}`,
+  );
+}
+
 export function workspacePathFromUrl(value) {
   try {
     return new URL(value).pathname.match(/^(?:\/[a-z]{2})?(\/workspaces\/[^/]+)/)?.[1] ?? null;
@@ -581,7 +590,7 @@ async function verifyMobileShell(page, locale, workspacePath, findings, routeRes
     }
     await expectTextVisible(page, ".mobile-ai-workbench .chat-message.user", smokePrompt, `mobile-shell-${viewportName}-ai-user-message`, findings);
     await expectTextVisible(page, ".mobile-ai-workbench .chat-message.assistant", "Smoke response", `mobile-shell-${viewportName}-ai-response`, findings);
-    const storedMode = await page.evaluate(() => window.localStorage.getItem("corgtex.mobileMode"));
+    const storedMode = await readStoredMobileMode(page, workspacePath);
     if (storedMode !== "ai") {
       findings.push({ name: `mobile-shell-${viewportName}-mode-store`, route: page.url(), status: storedMode });
     }

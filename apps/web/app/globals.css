@@ -717,3 +717,68 @@ button:disabled {
     inset: 0;
   }
 }
+
+/* Workspace identity controls share desktop and touch sizing. */
+.workspace-switcher-trigger,
+.workspace-switcher-static {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 44px;
+  width: 100%;
+  height: auto;
+  padding: 8px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  text-decoration: none;
+  box-shadow: none;
+}
+.workspace-switcher-identity {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.workspace-switcher-identity strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-switcher-identity small,
+.workspace-switcher-option small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+.workspace-switcher-panel { width: 300px; }
+.workspace-switcher-content { min-width: 0; }
+.workspace-switcher-list { max-height: 50vh; overflow-y: auto; }
+.workspace-switcher-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.workspace-switcher-option > span { overflow-wrap: anywhere; min-width: 0; }
+.workspace-switcher-option svg { flex-shrink: 0; }
+.workspace-switcher-option:hover,
+.workspace-switcher-option[aria-current="true"] { background: var(--bg-alt); }
+.workspace-switcher-trigger:focus-visible,
+.workspace-switcher-option:focus-visible { outline: 2px solid var(--text); outline-offset: -2px; }
+.workspace-switcher-search { display: block; padding: 8px; color: var(--muted); }
+.workspace-switcher-search input { display: block; width: 100%; min-height: 44px; }
+.mobile-topbar > .workspace-switcher-trigger,
+.mobile-topbar > .workspace-switcher-static { flex: 1; min-width: 0; }
+.workspace-switcher-dialog .dialog-close { width: 44px; height: 44px; }

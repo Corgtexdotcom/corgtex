@@ -1,4 +1,13 @@
 {
+  "workspaceSwitcher": {
+    "title": "Switch workspace",
+    "trigger": "Switch workspace: {name}",
+    "search": "Search workspaces",
+    "current": "Current workspace",
+    "empty": "No matching workspaces",
+    "switching": "Opening workspace…",
+    "leaveWarning": "Open {name}? Any unsaved changes or drafts in this workspace will be lost. Cancel to save them first."
+  },
   "actions": {
     "allWorkspaceActions": "All workspace actions",
     "myActions": "My actions",
