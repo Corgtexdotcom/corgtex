@@ -138,7 +138,7 @@ export function normalizeBrainIndexSearch(searchParams: BrainSearchParams) {
   };
 }
 
-function getBrainRangeCutoff(range: BrainRange, now = new Date()) {
+export function getBrainRangeCutoff(range: BrainRange, now = new Date()) {
   if (range === "all") return null;
 
   const cutoff = new Date(now);

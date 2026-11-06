@@ -24,8 +24,8 @@ vi.mock("@/lib/auth", () => ({
 vi.mock("@corgtex/domain", () => ({
   requireWorkspaceMembership: async () => ({ id: "synthetic-member", role: "ADMIN" }),
   listArticles: async () => ({ items: [] }),
-  listMeetings: async () => [],
-  listDocuments: async () => [],
+  listMeetingDirectory: async () => ({ items: [], complete: true, nextCursor: null }),
+  listDocumentDirectory: async () => ({ items: [], complete: true, nextCursor: null }),
   resolveKnowledgeAccessDomains: async () => [],
   readableArtifactIds: async () => new Set(),
 }));
