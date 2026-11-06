@@ -58,6 +58,8 @@ vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
 }));
 
+vi.mock("./external-resource-targets", () => ({ requireExternalResourceAttachmentTarget: vi.fn() }));
+
 vi.mock("./audit-trail", () => ({
   recordAudit: recordAuditMock,
 }));
