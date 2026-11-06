@@ -117,7 +117,8 @@ jobs:
     name: Selfserve Named Owner Read-only Acceptance
     needs: [validation-context, selfserve-isolated]
     if: needs.validation-context.outputs.target == 'selfserve-validation' && needs.validation-context.outputs.enabled == 'true'
-    runs-on: ubuntu-latest
+    # Playwright 1.60.0 supports Ubuntu 24.04; ubuntu-latest can select unsupported 26.04.
+    runs-on: ubuntu-24.04
     environment: fleet-release-production
     timeout-minutes: 15
     steps:
