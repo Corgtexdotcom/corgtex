@@ -5,7 +5,8 @@
   --surface-strong: #ffffff;
   --line: #e2e8f0;
   --text: #0f172a;
-  --muted: #64748b;
+  --muted-on-light: #5f6f86;
+  --muted: var(--muted-on-light);
   --accent: #0f766e;
   --accent-soft: #ccfbf1;
   --bg-alt: #f1f5f9;
