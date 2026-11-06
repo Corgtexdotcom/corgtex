@@ -140,11 +140,22 @@ function discoverCustomers() {
 function eligibleCustomers() {
   const only = selectedSlugSet();
   const includeInactive = process.env.CLIENT_READINESS_INCLUDE_INACTIVE === "true";
-  return discoverCustomers().filter((customer) => {
+  const customers = discoverCustomers().filter((customer) => {
     if (only && !only.has(customer.slug)) return false;
     if (includeInactive) return true;
     return isMonitorableCustomerStatus(customer.provisioningStatus);
   });
+
+  // An explicit selection is a required set, not a best-effort fleet filter.
+  // Validate the whole set before health checks, credentials, smoke or issue sync.
+  if (only) {
+    const eligibleSlugs = new Set(customers.map((customer) => customer.slug));
+    const missing = [...only].filter((slug) => !eligibleSlugs.has(slug));
+    if (missing.length > 0) {
+      throw new Error(`Required readiness targets unavailable: ${missing.join(", ")}. Check discovery, runtime URLs and CLIENT_READINESS_INCLUDE_INACTIVE.`);
+    }
+  }
+  return customers;
 }
 
 function healthTarget(customer) {

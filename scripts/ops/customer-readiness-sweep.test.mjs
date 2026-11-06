@@ -7,22 +7,134 @@ import { describe, expect, it } from "vitest";
 const sweepPath = fileURLToPath(new URL("./customer-readiness-sweep.mjs", import.meta.url));
 const repoRoot = path.resolve(path.dirname(sweepPath), "../..");
 
-function runDryRun(customers) {
-  const result = spawnSync(process.execPath, [sweepPath, "--dry-run"], {
+function runSweep(customers, { args = ["--dry-run"], env = {}, nodeArgs = [] } = {}) {
+  return spawnSync(process.execPath, [...nodeArgs, sweepPath, ...args], {
     cwd: repoRoot,
     env: {
       ...process.env,
       CLIENT_READINESS_CUSTOMERS_JSON: JSON.stringify(customers),
       CLIENT_READINESS_CUSTOMER_SLUGS: "",
-      CLIENT_READINESS_INCLUDE_INACTIVE: "true",
+      CLIENT_READINESS_INCLUDE_INACTIVE: "false",
+      OPS_CREATE_GITHUB_ISSUES: "false",
+      ...env,
     },
     encoding: "utf8",
+    timeout: 10_000,
   });
+}
 
+function runDryRun(customers) {
+  const result = runSweep(customers);
   expect(result.stderr).toBe("");
   expect(result.status).toBe(0);
   return JSON.parse(result.stdout);
 }
+
+describe("customer readiness sweep required targets", () => {
+  const active = { slug: "active-client", url: "https://active.example", provisioningStatus: "active" };
+  const degraded = { slug: "degraded-client", url: "https://degraded.example", provisioningStatus: "degraded" };
+  const inactive = { slug: "inactive-client", url: "https://inactive.example", provisioningStatus: "suspended" };
+
+  function expectMissing(result, slugs) {
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain(`Required readiness targets unavailable: ${slugs.join(", ")}.`);
+  }
+
+  it.each([{ customers: [] }, { customers: [active] }])("fails when discovery has no match for an explicit target (%j)", ({ customers }) => {
+    expectMissing(runSweep(customers, {
+      args: ["--dry-run", "--customers", "corgtex-selfserve-production"],
+    }), ["corgtex-selfserve-production"]);
+  });
+
+  it("requires every requested target, not just one match", () => {
+    const result = runSweep([active], {
+      args: ["--dry-run", "--customers", "active-client,missing-client,another-missing-client"],
+    });
+    expectMissing(result, ["missing-client", "another-missing-client"]);
+  });
+
+  it("fails when a required target is excluded by the inactive-status policy", () => {
+    expectMissing(runSweep([active, inactive], {
+      args: ["--dry-run", "--customers", "active-client,inactive-client"],
+    }), ["inactive-client"]);
+  });
+
+  it("fails when a required target has no usable runtime URL", () => {
+    expectMissing(runSweep([{ ...active, url: "https://ops.example/workspaces/workspace-1" }], {
+      args: ["--dry-run", "--customers", "active-client"],
+    }), ["active-client"]);
+  });
+
+  it("accepts all requested eligible targets and excludes unrelated customers", () => {
+    const result = runSweep([active, inactive, degraded], {
+      args: ["--dry-run", "--customers", "active-client,degraded-client"],
+    });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout).customers.map((customer) => customer.slug)).toEqual([
+      "active-client", "degraded-client",
+    ]);
+  });
+
+  it("honors the explicit opt-in to include an inactive required target", () => {
+    const result = runSweep([inactive], {
+      args: ["--dry-run", "--customers", "inactive-client"],
+      env: { CLIENT_READINESS_INCLUDE_INACTIVE: "true" },
+    });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).customers.map((customer) => customer.slug)).toEqual(["inactive-client"]);
+  });
+
+  it("treats environment-selected targets as a required set too", () => {
+    expectMissing(runSweep([active], {
+      env: { CLIENT_READINESS_CUSTOMER_SLUGS: "active-client,missing-client" },
+    }), ["missing-client"]);
+
+    const result = runSweep([active, degraded], {
+      env: { CLIENT_READINESS_CUSTOMER_SLUGS: "active-client,degraded-client" },
+    });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).customers).toHaveLength(2);
+  });
+
+  it("preserves CLI selection precedence over environment selection", () => {
+    const result = runSweep([active], {
+      args: ["--dry-run", "--customers", "active-client"],
+      env: { CLIENT_READINESS_CUSTOMER_SLUGS: "missing-client" },
+    });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).customers.map((customer) => customer.slug)).toEqual(["active-client"]);
+  });
+
+  it.each([{ customers: [] }, { customers: [inactive] }])("preserves unfiltered fleet success with no eligible targets (%j)", ({ customers }) => {
+    expect(runDryRun(customers).customers).toEqual([]);
+  });
+
+  it("preserves normal unfiltered active and degraded fleet selection", () => {
+    expect(runDryRun([active, inactive, degraded]).customers.map((customer) => customer.slug)).toEqual([
+      "active-client", "degraded-client",
+    ]);
+  });
+
+  it.each([{ modeArgs: [] }, { modeArgs: ["--health-only"] }])("fails before health, credentials, smoke or issue sync (%j)", ({ modeArgs }) => {
+    // Make downstream network/subprocess work impossible even if the preflight regresses.
+    const preload = `
+      import childProcess from "node:child_process";
+      import { syncBuiltinESMExports } from "node:module";
+      const unexpected = () => { throw new Error("Unexpected downstream readiness work"); };
+      childProcess.spawnSync = unexpected;
+      syncBuiltinESMExports();
+      globalThis.fetch = unexpected;
+    `;
+    expectMissing(runSweep([active], {
+      args: ["--customers", "active-client,missing-client", "--create-issues", ...modeArgs],
+      nodeArgs: ["--import", `data:text/javascript,${encodeURIComponent(preload)}`],
+      env: { CLIENT_READINESS_CREDENTIALS_JSON: "invalid credential configuration" },
+    }), ["missing-client"]);
+  });
+});
 
 describe("customer readiness sweep URL selection", () => {
   it("fails a standalone health check when an incident is not being published", async () => {
@@ -42,6 +154,7 @@ describe("customer readiness sweep URL selection", () => {
             url: `http://127.0.0.1:${server.address().port}`,
             provisioningStatus: "active",
           }]),
+          CLIENT_READINESS_CUSTOMER_SLUGS: "",
           OPS_CREATE_GITHUB_ISSUES: "false",
         },
       });
