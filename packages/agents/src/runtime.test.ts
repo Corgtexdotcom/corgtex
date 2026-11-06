@@ -11,6 +11,7 @@ const lineage = vi.hoisted(() => ({
   request: vi.fn(), feedback: vi.fn(), capture: vi.fn(), readableIds: vi.fn(), persistMeeting: vi.fn(), snapshot: vi.fn(), readable: vi.fn(), record: vi.fn(), invalidate: vi.fn(), observe: vi.fn(),
 }));
 const prismaMock = {
+  $queryRaw: vi.fn(async () => []),
   agentRun: {
     findFirst: vi.fn(),
     count: vi.fn(),

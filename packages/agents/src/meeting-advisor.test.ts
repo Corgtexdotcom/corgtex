@@ -10,6 +10,8 @@ const { buildMeetingIntelligenceContextMock, syncKnowledgeForSourceMock, isArtif
 
 const runtimeLineage = vi.hoisted(() => ({ capture: vi.fn(), snapshot: vi.fn(), immutable: vi.fn(), record: vi.fn(), invalidate: vi.fn(), observe: vi.fn() }));
 const prismaMock = {
+  $queryRaw: vi.fn(async () => []),
+  workspaceAgentConfig: { findUnique: vi.fn() },
   agentRun: {
     findFirst: vi.fn(),
     count: vi.fn(),
@@ -166,6 +168,7 @@ describe("runMeetingSummaryAgent", () => {
     // Mock $transaction to execute the callback
     prismaMock.$transaction.mockReset().mockImplementation(async (fn: any) => fn(prismaMock));
     prismaMock.agentIdentity.findUnique.mockReset().mockResolvedValue(null);
+    prismaMock.workspaceAgentConfig.findUnique.mockReset().mockResolvedValue(null);
   });
 
   it("completes without requiring a live database", async () => {

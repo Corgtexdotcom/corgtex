@@ -1,3 +1,5 @@
+import { redactUnreadableAgentGovernance } from "./agent-config";
+import { prepareProducerLineage, finishProducerLineage } from "./producer-lineage";
 import { getSlackWorkspaceBinding } from "./slack-workspace-bindings";
 import { getRecallWorkspaceBinding } from "./recall-workspace-bindings";
 import { managedAzureReleaseEligible } from "./managed-azure-release-policy";
@@ -44,7 +46,7 @@ import {
 } from "./railway-client";
 import { buildCustomerDeploymentProviderReadModel, buildCustomerDeploymentReadiness, provisionCustomerDeployment } from "./admin";
 import { registerCustomerDeployment, registerRemoteSharedWorkspaceDeployment, type RemoteSharedWorkspaceRegistration } from "./customer-lifecycle";
-import { AGENT_REGISTRY } from "./agent-registry";
+import { AGENT_REGISTRY, supportsAgentGovernancePrompt } from "./agent-registry";
 import { isKnownScope, type AgentScope } from "./agent-auth";
 import { compareAndSetFinanceConfig, financeConfigIdentity, FINANCE_PARENT_FLAG } from "./finance";
 import { getModuleManifests, listModuleFlagKeys, listWorkspaceFeatureFlagDefinitions } from "./modules";
@@ -8283,6 +8285,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
       enabled: override?.enabled ?? ("defaultEnabled" in meta ? meta.defaultEnabled : true),
       modelOverride: override?.modelOverride ?? null,
       hasGovernancePolicy: Boolean(override?.governancePolicy?.trim()),
+      governancePromptSupported: supportsAgentGovernancePrompt(agentKey),
       updatedAt: override?.updatedAt ?? null,
     };
   });
@@ -8684,40 +8687,51 @@ export async function updateControlPlaneAgentPolicy(actor: AppActor, params: {
     return { deploymentId: params.deploymentId, source: "support_connector" as const, operation };
   }
 
-  const config = await prisma.workspaceAgentConfig.upsert({
-    where: {
-      workspaceId_agentKey: {
-        workspaceId: deployment.managedWorkspaceId,
-        agentKey,
+  const config = await prisma.$transaction(async tx => {
+    const receipt = governancePolicy !== undefined
+      ? await prepareProducerLineage({ tx, actor, workspaceId: deployment.managedWorkspaceId!, copied: actor.kind !== "user" })
+      : undefined;
+    const config = await tx.workspaceAgentConfig.upsert({
+      where: {
+        workspaceId_agentKey: {
+          workspaceId: deployment.managedWorkspaceId!,
+          agentKey,
+        },
       },
-    },
-    create: {
-      workspaceId: deployment.managedWorkspaceId,
-      agentKey,
-      enabled: "defaultEnabled" in meta ? meta.defaultEnabled : true,
-      modelOverride: modelOverride ?? null,
-      governancePolicy: governancePolicy ?? null,
-      configJson: {},
-    },
-    update: {
-      ...(governancePolicy !== undefined && { governancePolicy }),
-      ...(modelOverride !== undefined && { modelOverride }),
-    },
-    select: {
-      id: true,
-      agentKey: true,
-      enabled: true,
-      modelOverride: true,
-      governancePolicy: true,
-      updatedAt: true,
-    },
+      create: {
+        workspaceId: deployment.managedWorkspaceId!,
+        agentKey,
+        enabled: "defaultEnabled" in meta ? meta.defaultEnabled : true,
+        modelOverride: modelOverride ?? null,
+        governancePolicy: governancePolicy ?? null,
+        configJson: {},
+      },
+      update: {
+        ...(governancePolicy !== undefined && { governancePolicy }),
+        ...(modelOverride !== undefined && { modelOverride }),
+      },
+      select: {
+        id: true,
+        workspaceId: true,
+        archivedAt: true,
+        createdAt: true,
+        agentKey: true,
+        enabled: true,
+        modelOverride: true,
+        governancePolicy: true,
+        updatedAt: true,
+      },
+    });
+    if (receipt) await finishProducerLineage({ tx, actor, workspaceId: deployment.managedWorkspaceId!,
+      artifact: { kind: "WorkspaceAgentGovernance", id: config.id }, content: { ...config, workspaceId: deployment.managedWorkspaceId }, receipt });
+    return redactUnreadableAgentGovernance(actor, deployment.managedWorkspaceId!, config, tx);
   });
   await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.ai_governance.agent_policy_updated", {
     reason,
     source: "managed_workspace",
     managedWorkspaceId: deployment.managedWorkspaceId,
     agentKey,
-    hasGovernancePolicy: Boolean(config.governancePolicy?.trim()),
+    hasGovernancePolicy: config.hasGovernancePolicy,
     modelOverride: config.modelOverride,
   });
   return {
@@ -8728,7 +8742,9 @@ export async function updateControlPlaneAgentPolicy(actor: AppActor, params: {
       agentKey: config.agentKey,
       enabled: config.enabled,
       modelOverride: config.modelOverride,
-      hasGovernancePolicy: Boolean(config.governancePolicy?.trim()),
+      hasGovernancePolicy: config.hasGovernancePolicy,
+      governancePolicyWithheld: config.governancePolicyWithheld,
+      governancePromptSupported: supportsAgentGovernancePrompt(agentKey),
       updatedAt: config.updatedAt,
     },
   };

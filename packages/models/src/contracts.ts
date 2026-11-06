@@ -99,6 +99,8 @@ export type ChatStreamEvent =
 export type ExtractionRequest = ModelRequestControls & {
   workspaceId: string;
   model?: string;
+  /** Trusted system guidance, retained during extraction repair attempts. */
+  systemInstruction?: string;
   instruction: string;
   input: string;
   schemaHint: string;

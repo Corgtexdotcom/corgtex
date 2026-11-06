@@ -209,7 +209,7 @@ export function artifactPermissionEpochIdentities(kind: string, row: Record<stri
   const add = (permissionKind: string, id: unknown) => {
     if (typeof id === "string" && id) identities.push({ kind: permissionKind, id });
   };
-  const sourceKind = ["MeetingTranscript", "MeetingAgenda"].includes(kind) ? "Meeting" : kind;
+  const sourceKind = kind === "WorkspaceAgentGovernance" ? "WorkspaceAgentConfig" : ["MeetingTranscript", "MeetingAgenda"].includes(kind) ? "Meeting" : kind;
   add(sourceKind, row.id);
   if (kind === "FinanceReportFactRevision") {
     add("FinanceReportFactLifecycle", row.factId);

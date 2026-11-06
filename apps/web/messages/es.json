@@ -330,7 +330,7 @@
     "statRecentFailures": "Fallos recientes",
     "tabInbox": "Bandeja de entrada",
     "editGovernancePolicy": "Editar política de gobernanza",
-    "governancePolicyDesc": "Define límites, instrucciones y umbrales en texto plano para este agente. Estas reglas se agregan al principio del prompt del sistema del agente en tiempo de ejecución.",
+    "governancePolicyDesc": "Las instrucciones guardadas se aplican solo a rutas compatibles tras verificar su origen, antes del comportamiento de identidad. No conceden aprobaciones, permisos ni autoridad de gasto. Las rutas no compatibles se indican en el registro.",
     "governancePolicyPlaceholder": "Ej.: pedir siempre a un humano antes de confirmar cualquier transacción financiera superior a $50.",
     "savePolicy": "Guardar política"
   },

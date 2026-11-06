@@ -1,5 +1,6 @@
 import {
   buildAgentAuthoritySummaries,
+  supportsAgentGovernancePrompt,
   getModelUsageBudget,
   requireWorkspaceMembership,
   getModelUsageSummary,
@@ -48,7 +49,8 @@ function accessLabel(agent: AgentAuthoritySummary) {
 }
 
 function policyLabel(agent: AgentAuthoritySummary) {
-  return agent.approval.hasGovernancePolicy ? "Policy configured" : "Policy not configured";
+  if (!supportsAgentGovernancePrompt(agent.agentKey)) return "Prompt policy unsupported";
+  return agent.approval.hasGovernancePolicy ? "Policy saved (source verification required)" : "Policy not configured";
 }
 
 function latestRunLabel(agent: AgentAuthoritySummary, format: Awaited<ReturnType<typeof getFormatter>>) {
@@ -147,10 +149,13 @@ function AgentAuthorityRow({
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(260px, 100%), 1fr))", gap: 16, marginTop: 12 }}>
           <section className="stack" style={{ gap: 12 }}>
             <form action={updateAgentGovernancePolicyAction}>
+              {agent.approval.governancePolicyWithheld && <p role="status" className="nr-item-meta">Policy text is withheld because its source proof is unavailable. A save replaces the entire policy.</p>}
               <input type="hidden" name="workspaceId" value={workspaceId} />
               <input type="hidden" name="agentKey" value={agent.agentKey} />
               <p className="nr-item-meta" style={{ fontSize: "0.8rem", marginBottom: 8 }}>
-                Plain-text boundaries, escalation rules, and thresholds for this agent.
+                {supportsAgentGovernancePrompt(agent.agentKey)
+                  ? "Proven saved instructions precede workspace and agent behavior in system prompts. These instructions do not grant approvals, scopes, or spending authority. Legacy text without source proof is withheld until replaced and saved."
+                  : "Prompt policy is unsupported for this route. Saved text has no execution effect. Approvals, scopes, and spending limits use separate controls."}
               </p>
               <textarea
                 name="governancePolicy"

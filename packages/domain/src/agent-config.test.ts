@@ -28,6 +28,10 @@ vi.mock("@corgtex/shared", () => ({
   toInputJson: (value: unknown) => JSON.parse(JSON.stringify(value ?? null)),
 }));
 
+vi.mock("./source-lineage", () => ({ readableArtifactIds: vi.fn(async (_a, _w, _k, rows) => new Set(rows.map((row: any) => row.id))) }));
+
+vi.mock("./producer-lineage", () => ({ prepareProducerLineage: vi.fn(async () => ({ mode: "HUMAN_ORIGINAL", inputs: [], roots: [] })), finishProducerLineage: vi.fn() }));
+
 vi.mock("./auth", () => ({
   requireWorkspaceMembership: vi.fn().mockResolvedValue(true),
 }));
@@ -372,11 +376,10 @@ describe("agent-config", () => {
         governancePolicy: "custom policy here",
       } as any);
 
-      const policy = await getAgentGovernancePolicy("ws-1", "inbox-triage");
+      const policy = await getAgentGovernancePolicy({ kind: "user", user: { id: "u-1" } } as any, "ws-1", "inbox-triage");
       expect(policy).toBe("custom policy here");
       expect(prisma.workspaceAgentConfig.findUnique).toHaveBeenCalledWith({
         where: { workspaceId_agentKey: { workspaceId: "ws-1", agentKey: "inbox-triage" } },
-        select: { governancePolicy: true },
       });
     });
   });
