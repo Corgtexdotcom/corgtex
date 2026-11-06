@@ -4,6 +4,17 @@ import { prisma } from "@corgtex/shared";
 import { z } from "zod";
 import { invariant } from "./errors";
 
+// The shared application host is not a SHARED_WORKSPACE tenant deployment.
+export const SELFSERVE_RELEASE_HOST_ID = "e0d34b24-bd86-4cb2-8ccb-f2f84309ca16";
+export const SELFSERVE_RELEASE_ORIGIN = "https://selfserve.corgtex.com";
+export const SELFSERVE_RELEASE_PROFILE = "SELF_SERVE_IMPORTER_FENCE_V1";
+export function isSelfserveReleaseHost(row: { id: string; url: string }) {
+  return row.id === SELFSERVE_RELEASE_HOST_ID || row.url.replace(/\/$/, "") === SELFSERVE_RELEASE_ORIGIN;
+}
+export function requiresProtectedManagedAzureBinding(row: { id: string; url: string; deploymentKind: string }) {
+  return row.deploymentKind === "HOSTED_DEDICATED" || isSelfserveReleaseHost(row);
+}
+
 const uuid = z.string().uuid().transform((value) => value.toLowerCase());
 const databaseId = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 const group = z.string().min(1).max(90).regex(/^[A-Za-z0-9][A-Za-z0-9_.()-]*$/);
@@ -90,10 +101,17 @@ function deploymentAliasesTarget(
 }
 type ManagedAzureBindingRow = Pick<CustomerDeployment, "id" | "customerAccountId" | "deploymentKind" | "cloudProvider" | "environment" | "url"
   | "providerSubscriptionId" | "providerResourceGroup" | "providerWebServiceId" | "providerWorkerServiceId">;
-export function assertManagedAzureTargetBinding(row: ManagedAzureBindingRow, acr?: { acrName: string; acrServer: string }, required = row.deploymentKind === "HOSTED_DEDICATED") {
+function assertSelfserveReleaseProfile(row: Pick<ManagedAzureBindingRow, "id" | "url" | "deploymentKind">, target: ManagedAzureTarget) {
+  if (isSelfserveReleaseHost(row)) invariant(row.id === SELFSERVE_RELEASE_HOST_ID
+    && row.deploymentKind === "REMOTE_MANAGED" && target.origin === SELFSERVE_RELEASE_ORIGIN
+    && target.activationPolicy === "EXCLUSIVE", 409, "MANAGED_RELEASE_TARGET_CONFIG_CONFLICT",
+  "The selfserve host requires its exact protected exclusive target.");
+}
+export function assertManagedAzureTargetBinding(row: ManagedAzureBindingRow, acr?: { acrName: string; acrServer: string }, required = requiresProtectedManagedAzureBinding(row)) {
   const target = managedAzureTargets().find((item) => item.deploymentId === row.id);
   invariant(target || !required, 409, "MANAGED_RELEASE_TARGET_CONFIG_REQUIRED", "An authoritative protected target is required.");
   if (!target) return null; // Preserve unmapped historical REMOTE_MANAGED behavior.
+  assertSelfserveReleaseProfile(row, target);
   invariant(row.customerAccountId === target.customerAccountId && row.deploymentKind === target.deploymentKind
     && row.cloudProvider === "AZURE" && row.environment === "production" && row.url.replace(/\/$/, "") === target.origin
     && row.providerSubscriptionId?.toLowerCase() === target.subscriptionId.toLowerCase()
@@ -147,10 +165,11 @@ export async function reconcileManagedAzureTarget(input: z.infer<typeof reconcil
     const [row] = await tx.$queryRaw<CustomerDeployment[]>`SELECT * FROM "CustomerDeployment" WHERE id = ${request.deploymentId} FOR UPDATE`;
     invariant(row, 404, "NOT_FOUND", "Deployment not found.");
     const [account] = await tx.$queryRaw<MetadataAccount[]>`SELECT id, status, "managementAuthority", "primaryDeploymentId", "updatedAt" FROM "CustomerAccount" WHERE id = ${row.customerAccountId} FOR SHARE`;
-    const protectedHosted = target.deploymentKind === "HOSTED_DEDICATED";
+    assertSelfserveReleaseProfile(row, target);
+    const protectedRelease = requiresProtectedManagedAzureBinding(row);
     invariant(account?.id === target.customerAccountId && account.managementAuthority === "CORGTEX"
-      && (protectedHosted ? !["SUSPENDED", "CHURNED"].includes(account.status) : account.status === "ACTIVE")
-      && (!protectedHosted || account.primaryDeploymentId === row.id)
+      && (protectedRelease ? !["SUSPENDED", "CHURNED"].includes(account.status) : account.status === "ACTIVE")
+      && (!protectedRelease || account.primaryDeploymentId === row.id)
       && row.deploymentKind === target.deploymentKind && row.environment === "production"
       && !["SUSPENDED", "RETIRED"].includes(row.deploymentStatus), 409, "MANAGED_RELEASE_ACCOUNT_AUTHORITY_REQUIRED", "Current deployment/account authority is required.");
     invariant(!row.releaseLeaseId && !row.releaseLeasePhase && !row.releaseLeaseRollbackRecord,

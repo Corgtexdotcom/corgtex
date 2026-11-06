@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { CustomerDeployment } from "@prisma/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { assertManagedAzureTargetBinding, managedAzureRecoveryAuthorityDigest, managedAzureTargetDigest, managedAzureTargets, managedAzureMetadataDigest } from "./managed-azure-targets";
+// These parser/binding tests never connect to a database.
+vi.mock("@corgtex/shared", () => ({ prisma: {} }));
 const target = { deploymentId: randomUUID(), customerAccountId: randomUUID(), deploymentKind: "HOSTED_DEDICATED" as const,
   origin: "https://client.example.test", subscriptionId: randomUUID(), resourceGroup: "rg-client", webAppName: "client-web", workerAppName: "client-worker",
   acrName: "clientacr", acrServer: "clientacr.azurecr.io", acrResourceGroup: "rg-registry", evidenceSha256: "a".repeat(64), activationPolicy: "EXCLUSIVE" as const,
@@ -23,6 +25,20 @@ describe("protected Azure target configuration", () => {
       expect(() => assertManagedAzureTargetBinding({ ...row(), ...change } as CustomerDeployment, target)).toThrow();
     }
     expect(() => assertManagedAzureTargetBinding(row(), { acrName: "otheracr", acrServer: "otheracr.azurecr.io" })).toThrow();
+  });
+  it("requires exact configured EXCLUSIVE authority for the selfserve host and cannot downgrade on removal", () => {
+    const host = { ...row(), id: "e0d34b24-bd86-4cb2-8ccb-f2f84309ca16", url: "https://selfserve.corgtex.com", deploymentKind: "REMOTE_MANAGED" as const };
+    const configured = { ...target, deploymentId: host.id, deploymentKind: host.deploymentKind, origin: host.url };
+    install(configured);
+    expect(assertManagedAzureTargetBinding(host)).toEqual(configured);
+    install({ ...configured, activationPolicy: "STANDARD" });
+    expect(() => assertManagedAzureTargetBinding(host)).toThrow();
+    vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", "");
+    expect(() => assertManagedAzureTargetBinding(host)).toThrow();
+    install(configured);
+    expect(() => assertManagedAzureTargetBinding({ ...host, deploymentKind: "SHARED_WORKSPACE" })).toThrow();
+    expect(() => assertManagedAzureTargetBinding({ ...host, customerAccountId: randomUUID() })).toThrow();
+    expect(() => assertManagedAzureTargetBinding({ ...host, id: randomUUID() })).toThrow();
   });
   it("requires protected hosted configuration without changing unmapped historical remote behavior", () => {
     vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", "");

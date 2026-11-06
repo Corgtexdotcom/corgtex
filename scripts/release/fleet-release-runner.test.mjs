@@ -51,7 +51,7 @@ function azureTargetJson(overrides = {}) {
     id: "azure",
     deploymentId: "dep-azure",
     label: "Azure Self-Serve",
-    url: "https://selfserve.corgtex.com",
+    url: "https://synthetic-selfserve.example.test",
     group: "selfserve",
     provider: "azure",
     azure: {
@@ -81,6 +81,23 @@ function azureRevisionState(name, overrides = {}) {
     state: "Succeeded", ...overrides,
   };
 }
+
+describe("selfserve legacy Fleet release guard", () => {
+  it.each([
+    { url: "https://selfserve.corgtex.com" },
+    { url: "https://renamed.example.test", azure: { resourceGroup: "rg-corgtex-selfserve-production-wus3", acrName: "acr1", webAppName: "ca-corgtex-ss-prod-web", workerAppName: "ca-corgtex-ss-prod-worker" } },
+    { url: "https://renamed.example.test", azure: { resourceGroup: "RG-CORGTEX-SELFSERVE-PRODUCTION-WUS3", acrName: "acr1", webAppName: "CA-CORGTEX-SS-PROD-WEB", workerAppName: "CA-CORGTEX-SS-PROD-WORKER" } },
+  ])("rejects canonical selfserve from legacy Fleet before any provider operation (%j)", async (host) => {
+    const runCommand = vi.fn(); const fetchImpl = vi.fn();
+    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "azure-selfserve", "--reason", "Require protected host transaction."], {
+      env: { ...azureReleaseEnv(), FLEET_RELEASE_TARGETS_JSON: azureTargetJson(host) },
+      runCommand, fetchImpl, sleep: vi.fn(),
+    })).rejects.toThrow("Ring 2 failed");
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+});
 
 describe("Azure revision readiness", () => {
   const target = JSON.parse(azureTargetJson())[0];
@@ -243,7 +260,7 @@ function healthResponse() {
   };
 }
 
-function azurePublicUrlEntries(origin = "https://selfserve.corgtex.com", overrides = {}) {
+function azurePublicUrlEntries(origin = "https://synthetic-selfserve.example.test", overrides = {}) {
   return Object.entries({
     APP_URL: origin,
     NEXT_PUBLIC_APP_URL: origin,
@@ -255,7 +272,7 @@ function azurePublicUrlEntries(origin = "https://selfserve.corgtex.com", overrid
 
 function publicJsonResponse(value) { return { ok: true, status: 200, json: async () => value }; }
 
-function oauthChallengeResponse(origin = "https://selfserve.corgtex.com") {
+function oauthChallengeResponse(origin = "https://synthetic-selfserve.example.test") {
   const scopes = MCP_CONNECTOR_DEFAULT_SCOPES.join(" ");
   return { ok: false, status: 401, headers: { get: () => `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource", scope="${scopes}"` } };
 }
@@ -278,7 +295,7 @@ function azureReleaseEnv() {
 
 function successfulAzurePublicResponse(url) {
   const path = new URL(String(url)).pathname;
-  const origin = "https://selfserve.corgtex.com";
+  const origin = "https://synthetic-selfserve.example.test";
   const scopes = [...MCP_CONNECTOR_DEFAULT_SCOPES];
   if (path === "/api/health") return healthResponse();
   if (path === "/.well-known/oauth-protected-resource") {
@@ -885,7 +902,7 @@ describe("fleet release runner", () => {
       "--worker-app-name",
       "worker-app",
       "--app-url",
-      "https://selfserve.corgtex.com",
+      "https://synthetic-selfserve.example.test",
     ], {
       cwd: process.cwd(),
       encoding: "utf8",
@@ -1318,7 +1335,7 @@ describe("fleet release runner", () => {
           label: "Railway Self-Serve",
           group: "azure-selfserve",
           provider: "railway",
-          url: "https://selfserve.corgtex.com",
+          url: "https://synthetic-selfserve.example.test",
         }),
         CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
         RAILWAY_API_TOKEN: "railway-token",
@@ -2333,8 +2350,8 @@ describe("fleet release runner", () => {
     const runCommand = vi.fn((command, args) => {
       if (command === "az" && args[0] === "containerapp" && args[1] === "show") {
         return {
-          stdout: JSON.stringify(azurePublicUrlEntries("https://selfserve.corgtex.com", {
-            MCP_PUBLIC_URL: "https://selfserve.corgtex.com",
+          stdout: JSON.stringify(azurePublicUrlEntries("https://synthetic-selfserve.example.test", {
+            MCP_PUBLIC_URL: "https://synthetic-selfserve.example.test",
           })),
           stderr: "",
         };
@@ -2376,8 +2393,8 @@ describe("fleet release runner", () => {
       }
       if (new URL(String(url)).pathname === "/.well-known/oauth-protected-resource") {
         return publicJsonResponse({
-          resource: "https://selfserve.corgtex.com",
-          authorization_servers: ["https://selfserve.corgtex.com"],
+          resource: "https://synthetic-selfserve.example.test",
+          authorization_servers: ["https://synthetic-selfserve.example.test"],
           scopes_supported: [...MCP_CONNECTOR_DEFAULT_SCOPES],
         });
       }
@@ -2503,7 +2520,7 @@ describe("fleet release runner", () => {
     expect(result.results[0].result.verifiedRelease).toMatchObject({ recorded: true });
     expect(result.results[0].result.oauthProof).toMatchObject({
       status: "ok",
-      resource: "https://selfserve.corgtex.com/mcp",
+      resource: "https://synthetic-selfserve.example.test/mcp",
       challenges: [{ path: "/mcp", status: 401 }, { path: "/api/mcp", status: 401 }],
     });
     expect(result.results[0].result.providerReadiness).toMatchObject({
@@ -2527,7 +2544,7 @@ describe("fleet release runner", () => {
       "fi",
       "if [ \"$1\" = \"containerapp\" ] && [ \"$2\" = \"show\" ]; then",
       "  case \" $* \" in",
-      "    *\" -o json \"*) printf '%s\\n' '[{\"name\":\"APP_URL\",\"value\":\"https://selfserve.corgtex.com\"},{\"name\":\"NEXT_PUBLIC_APP_URL\",\"value\":\"https://selfserve.corgtex.com\"},{\"name\":\"MEETING_RECORDER_PUBLIC_BASE_URL\",\"value\":\"https://selfserve.corgtex.com\"},{\"name\":\"MCP_PUBLIC_URL\",\"value\":\"https://selfserve.corgtex.com/mcp\"}]'; exit 0 ;;",
+      "    *\" -o json \"*) printf '%s\\n' '[{\"name\":\"APP_URL\",\"value\":\"https://synthetic-selfserve.example.test\"},{\"name\":\"NEXT_PUBLIC_APP_URL\",\"value\":\"https://synthetic-selfserve.example.test\"},{\"name\":\"MEETING_RECORDER_PUBLIC_BASE_URL\",\"value\":\"https://synthetic-selfserve.example.test\"},{\"name\":\"MCP_PUBLIC_URL\",\"value\":\"https://synthetic-selfserve.example.test/mcp\"}]'; exit 0 ;;",
       "  esac",
       "  printf 'fake-revision\\n'",
       "  exit 0",

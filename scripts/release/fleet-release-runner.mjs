@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { isSelfserveReleaseHost } from "./managed-azure-selfserve-profile.mjs";
+
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -599,6 +601,9 @@ export function checkReleaseImages(manifest, deps) {
 }
 
 async function deployTarget(target, manifest, reason, deps) {
+  if (target.provider === "azure" && isSelfserveReleaseHost(target.deploymentId, target.url, target.azure)) {
+    throw new Error("Selfserve requires the protected managed Azure EXCLUSIVE workflow and frozen inventory; legacy Fleet web-first promotion is disabled.");
+  }
   const providerResult = target.provider === "azure"
     ? await deployAzureTarget(target, { ...manifest, acrWebImage: `${target.azure.acrServer}/corgtex/web:${manifest.imageTag}`, acrWorkerImage: `${target.azure.acrServer}/corgtex/worker:${manifest.imageTag}` }, deps)
     : await deployRailwayTarget(target, manifest, deps);
