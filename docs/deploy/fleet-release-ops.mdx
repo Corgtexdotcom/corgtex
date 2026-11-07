@@ -184,4 +184,69 @@ Repository rollback is to disable the workflow or merge a normal protected rever
 
 ## Gate For Next Work
 
+### Exact reviewed hotfix sources
+
+The closed admission profiles are `selfserve-switcher` for Azure selfserve and
+`ops-release-authority` for Railway Ops. Each requires its own complete reviewed
+record, exact source/parent/tree/diff/blob modes and unchanged Prisma tree. A
+missing record fails closed. Ops additionally binds one operational target ID,
+its origin and all four Railway resource IDs, with explicit `deploymentId:null`.
+Neither admission authorizes another target, provider or source branch.
+
+The current Ops record is source-only. Promotion stops with
+`HOTFIX_OPS_OPERATIONAL_APPROVAL_REQUIRED` even when source, CI and image
+evidence is valid. There is no environment override. A future protected change
+must enforce the supported operational approval and recovery compatibility
+receipts before removing this hold. The recorded baseline SHA identifies a
+source for qualification; it is not an approved recovery commitment. The frozen
+Ops health envelope also remains incompatible with the generic startup proof;
+source admission does not waive that check.
+
+Review the complete candidate and build inputs through the normal protected PR
+process. Required candidate CI runs without production secrets, uses disposable
+fixtures, and records successful fixture/static/test/build checks for the exact
+source. Selfserve also runs desktop/mobile switcher acceptance. Release evidence
+must reference a successful canonical main-push CI run and its bounded receipt;
+PR and merge-queue runs cannot stand in for that producing run.
+
+Use the existing Release Images workflow from protected main with the closed
+`candidate_admission` option. Its secret-free predecessor verifies the selected
+record before the protected publisher builds a separate candidate context. This
+mode publishes only immutable-source SHA tags and retains actual role digests.
+The producing run's tooling SHA and artifact's candidate SHA are distinct and
+both must match their authenticated evidence. The recorded recovery source can
+be built through the same closed record; building it does not grant recovery
+approval. No branch-policy or credential expansion is part of this path.
+
+Run startup proofs from protected main on the lane's exact unchanged base schema.
+Schema ancestry and complete migration-ledger checks remain mandatory. The
+`hotfix_evidence` input for proof contains a `build` reference with numeric
+`runId`, `runAttempt` and `artifactId`. Use only real successful run/artifact IDs.
+Both normal role entrypoints must pass identity, schema, worker and cleanup checks.
+Protected image/proof evidence requires attempt 1 because GitHub approval history
+does not bind approvals to individual attempts.
+
+Explicit selfserve Production Validation accepts the same build reference. Its
+existing single-workspace identity contract remains unchanged; authenticated
+multi-workspace switching is separate acceptance using an authorized session.
+Managed Azure release requires `ci`, `candidate` and `recovery` evidence entries;
+the latter two each contain `build` and `proof` references. Registry digest rechecks
+precede lease acquisition/import. Existing inventory, authority, schema approval,
+compatible recovery, EXCLUSIVE activation and observation gates remain mandatory.
+There is no legacy Fleet shortcut for shared selfserve.
+
+The exact Ops Fleet exception requires `targets=ops`, an empty request `target_id`,
+and exactly one raw configured target with explicit null deployment ID matching
+the reviewed tuple. Its `hotfix_evidence` contains `ci`, `build` and `proof`
+references. A protected-main gate authenticates those receipts before provider
+or image operations. Candidate fixture scripts are omitted in this privileged
+mode only because the exact secret-free CI receipt proves them; ordinary Fleet
+behavior remains unchanged. The produced OCI index must contain the verified
+linux/amd64 platform manifest actually used for Railway. Baseline drift and
+recovery gates remain separate: no schema-ledger repair or approval is inferred.
+
+Changing an admitted source, resource tuple or recovery commitment requires its
+normal protected review and applicable operational approval. Retire records
+through protected review when they are no longer needed.
+
 The immutable-image workflow is sufficient only if a canary promotion reuses existing images, skips Docker build work inside fleet promotion, and proves matching `gitSha`, `imageTag`, `database=up`, `schema=ready`, customer-read probes, and support-scope readiness. Move to the next release PR only when this gate is not met.

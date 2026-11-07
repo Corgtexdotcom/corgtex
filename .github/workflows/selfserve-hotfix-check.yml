@@ -1,0 +1,122 @@
+name: Exact Admitted Hotfix Checks
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  admissions:
+    name: Select complete exact candidate records
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.admissions.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.22.0
+      - id: admissions
+        run: node scripts/release/hotfix-candidate-ci.mjs discover
+  candidate:
+    name: Exact admitted candidate checks (${{ matrix.admissionId }})
+    needs: admissions
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.admissions.outputs.matrix) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      HOTFIX_ADMISSION_ID: ${{ matrix.admissionId }}
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_ci?schema=public
+      SHADOW_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres?schema=public
+      ADMIN_EMAIL: system+corgtex@corgtex.local
+      ADMIN_PASSWORD: corgtex-test-agent-pw
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.22.0
+      - name: Read the reviewed candidate identity
+        id: admission
+        run: node scripts/release/hotfix-candidate-ci.mjs prepare
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.admission.outputs.sha }}
+          path: .hotfix-source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact source before executing candidate code
+        run: node scripts/release/hotfix-candidate-ci.mjs verify
+      - name: Prepare verified isolated PostgreSQL fixture
+        uses: ./.github/actions/ci-pgvector
+        with:
+          database: corgtex_ci
+      - run: npm ci
+        working-directory: .hotfix-source
+      - run: npx prisma generate
+        working-directory: .hotfix-source
+      - name: Candidate static and schema checks
+        working-directory: .hotfix-source
+        run: |
+          npm run lint
+          npm run typecheck
+          npm run check:private-boundary
+          npx prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --shadow-database-url "$SHADOW_DATABASE_URL" --exit-code
+          npx prisma migrate deploy
+          npm run check:migration-fixtures
+          npm run check:seed-fixtures
+      - name: Candidate unit and integration tests
+        working-directory: .hotfix-source
+        run: npx vitest run --project unit --project integration
+      - name: Candidate Chromium switcher acceptance
+        if: matrix.admissionId == 'selfserve-switcher'
+        working-directory: .hotfix-source
+        env:
+          WORKSPACE_SWITCHER_BROWSER_QA: "1"
+          WORKSPACE_SWITCHER_PROOF_DIR: .artifacts/switcher
+        run: |
+          npx playwright install --with-deps chromium
+          npx vitest run --project unit WorkspaceSwitcher.browser.test.ts
+      - name: Database-independent candidate build
+        working-directory: .hotfix-source
+        run: env -u DATABASE_URL -u SHADOW_DATABASE_URL npm run build
+      - name: Scan the actual admitted diff
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          BASE: ${{ steps.admission.outputs.base }}
+          CANDIDATE: ${{ steps.admission.outputs.sha }}
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o "$RUNNER_TEMP/gitleaks.tar.gz"
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git .hotfix-source --redact --log-opts="$BASE..$CANDIDATE"
+          git -C .hotfix-source update-ref refs/remotes/origin/hotfix-baseline "$BASE"
+          (cd .hotfix-source && GITHUB_BASE_REF=hotfix-baseline node ../scripts/check-client-data-leak.mjs)
+      - name: Seal successful canonical-main candidate CI receipt
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: node scripts/release/hotfix-candidate-ci.mjs finish
+      - name: Retain exact candidate CI receipt separately from captures
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: exact-hotfix-ci-${{ matrix.admissionId }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/hotfix-ci-receipt.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exact-hotfix-checks-${{ matrix.admissionId }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .artifacts/hotfix-source.json
+            .hotfix-source/.artifacts/switcher
+          if-no-files-found: error
+      - name: Remove owned fixture
+        if: always()
+        run: docker rm --force --volumes corgtex-ci-postgres || true

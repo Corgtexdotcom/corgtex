@@ -114,9 +114,14 @@ jobs:
   # Keep the PR and merge-queue gate comprehensive, but do not serialize
   # independent checks. This preserves the existing required check names while
   # letting test, migration, and build failures surface in parallel.
+  hotfix-candidate:
+    uses: ./.github/workflows/selfserve-hotfix-check.yml
+    permissions:
+      contents: read
+
   check:
     name: Lint, Typecheck & Test
-    needs: [check-native, test]
+    needs: [check-native, test, hotfix-candidate]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
@@ -124,10 +129,12 @@ jobs:
         env:
           NATIVE_RESULT: ${{ needs.check-native.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          HOTFIX_RESULT: ${{ needs.hotfix-candidate.result }}
         run: |
           set -euo pipefail
           test "$NATIVE_RESULT" = success
           test "$TEST_RESULT" = success
+          test "$HOTFIX_RESULT" = success
 
   test:
     name: Unit & Integration Tests (${{ matrix.shard }}/3)

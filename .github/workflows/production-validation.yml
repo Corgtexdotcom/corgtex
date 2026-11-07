@@ -48,6 +48,11 @@ on:
         description: Comma-separated client-readiness route names to validate.
         required: false
         default: leads
+      hotfix_evidence:
+        description: Exact build run, attempt and artifact JSON for this explicitly dispatched admitted switcher release
+        type: string
+        required: false
+        default: ""
   schedule:
     - cron: "47 10 * * *"
 
@@ -71,18 +76,34 @@ jobs:
       expected_git_sha: ${{ steps.context.outputs.expected_git_sha }}
       pr_numbers: ${{ steps.context.outputs.pr_numbers }}
       client_readiness_routes: ${{ steps.context.outputs.client_readiness_routes }}
+      hotfix_evidence: ${{ steps.hotfix.outputs.hotfix_evidence }}
     steps:
       - id: window
         run: echo "since=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v5
         with:
           ref: main
-          fetch-depth: 2
+          fetch-depth: 0
 
       - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
+
+      - name: Forward explicit hotfix evidence without selecting a fallback
+        id: hotfix
+        env:
+          HOTFIX_EVIDENCE_INPUT: ${{ inputs.hotfix_evidence || '' }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from "node:fs";
+          const raw = process.env.HOTFIX_EVIDENCE_INPUT || "";
+          if (raw && (process.env.GITHUB_EVENT_NAME !== "workflow_dispatch"
+            || process.env.GITHUB_REF !== "refs/heads/main"
+            || process.env.GITHUB_REPOSITORY !== "Corgtexdotcom/corgtex")) throw new Error("HOTFIX_TRUSTED_DISPATCH_REQUIRED");
+          const value = raw ? JSON.stringify(JSON.parse(raw)) : "";
+          appendFileSync(process.env.GITHUB_OUTPUT, `hotfix_evidence=${value}\n`);
+          NODE
 
       - name: Resolve production validation context
         id: context
@@ -126,14 +147,22 @@ jobs:
         with:
           ref: ${{ needs.validation-context.outputs.verifier_sha }}
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/checkout@v5
         with:
           ref: ${{ needs.validation-context.outputs.expected_git_sha }}
           path: .accepted-source
           persist-credentials: false
           fetch-depth: 0
-      - name: Require accepted/release source on trusted main ancestry
-        run: git -C .accepted-source merge-base --is-ancestor HEAD origin/main
+      - name: Verify ordinary main source or the exact admitted selfserve hotfix
+        env:
+          EXPECTED_SHA: ${{ needs.validation-context.outputs.expected_git_sha }}
+        run: >-
+          node scripts/release/selfserve-hotfix-source.mjs
+          --source-root .accepted-source
+          --source-sha "$EXPECTED_SHA"
+          --target-id e0d34b24-bd86-4cb2-8ccb-f2f84309ca16
+          --origin https://selfserve.corgtex.com
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -183,6 +212,7 @@ jobs:
     if: needs.validation-context.outputs.target == 'selfserve-validation' && needs.validation-context.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       packages: read
     timeout-minutes: 45
@@ -198,17 +228,32 @@ jobs:
         with:
           ref: ${{ needs.validation-context.outputs.verifier_sha }}
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/checkout@v5
         with:
           ref: ${{ needs.validation-context.outputs.expected_git_sha }}
           path: .accepted-source
           persist-credentials: false
           fetch-depth: 0
-      - name: Require accepted/release source on trusted main ancestry
-        run: git -C .accepted-source merge-base --is-ancestor HEAD origin/main
+      - name: Verify ordinary main source or the exact admitted selfserve hotfix
+        env:
+          EXPECTED_SHA: ${{ needs.validation-context.outputs.expected_git_sha }}
+        run: >-
+          node scripts/release/selfserve-hotfix-source.mjs
+          --source-root .accepted-source
+          --source-sha "$EXPECTED_SHA"
+          --target-id e0d34b24-bd86-4cb2-8ccb-f2f84309ca16
+          --origin https://selfserve.corgtex.com
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+      - name: Verify exact build evidence before admitted hotfix isolation
+        env:
+          HOTFIX_SOURCE_ROOT: .accepted-source
+          HOTFIX_SOURCE_SHA: ${{ needs.validation-context.outputs.expected_git_sha }}
+          HOTFIX_EVIDENCE: ${{ needs.validation-context.outputs.hotfix_evidence }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/release/selfserve-hotfix-gate.mjs validation
       - name: Stage exact immutable images before isolated runtime (existing read access only)
         timeout-minutes: 10
         env:
@@ -244,6 +289,7 @@ jobs:
         with:
           ref: ${{ needs.validation-context.outputs.verifier_sha }}
           persist-credentials: false
+          fetch-depth: 0
       - name: Guard owner/target before scoped internal mutations and verify cleanup
         env:
           SELFSERVE_PARITY_ENABLED: "true"
@@ -270,6 +316,7 @@ jobs:
         with:
           ref: ${{ needs.validation-context.outputs.verifier_sha }}
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           pattern: selfserve-validation-*

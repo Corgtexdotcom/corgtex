@@ -3,6 +3,11 @@ name: Fleet Release
 on:
   workflow_dispatch:
     inputs:
+      hotfix_evidence:
+        description: "Exact Ops candidate CI/build/startup evidence references; empty for ordinary releases."
+        required: false
+        type: string
+        default: ""
       release:
         description: "latest-stable or a full 40-character Git SHA."
         required: true
@@ -51,6 +56,7 @@ concurrency:
 
 jobs:
   release:
+    if: ${{ inputs.hotfix_evidence == '' || (github.repository == 'Corgtexdotcom/corgtex' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.workflow_ref == 'Corgtexdotcom/corgtex/.github/workflows/fleet-release.yml@refs/heads/main') }}
     name: Promote Corgtex release
     runs-on: ubuntu-latest
     environment: fleet-release-production
@@ -107,6 +113,40 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Reject unbound candidate release requests
+        env:
+          RELEASE_INPUT: ${{ inputs.release }}
+          TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGET_ID: ${{ inputs.target_id }}
+          HOTFIX_EVIDENCE: ${{ inputs.hotfix_evidence }}
+        run: node scripts/release/ops-hotfix-fleet-proof.mjs
+
+      - name: Read admitted Ops source without executing it
+        if: inputs.hotfix_evidence != ''
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.release }}
+          path: .ops-hotfix-source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact Ops candidate CI and image provenance
+        if: inputs.hotfix_evidence != ''
+        env:
+          HOTFIX_EVIDENCE: ${{ inputs.hotfix_evidence }}
+          HOTFIX_SOURCE_ROOT: .ops-hotfix-source
+          HOTFIX_SOURCE_SHA: ${{ inputs.release }}
+          TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGET_ID: ${{ inputs.target_id }}
+        run: node scripts/release/selfserve-hotfix-gate.mjs ops-release
 
       - name: Preserve release summary runner across source checkouts
         run: cp scripts/release/fleet-release-summary.mjs "$RUNNER_TEMP/fleet-release-summary.mjs"
@@ -183,29 +223,38 @@ jobs:
             --concurrency "$CONCURRENCY_INPUT" \
             --fail-on-blockers true
 
-      - uses: actions/checkout@v5
+      - if: inputs.hotfix_evidence == ''
+        uses: actions/checkout@v5
         with:
           ref: ${{ steps.manifest.outputs.git_sha }}
+          persist-credentials: false
 
-      - uses: actions/setup-node@v5
+      - if: inputs.hotfix_evidence == ''
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
 
-      - run: npm ci
+      - if: inputs.hotfix_evidence == ''
+        run: npm ci
 
-      - run: npx prisma generate
+      - if: inputs.hotfix_evidence == ''
+        run: npx prisma generate
 
       - name: Validate data migration fixtures
+        if: inputs.hotfix_evidence == ''
         run: npm run check:migration-fixtures
 
       - name: Validate seed fixtures
+        if: inputs.hotfix_evidence == ''
         run: npm run check:seed-fixtures
 
       - name: Checkout release runner source
+        if: inputs.hotfix_evidence == ''
         uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
 
       - uses: actions/setup-node@v5
         with:

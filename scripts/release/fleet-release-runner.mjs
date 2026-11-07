@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { readOpsHotfixProof, validateOpsProducedIndex } from "./ops-hotfix-fleet-proof.mjs";
 import { isSelfserveReleaseHost } from "./managed-azure-selfserve-profile.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -100,6 +101,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     }
     const verified = [];
     for (const target of targets) {
+      readOpsHotfixProof(env, target);
       if (targetEligibilityErrors(target).length) throw new Error("Protected Railway target is not release-eligible.");
       verified.push(await preflightOpsRailwayProvider(target, deps));
     }
@@ -731,18 +733,38 @@ export function inspectFleetRegistryImage(image, role, purpose, deps = {}) {
 export async function checkFleetRegistryImages(manifest, selection, deps = {}) {
   const groups = normalizeTargets(selection);
   const env = deps.env ?? process.env;
+  const hotfix = readOpsHotfixProof(env);
   const snapshotPath = env.FLEET_RELEASE_TARGETS_FILE;
   if (snapshotPath && !existsSync(snapshotPath)) throw new Error("Registry preflight requires the selected-target planning snapshot.");
   const images = [
     inspectFleetRegistryImage(manifest.ghcrWebImage, "web", "candidate", deps),
     inspectFleetRegistryImage(manifest.ghcrWorkerImage, "worker", "candidate", deps),
   ];
+  if (hotfix) {
+    if (selection !== "ops" || env.FLEET_RELEASE_TARGET_ID !== "" || manifest.gitSha !== hotfix.admission.sourceSha) {
+      throw new Error("HOTFIX_FLEET_SELECTION_INVALID");
+    }
+    for (const image of images) {
+      const produced = hotfix.candidate.images?.[image.role];
+      const prefix = `ghcr.io/corgtexdotcom/corgtex/${image.role}@`;
+      if (typeof produced !== "string" || !produced.startsWith(prefix)) throw new Error("HOTFIX_INDEX_INVALID");
+      const indexDigest = produced.slice(prefix.length);
+      let raw;
+      try {
+        raw = runCommand("docker", ["buildx", "imagetools", "inspect", image.image, "--raw"], deps, {
+          timeout: 30_000, killSignal: "SIGKILL", maxBuffer: 1024 * 1024,
+        }).stdout;
+      } catch { throw new Error("HOTFIX_INDEX_UNAVAILABLE"); }
+      image.producedIndex = validateOpsProducedIndex(raw, indexDigest, image.manifestDigest);
+    }
+  }
   const ops = [];
   if (groups.includes("ops")) {
     const targets = filterTargetsByGroups(await discoverTargets(deps, ["ops"]), ["ops"], { excludeIneligible: isBroadTargetSelection(selection) });
     const exactSelectionExcludesOps = Boolean(env.FLEET_RELEASE_TARGET_ID && snapshotPath && targets.length === 0);
     if (!exactSelectionExcludesOps && (targets.length > 1 || (!targets.length && !isBroadTargetSelection(selection)))) throw new Error("Ops registry preflight requires exactly one configured target.");
     for (const target of targets) {
+      if (hotfix) readOpsHotfixProof(env, target);
       if (targetEligibilityErrors(target).length) throw new Error("Ops registry preflight target is not release-eligible.");
       if (target.provider !== "railway" || !target.railway?.webServiceId || !target.railway.workerServiceId) {
         throw new Error("Ops registry preflight target is invalid.");
@@ -770,6 +792,8 @@ function verifyOpsRegistryBaseline(target, manifest, stages, deps) {
     const baselineDigest = createHash("sha256").update(JSON.stringify(stages)).digest("hex");
     if (proof.ok !== true || proof.effects !== 0 || proof.gitSha !== manifest.gitSha
       || proof.ops?.length !== 1 || proof.ops[0].targetId !== target.id || proof.ops[0].baselineDigest !== baselineDigest) throw new Error();
+    const hotfix = readOpsHotfixProof(deps.env ?? process.env, target);
+    if (hotfix && hotfix.admission.sourceSha !== manifest.gitSha) throw new Error();
     const candidates = {};
     for (const [index, role] of ["web", "worker"].entries()) {
       for (const purpose of ["candidate", "rollback"]) {
@@ -778,7 +802,12 @@ function verifyOpsRegistryBaseline(target, manifest, stages, deps) {
         if (matches?.length !== 1 || matches[0].platform !== "linux/amd64" || !/^sha256:[0-9a-f]{64}$/.test(matches[0].manifestDigest)) throw new Error();
         const immutableImage = `ghcr.io/corgtexdotcom/corgtex/${role}@${matches[0].manifestDigest}`;
         if (matches[0].immutableImage !== immutableImage || (expectedImage.includes("@") && expectedImage !== immutableImage)) throw new Error();
-        if (purpose === "candidate") candidates[role] = immutableImage;
+        if (purpose === "candidate") {
+          if (hotfix && (matches[0].producedIndex?.platform !== "linux/amd64"
+            || matches[0].producedIndex.platformDigest !== matches[0].manifestDigest
+            || hotfix.candidate.images?.[role] !== `ghcr.io/corgtexdotcom/corgtex/${role}@${matches[0].producedIndex.indexDigest}`)) throw new Error();
+          candidates[role] = immutableImage;
+        }
       }
     }
     return candidates;
