@@ -15,6 +15,10 @@ const health = () => ({ status: "ok", service: "web", database: "up", schema: "r
   release: { gitSha: SHA, configured: { gitSha: SHA }, runtime: { gitSha: SHA, evidence: "baked" } } });
 
 describe("one pinned target through the entire automatic validation chain", () => {
+  it("pins the live Chromium setup to Ubuntu 24.04 supported by the locked Playwright", () => {
+    expect(validation.jobs["selfserve-live"]["runs-on"]).toBe("ubuntu-24.04");
+    expect(validation.jobs["selfserve-live"].steps.some((step) => step.run === "npx playwright install --with-deps chromium")).toBe(true);
+  });
   it("passes the pinned selection into the reusable context and checks its returned target", () => {
     expect(ci.jobs["smoke-selfserve"].with.validation_target).toBe("${{ needs.smoke-target.outputs.target }}");
     expect(validation.on.workflow_call.inputs.validation_target.required).toBe(true);
