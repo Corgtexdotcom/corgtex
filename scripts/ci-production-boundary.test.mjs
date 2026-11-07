@@ -173,17 +173,19 @@ describe("automatic production CI boundary", () => {
   it("keeps the required check fail closed for unsuccessful, cancelled, skipped or missing dependencies", () => {
     const gate = parse(workflow).jobs.check;
     expect(gate.name).toBe("Lint, Typecheck & Test");
-    expect(gate.needs).toEqual(["check-native", "test"]);
+    expect(gate.needs).toEqual(["check-native", "test", "hotfix-candidate"]);
     expect(gate.if).toBe("${{ always() }}");
     expect(gate["continue-on-error"]).toBeUndefined();
     expect(gate.steps).toHaveLength(1);
     const step = gate.steps[0];
-    expect(step.env).toEqual({NATIVE_RESULT: "${{ needs.check-native.result }}", TEST_RESULT: "${{ needs.test.result }}"});
+    expect(step.env).toEqual({NATIVE_RESULT: "${{ needs.check-native.result }}", TEST_RESULT: "${{ needs.test.result }}", HOTFIX_RESULT: "${{ needs.hotfix-candidate.result }}"});
     for (const native of ["success", "failure", "cancelled", "skipped", ""]) {
       for (const tests of ["success", "failure", "cancelled", "skipped", ""]) {
-        const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-c", step.run],
-          {env: {...process.env, NATIVE_RESULT: native, TEST_RESULT: tests}});
-        expect(result.status === 0).toBe(native === "success" && tests === "success");
+        for (const hotfix of ["success", "failure", "cancelled", "skipped", ""]) {
+          const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-c", step.run],
+            {env: {...process.env, NATIVE_RESULT: native, TEST_RESULT: tests, HOTFIX_RESULT: hotfix}});
+          expect(result.status === 0).toBe(native === "success" && tests === "success" && hotfix === "success");
+        }
       }
     }
   });

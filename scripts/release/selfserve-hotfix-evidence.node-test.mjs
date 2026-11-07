@@ -12,21 +12,27 @@ function fixture(sourceRole = "candidate") {
   const expected = { repository: "Corgtexdotcom/corgtex", candidateSha: sha("a"), candidateTree: sha("b"),
     baseSha: sha("c"), recoverySha: sha("c"), toolingSha: sha("d"), manifestSha256: hex("e"),
     targetId: "e0d34b24-bd86-4cb2-8ccb-f2f84309ca16", origin: "https://selfserve.corgtex.com",
-    schemaSha256: hex("f"), sourceRole, runId: 123, runAttempt: 1, artifactId: 456 };
+    schemaSha256: hex("f"), prismaTree: sha("8"), sourceRole, runId: 123, runAttempt: 1, artifactId: 456 };
   const sourceSha = sourceRole === "candidate" ? expected.candidateSha : expected.recoverySha;
-  const run = { id: 123, run_attempt: 1, event: "workflow_dispatch", head_branch: "codex/switcher-storage",
-    head_sha: sourceSha, status: "completed", conclusion: "success", path: ".github/workflows/release-images.yml", workflow_id: 789,
+  const run = { id: 123, run_attempt: 1, event: "workflow_dispatch", head_branch: "main",
+    head_sha: expected.toolingSha, status: "completed", conclusion: "success", path: ".github/workflows/release-images.yml", workflow_id: 789,
     repository: { full_name: expected.repository, id: 12 }, head_repository: { full_name: expected.repository, id: 12 },
     actor: { id: 10 }, triggering_actor: { id: 10 } };
   const workflow = { id: 789, path: run.path };
-  const jobs = [{ name: "Build and publish web/worker images", run_id: 123, run_attempt: 1, head_sha: sourceSha, status: "completed", conclusion: "success" }];
+  const jobs = [{ name: "Build and publish web/worker images", run_id: 123, run_attempt: 1, head_sha: expected.toolingSha, status: "completed", conclusion: "success" }];
   const approvals = [{ state: "approved", user: { login: "beepto-codex", id: 278524841 }, environments: [{ id: 17085878745, name: "fleet-release-production" }] }];
   const artifact = { id: 456, name: "release-image-digests-123-1", expired: false, digest: `sha256:${hex("1")}`,
-    workflow_run: { id: 123, head_sha: sourceSha, head_branch: run.head_branch, repository_id: 12, head_repository_id: 12 } };
-  const receipt = { schemaVersion: 1, sourceSha, images: { web: { digest: `sha256:${hex("2")}` }, worker: { digest: `sha256:${hex("3")}` } } };
-  return { data: { run, workflow, jobs, approvals, artifact, receipt, workflowUnchanged: true }, expected };
+    workflow_run: { id: 123, head_sha: expected.toolingSha, head_branch: run.head_branch, repository_id: 12, head_repository_id: 12 } };
+  const receipt = { schemaVersion: 2, mode: "candidate-build", admissionId: "selfserve-switcher", sourceRole, sourceSha,
+    toolingSha: expected.toolingSha, runId: expected.runId, runAttempt: expected.runAttempt,
+    source: { schemaVersion: 1, repository: expected.repository, admission: "hotfix", sourceSha: expected.candidateSha,
+      sourceTree: expected.candidateTree, prismaTree: expected.prismaTree, schemaSha256: expected.schemaSha256,
+      toolingSha: expected.toolingSha, manifestSha256: expected.manifestSha256, recoverySha: expected.recoverySha,
+      ...validateHotfixTarget(expected, expected) },
+    images: { web: { digest: `sha256:${hex("2")}` }, worker: { digest: `sha256:${hex("3")}` } } };
+  return { data: { run, workflow, jobs, approvals, artifact, receipt, toolingTrusted: true }, expected };
 }
-for (const role of ["candidate", "recovery"]) test(`accepts exact approved ${role} image pair without trusting its branch name`, () => {
+for (const role of ["candidate", "recovery"]) test(`accepts exact approved ${role} image pair from the protected-main producer`, () => {
   const { data, expected } = fixture(role);
   const value = validateHotfixBuildEvidence(data, expected);
   assert.equal(value.kind, "selfserve-hotfix-build-proof");
@@ -55,7 +61,7 @@ const rejected = [
   ["other receipt source", (d) => { d.receipt.sourceSha = sha("9"); }],
   ["mutable image tag", (d) => { d.receipt.images.worker.digest = "latest"; }],
   ["extra receipt authority", (d) => { d.receipt.targetId = "another-target"; }],
-  ["modified publisher workflow", (d) => { d.workflowUnchanged = false; }],
+  ["untrusted producer tooling", (d) => { d.toolingTrusted = false; }],
 ];
 for (const [name, change] of rejected) test(`rejects ${name}`, () => {
   const { data, expected } = fixture(); change(data, expected);
@@ -153,8 +159,15 @@ test("fetches the exact run attempt and digest-bound archive without forwarding 
     git("add", "."); git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "candidate");
     const candidate = git("rev-parse", "HEAD");
     const { data, expected } = fixture(); expected.baseSha = expected.recoverySha = base; expected.candidateSha = candidate;
-    data.run.head_sha = data.jobs[0].head_sha = data.artifact.workflow_run.head_sha = data.receipt.sourceSha = candidate;
-    const archive = zip({ "release-image-digests.json": data.receipt }); data.artifact.digest = digest(archive);
+    const manifest = "fixture admitted candidate\n";
+    await writeFile(join(directory, ".github/selfserve-switcher-hotfix.json"), manifest);
+    git("add", "."); git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "trusted tooling");
+    const tooling = git("rev-parse", "HEAD"); git("update-ref", "refs/remotes/origin/main", tooling);
+    expected.toolingSha = tooling; expected.manifestSha256 = createHash("sha256").update(manifest).digest("hex");
+    data.run.head_sha = data.jobs[0].head_sha = data.artifact.workflow_run.head_sha = tooling;
+    data.receipt.sourceSha = candidate; data.receipt.toolingSha = tooling;
+    Object.assign(data.receipt.source, { sourceSha: candidate, toolingSha: tooling, recoverySha: base, manifestSha256: expected.manifestSha256 });
+    let archive = zip({ "release-image-digests.json": data.receipt }); data.artifact.digest = digest(archive);
     const calls = [];
     const fetchImpl = async (url, options) => {
       calls.push({ url, options });
@@ -178,6 +191,13 @@ test("fetches the exact run attempt and digest-bound archive without forwarding 
       ? new Response(null, { status: 302, headers: { location: "https://attacker.invalid/archive" } }) : fetchImpl(url, options);
     await assert.rejects(verifyHotfixBuildEvidence({ runId: 123, runAttempt: 1, artifactId: 456, expected,
       sourceRoot: directory, toolingRoot: directory, token: "fixture-token", fetchImpl: badDownload }), /DOWNLOAD_HOST_INVALID/);
+    await assert.rejects(verifyHotfixBuildEvidence({ runId: 123, runAttempt: 1, artifactId: 456,
+      expected: { ...expected, manifestSha256: hex("0") }, toolingRoot: directory,
+      token: "fixture-token", fetchImpl }), /TOOLING_UNTRUSTED/);
+    archive = zip({ "release-image-digests.json": { schemaVersion: 1, sourceSha: candidate, images: data.receipt.images } });
+    data.artifact.digest = digest(archive);
+    await assert.rejects(verifyHotfixBuildEvidence({ runId: 123, runAttempt: 1, artifactId: 456, expected,
+      sourceRoot: directory, toolingRoot: directory, token: "fixture-token", fetchImpl }), /PRODUCER_VERSION_INVALID/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -265,7 +285,17 @@ for (const [name, change] of [
   const { data, expected } = protectedBuildFixture(true); change(data);
   assert.throws(() => validateHotfixBuildEvidence(data, expected), /HOTFIX_/);
 });
-test("Ops cannot fall back to a legacy publisher artifact", () => {
-  const { data, expected } = fixture(); Object.assign(expected, validateHotfixTarget(opsProofFixture().expected, opsProofFixture().expected));
-  assert.throws(() => validateHotfixBuildEvidence(data, expected), /LEGACY_ADMISSION_FORBIDDEN/);
+for (const ops of [false, true]) test(`${ops ? "Ops" : "selfserve"} cannot fall back to a legacy publisher artifact`, () => {
+  const { data, expected } = protectedBuildFixture(ops);
+  data.receipt = { schemaVersion: 1, sourceSha: expected.candidateSha, images: data.receipt.images };
+  // Even an unchanged publisher blob and branch approval cannot authorize v1.
+  data.workflowUnchanged = true;
+  assert.throws(() => validateHotfixBuildEvidence(data, expected), /PRODUCER_VERSION_INVALID/);
+});
+for (const ops of [false, true]) test(`${ops ? "Ops" : "selfserve"} rejects candidate-headed producer`, () => {
+  const { data, expected } = protectedBuildFixture(ops);
+  data.run.head_sha = data.jobs[0].head_sha = data.artifact.workflow_run.head_sha = expected.candidateSha;
+  data.run.head_branch = data.artifact.workflow_run.head_branch = "candidate-branch";
+  data.receipt.toolingSha = data.receipt.source.toolingSha = expected.candidateSha;
+  assert.throws(() => validateHotfixBuildEvidence(data, expected), /TOOLING_UNTRUSTED/);
 });

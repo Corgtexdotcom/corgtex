@@ -79,30 +79,23 @@ function validateExpected(expected) {
     && HEX.test(expected.schemaSha256) && id(expected.runId) && id(expected.runAttempt)
     && id(expected.artifactId) && ["candidate", "recovery"].includes(expected.sourceRole), "HOTFIX_BUILD_EXPECTATION_INVALID");
 }
-export function validateHotfixBuildEvidence({ run, workflow, jobs, approvals, artifact, receipt, workflowUnchanged, toolingTrusted }, expected) {
+export function validateHotfixBuildEvidence({ run, workflow, jobs, approvals, artifact, receipt, toolingTrusted }, expected) {
   validateExpected(expected);
   const sourceSha = expected.sourceRole === "candidate" ? expected.candidateSha : expected.recoverySha;
-  const protectedProducer = receipt?.schemaVersion === 2;
-  validateRun(run, workflow, jobs, approvals, expected, "Build and publish web/worker images", protectedProducer ? run?.head_sha : sourceSha);
-  if (protectedProducer) {
-    requireEvidence(toolingTrusted === true && run.head_branch === "main" && SHA.test(run.head_sha), "HOTFIX_BUILD_TOOLING_UNTRUSTED");
-    const source = receipt.source;
-    requireEvidence(exactKeys(receipt, ["schemaVersion", "mode", "admissionId", "sourceRole", "sourceSha", "toolingSha", "runId", "runAttempt", "source", "images"])
-      && receipt.mode === "candidate-build" && receipt.admissionId === evidenceTarget(expected).admissionId
-      && receipt.sourceRole === expected.sourceRole && receipt.sourceSha === sourceSha
-      && receipt.toolingSha === run.head_sha && receipt.runId === expected.runId && receipt.runAttempt === expected.runAttempt
-      && source?.schemaVersion === 1 && source.admission === "hotfix" && source.repository === REPOSITORY
-      && source.sourceSha === expected.candidateSha && source.sourceTree === expected.candidateTree
-      && source.toolingSha === run.head_sha && source.manifestSha256 === expected.manifestSha256
-      && source.schemaSha256 === expected.schemaSha256 && source.recoverySha === expected.recoverySha
-      && SHA.test(expected.prismaTree || "") && source.prismaTree === expected.prismaTree
-      && sameTarget(source, expected), "HOTFIX_BUILD_BINDING_MISMATCH");
-  } else {
-    requireEvidence(evidenceTarget(expected).admissionId === "selfserve-switcher", "HOTFIX_BUILD_LEGACY_ADMISSION_FORBIDDEN");
-    requireEvidence(workflowUnchanged === true, "HOTFIX_BUILD_WORKFLOW_CHANGED");
-    requireEvidence(exactKeys(receipt, ["schemaVersion", "sourceSha", "images"])
-      && receipt.schemaVersion === 1 && receipt.sourceSha === sourceSha, "HOTFIX_BUILD_BINDING_MISMATCH");
-  }
+  requireEvidence(receipt?.schemaVersion === 2, "HOTFIX_BUILD_PRODUCER_VERSION_INVALID");
+  validateRun(run, workflow, jobs, approvals, expected, "Build and publish web/worker images", run?.head_sha);
+  requireEvidence(toolingTrusted === true && run.head_branch === "main" && SHA.test(run.head_sha), "HOTFIX_BUILD_TOOLING_UNTRUSTED");
+  const source = receipt.source;
+  requireEvidence(exactKeys(receipt, ["schemaVersion", "mode", "admissionId", "sourceRole", "sourceSha", "toolingSha", "runId", "runAttempt", "source", "images"])
+    && receipt.mode === "candidate-build" && receipt.admissionId === evidenceTarget(expected).admissionId
+    && receipt.sourceRole === expected.sourceRole && receipt.sourceSha === sourceSha
+    && receipt.toolingSha === run.head_sha && receipt.runId === expected.runId && receipt.runAttempt === expected.runAttempt
+    && source?.schemaVersion === 1 && source.admission === "hotfix" && source.repository === REPOSITORY
+    && source.sourceSha === expected.candidateSha && source.sourceTree === expected.candidateTree
+    && source.toolingSha === run.head_sha && source.manifestSha256 === expected.manifestSha256
+    && source.schemaSha256 === expected.schemaSha256 && source.recoverySha === expected.recoverySha
+    && SHA.test(expected.prismaTree || "") && source.prismaTree === expected.prismaTree
+    && sameTarget(source, expected), "HOTFIX_BUILD_BINDING_MISMATCH");
   validateArtifact(artifact, run, expected, `release-image-digests-${expected.runId}-${expected.runAttempt}`);
   requireEvidence(exactKeys(receipt.images, ["web", "worker"])
     && ["web", "worker"].every((role) => exactKeys(receipt.images[role], ["digest"])
@@ -264,23 +257,15 @@ const git = (root, args) => execFileSync("git", ["-C", root, ...args],
 export async function verifyHotfixBuildEvidence(options) {
   const expected = { ...options.expected, sourceRole: options.sourceRole || options.expected.sourceRole, runId: options.runId, runAttempt: options.runAttempt, artifactId: options.artifactId };
   const data = await fetchHotfixEvidence(options, ["release-image-digests.json"]);
-  const sourceSha = expected.sourceRole === "candidate" ? expected.candidateSha : expected.recoverySha;
   const receipt = data.files["release-image-digests.json"];
-  if (receipt?.schemaVersion === 2) {
-    try {
-      requireEvidence(SHA.test(data.run.head_sha || ""), "HOTFIX_BUILD_TOOLING_UNTRUSTED");
-      git(options.toolingRoot || ROOT, ["merge-base", "--is-ancestor", data.run.head_sha, "origin/main"]);
-      requireEvidence(hash(Buffer.from(git(options.toolingRoot || ROOT, ["show", `${data.run.head_sha}:${hotfixEvidenceManifestPath(expected.admissionId)}`]))) === expected.manifestSha256,
-        "HOTFIX_BUILD_ADMISSION_CHANGED");
-    } catch { throw new Error("HOTFIX_BUILD_TOOLING_UNTRUSTED"); }
-    return validateHotfixBuildEvidence({ ...data, receipt, toolingTrusted: true }, expected);
-  }
-  let workflowUnchanged = false;
+  requireEvidence(receipt?.schemaVersion === 2, "HOTFIX_BUILD_PRODUCER_VERSION_INVALID");
   try {
-    workflowUnchanged = SHA.test(sourceSha) && SHA.test(expected.baseSha)
-      && git(options.sourceRoot || options.toolingRoot || ROOT, ["show", `${sourceSha}:${WORKFLOW}`]) === git(options.toolingRoot || ROOT, ["show", `${expected.baseSha}:${WORKFLOW}`]);
-  } catch { throw new Error("HOTFIX_BUILD_WORKFLOW_CHANGED"); }
-  return validateHotfixBuildEvidence({ ...data, receipt: data.files["release-image-digests.json"], workflowUnchanged }, expected);
+    requireEvidence(SHA.test(data.run.head_sha || ""), "HOTFIX_BUILD_TOOLING_UNTRUSTED");
+    git(options.toolingRoot || ROOT, ["merge-base", "--is-ancestor", data.run.head_sha, "origin/main"]);
+    requireEvidence(hash(Buffer.from(git(options.toolingRoot || ROOT, ["show", `${data.run.head_sha}:${hotfixEvidenceManifestPath(expected.admissionId)}`]))) === expected.manifestSha256,
+      "HOTFIX_BUILD_ADMISSION_CHANGED");
+  } catch { throw new Error("HOTFIX_BUILD_TOOLING_UNTRUSTED"); }
+  return validateHotfixBuildEvidence({ ...data, receipt, toolingTrusted: true }, expected);
 }
 
 export async function verifyHotfixProofEvidence(options) {
