@@ -31,7 +31,7 @@ jobs:
     timeout-minutes: 60
     env:
       HOTFIX_ADMISSION_ID: ${{ matrix.admissionId }}
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_ci?schema=public
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_test?schema=public
       SHADOW_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres?schema=public
       ADMIN_EMAIL: system+corgtex@corgtex.local
       ADMIN_PASSWORD: corgtex-test-agent-pw
@@ -57,7 +57,7 @@ jobs:
       - name: Prepare verified isolated PostgreSQL fixture
         uses: ./.github/actions/ci-pgvector
         with:
-          database: corgtex_ci
+          database: corgtex_test
       - run: npm ci
         working-directory: .hotfix-source
       - run: npx prisma generate

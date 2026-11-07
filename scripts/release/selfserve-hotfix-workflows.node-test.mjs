@@ -19,7 +19,7 @@ test("required CI includes exact candidate checks with no production environment
   assert.ok(steps.some((s) => s.run?.includes("WorkspaceSwitcher.browser.test.ts")));
   assert.equal(candidate.jobs.candidate["runs-on"], "ubuntu-24.04");
   const database = steps.find((s) => s.uses?.includes("ci-pgvector")).with.database;
-  assert.equal(database, "corgtex_ci");
+  assert.equal(database, "corgtex_test");
   assert.equal(new URL(candidate.jobs.candidate.env.DATABASE_URL).pathname, `/${database}`);
 });
 test("startup proof preserves schema ancestry and binds the exact candidate exception", () => {
