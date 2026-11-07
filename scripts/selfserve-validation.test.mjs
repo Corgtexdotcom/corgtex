@@ -280,7 +280,7 @@ describe("workflow and fixture secret isolation", () => {
     const isolated = validation.jobs["selfserve-isolated"];
     expect(isolated.environment).toBeUndefined();
     expect(JSON.stringify(isolated).match(/secrets\.[A-Za-z_]+/g)).toEqual(["secrets.GITHUB_TOKEN"]);
-    expect(isolated.permissions).toEqual({ contents: "read", packages: "read" });
+    expect(isolated.permissions).toEqual({ actions: "read", contents: "read", packages: "read" });
     expect(ci.jobs["smoke-selfserve"].permissions.packages).toBe("read");
     expect(isolated.env.SELFSERVE_IMAGE_READ_TOKEN).toBeUndefined();
     const tokenSteps = isolated.steps.filter((step) => step.env?.SELFSERVE_IMAGE_READ_TOKEN);
