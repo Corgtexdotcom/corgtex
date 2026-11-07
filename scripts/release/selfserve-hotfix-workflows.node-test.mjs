@@ -8,6 +8,7 @@ const runs = (job) => job.steps.map((step) => step.run || "").join("\n");
 test("required CI includes exact candidate checks with no production environment or secrets", () => {
   const ci = workflow("ci"), candidate = workflow("selfserve-hotfix-check");
   assert.ok(ci.jobs.check.needs.includes("hotfix-candidate"));
+  assert.match(runs(ci.jobs["check-native"]), /node --test scripts\/release\/\*hotfix\*\.node-test\.mjs/);
   assert.match(runs(ci.jobs.check), /test "\$HOTFIX_RESULT" = success/);
   assert.equal(candidate.jobs.candidate.environment, undefined);
   assert.deepEqual(candidate.permissions, { contents: "read" });
