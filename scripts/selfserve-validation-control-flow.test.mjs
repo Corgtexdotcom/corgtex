@@ -68,6 +68,7 @@ describe("executed observation shell requires fresh baked health before manifest
       curl() { printf "%s" "$HEALTH"; ${httpFailure ? "return 22" : "return 0"}; }
       node() {
         if [[ "$1" == "scripts/post-deploy-observation-gate.mjs" ]]; then printf "%s\\n" "$@";
+        elif [[ "$1" == "scripts/ops-public-health.mjs" ]]; then printf "%s\\n" "$GITHUB_SHA" "sha-$GITHUB_SHA" "main-\${GITHUB_SHA:0:12}";
         else command node "$@"; fi
       }
       ${script}`], { encoding: "utf8", env: { PATH: process.env.PATH, HEALTH: JSON.stringify(payload),

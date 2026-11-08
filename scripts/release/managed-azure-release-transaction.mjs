@@ -1,6 +1,8 @@
 import { isSelfserveReleaseHost, SELFSERVE_RELEASE_HOST_ID, SELFSERVE_RELEASE_ORIGIN, SELFSERVE_RELEASE_PROFILE } from "./managed-azure-selfserve-profile.mjs";
 import { createManagedAzureExclusiveActivation, snapshotManagedAzureExclusiveActivation } from "./managed-azure-exclusive-activation.mjs";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { assertHotfixResolvedImages } from "./selfserve-hotfix-gate.mjs";
 import { spawn as nodeSpawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
@@ -721,6 +723,8 @@ async function callControlPlane(name, args, env, fetchImpl = fetch) {
 }
 
 function runtimeDependencies(env = process.env) {
+  const hotfixProof = env.MANAGED_HOTFIX_PROOF_FILE
+    ? JSON.parse(readFileSync(env.MANAGED_HOTFIX_PROOF_FILE, "utf8")) : null;
   const spawn = createSpawn();
   const sourceResolver = createManagedAzureSourceManifestResolver({ spawn });
   const provider = createManagedAzureProviderObservation({ spawn, clock: Date.now });
@@ -828,6 +832,7 @@ function runtimeDependencies(env = process.env) {
           image: `${target.acrServer}/${requests[role].binding.destinationRepository}@${requests[role].binding.sourceDigest}`,
           destinationState: compared.state === "MATCH" ? "MATCH" : "ABSENT" };
       }
+      if (hotfixProof) assertHotfixResolvedImages(hotfixProof, { gitSha, deploymentId, roles });
       return { intent, roles };
     },
     verifyImport: async (rolePlan) => {

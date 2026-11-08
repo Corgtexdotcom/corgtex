@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "repository": "Corgtexdotcom/corgtex",
+  "targetId": "e0d34b24-bd86-4cb2-8ccb-f2f84309ca16",
+  "origin": "https://selfserve.corgtex.com",
+  "baseSha": "eb423aca0618638cf7cd742dcb84397c492ba09b",
+  "candidateSha": "adbb1c463b97dfa41a015a3848ba4de94e7967e5",
+  "candidateTree": "e505e18db415215f779f94975d72359f73382238",
+  "diffSha256": "45e7039fd62ae3ae8e67daae8edb6f4c2ad99105ba6d793c947fa76675201241",
+  "prismaTree": "568ef97fdcce436dc5db30e1eff9e404b64c69d9",
+  "recoverySha": "eb423aca0618638cf7cd742dcb84397c492ba09b",
+  "changedFiles": [
+    {
+      "path": "apps/web/app/[locale]/workspaces/[workspaceId]/MobileWorkspaceShell.tsx",
+      "baseMode": "100644",
+      "baseBlob": "bd5d6d6a52443da19938aca6a999dd0da69b332f",
+      "candidateMode": "100644",
+      "candidateBlob": "f1e7c033043897dc1d140bb84d0d3fba4641293c"
+    },
+    {
+      "path": "apps/web/app/[locale]/workspaces/[workspaceId]/WorkspaceSwitcher.browser.test.ts",
+      "baseMode": null,
+      "baseBlob": null,
+      "candidateMode": "100644",
+      "candidateBlob": "d3fade61aaaf87224ede5c42628f66d03fdec8d8"
+    },
+    {
+      "path": "apps/web/app/[locale]/workspaces/[workspaceId]/WorkspaceSwitcher.test.ts",
+      "baseMode": null,
+      "baseBlob": null,
+      "candidateMode": "100644",
+      "candidateBlob": "3fb79569d78e796bc37aa97449778d25a460f36e"
+    },
+    {
+      "path": "apps/web/app/[locale]/workspaces/[workspaceId]/WorkspaceSwitcher.tsx",
+      "baseMode": null,
+      "baseBlob": null,
+      "candidateMode": "100644",
+      "candidateBlob": "2c0e33cda08157cd499d59b0fb652d749412b2b5"
+    },
+    {
+      "path": "apps/web/app/[locale]/workspaces/[workspaceId]/layout.tsx",
+      "baseMode": "100644",
+      "baseBlob": "8e76813ad8523db7cf94361c9e38057ffdd9a958",
+      "candidateMode": "100644",
+      "candidateBlob": "d574f6d8ef2287ef9fd307248740a09c28a6bff3"
+    },
+    {
+      "path": "apps/web/app/[locale]/workspaces/[workspaceId]/workspace-switcher-access.test.ts",
+      "baseMode": null,
+      "baseBlob": null,
+      "candidateMode": "100644",
+      "candidateBlob": "c076501de8d9e6eac585c56b3344f22cec85a05c"
+    },
+    {
+      "path": "apps/web/app/[locale]/workspaces/[workspaceId]/workspace-switcher-access.ts",
+      "baseMode": null,
+      "baseBlob": null,
+      "candidateMode": "100644",
+      "candidateBlob": "568af98d2b2b98dea12bdce0b7b2573e8a93045b"
+    },
+    {
+      "path": "apps/web/app/[locale]/workspaces/[workspaceId]/workspace-switcher-model.test.ts",
+      "baseMode": null,
+      "baseBlob": null,
+      "candidateMode": "100644",
+      "candidateBlob": "ef8288ce2401af639bd5cf2942f44bce7026926b"
+    },
+    {
+      "path": "apps/web/app/[locale]/workspaces/[workspaceId]/workspace-switcher-model.ts",
+      "baseMode": null,
+      "baseBlob": null,
+      "candidateMode": "100644",
+      "candidateBlob": "0920853d2c4ee253fdce94a4bdd72560bd22e923"
+    },
+    {
+      "path": "apps/web/app/globals.css",
+      "baseMode": "100644",
+      "baseBlob": "c3130539c04c780f9b1de20a235b4eedec92ecce",
+      "candidateMode": "100644",
+      "candidateBlob": "f7fc4e7481a700d66b3eb2d744c6f9790fd36147"
+    },
+    {
+      "path": "apps/web/lib/components/Dialog.tsx",
+      "baseMode": "100644",
+      "baseBlob": "3393a457c2e02b83d4932a2c0f1dd77f8e991a7d",
+      "candidateMode": "100644",
+      "candidateBlob": "740313457f4203e615d913ef0da8abc67663eec4"
+    },
+    {
+      "path": "apps/web/lib/components/ui/ActionMenu.tsx",
+      "baseMode": "100644",
+      "baseBlob": "eb024fd437e896f2290d04ab769afa023bf92c1e",
+      "candidateMode": "100644",
+      "candidateBlob": "435478fdcbbaf8146052f457776aededaac85297"
+    },
+    {
+      "path": "apps/web/messages/en.json",
+      "baseMode": "100644",
+      "baseBlob": "245982304e6dc15682c58472b6972aa48520e69c",
+      "candidateMode": "100644",
+      "candidateBlob": "8959dd000ef1498b344541485eacacc565a818d7"
+    },
+    {
+      "path": "apps/web/messages/es.json",
+      "baseMode": "100644",
+      "baseBlob": "2a85f3de066d615cbdda7bd721a2cc717bc1f457",
+      "candidateMode": "100644",
+      "candidateBlob": "578a38e0d09591ede399280a3036442b2503a8ba"
+    },
+    {
+      "path": "scripts/client-readiness-smoke.mjs",
+      "baseMode": "100644",
+      "baseBlob": "430758e4e4fd6e2b2248378cb4b0a498406a82a3",
+      "candidateMode": "100644",
+      "candidateBlob": "b51c84e0a6fbd6927d3d5dd6e438b8a18cb3e0b8"
+    },
+    {
+      "path": "scripts/client-readiness-smoke.test.mjs",
+      "baseMode": "100644",
+      "baseBlob": "7e16495c8da9ace7bf4ccc3d12070a2f9c210c72",
+      "candidateMode": "100644",
+      "candidateBlob": "3843031f9e7c06515f0759e4158510b5fd09bd15"
+    }
+  ]
+}

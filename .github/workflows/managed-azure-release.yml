@@ -3,6 +3,10 @@ name: Managed Azure Single-Target Release
 on:
   workflow_dispatch:
     inputs:
+      hotfix_evidence:
+        description: Exact candidate/recovery build and startup-proof run, attempt and artifact IDs; required only for the admitted hotfix
+        required: false
+        type: string
       inventory_ref:
         description: Immutable private Ops inventory asset ID
         required: true
@@ -46,6 +50,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
   id-token: write
   packages: read
@@ -65,9 +70,24 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@v5
         with:
           node-version: 22.22.0
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.release_sha }}
+          path: .release-source
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify source and exact hotfix build/recovery proofs before provider access
+        env:
+          HOTFIX_SOURCE_ROOT: .release-source
+          HOTFIX_SOURCE_SHA: ${{ inputs.release_sha }}
+          HOTFIX_TARGET_ID: ${{ inputs.deployment_id }}
+          HOTFIX_EVIDENCE: ${{ inputs.hotfix_evidence }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/release/selfserve-hotfix-gate.mjs release
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -115,9 +135,24 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@v5
         with:
           node-version: 22.22.0
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.release_sha }}
+          path: .release-source
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify source and exact hotfix build/recovery proofs before provider access
+        env:
+          HOTFIX_SOURCE_ROOT: .release-source
+          HOTFIX_SOURCE_SHA: ${{ inputs.release_sha }}
+          HOTFIX_TARGET_ID: ${{ inputs.deployment_id }}
+          HOTFIX_EVIDENCE: ${{ inputs.hotfix_evidence }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/release/selfserve-hotfix-gate.mjs release
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:

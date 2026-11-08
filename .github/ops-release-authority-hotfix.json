@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 2,
+  "repository": "Corgtexdotcom/corgtex",
+  "admissionId": "ops-release-authority",
+  "provider": "railway",
+  "targetId": "ops",
+  "deploymentId": null,
+  "origin": "https://ops.corgtex.com",
+  "railway": {
+    "projectId": "42d177e6-0f16-4878-9fb3-f65e6153ad2c",
+    "environmentId": "30b16f74-9443-4184-99cc-73ca595ebb3a",
+    "webServiceId": "e5d5f0a2-ef73-459b-b7ea-1ed6c3a5dd00",
+    "workerServiceId": "0da713c9-d148-4cee-b3dd-1ad6ea0afc80"
+  },
+  "baseSha": "1d3d49961ee85e8f37d8cc4fdf17c86d6aebd1bb",
+  "candidateSha": "e660f4e41229c2b8e419543de1fcfe6500cb3392",
+  "candidateTree": "9bdf38917f7ddad46fa2b0c2fcca67dcc37d472b",
+  "diffSha256": "832ecf16bd3e8d49e31e66795e653f082cbea0a48687d1692385e7ebbdc7adf7",
+  "prismaTree": "c028c324fbb645e3c4bfcd9b20da75f9de96c663",
+  "recoverySha": "1d3d49961ee85e8f37d8cc4fdf17c86d6aebd1bb",
+  "changedFiles": [
+    {
+      "path": "packages/domain/src/control-plane-release-lease.integration.test.ts",
+      "baseMode": "100644",
+      "baseBlob": "f06ffbb4f7aad35e16648f5216c66226a96243b9",
+      "candidateMode": "100644",
+      "candidateBlob": "90177f8adbbca41689c7291a08715c82a3e31fc6"
+    },
+    {
+      "path": "packages/domain/src/control-plane-release-lease.ts",
+      "baseMode": "100644",
+      "baseBlob": "848383650dad5e2d743f76091b4e927fe469eec9",
+      "candidateMode": "100644",
+      "candidateBlob": "6ebf5b04a3a082ce20f8a099e064a6f5429e4b84"
+    },
+    {
+      "path": "packages/domain/src/control-plane.test.ts",
+      "baseMode": "100644",
+      "baseBlob": "5b8051f22f89c2cf84f02cb1e96200c33e791448",
+      "candidateMode": "100644",
+      "candidateBlob": "e53a0b2d4b25038de6271a7b4d6c62de035aead9"
+    },
+    {
+      "path": "packages/domain/src/control-plane.ts",
+      "baseMode": "100644",
+      "baseBlob": "fe3a8db3449598eb5831f2bc486c8200ef3cc704",
+      "candidateMode": "100644",
+      "candidateBlob": "fe0902a74e5ff7819849b749aa6dd9fa8a078314"
+    },
+    {
+      "path": "packages/domain/src/managed-azure-targets.test.ts",
+      "baseMode": "100644",
+      "baseBlob": "025f0e405b826dfc8ef09284a05513dd0594237f",
+      "candidateMode": "100644",
+      "candidateBlob": "9290e2daf83c9e47d02f10e0f9a8c5323a9d168a"
+    },
+    {
+      "path": "packages/domain/src/managed-azure-targets.ts",
+      "baseMode": "100644",
+      "baseBlob": "09388b570c3845a4a362545dff2e15d39a923d5f",
+      "candidateMode": "100644",
+      "candidateBlob": "40afd4610d0f2eeb2a6a984f6f955e0c91a1c2e1"
+    },
+    {
+      "path": "scripts/azure-selfserve-production-release.mjs",
+      "baseMode": "100755",
+      "baseBlob": "8b1b6d60487ddd1c238425ead2d16b189c4f7cc5",
+      "candidateMode": "100755",
+      "candidateBlob": "8474d38cf1c1d2027ea44a1a7ba402612b4a7d98"
+    },
+    {
+      "path": "scripts/release/fleet-release-runner.mjs",
+      "baseMode": "100644",
+      "baseBlob": "486acb0c8abb1e5bb8d1f89cfd88e49070723045",
+      "candidateMode": "100644",
+      "candidateBlob": "776ba0df1eac52ba186de506d77ca4a36251fa30"
+    },
+    {
+      "path": "scripts/release/fleet-release-runner.test.mjs",
+      "baseMode": "100644",
+      "baseBlob": "21ac338a10a9bedf9fb76f7fc5781f49a06cba0f",
+      "candidateMode": "100644",
+      "candidateBlob": "cd377e2d4f7af6136355ed0a12b60d01ceca35bd"
+    },
+    {
+      "path": "scripts/release/managed-azure-release-recovery.mjs",
+      "baseMode": "100644",
+      "baseBlob": "7d14f38c0c8a25f275db15763dd6791b784f90a2",
+      "candidateMode": "100644",
+      "candidateBlob": "d943eee308cbb3fb897434c265f6ef797d2a125b"
+    },
+    {
+      "path": "scripts/release/managed-azure-release-recovery.test.mjs",
+      "baseMode": "100644",
+      "baseBlob": "0f3a5f5eda7a0400265a177976eca8391a9610c7",
+      "candidateMode": "100644",
+      "candidateBlob": "3be3f356bffdda6b53b99bcc69ee83768064ab9c"
+    },
+    {
+      "path": "scripts/release/managed-azure-release-transaction.mjs",
+      "baseMode": "100644",
+      "baseBlob": "7ea5787e0af2c3fac3ca3e19bea831adab429405",
+      "candidateMode": "100644",
+      "candidateBlob": "6ceba49e041cc1e8954fdc362f5350b4d34d0e16"
+    },
+    {
+      "path": "scripts/release/managed-azure-release-transaction.test.mjs",
+      "baseMode": "100644",
+      "baseBlob": "cc5392230f4ee84a9cd310ad114ef2755bdacb70",
+      "candidateMode": "100644",
+      "candidateBlob": "71a4084de11f38d02fb8337e04e18f64f0bd418a"
+    },
+    {
+      "path": "scripts/release/managed-azure-selfserve-profile.mjs",
+      "baseMode": null,
+      "baseBlob": null,
+      "candidateMode": "100644",
+      "candidateBlob": "227d68d5697b5542ed3e927892370f8bea2f75a4"
+    },
+    {
+      "path": "scripts/release/managed-azure-selfserve-profile.test.mjs",
+      "baseMode": null,
+      "baseBlob": null,
+      "candidateMode": "100644",
+      "candidateBlob": "b9ba3e615498a46e078de5268d69cb786f3eff57"
+    }
+  ]
+}

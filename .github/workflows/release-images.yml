@@ -8,6 +8,16 @@ on:
         type: choice
         options: [build, proof]
         default: build
+      candidate_admission:
+        description: Optional exact admitted candidate build lane (also selects the bound hotfix proof lane)
+        type: choice
+        options: ["", selfserve-switcher, ops-release-authority]
+        default: ""
+      candidate_source_role:
+        description: Candidate or recovery source pinned by the selected admission (never an arbitrary SHA)
+        type: choice
+        options: [candidate, recovery]
+        default: candidate
       proof_source_sha:
         description: Full recovery image source SHA (proof mode only)
         type: string
@@ -20,6 +30,11 @@ on:
       proof_schema_sha:
         description: Full candidate schema source SHA on main ancestry (proof mode only)
         type: string
+      hotfix_evidence:
+        description: Exact build run, attempt and artifact JSON for the admitted switcher candidate or recovery proof
+        type: string
+        required: false
+        default: ""
   push:
     tags:
       - "v*"
@@ -29,14 +44,98 @@ permissions:
   packages: write
 
 jobs:
+  admission:
+    if: inputs.mode != 'proof'
+    name: Admit exact source before protected publishing
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      candidate_mode: ${{ steps.select.outputs.candidate_mode }}
+      source_sha: ${{ steps.select.outputs.source_sha }}
+      candidate_sha: ${{ steps.select.outputs.candidate_sha }}
+      source_role: ${{ steps.select.outputs.source_role }}
+      source_receipt: ${{ steps.verify.outputs.source_receipt }}
+    env:
+      CANDIDATE_ADMISSION: ${{ inputs.candidate_admission || '' }}
+      CANDIDATE_SOURCE_ROLE: ${{ inputs.candidate_source_role || 'candidate' }}
+      RELEASE_IMAGE_MODE: ${{ inputs.mode || 'build' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.22.0
+      - name: Select ordinary source or one fixed admitted source
+        id: select
+        shell: bash
+        run: |
+          if [[ -z "$CANDIDATE_ADMISSION" ]]; then
+            [[ "$GITHUB_SHA" =~ ^[a-f0-9]{40}$ ]]
+            printf 'candidate_mode=false\nsource_sha=%s\ncandidate_sha=\nsource_role=\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          else
+            node scripts/release/hotfix-candidate-build.mjs select
+          fi
+      - uses: actions/checkout@v5
+        if: steps.select.outputs.candidate_mode == 'true'
+        with:
+          ref: ${{ steps.select.outputs.candidate_sha }}
+          path: .admission-candidate
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify full candidate admission before any publishing authority
+        if: steps.select.outputs.candidate_mode == 'true'
+        id: verify
+        env:
+          PINNED_SOURCE_SHA: ${{ steps.select.outputs.source_sha }}
+          PINNED_CANDIDATE_SHA: ${{ steps.select.outputs.candidate_sha }}
+          CANDIDATE_SOURCE_ROOT: .admission-candidate
+        run: node scripts/release/hotfix-candidate-build.mjs verify
+
   publish:
+    needs: admission
     if: inputs.mode != 'proof'
     name: Build and publish web/worker images
     runs-on: ubuntu-latest
     environment: fleet-release-production
-
+    env:
+      CANDIDATE_ADMISSION: ${{ inputs.candidate_admission || '' }}
+      CANDIDATE_SOURCE_ROLE: ${{ inputs.candidate_source_role || 'candidate' }}
+      RELEASE_IMAGE_MODE: ${{ inputs.mode || 'build' }}
+      PINNED_SOURCE_SHA: ${{ needs.admission.outputs.source_sha }}
+      PINNED_CANDIDATE_SHA: ${{ needs.admission.outputs.candidate_sha }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        if: needs.admission.outputs.candidate_mode == 'true'
+        with:
+          node-version: 22.22.0
+      - uses: actions/checkout@v5
+        if: needs.admission.outputs.candidate_mode == 'true'
+        with:
+          ref: ${{ needs.admission.outputs.candidate_sha }}
+          path: .admission-candidate
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/checkout@v5
+        if: needs.admission.outputs.candidate_mode == 'true'
+        with:
+          ref: ${{ needs.admission.outputs.source_sha }}
+          path: .candidate-source
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Reverify pinned admission and selected build checkout
+        if: needs.admission.outputs.candidate_mode == 'true'
+        env:
+          CANDIDATE_SOURCE_ROOT: .admission-candidate
+          BUILD_SOURCE_ROOT: .candidate-source
+          ADMISSION_RECEIPT: ${{ needs.admission.outputs.source_receipt }}
+        run: node scripts/release/hotfix-candidate-build.mjs verify
 
       - uses: docker/setup-buildx-action@v3
 
@@ -50,14 +149,19 @@ jobs:
       - name: Compute image tags
         id: image
         shell: bash
+        env:
+          CANDIDATE_MODE: ${{ needs.admission.outputs.candidate_mode }}
         run: |
-          repo="ghcr.io/${GITHUB_REPOSITORY,,}"
-          sha_tag="sha-${GITHUB_SHA}"
-          version_tag="${GITHUB_REF_NAME//\//-}"
+          [[ "$PINNED_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          repo="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          sha_tag="sha-${PINNED_SOURCE_SHA}"
           echo "web_sha=${repo}/web:${sha_tag}" >> "$GITHUB_OUTPUT"
           echo "worker_sha=${repo}/worker:${sha_tag}" >> "$GITHUB_OUTPUT"
-          echo "web_version=${repo}/web:${version_tag}" >> "$GITHUB_OUTPUT"
-          echo "worker_version=${repo}/worker:${version_tag}" >> "$GITHUB_OUTPUT"
+          if [[ "$CANDIDATE_MODE" != true ]]; then
+            version_tag="${GITHUB_REF_NAME//\//-}"
+            echo "web_version=${repo}/web:${version_tag}" >> "$GITHUB_OUTPUT"
+            echo "worker_version=${repo}/worker:${version_tag}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Validate image release secrets
         shell: bash
@@ -74,11 +178,11 @@ jobs:
         id: web
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: deploy/Dockerfile.web
+          context: ${{ needs.admission.outputs.candidate_mode == 'true' && '.candidate-source' || '.' }}
+          file: ${{ needs.admission.outputs.candidate_mode == 'true' && '.candidate-source/deploy/Dockerfile.web' || 'deploy/Dockerfile.web' }}
           build-args: |
-            CORGTEX_RELEASE_GIT_SHA=${{ github.sha }}
-            GITHUB_SHA=${{ github.sha }}
+            CORGTEX_RELEASE_GIT_SHA=${{ needs.admission.outputs.source_sha }}
+            GITHUB_SHA=${{ needs.admission.outputs.source_sha }}
             REQUIRE_NEXT_SERVER_ACTIONS_KEY=true
           secrets: |
             next_server_actions_encryption_key=${{ secrets.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY }}
@@ -91,17 +195,18 @@ jobs:
         id: worker
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: deploy/Dockerfile.worker
+          context: ${{ needs.admission.outputs.candidate_mode == 'true' && '.candidate-source' || '.' }}
+          file: ${{ needs.admission.outputs.candidate_mode == 'true' && '.candidate-source/deploy/Dockerfile.worker' || 'deploy/Dockerfile.worker' }}
           build-args: |
-            CORGTEX_RELEASE_GIT_SHA=${{ github.sha }}
-            GITHUB_SHA=${{ github.sha }}
+            CORGTEX_RELEASE_GIT_SHA=${{ needs.admission.outputs.source_sha }}
+            GITHUB_SHA=${{ needs.admission.outputs.source_sha }}
           push: true
           tags: |
             ${{ steps.image.outputs.worker_sha }}
             ${{ steps.image.outputs.worker_version }}
 
       - name: Retain the exact pushed image digests
+        if: needs.admission.outputs.candidate_mode != 'true'
         shell: bash
         env:
           WEB_DIGEST: ${{ steps.web.outputs.digest }}
@@ -112,6 +217,12 @@ jobs:
           jq -n --arg sha "$GITHUB_SHA" --arg web "$WEB_DIGEST" --arg worker "$WORKER_DIGEST" \
             '{schemaVersion:1,sourceSha:$sha,images:{web:{digest:$web},worker:{digest:$worker}}}' \
             > "$RUNNER_TEMP/release-image-digests.json"
+      - name: Retain the admitted source and exact pushed image digests
+        if: needs.admission.outputs.candidate_mode == 'true'
+        env:
+          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+          WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
+        run: node scripts/release/hotfix-candidate-build.mjs receipt
       - uses: actions/upload-artifact@v4
         with:
           name: release-image-digests-${{ github.run_id }}-${{ github.run_attempt }}
@@ -125,6 +236,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: fleet-release-production
     permissions:
+      actions: read
       contents: read
       packages: read
     timeout-minutes: 20
@@ -133,9 +245,36 @@ jobs:
       IMAGE_PROOF_WEB_DIGEST: ${{ inputs.proof_web_digest }}
       IMAGE_PROOF_WORKER_DIGEST: ${{ inputs.proof_worker_digest }}
       IMAGE_PROOF_SCHEMA_SHA: ${{ inputs.proof_schema_sha }}
+      HOTFIX_ADMISSION_ID: ${{ inputs.candidate_admission || 'selfserve-switcher' }}
     steps:
       - uses: actions/checkout@v5
         with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require protected main for admitted hotfix proof
+        if: inputs.hotfix_evidence != ''
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REPOSITORY" = Corgtexdotcom/corgtex
+          test "$GITHUB_WORKFLOW_REF" = Corgtexdotcom/corgtex/.github/workflows/release-images.yml@refs/heads/main
+      - name: Read the fixed admitted candidate
+        if: inputs.hotfix_evidence != ''
+        id: hotfix
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, appendFileSync } from "node:fs";
+          import { hotfixAdmissionProfile } from "./scripts/release/selfserve-hotfix-source.mjs";
+          const profile = hotfixAdmissionProfile(process.env.HOTFIX_ADMISSION_ID);
+          const manifest = JSON.parse(readFileSync(profile.manifestPath, "utf8"));
+          if (!/^[a-f0-9]{40}$/.test(manifest.candidateSha || "")) throw new Error("HOTFIX_SOURCE_SHA_INVALID");
+          appendFileSync(process.env.GITHUB_OUTPUT, `sha=${manifest.candidateSha}\n`);
+          NODE
+      - uses: actions/checkout@v5
+        if: inputs.hotfix_evidence != ''
+        with:
+          ref: ${{ steps.hotfix.outputs.sha }}
+          path: .hotfix-source
           persist-credentials: false
           fetch-depth: 0
       - name: Validate closed immutable proof inputs
@@ -146,11 +285,20 @@ jobs:
           path: .candidate-schema
           persist-credentials: false
           fetch-depth: 0
-      - name: Require reviewed sources on main ancestry
+      - name: Require schema source on main ancestry
         run: |
-          git merge-base --is-ancestor "$IMAGE_PROOF_SOURCE_SHA" origin/main
           git -C .candidate-schema merge-base --is-ancestor HEAD origin/main
           test "$(git -C .candidate-schema rev-parse HEAD)" = "$IMAGE_PROOF_SCHEMA_SHA"
+      - name: Require ordinary image source on main ancestry
+        if: inputs.hotfix_evidence == ''
+        run: git merge-base --is-ancestor "$IMAGE_PROOF_SOURCE_SHA" origin/main
+      - name: Verify admitted source and exact protected build evidence
+        if: inputs.hotfix_evidence != ''
+        env:
+          HOTFIX_EVIDENCE: ${{ inputs.hotfix_evidence }}
+          HOTFIX_SOURCE_ROOT: .hotfix-source
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/release/selfserve-hotfix-gate.mjs proof
       - uses: actions/setup-node@v5
         with:
           node-version: 22.22.0
@@ -161,6 +309,9 @@ jobs:
         run: node scripts/release/image-startup-proof.mjs --prepare
       - name: Boot both normal entrypoints on isolated candidate schema
         run: node scripts/release/image-startup-proof.mjs
+      - name: Bind successful startup proof to admitted source and build evidence
+        if: inputs.hotfix_evidence != ''
+        run: node scripts/release/selfserve-hotfix-gate.mjs finish-proof
       - uses: actions/upload-artifact@v4
         if: always()
         with:
