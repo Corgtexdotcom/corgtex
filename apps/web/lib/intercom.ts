@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 
 import { env } from "@corgtex/shared";
 
-export const INTERCOM_MESSENGER_JWT_TTL_SECONDS = 10 * 60;
+const INTERCOM_MESSENGER_JWT_TTL_SECONDS = 10 * 60;
 
 export type IntercomJwtPayload = Record<string, unknown> & {
   user_id: string;

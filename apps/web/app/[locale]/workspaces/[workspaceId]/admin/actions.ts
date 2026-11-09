@@ -121,8 +121,6 @@ export async function adminResendAccessLinkAction(formData: FormData) {
   });
 
   refresh(workspaceId);
-  // We can't easily return { url } from a server action used in a form. 
-  // Let's rely on refresh and client-side code if needed. Actually Server Actions can return values if called directly.
   return { url: setupUrl };
 }
 

@@ -1,7 +1,7 @@
 type Search = Record<string, string | string[] | undefined>;
 
 /** Retain the entity route and every unrelated filter when changing advice windows. */
-export function adviceRequestWindowHref(path: string, search: Search, cursor: string | null) {
+function adviceRequestWindowHref(path: string, search: Search, cursor: string | null) {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(search)) {
     if (key === "adviceCursor") continue;
