@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { env } from "@corgtex/shared";
 
-export function controlPlaneModeUnavailableResponse() {
+function controlPlaneModeUnavailableResponse() {
   return NextResponse.json(
     {
       error: {

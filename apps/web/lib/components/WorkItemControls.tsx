@@ -46,7 +46,7 @@ export function WorkItemBadge({
   );
 }
 
-export function WorkItemBadgeGroup({
+function WorkItemBadgeGroup({
   children,
   className,
 }: {
@@ -140,7 +140,7 @@ export function WorkItemCard({
   );
 }
 
-export function WorkItemViewToggle({
+function WorkItemViewToggle({
   currentView,
   listHref,
   kanbanHref,

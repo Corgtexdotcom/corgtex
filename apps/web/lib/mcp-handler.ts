@@ -174,7 +174,7 @@ export async function DELETE() {
   }
 }
 
-export function assertBoundWorkspace(request: Request, body: unknown, workspaceId: string) {
+function assertBoundWorkspace(request: Request, body: unknown, workspaceId: string) {
   for (const header of ["x-workspace-id", "x-corgtex-workspace-id"]) {
     const value = request.headers.get(header);
     if (value && value !== workspaceId) throw new AppError(403, "MCP_WORKSPACE_SCOPE_REQUIRED", "Connection workspace mismatch.");

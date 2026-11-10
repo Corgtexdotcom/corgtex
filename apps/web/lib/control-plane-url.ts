@@ -5,10 +5,9 @@ import {
   type ControlPlaneLocale,
 } from "@/lib/control-plane-path";
 
-export const DEFAULT_CONTROL_PLANE_ORIGIN = "https://ops.corgtex.com";
-export const RAW_OPS_RAILWAY_HOST = "web-production-6a3ab.up.railway.app";
+const DEFAULT_CONTROL_PLANE_ORIGIN = "https://ops.corgtex.com";
 
-export function normalizeOrigin(value: string | null | undefined) {
+function normalizeOrigin(value: string | null | undefined) {
   if (!value) return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
@@ -21,7 +20,7 @@ export function normalizeOrigin(value: string | null | undefined) {
   }
 }
 
-export function configuredControlPlaneOrigin() {
+function configuredControlPlaneOrigin() {
   const configuredOrigin = normalizeOrigin(env.CONTROL_PLANE_URL);
   if (configuredOrigin) {
     return configuredOrigin;
@@ -34,7 +33,7 @@ export function configuredControlPlaneOrigin() {
   return env.NODE_ENV === "production" ? DEFAULT_CONTROL_PLANE_ORIGIN : null;
 }
 
-export function controlPlanePath(pathname = "/control-plane", locale: string | ControlPlaneLocale = "en") {
+function controlPlanePath(pathname = "/control-plane", locale: string | ControlPlaneLocale = "en") {
   return localizedControlPlanePath(pathname, normalizeControlPlaneLocale(locale));
 }
 

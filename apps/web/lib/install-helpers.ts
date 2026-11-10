@@ -161,7 +161,7 @@ export const OPENWORK_DOWNLOAD_URL = "https://openworklabs.com/download";
  */
 export const CLAUDE_INSTALLER_PATH = "/install/claude";
 export const CLAUDE_CODE_INSTALLER_PATH = "/install/claude-code";
-export const INSTALL_INDEX_PATH = "/install";
+const INSTALL_INDEX_PATH = "/install";
 
 export type InstallerProviderKey =
   | "openwork"

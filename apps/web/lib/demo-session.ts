@@ -63,7 +63,7 @@ function getRequestHeaderValue(request: NextRequest, headerName: string) {
   return value || null;
 }
 
-export function demoRedirectBaseUrl(request: NextRequest) {
+function demoRedirectBaseUrl(request: NextRequest) {
   const requestUrl = new URL(request.url);
   const host =
     getRequestHeaderValue(request, "x-forwarded-host") ||
