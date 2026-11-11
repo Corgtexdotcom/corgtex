@@ -32,7 +32,7 @@ const pending = new AsyncLocalStorage<{ actor: AppActor; tx: Db; receiptId: stri
 const RECOVERY_EVIDENCE_CANDIDATES = 5000;
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
-export const isLegacyRecoveryKind = (kind: unknown): kind is LegacyRecoveryKind => LEGACY_RECOVERY_KINDS.includes(kind as LegacyRecoveryKind);
+const isLegacyRecoveryKind = (kind: unknown): kind is LegacyRecoveryKind => LEGACY_RECOVERY_KINDS.includes(kind as LegacyRecoveryKind);
 
 async function load(db: Db, selection: Selection): Promise<Row | null> {
   const where = { id: selection.id, workspaceId: selection.workspaceId };
@@ -233,7 +233,7 @@ export async function inspectLegacyRecovery(actor: AppActor, selection: Selectio
 
 /** Strict namespace evidence is deliberately stronger than an arbitrary stored
  * key. No foreign object is fetched to discover whether it might be authorized. */
-export function assertRecoveryStorageKey(workspaceId: string, key: string) {
+function assertRecoveryStorageKey(workspaceId: string, key: string) {
   invariant(/^[A-Za-z0-9_-]+$/.test(workspaceId) && key.startsWith(`workspaces/${workspaceId}/uploads/`)
     && !key.includes("\\") && !key.split("/").some(part => !part || part === "." || part === "..")
     && !/%[0-9a-f]{2}/i.test(key), 409, "RECOVERY_STORAGE_UNPROVEN", "This storage key has no verified workspace upload namespace.");

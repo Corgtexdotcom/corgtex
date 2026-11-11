@@ -4,18 +4,18 @@
  * (CorgtexConnectorManager) so neither pulls in the other's bundle.
  */
 
-export type CursorMcpConfig = {
+type CursorMcpConfig = {
   type: "http";
   url: string;
 };
 
-export type CursorMcpJsonConfig = {
+type CursorMcpJsonConfig = {
   mcpServers: {
     [name: string]: CursorMcpConfig;
   };
 };
 
-export type VsCodeMcpConfig = {
+type VsCodeMcpConfig = {
   servers: {
     [name: string]: {
       type: "http";
@@ -24,7 +24,7 @@ export type VsCodeMcpConfig = {
   };
 };
 
-export type CopilotCliMcpConfig = {
+type CopilotCliMcpConfig = {
   mcpServers: {
     [name: string]: {
       type: "http";
@@ -34,7 +34,7 @@ export type CopilotCliMcpConfig = {
   };
 };
 
-export type GeminiMcpConfig = {
+type GeminiMcpConfig = {
   mcpServers: {
     [name: string]: {
       httpUrl: string;
@@ -160,7 +160,6 @@ export const OPENWORK_DOWNLOAD_URL = "https://openworklabs.com/download";
  * (Slack, email) — the connector URL is also non-secret.
  */
 export const CLAUDE_INSTALLER_PATH = "/install/claude";
-export const CLAUDE_CODE_INSTALLER_PATH = "/install/claude-code";
 const INSTALL_INDEX_PATH = "/install";
 
 export type InstallerProviderKey =
