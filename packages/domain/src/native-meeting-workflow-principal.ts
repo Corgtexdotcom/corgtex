@@ -6,7 +6,7 @@ import { prisma, type AppActor } from "@corgtex/shared";
 import { sealArtifactInputActor } from "./artifact-input-actor";
 import { invariant } from "./errors";
 
-export const MEETING_TRANSCRIPT_WORKER_JOB_TYPES = [
+const MEETING_TRANSCRIPT_WORKER_JOB_TYPES = [
   "agent.meeting-summary", "meeting.insights.extract", "agent.action-extraction",
 ] as const;
 export function isMeetingTranscriptWorkerJob(type: string) {

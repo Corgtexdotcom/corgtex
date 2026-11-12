@@ -43,7 +43,7 @@ export const exactTargetInventoryComponentKinds = Object.freeze([
 
 export type ExactTargetInventoryComponentKind = typeof exactTargetInventoryComponentKinds[number];
 
-export const exactTargetInventoryClaimKinds = Object.freeze([
+const exactTargetInventoryClaimKinds = Object.freeze([
   "LIFECYCLE",
   "AUTHORITY",
   "COMPLETENESS",
@@ -52,9 +52,9 @@ export const exactTargetInventoryClaimKinds = Object.freeze([
   "POLICY",
 ] as const);
 
-export type ExactTargetInventoryClaimKind = typeof exactTargetInventoryClaimKinds[number];
+type ExactTargetInventoryClaimKind = typeof exactTargetInventoryClaimKinds[number];
 
-export const exactTargetInventoryProofPurposes = Object.freeze([
+const exactTargetInventoryProofPurposes = Object.freeze([
   "target-lifecycle",
   "target-authority",
   "target-completeness",
@@ -63,7 +63,7 @@ export const exactTargetInventoryProofPurposes = Object.freeze([
   "target-policy",
 ] as const);
 
-export type ExactTargetInventoryProofPurpose = typeof exactTargetInventoryProofPurposes[number];
+type ExactTargetInventoryProofPurpose = typeof exactTargetInventoryProofPurposes[number];
 
 export const exactTargetInventoryClassDispositions = Object.freeze([
   "SELECTABLE",

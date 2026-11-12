@@ -27,25 +27,6 @@ export function normalizeSelectedValues<TValue extends string>(
   return values;
 }
 
-export function selectedValuesFrom<TValue extends string>(
-  values: readonly TValue[] | undefined,
-  allowedValues?: readonly TValue[],
-) {
-  const allowed = allowedValues ? new Set<string>(allowedValues) : null;
-  const seen = new Set<string>();
-  const selected: TValue[] = [];
-
-  for (const value of values ?? []) {
-    if (!value || seen.has(value)) continue;
-    if (allowed && !allowed.has(value)) continue;
-    seen.add(value);
-    selected.push(value);
-  }
-
-  if (allowedValues && selected.length === allowedValues.length) return [];
-  return selected;
-}
-
 export function firstSelectedValue(values: readonly string[]) {
   return values[0] || undefined;
 }

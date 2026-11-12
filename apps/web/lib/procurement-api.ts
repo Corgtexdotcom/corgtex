@@ -86,7 +86,7 @@ async function enforceRateLimit(key: string, limit: typeof RATE_LIMITS[keyof typ
   return null;
 }
 
-export function procurementTrialCreateRateLimitKeysForHeaders(headers: HeaderReader, params: {
+function procurementTrialCreateRateLimitKeysForHeaders(headers: HeaderReader, params: {
   adminEmail: string;
   companyName: string;
 }) {

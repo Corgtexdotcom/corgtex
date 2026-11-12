@@ -1,27 +1,27 @@
 import { AppError, createAction, createWorkItemEvidenceLinks } from "@corgtex/domain";
 import { env, prisma, type AppActor } from "@corgtex/shared";
 
-export const PRODUCT_FEEDBACK_DEFAULT_TARGET_WORKSPACE_SLUG = "corgtex";
-export const PRODUCT_FEEDBACK_EVIDENCE_PURPOSE = "feedback_context";
-export const PRODUCT_FEEDBACK_MAX_MESSAGE_LENGTH = 4000;
-export const PRODUCT_FEEDBACK_MAX_SCREENSHOTS = 5;
-export const PRODUCT_FEEDBACK_MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024;
-export const PRODUCT_FEEDBACK_MAX_TOTAL_SCREENSHOT_BYTES = 25 * 1024 * 1024;
-export const PRODUCT_FEEDBACK_ALLOWED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"] as const;
+const PRODUCT_FEEDBACK_DEFAULT_TARGET_WORKSPACE_SLUG = "corgtex";
+const PRODUCT_FEEDBACK_EVIDENCE_PURPOSE = "feedback_context";
+const PRODUCT_FEEDBACK_MAX_MESSAGE_LENGTH = 4000;
+const PRODUCT_FEEDBACK_MAX_SCREENSHOTS = 5;
+const PRODUCT_FEEDBACK_MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024;
+const PRODUCT_FEEDBACK_MAX_TOTAL_SCREENSHOT_BYTES = 25 * 1024 * 1024;
+const PRODUCT_FEEDBACK_ALLOWED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"] as const;
 
-export type ProductFeedbackTargetWorkspace = {
+type ProductFeedbackTargetWorkspace = {
   id: string;
   slug: string;
   name: string;
 };
 
-export type ProductFeedbackScreenshotLike = {
+type ProductFeedbackScreenshotLike = {
   name: string;
   size: number;
   type: string;
 };
 
-export type ProductFeedbackContext = {
+type ProductFeedbackContext = {
   locale?: string | null;
   pagePath?: string | null;
   pageTitle?: string | null;
@@ -95,7 +95,7 @@ export function normalizeProductFeedbackMessage(message: string | null | undefin
   return normalized;
 }
 
-export function parseProductFeedbackViewportJson(raw: string | null | undefined) {
+function parseProductFeedbackViewportJson(raw: string | null | undefined) {
   const normalized = clip(raw, 2000);
   if (!normalized) return null;
 
