@@ -75,7 +75,6 @@ export default async function ControlPlaneOperationsPage({
     notFound();
   }
 
-  // Fetch real operations audit logs from database using Prisma SupportOperation
   const [operations, clientOptions] = await Promise.all([
     prisma.supportOperation.findMany({
       where: clientFilters.length > 0 ? { deploymentId: { in: clientFilters } } : undefined,

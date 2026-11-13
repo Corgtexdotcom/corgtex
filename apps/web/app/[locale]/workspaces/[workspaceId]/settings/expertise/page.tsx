@@ -15,7 +15,6 @@ export default async function ExpertiseSettingsPage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
 
-  // Make sure to load the member profile for the actor so they can manage their own
   const member = await prisma.member.findUnique({
     where: { workspaceId_userId: { workspaceId, userId: actor.kind === "user" ? actor.user.id : "" } },
     include: { expertise: { include: { expertiseTag: true } } },

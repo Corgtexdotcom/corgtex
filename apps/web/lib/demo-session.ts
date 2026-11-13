@@ -12,7 +12,7 @@ type DemoSession = {
   workspaceId: string;
 };
 
-export type DemoLocale = "en" | "es";
+type DemoLocale = "en" | "es";
 
 export async function issueDemoSession(): Promise<DemoSession> {
   const result = await loginUserWithPassword({

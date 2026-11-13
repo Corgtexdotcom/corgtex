@@ -3,7 +3,7 @@ import { sha256, type EmailSendResult } from "@corgtex/shared";
 type PasswordResetSource = "forgot_password_action" | "api_auth_forgot_password";
 type PasswordResetOutcome = "no_account" | "email_sent" | "email_skipped" | "email_failed" | "action_failed";
 
-export type PasswordResetDiagnostic = {
+type PasswordResetDiagnostic = {
   source: PasswordResetSource;
   outcome: PasswordResetOutcome;
   email: string;
