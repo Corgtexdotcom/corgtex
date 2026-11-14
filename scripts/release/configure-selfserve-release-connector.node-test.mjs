@@ -37,7 +37,7 @@ function fixture() {
       state.configured = true;
     } else assert.equal(pathname, `/api/control-plane/deployments/${hostId}`);
     return Response.json({ deployment: { id: hostId, deploymentKind: "REMOTE_MANAGED", cloudProvider: "AZURE",
-      url: workspace.origin, hasSupportCredential: state.configured } });
+      url: workspace.origin, supportMcpUrl: state.supportMcpUrl, hasSupportCredential: state.configured } });
   };
   return { state, run: () => configureReleaseConnector(env, { fetchImpl, openSession }) };
 }
@@ -62,5 +62,13 @@ test("existing connector for another workspace fails verification", async () => 
   state.configured = true;
   state.workspaceId = "another";
   await assert.rejects(run(), /DIAGNOSTIC_UNVERIFIED/);
+  assert.equal(state.issued.length, 0);
+});
+
+test("a stale existing MCP endpoint is rejected before any credential is used", async () => {
+  const { state, run } = fixture();
+  state.configured = true;
+  state.supportMcpUrl = "https://former.example.test/api/mcp";
+  await assert.rejects(run(), /CONNECTOR_ENDPOINT_MISMATCH/);
   assert.equal(state.issued.length, 0);
 });

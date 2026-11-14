@@ -26,6 +26,10 @@ export async function configureReleaseConnector(env, { fetchImpl = fetch, openSe
       && deployment.cloudProvider === "AZURE" && new URL(deployment.url).origin === workspace.origin
       && (!deployment.remoteWorkspaceId || deployment.remoteWorkspaceId === workspace.workspaceId)
       && typeof deployment.hasSupportCredential === "boolean", "HOST_BINDING_CHANGED");
+    const base = deployment.supportBaseUrl || deployment.url;
+    check([workspace.origin, workspace.origin + "/"].includes(base)
+      && (!deployment.supportMcpUrl || deployment.supportMcpUrl === workspace.origin + "/api/mcp"),
+      "CONNECTOR_ENDPOINT_MISMATCH");
     return deployment;
   };
   const verify = async () => {
@@ -55,6 +59,7 @@ export async function configureReleaseConnector(env, { fetchImpl = fetch, openSe
     // A retry checks the host first and never issues a second active credential with this label.
     await request(ops + hostPath + "/support-connector", { authorization }, { supportBaseUrl: workspace.origin,
       supportMcpUrl: workspace.origin + "/api/mcp", supportCredentialLabel: label, supportCredential: token });
+    check((await host()).hasSupportCredential, "REGISTRATION_UNVERIFIED");
     await verify();
     return "READY";
   } finally { await session.close(); }
