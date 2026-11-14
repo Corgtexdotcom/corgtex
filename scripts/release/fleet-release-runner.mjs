@@ -36,7 +36,7 @@ import { notifyFleetReleaseFailure } from "./fleet-release-alerts.mjs";
 import { runPostDeployProbe } from "./fleet-release-probes.mjs";
 
 const DEFAULT_CONTROL_PLANE_URL = "https://ops.corgtex.com";
-const DEFAULT_RAILWAY_GRAPHQL_ENDPOINT = "https://backboard.railway.com/graphql/v2";
+import { railwayCredential, railwayApiRequest } from "../lib/railway-release-credential.mjs";
 const DEFAULT_AZURE = {
   resourceGroup: "rg-corgtex-selfserve-production-wus3",
   acrName: "acrcorgtexssstgwus3",
@@ -1561,26 +1561,14 @@ async function callControlPlaneTool(name, args, deps) {
   return text ? JSON.parse(text) : body?.result;
 }
 
-function railwayCredential(target, env) {
-  if (target.group === "ops" && env.OPS_RAILWAY_PROJECT_TOKEN?.trim()) {
-    return { "Project-Access-Token": env.OPS_RAILWAY_PROJECT_TOKEN.trim() };
-  }
-  const bearer = env.RAILWAY_API_TOKEN?.trim();
-  return bearer ? { authorization: `Bearer ${bearer}` } : null;
-}
-
 async function railwayGraphql(query, variables, deps, target) {
   const env = deps.env ?? process.env;
-  const credential = railwayCredential(target, env);
-  if (!credential) throw new Error("RAILWAY_API_TOKEN is required.");
-  const scoped = Object.hasOwn(credential, "Project-Access-Token");
-  const endpoint = env.RAILWAY_GRAPHQL_ENDPOINT || DEFAULT_RAILWAY_GRAPHQL_ENDPOINT;
-  if (scoped && endpoint !== DEFAULT_RAILWAY_GRAPHQL_ENDPOINT) throw new Error("Unexpected Ops Railway API endpoint.");
+  const { headers, endpoint } = railwayApiRequest(target, env);
   const response = await (deps.fetchImpl ?? fetch)(endpoint, {
     redirect: "error",
     method: "POST",
     headers: {
-      ...credential,
+      ...headers,
       "content-type": "application/json",
     },
     body: JSON.stringify({ query, variables }),

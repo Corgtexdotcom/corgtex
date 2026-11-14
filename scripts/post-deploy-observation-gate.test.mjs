@@ -905,6 +905,8 @@ describe("post-deploy observation gate", () => {
 
   it("accepts array-form ops Railway target metadata", async () => {
     const fetchImpl = vi.fn(async (_url, init) => {
+      expect(init.headers["Project-Access-Token"]).toBe("fixture-ops");
+      expect(init.redirect).toBe("error");
       const body = JSON.parse(init.body);
       if (body.query.includes("LatestDeployment")) {
         return new Response(JSON.stringify({
@@ -923,7 +925,7 @@ describe("post-deploy observation gate", () => {
       since: new Date("2026-07-16T05:52:00.000Z"),
       targets: "ops",
       env: {
-        RAILWAY_API_TOKEN: "railway-token",
+        OPS_RAILWAY_PROJECT_TOKEN: "fixture-ops",
         FLEET_RELEASE_OPS_TARGET_JSON: JSON.stringify([{
           label: "Ops",
           provider: "railway",
