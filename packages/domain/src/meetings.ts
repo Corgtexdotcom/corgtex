@@ -1,3 +1,5 @@
+import { decodeDirectoryCursor, encodeDirectoryCursor } from "./directory-cursor";
+import { collectProjectedDirectory } from "./projected-directory";
 import { lockCompanyTranscriptPublication, finishCompanyTranscriptPublication } from "./native-transcript-publication";
 import { createHash, randomUUID } from "node:crypto";
 import ICAL from "ical.js";
@@ -788,7 +790,7 @@ async function projectMeetingsForReader<T extends { id: string }>(actor: AppActo
   });
 }
 
-export async function listMeetings(actor: AppActor, workspaceId: string, opts?: ListMeetingsOptions) {
+async function meetingDirectoryWhere(actor: AppActor, workspaceId: string, opts?: ListMeetingsOptions): Promise<Prisma.MeetingWhereInput> {
   await requireWorkspaceMembership({ actor, workspaceId });
   const memberIds = [...new Set([...(opts?.memberIds ?? []), opts?.memberId]
     .map((value) => value?.trim())
@@ -816,9 +818,7 @@ export async function listMeetings(actor: AppActor, workspaceId: string, opts?: 
   ])];
   const participantEmails = [...new Set(members.map((member) => member.user.email))];
   const recordedAt = meetingDateRangeWhere(opts?.recordedFrom, opts?.recordedTo);
-  const release = new DigestReadRelease(actor, workspaceId);
-  const meetings = await readMeetingInputBatches((page) => prisma.meeting.findMany({
-    where: {
+  return {
       workspaceId,
       ...(opts?.status ? { status: opts.status } : {}),
       ...(recordedAt ? { recordedAt } : {}),
@@ -831,10 +831,46 @@ export async function listMeetings(actor: AppActor, workspaceId: string, opts?: 
         }
         : {}),
       ...archiveFilterWhere(opts?.archiveFilter),
-    },
+    };
+}
+
+export async function listMeetings(actor: AppActor, workspaceId: string, opts?: ListMeetingsOptions) {
+  const where = await meetingDirectoryWhere(actor, workspaceId, opts);
+  const release = new DigestReadRelease(actor, workspaceId);
+  const meetings = await readMeetingInputBatches((page) => prisma.meeting.findMany({
+    where,
     orderBy: [{ recordedAt: opts?.status === "SCHEDULED" ? "asc" : "desc" }, { id: "asc" }], ...page,
   }), (rows) => projectMeetingsForReader(actor, workspaceId, rows, undefined, release), opts?.take);
   return release.finish(meetings);
+}
+
+/** Caller maps verified canonical rows immediately; full transcripts, summaries
+ * and JSON are never retained across directory batches unless explicitly mapped. */
+export async function listMeetingDirectory<T>(actor: AppActor, workspaceId: string,
+  opts: Omit<ListMeetingsOptions, "take"> & { cursor?: string },
+  project: (meeting: Awaited<ReturnType<typeof listMeetings>>[number]) => T,
+) {
+  const baseWhere = await meetingDirectoryWhere(actor, workspaceId, opts);
+  if (opts.cursor === "end") return { items: [] as T[], complete: false, nextCursor: null };
+  const ascending = opts.status === "SCHEDULED";
+  const position = decodeDirectoryCursor(opts.cursor, { workspaceId, kind: "Meeting", ascending });
+  const where: Prisma.MeetingWhereInput = position ? { AND: [baseWhere, { OR: [
+    { recordedAt: { [ascending ? "gt" : "lt"]: position.date } }, { recordedAt: position.date, id: { gt: position.id } },
+  ] }] } : baseWhere;
+  const inventory = await prisma.meeting.findMany({ where, select: { id: true, recordedAt: true },
+    orderBy: [{ recordedAt: opts.status === "SCHEDULED" ? "asc" : "desc" }, { id: "asc" }], take: 10001 });
+  const hasMore = inventory.length > 10000;
+  const complete = !hasMore && !position;
+  const boundary = inventory[9999];
+  const nextCursor = hasMore ? encodeDirectoryCursor({ workspaceId, kind: "Meeting", ascending, id: boundary.id, date: boundary.recordedAt.toISOString() }) : null;
+  const candidates = inventory.slice(0, 10000).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const release = new DigestReadRelease(actor, workspaceId);
+  const rows = await collectProjectedDirectory({ candidates,
+    load: page => prisma.meeting.findMany({ where: { AND: [where, { id: { in: page.map(row => row.id) } }] }, take: 100 }),
+    admit: page => projectMeetingsForReader(actor, workspaceId, page, undefined, release),
+    project,
+  });
+  return release.finish({ items: rows, complete, nextCursor });
 }
 
 export async function listUpcomingMeetings(actor: AppActor, workspaceId: string, opts?: { from?: Date; to?: Date; take?: number }) {

@@ -29,7 +29,8 @@ const assertTrialStorageCapacityMock = vi.hoisted(() => vi.fn());
 const lockAndAssertTrialStorageCapacityMock = vi.hoisted(() => vi.fn());
 const resolveKnowledgeAccessDomainsMock = vi.hoisted(() => vi.fn());
 
-vi.mock("@corgtex/shared", () => ({
+vi.mock("@corgtex/shared", async () => ({
+  ...(await import("../../shared/src/crypto")),
   prisma: prismaMock,
 }));
 
@@ -71,6 +72,33 @@ describe("listDocuments", () => {
     prismaMock.brainSource.findMany.mockResolvedValue([]);
     prismaMock.brainSource.update.mockImplementation(async ({ where, data }: any) => ({ id: where.id, ...data }));
     resolveKnowledgeAccessDomainsMock.mockResolvedValue(["WORKSPACE"]);
+  });
+
+  it("keeps a meaningful bounded directory window and reports incomplete counts", async () => {
+    vi.stubEnv("ENCRYPTION_KEY", "a".repeat(64));
+    const { listDocumentDirectory } = await import("./documents");
+    const inventory = Array.from({ length: 10001 }, (_, index) => ({ id: String(index).padStart(5, "0"), createdAt: new Date("2026-10-01") }));
+    prismaMock.document.findMany.mockImplementation(async (args: any) => args.select ? inventory : args.where.AND[1].id.in.map((id: string) => ({ ...inventory[Number(id)], title: id, source: "SYNTHETIC", textContent: "canonical" })));
+    const result = await listDocumentDirectory({ kind: "user", user: { id: "reader" } } as any, "workspace-1");
+    expect(result.complete).toBe(false);
+    expect(result.items).toHaveLength(10000);
+    expect(result.items.at(-1)?.id).toBe("09999");
+    expect(prismaMock.document.findMany.mock.calls[0][0]).toMatchObject({ orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: 10001 });
+    expect(prismaMock.document.findMany.mock.calls.slice(1).every(([args]: any) => args.take === 100)).toBe(true);
+    expect(result.items[0]).not.toHaveProperty("textContent");
+    const { readableArtifactIds } = await import("./source-lineage");
+    for (let batch = 0; batch < 100; batch++) vi.mocked(readableArtifactIds).mockResolvedValueOnce(new Set());
+    const hidden = await listDocumentDirectory({ kind: "user", user: { id: "reader" } } as any, "workspace-1");
+    expect(hidden.items).toEqual([]);
+    expect(hidden.complete).toBe(false);
+    expect(Object.keys(hidden).sort()).toEqual(["complete", "items", "nextCursor"]);
+    expect(JSON.stringify(hidden)).not.toContain("09999");
+    expect(result.nextCursor).toEqual(expect.any(String));
+    prismaMock.document.findMany.mockImplementation(async (args: any) => args.select ? [inventory[10000]] : [{ ...inventory[10000], title: "last", source: "SYNTHETIC", textContent: "canonical" }]);
+    const next = await listDocumentDirectory({ kind: "user", user: { id: "reader" } } as any, "workspace-1", { cursor: result.nextCursor! });
+    expect(next).toMatchObject({ items: [{ id: "10000" }], complete: false, nextCursor: null });
+    const continuationQuery = prismaMock.document.findMany.mock.calls.at(-2)?.[0];
+    expect(continuationQuery.where.AND[1]).toEqual({ OR: [{ createdAt: { lt: inventory[9999].createdAt } }, { createdAt: inventory[9999].createdAt, id: { gt: "09999" } }] });
   });
 
   it("uses the actor's resolved knowledge access domains", async () => {

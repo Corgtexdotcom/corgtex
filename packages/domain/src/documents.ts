@@ -1,3 +1,4 @@
+import { decodeDirectoryCursor, encodeDirectoryCursor } from "./directory-cursor";
 import type { KnowledgeAccessDomain, Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -18,6 +19,8 @@ import {
   type DuplicateGuardOptions,
 } from "./duplicate-guard";
 import { resolveKnowledgeAccessDomains } from "./brain-access";
+import { DigestReadRelease } from "./digest-lineage";
+import { collectProjectedDirectory } from "./projected-directory";
 import { scanSourceReadableRecords } from "./source-scoped-read";
 import { finishProducerLineage, prepareProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { captureArtifactInputProof, captureImmutableArtifactInputProof,
@@ -34,6 +37,37 @@ export async function listDocuments(actor: AppActor, workspaceId: string, opts?:
       ...(afterId ? { id: { gt: afterId } } : {}) }, orderBy: { id: "asc" }, take,
   }) });
   return documents.sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() || left.id.localeCompare(right.id));
+}
+
+/** Directory output retains no document text/metadata. Canonical permission
+ * checks still hydrate full bodies, at most 100 candidate rows at a time. */
+export async function listDocumentDirectory(actor: AppActor, workspaceId: string, opts?: {
+  createdFrom?: Date;
+  ids?: string[];
+  cursor?: string;
+}) {
+  const accessDomains = await resolveKnowledgeAccessDomains(actor, workspaceId);
+  const position = decodeDirectoryCursor(opts?.cursor, { workspaceId, kind: "Document", ascending: false });
+  const baseWhere: Prisma.DocumentWhereInput = { workspaceId, archivedAt: null, accessDomain: { in: accessDomains },
+    ...(opts?.createdFrom ? { createdAt: { gte: opts.createdFrom } } : {}),
+    ...(opts?.ids ? { id: { in: opts.ids } } : {}),
+  };
+  const where: Prisma.DocumentWhereInput = position ? { AND: [baseWhere, { OR: [
+    { createdAt: { lt: position.date } }, { createdAt: position.date, id: { gt: position.id } },
+  ] }] } : baseWhere;
+  const inventory = await prisma.document.findMany({ where, select: { id: true, createdAt: true }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: 10001 });
+  const hasMore = inventory.length > 10000;
+  const complete = !hasMore && !position;
+  const boundary = inventory[9999];
+  const nextCursor = hasMore ? encodeDirectoryCursor({ workspaceId, kind: "Document", ascending: false, id: boundary.id, date: boundary.createdAt.toISOString() }) : null;
+  const candidates = inventory.slice(0, 10000).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const release = new DigestReadRelease(actor, workspaceId);
+  const rows = await collectProjectedDirectory({ candidates,
+    load: page => prisma.document.findMany({ where: { AND: [where, { id: { in: page.map(row => row.id) } }] }, take: 100 }),
+    admit: async page => (await release.captureSourcePage("Document", page)).records,
+    project: row => ({ id: row.id, title: row.title, source: row.source, createdAt: row.createdAt }),
+  });
+  return release.finish({ items: rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || a.id.localeCompare(b.id)), complete, nextCursor });
 }
 
 type CreateDocumentParams = ProducerLineageParams & {
