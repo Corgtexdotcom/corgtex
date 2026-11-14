@@ -4,8 +4,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { membership, usage, budget, counts } = vi.hoisted(() => ({membership: vi.fn(), usage: vi.fn(), budget: vi.fn(), counts: vi.fn()}));
 vi.mock("@corgtex/domain", async () => ({
   ...await import("../../../../../../../packages/domain/src/agent-authority-summary"),
+  ...await import("../../../../../../../packages/domain/src/agent-registry"),
   requireWorkspaceMembership: membership, getModelUsageSummary: usage, getModelUsageBudget: budget,
-  listAgentIdentities: async () => [{agentKey: "maintenance", displayName: "Maintenance", maxSpendPerRunCents: 12345, maxRunsPerDay: 10}],
+  listAgentIdentities: async () => [{agentKey: "maintenance", displayName: "Maintenance", maxSpendPerRunCents: 12345, maxRunsPerDay: 10}, {agentKey: "inbox-triage", displayName: "Inbox Triage"}],
   getAgentRunOperationalCounts: counts,
   listAgentConfigs: async () => [], listAgentCredentials: async () => [], listAgentRuns: async () => [],
 }));
@@ -97,3 +98,29 @@ it.runIf(process.env.USAGE_WINDOW_BROWSER_QA==="1")("renders both actual admin t
     expect(errors).toEqual([]);
   }finally{await browser.close();}
 },60_000);
+
+
+it.runIf(process.env.PUN80_GOVERNANCE_BROWSER_QA === "1")("shows supported guidance and unsupported routes in the running registry", async () => {
+  const { chromium } = await import("playwright");
+  const { readFile, mkdir } = await import("node:fs/promises");
+  const css = (await Promise.all(["globals.css", "styles/tokens.css", "styles/components.css", "styles/animations.css", "styles/pages.css"]
+    .map(path => readFile(new URL(`../../../../../app/${path}`, import.meta.url), "utf8")))).join("\n");
+  const html = renderToStaticMarkup(React.createElement("main", { style: { maxWidth: 1100, margin: "24px auto", padding: 20 } },
+    React.createElement("h1", null, "Synthetic agent governance"), await AgentRegistryTab(props)));
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.route("**/*", route => route.abort());
+    await page.setContent(`<html><head><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}</style></head><body>${html}</body></html>`);
+    await page.locator("details").evaluateAll(nodes => nodes.forEach(node => node.setAttribute("open", "")));
+    expect(await page.getByText("Prompt policy unsupported", { exact: true }).isVisible()).toBe(true);
+    expect(await page.getByText(/Proven saved instructions precede workspace and agent behavior/).isVisible()).toBe(true);
+    expect(await page.getByText(/Saved text has no execution effect/).isVisible()).toBe(true);
+    await mkdir(".artifacts/pun80-governance", { recursive: true });
+    for (const width of [1200, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await page.screenshot({ path: `.artifacts/pun80-governance/registry-${width}.png`, fullPage: true });
+    }
+  } finally { await browser.close(); }
+});

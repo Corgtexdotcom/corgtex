@@ -19,7 +19,7 @@ export type AgentAuthorityIdentityInput = {
 export type AgentAuthorityConfigInput = {
   agentKey: string; label?: string | null; category?: string | null; canDisable?: boolean | null;
   costTier?: string | null; defaultModelTier?: string | null; enabled?: boolean | null;
-  modelOverride?: string | null; governancePolicy?: string | null; hasGovernancePolicy?: boolean | null;
+  modelOverride?: string | null; governancePolicy?: string | null; hasGovernancePolicy?: boolean | null; governancePolicyWithheld?: boolean;
 };
 
 export type AgentAuthorityRunInput = {
@@ -46,7 +46,7 @@ export type AgentAuthoritySummary = {
     workspaceBudgetConfigured: boolean;
   };
   approval: {
-    hasGovernancePolicy: boolean; governancePolicy: string | null; pendingApprovalCount: number;
+    hasGovernancePolicy: boolean; governancePolicy: string | null; governancePolicyWithheld?: boolean; pendingApprovalCount: number;
     latestApprovalRequiredRun: AgentAuthorityRunInput | null;
   };
   recentActivity: { latestRun: AgentAuthorityRunInput | null; runCount30d: number; modelCallCount30d: number; spend30dUsd: number };
@@ -179,6 +179,7 @@ export function buildAgentAuthoritySummaries(input: BuildAgentAuthoritySummaries
       approval: {
         hasGovernancePolicy: config?.hasGovernancePolicy ?? Boolean(governancePolicy),
         governancePolicy,
+        governancePolicyWithheld: config?.governancePolicyWithheld ?? false,
         pendingApprovalCount: input.pendingApprovalCountsByAgent ? pendingCounts.get(agentKey) ?? 0 : approvalRuns.length,
         latestApprovalRequiredRun: input.pendingApprovalCountsByAgent && !pendingCounts.get(agentKey) ? null : approvalRuns[0] ?? null,
       },

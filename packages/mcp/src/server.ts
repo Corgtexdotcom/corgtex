@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { supportsAgentGovernancePrompt } from "@corgtex/domain";
 /**
  * Corgtex MCP server — every workspace operation Claude/ChatGPT/Cursor can perform.
  *
@@ -2287,7 +2288,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           category: config.category,
           enabled: config.enabled,
           modelOverride: config.modelOverride,
-          hasGovernancePolicy: Boolean(config.governancePolicy?.trim()),
+          hasGovernancePolicy: config.hasGovernancePolicy ?? Boolean(config.governancePolicy?.trim()),
+          governancePromptSupported: supportsAgentGovernancePrompt(config.agentKey),
           costTier: config.costTier,
         })),
       });
@@ -2310,7 +2312,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "update_agent_policy",
-    "Update an agent governance policy or model override for support repair. Returns only redacted policy state.",
+    "Update saved governance guidance or model override for support repair. Source proof is required for prompt use; unsupported routes have no policy prompt effect. This does not grant approvals, scopes, or spending authority. Returns redacted policy state.",
     {
       agentKey: z.string(),
       governancePolicy: z.string().nullable().optional(),
@@ -2330,7 +2332,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           agentKey: config.agentKey,
           enabled: config.enabled,
           modelOverride: config.modelOverride,
-          hasGovernancePolicy: Boolean(config.governancePolicy?.trim()),
+          hasGovernancePolicy: config.hasGovernancePolicy ?? Boolean(config.governancePolicy?.trim()),
+          governancePromptSupported: supportsAgentGovernancePrompt(config.agentKey),
           updatedAt: config.updatedAt,
         },
       });

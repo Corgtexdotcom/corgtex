@@ -128,7 +128,7 @@ export async function proposeFinanceReportImportV1(input: FinanceReportImportPro
   for (const attempts of [1, 2] as const) {
     await input.beforeModel?.();
     try {
-      const response = await gateway.extract({ signal: input.signal, authorizeAttempt: input.authorizeAttempt, workspaceId: input.workspaceId, model: input.model, workflowJobId: input.workflowJobId, agentRunId: input.agentRunId, instruction: `${input.behaviorContext ?? ""}\n\n${attempts === 1 ? INSTRUCTION : `${INSTRUCTION} Repair the previous object using this validation feedback: ${feedback}.`}`, schemaHint: SCHEMA_HINT, input: JSON.stringify({ format: input.format, extractedEvidence: input.extractedEvidence, ...(attempts === 2 ? { previous } : {}) }) });
+      const response = await gateway.extract({ signal: input.signal, authorizeAttempt: input.authorizeAttempt, workspaceId: input.workspaceId, model: input.model, workflowJobId: input.workflowJobId, agentRunId: input.agentRunId, systemInstruction: input.behaviorContext ?? undefined, instruction: `${attempts === 1 ? INSTRUCTION : `${INSTRUCTION} Repair the previous object using this validation feedback: ${feedback}.`}`, schemaHint: SCHEMA_HINT, input: JSON.stringify({ format: input.format, extractedEvidence: input.extractedEvidence, ...(attempts === 2 ? { previous } : {}) }) });
       previous = response.output;
     } catch { return { version: 1, kind: "FAILURE", attempts, code: "PROVIDER_ERROR" }; }
     await input.beforeModel?.();

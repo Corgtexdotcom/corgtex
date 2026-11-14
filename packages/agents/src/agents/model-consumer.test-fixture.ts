@@ -8,7 +8,7 @@ export const fixture = (() => {
   const rows: Record<string, any[]> = {};
   const timestamp = new Date("2026-10-12T10:00:00Z");
   const names = ["informationCategoryPolicy", "workspace", "user", "member", "document", "action", "tension", "proposal", "meeting", "meetingInsight",
-    "modelUsageBudget", "modelUsage", "notification", "constitution", "constitutionSourceReference", "policyCorpus", "brainArticle", "checkIn", "brainSource", "conversationSession", "conversationTurn", "conversationPromptInput", "agentIdentity", "artifactInputLineage", "artifactInputSnapshot", "agentRun", "agentStep", "agentToolCall", "event"];
+    "agentRequestInput", "workspaceAgentConfig", "modelUsageBudget", "modelUsage", "notification", "constitution", "constitutionSourceReference", "policyCorpus", "brainArticle", "checkIn", "brainSource", "conversationSession", "conversationTurn", "conversationPromptInput", "agentIdentity", "artifactInputLineage", "artifactInputSnapshot", "agentRun", "agentStep", "agentToolCall", "event"];
   const relatedKind: Record<string, string> = { user: "user", meeting: "meeting", member: "member", ownerMember: "member", agentRun: "agentRun", conversation: "conversationSession", session: "conversationSession" };
   function relation(row: any, key: string) {
     return rows[relatedKind[key]]?.find((item) => item.id === row[key + "Id"]);
@@ -94,6 +94,11 @@ export const fixture = (() => {
       }),
       count: vi.fn(async (args: any) => rows[name].filter((row) => matches(row, args.where)).length),
       create: vi.fn(async ({ data }: any) => { const row = stored(name, data); rows[name].push(row); return { ...row }; }),
+      upsert: vi.fn(async ({ where, create, update }: any) => {
+        const row = rows[name].find(item => matches(item, where));
+        if (row) { Object.assign(row, update, { updatedAt: new Date() }); return { ...row }; }
+        const added = stored(name, create); rows[name].push(added); return { ...added };
+      }),
       createMany: vi.fn(async ({ data }: any) => { for (const item of data) rows[name].push(stored(name, item)); return { count: data.length }; }),
       update: vi.fn(async ({ where, data }: any) => {
         const row = rows[name].find((item) => matches(item, where));
@@ -172,6 +177,7 @@ export async function domainExports() {
     ...await import("../../../domain/src/source-lineage"), ...await import("../../../domain/src/internal-source-principal"), ...await import("../../../domain/src/source-scoped-read"),
     ...await import("../../../domain/src/digest-lineage"), ...await import("../../../domain/src/errors"),
     ...await import("../../../domain/src/meeting-intelligence-context"), ...await import("../../../domain/src/check-ins"),
+    ...await import("../../../domain/src/agent-registry"),
     isAgentEnabled: async () => true, getAgentModelOverride: async () => null, checkBudget: async () => ({ allowed: true }),
     resolveAgentIdentityLimits: async () => null,
     AGENT_REGISTRY: { "inbox-triage": { defaultModelTier: "light" }, "action-extraction": { defaultModelTier: "none" }, "daily-check-in": { defaultModelTier: "none" } },
