@@ -6,7 +6,7 @@ import { SELFSERVE_RELEASE_HOST_ID as hostId } from "./managed-azure-selfserve-p
 
 function fixture() {
   const state = { configured: false, issued: [], closed: 0, ambiguous: false, workspaceId: workspace.workspaceId };
-  const env = { CONTROL_PLANE_AGENT_API_KEY: "ops-fixture" };
+  const env = { CONTROL_PLANE_AGENT_API_KEY: "ops-fixture", EXPECTED_SELFSERVE_SHA: "a".repeat(40) };
   const openSession = async () => ({ cookie: "session=fixture", close: async () => { state.closed++; } });
   const fetchImpl = async (url, init) => {
     assert.equal(init.redirect, "error");
@@ -14,6 +14,12 @@ function fixture() {
     const body = init.body && JSON.parse(init.body);
     if (origin === workspace.origin) {
       assert.equal(init.headers.authorization, undefined);
+      if (pathname === "/api/health") {
+        assert.equal(init.headers.cookie, undefined);
+        const gitSha = state.servingSha || env.EXPECTED_SELFSERVE_SHA;
+        return Response.json({ status: "ok", database: "up", schema: "ready",
+          release: { gitSha, runtime: { gitSha, evidence: "baked" } } });
+      }
       assert.equal(init.headers.cookie, "session=fixture");
       assert.equal(pathname, `/api/workspaces/${workspace.workspaceId}/agent-credentials`);
       if (!body) return Response.json({ credentials: state.issued });
@@ -71,4 +77,11 @@ test("a stale existing MCP endpoint is rejected before any credential is used", 
   state.supportMcpUrl = "https://former.example.test/api/mcp";
   await assert.rejects(run(), /CONNECTOR_ENDPOINT_MISMATCH/);
   assert.equal(state.issued.length, 0);
+});
+
+test("an existing connector verifies the running release before its diagnostic", async () => {
+  const { state, run } = fixture();
+  state.configured = true;
+  state.servingSha = "b".repeat(40);
+  await assert.rejects(run(), /SERVING_RELEASE_MISMATCH/);
 });

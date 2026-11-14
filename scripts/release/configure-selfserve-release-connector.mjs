@@ -1,5 +1,5 @@
 import { pathToFileURL } from "node:url";
-import { SELFSERVE_VALIDATION_TARGET as workspace } from "../lib/selfserve-validation-target.mjs";
+import { fullReleaseSha, SELFSERVE_VALIDATION_TARGET as workspace } from "../lib/selfserve-validation-target.mjs";
 import { openSelfserveValidationSession } from "../selfserve-validation-smoke.mjs";
 import { SELFSERVE_RELEASE_HOST_ID as hostId } from "./managed-azure-selfserve-profile.mjs";
 
@@ -41,7 +41,15 @@ export async function configureReleaseConnector(env, { fetchImpl = fetch, openSe
     const proof = text && JSON.parse(text);
     check(proof?.status === "READY" && proof.effects === 0 && proof.workspaceId === workspace.workspaceId, "DIAGNOSTIC_UNVERIFIED");
   };
-  if ((await host()).hasSupportCredential) { await verify(); return "ALREADY_READY"; }
+  const expectedSha = fullReleaseSha(env.EXPECTED_SELFSERVE_SHA);
+  if ((await host()).hasSupportCredential) {
+    const health = await request(workspace.origin + "/api/health", {});
+    check(health.status === "ok" && health.database === "up" && health.schema === "ready"
+      && health.release?.gitSha === expectedSha && health.release.runtime?.gitSha === expectedSha
+      && health.release.runtime.evidence === "baked", "SERVING_RELEASE_MISMATCH");
+    await verify();
+    return "ALREADY_READY";
+  }
   const session = await openSession({ origin: workspace.origin, expectedSha: env.EXPECTED_SELFSERVE_SHA,
     email: env.SELFSERVE_VALIDATION_EMAIL, password: env.SELFSERVE_VALIDATION_PASSWORD, fetchImpl });
   try {
