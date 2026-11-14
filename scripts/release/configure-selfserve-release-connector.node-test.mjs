@@ -43,7 +43,7 @@ function fixture() {
       state.configured = true;
     } else assert.equal(pathname, `/api/control-plane/deployments/${hostId}`);
     return Response.json({ deployment: { id: hostId, deploymentKind: "REMOTE_MANAGED", cloudProvider: "AZURE",
-      url: workspace.origin, supportMcpUrl: state.supportMcpUrl, hasSupportCredential: state.configured } });
+      url: state.deploymentUrl || workspace.origin, supportBaseUrl: state.supportBaseUrl, supportMcpUrl: state.supportMcpUrl, hasSupportCredential: state.configured } });
   };
   return { state, run: () => configureReleaseConnector(env, { fetchImpl, openSession }) };
 }
@@ -84,4 +84,12 @@ test("an existing connector verifies the running release before its diagnostic",
   state.configured = true;
   state.servingSha = "b".repeat(40);
   await assert.rejects(run(), /SERVING_RELEASE_MISMATCH/);
+});
+
+test("a non-root deployment URL cannot change the fallback MCP path", async () => {
+  const { state, run } = fixture();
+  state.configured = true;
+  state.deploymentUrl = workspace.origin + "/another-workspace";
+  state.supportBaseUrl = workspace.origin;
+  await assert.rejects(run(), /HOST_BINDING_CHANGED/);
 });

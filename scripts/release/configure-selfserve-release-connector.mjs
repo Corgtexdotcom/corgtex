@@ -23,7 +23,7 @@ export async function configureReleaseConnector(env, { fetchImpl = fetch, openSe
   const host = async () => {
     const { deployment } = await request(ops + hostPath, { authorization });
     check(deployment?.id === hostId && deployment.deploymentKind === "REMOTE_MANAGED"
-      && deployment.cloudProvider === "AZURE" && new URL(deployment.url).origin === workspace.origin
+      && deployment.cloudProvider === "AZURE" && [workspace.origin, workspace.origin + "/"].includes(deployment.url)
       && (!deployment.remoteWorkspaceId || deployment.remoteWorkspaceId === workspace.workspaceId)
       && typeof deployment.hasSupportCredential === "boolean", "HOST_BINDING_CHANGED");
     const base = deployment.supportBaseUrl || deployment.url;
