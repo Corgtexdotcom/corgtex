@@ -491,7 +491,6 @@ export function UserSettingsPanel({
 
           <div className="session-list">
             {sessions.map(s => {
-              // Parse User Agent basically
               const browser = s.userAgent?.includes("Chrome") ? "Chrome" : s.userAgent?.includes("Firefox") ? "Firefox" : s.userAgent?.includes("Safari") ? "Safari" : "Browser";
               const os = s.userAgent?.includes("Mac") ? "macOS" : s.userAgent?.includes("Win") ? "Windows" : s.userAgent?.includes("Linux") ? "Linux" : "Unknown OS";
 

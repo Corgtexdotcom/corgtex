@@ -18,9 +18,6 @@ import { z } from "zod";
 import { validateMcpConsentResource } from "@corgtex/domain";
 import { verifyMcpConsent } from "@/lib/mcp-consent";
 
-// This is the endpoint ChatGPT calls to start the OAuth flow.
-// Typically it's a GET, but we'll accept POST too for the user consent submission.
-
 type PageActor = Awaited<ReturnType<typeof requirePageActor>>;
 
 async function deploymentScopeWorkspaceError(actor: PageActor, workspaceId: string) {
@@ -86,10 +83,8 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "invalid_request", message: "Redirect URI is not registered" }, { status: 400 });
     }
 
-    // Ensure user is logged in
     await requirePageActor();
 
-    // Create a URL pointing to our UI consent page
     const consentUrl = new URL("/oauth/authorize", getPublicOrigin(request));
     consentUrl.searchParams.set("client_id", clientId);
     consentUrl.searchParams.set("redirect_uri", redirectUri);
@@ -103,7 +98,6 @@ export async function GET(request: NextRequest) {
   }
 }
 
-// Handling the consent form submission from our UI
 export async function POST(request: NextRequest) {
   try {
     const actor = await requirePageActor();
@@ -185,7 +179,6 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Build redirect back to ChatGPT
     const redirectUrl = new URL(body.redirectUri);
     redirectUrl.searchParams.set("code", code);
     if (body.state) {

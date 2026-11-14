@@ -1,6 +1,6 @@
 import type { AppActor } from "@corgtex/shared";
 
-export type ExternalProviderWorkerPurpose = Readonly<{ workspaceId: string; sourceId: string; workflowJobId: string;
+type ExternalProviderWorkerPurpose = Readonly<{ workspaceId: string; sourceId: string; workflowJobId: string;
   userId: string; connectionId: string; bindingHash: string; jobLeaseHash: string; connectionGrantHash: string }>;
 const workers = new WeakMap<AppActor, ExternalProviderWorkerPurpose>();
 // Internal server authority imports these issuers; no barrel exposes minting or serialized capabilities.

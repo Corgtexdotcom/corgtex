@@ -16,11 +16,6 @@ export async function POST(request: NextRequest) {
 
     await changeUserPassword(actor, body);
 
-    // Changing password invalidates all sessions including current one,
-    // so we need to logout the user via cookies
-    // This API route will just return 200, the client can then reload
-    // Or we can let server actions handle it.
-
     return NextResponse.json({ success: true });
   } catch (error) {
     return handleRouteError(error);

@@ -4,7 +4,7 @@ import { env } from "@corgtex/shared";
 
 const INTERCOM_MESSENGER_JWT_TTL_SECONDS = 10 * 60;
 
-export type IntercomJwtPayload = Record<string, unknown> & {
+type IntercomJwtPayload = Record<string, unknown> & {
   user_id: string;
 };
 
