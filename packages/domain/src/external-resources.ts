@@ -1,3 +1,4 @@
+import { requireExternalResourceAttachmentTarget } from "./external-resource-targets";
 import { createHash } from "node:crypto";
 import type { CommunicationProvider, Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
@@ -391,21 +392,6 @@ export function extractExternalResourceReferencesFromText(text?: string | null):
   return references;
 }
 
-async function assertAttachTarget(tx: Prisma.TransactionClient, workspaceId: string, entityType: WorkspaceExternalResourceEntityType, entityId: string) {
-  let found: { id: string } | null = null;
-  if (entityType === "Action") {
-    found = await tx.action.findFirst({ where: { id: entityId, workspaceId, archivedAt: null }, select: { id: true } });
-  } else if (entityType === "Tension") {
-    found = await tx.tension.findFirst({ where: { id: entityId, workspaceId, archivedAt: null }, select: { id: true } });
-  } else if (entityType === "Proposal") {
-    found = await tx.proposal.findFirst({ where: { id: entityId, workspaceId, archivedAt: null }, select: { id: true } });
-  } else if (entityType === "Meeting") {
-    found = await tx.meeting.findFirst({ where: { id: entityId, workspaceId, archivedAt: null }, select: { id: true } });
-  } else if (entityType === "BrainSource") {
-    found = await tx.brainSource.findFirst({ where: { id: entityId, workspaceId, archivedAt: null }, select: { id: true } });
-  }
-  invariant(found, 404, "NOT_FOUND", "External resource target not found.");
-}
 
 function resourceKnowledgeContent(resource: ExternalResourceKnowledgeRecord) {
   const mentionLines = (resource.mentions ?? [])
@@ -614,11 +600,11 @@ export async function upsertWorkspaceExternalResourceFromUrl(actor: AppActor, pa
   const purpose = validatePurpose(params.purpose);
   const entityType = params.entityType ? validateEntityType(params.entityType) : null;
   const entityId = params.entityId?.trim() || null;
-  invariant(!entityType || entityId, 400, "INVALID_INPUT", "External resource target ID is required.");
+  invariant(Boolean(entityType) === Boolean(entityId), 400, "INVALID_INPUT", "External resource target type and ID are required together.");
 
   return prisma.$transaction(async (tx) => {
     if (entityType && entityId) {
-      await assertAttachTarget(tx, params.workspaceId, entityType, entityId);
+      await requireExternalResourceAttachmentTarget(tx, actor, { workspaceId: params.workspaceId, entityType, entityId });
     }
 
     const resource = await upsertExternalResource(tx, {
