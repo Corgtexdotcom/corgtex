@@ -302,7 +302,13 @@ image, not a public download. Default test runs skip this explicit local fixture
 Keep plan and credential JSON files owned by the operator with mode0600 and no
 symlinks. Credentials are separate from the retained plan:
 `sourceConfig`, `readerConfig`, `targetAdminConfig`, `objectSource`, `redisSource`
-and optional `railwayToken`. PostgreSQL objects use the existing rehearsal config
+and one Railway API credential. Use `railwayProjectToken` for a project token scoped
+to the source environment. The operator checks its project and environment before
+source operations. Existing bearer credentials use `railwayToken`. An optional
+`railwaySshIdentityFile` selects an already registered operator SSH key at an
+absolute path. This uses OpenSSH with strict host verification for the instance
+identified by the provider. The operator must already trust the Railway SSH host key.
+PostgreSQL objects use the existing rehearsal config
 shape; the Azure connection requires verified TLS. Keep artifacts in a private,
 ignored directory. Before fencing, retain the exact original source PostgreSQL
 password in the independent custody vault and bind its immutable version as

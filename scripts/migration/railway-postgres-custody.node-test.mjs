@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { railwayInstanceSsh } from "./railway-instance-ssh.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -217,4 +219,15 @@ test("checks abort before dispatch and after remote read", async () => {
   const later = fixture({ remoteRead() { later.controller.abort(); return remote(later.b); } });
   await assert.rejects(later.adapter.assertHeld(), { code: "RAILWAY_PG_CUSTODY_ABORTED" });
   assert.deepEqual(later.calls, ["provider", "remote"]);
+});
+
+test("registered operator key connects only to the verified instance with pinned host checks", () => {
+  const instanceId = randomUUID();
+  const identityFile = "/operator/existing-key";
+  const [command, args] = railwayInstanceSsh({ instanceId, identityFile }, ["sh", "-c", "'true'"]);
+  assert.equal(command, "ssh");
+  assert.deepEqual(args, ["-F", "/dev/null", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+    "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=10", "-i", identityFile,
+    `${instanceId}@ssh.railway.com`, "sh", "-c", "'true'"]);
+  assert.throws(() => railwayInstanceSsh({ instanceId, identityFile: "relative" }, []), /INVALID_RAILWAY_SSH_IDENTITY_PATH/);
 });

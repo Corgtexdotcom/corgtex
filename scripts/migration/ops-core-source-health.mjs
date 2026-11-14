@@ -1,3 +1,4 @@
+import { railwayInstanceSsh } from "./railway-instance-ssh.mjs";
 import { redisRuntimeObservationScript, verifyRuntimeRedisObservation } from "./ops-core-source-redis.mjs";
 import { opsCorePlanSharedStateVariant } from "./ops-core-plan-variant.mjs";
 import { execFile } from "node:child_process";
@@ -66,17 +67,18 @@ catch{process.stderr.write('SOURCE_HEALTH_REMOTE_UNPROVEN');process.exitCode=1;}
 /** Railway SSH joins its remote argv. Quote the entire Node script, use explicit
  * project/environment/service/instance IDs, clear inherited Node options, cap
  * output and wall time, and suppress all raw CLI/provider errors. */
-export function createRailwaySourceHealthRemoteRead({ execFileImpl = execFile } = {}) {
+export function createRailwaySourceHealthRemoteRead({ execFileImpl = execFile, identityFile } = {}) {
   return async ({ binding, service, instanceId, nonce, signal, observeRedis = false, redisIntentSha256 }) => {
     validateOpsCoreSourceHealthPlan(binding);
     need(binding.services.some(s => same(s, service)) && ID.test(instanceId) && HASH.test(nonce)
       && signal instanceof AbortSignal && !signal.aborted, "SOURCE_HEALTH_REMOTE_BINDING_INVALID");
     need(typeof observeRedis === "boolean" && (!observeRedis || HASH.test(redisIntentSha256)), "SOURCE_HEALTH_REMOTE_BINDING_INVALID");
     const request = { ...service, instanceId, nonce, ...(observeRedis ? { observeRedis, redisIntentSha256 } : {}) };
-    const args = ["ssh", "-p", binding.projectId, "-e", binding.environmentId, "-s", service.serviceId,
-      "-d", instanceId, "--", "env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin", "node", "--input-type=module", "-e", quote(remoteScript(request))];
+    const [command, args] = railwayInstanceSsh({ projectId: binding.projectId, environmentId: binding.environmentId,
+      serviceId: service.serviceId, instanceId, identityFile },
+      ["env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin", "node", "--input-type=module", "-e", quote(remoteScript(request))]);
     try {
-      const output = await new Promise((resolve, reject) => execFileImpl("railway", args,
+      const output = await new Promise((resolve, reject) => execFileImpl(command, args,
         { encoding: "utf8", timeout: 110000, maxBuffer: 32768, signal, shell: false },
         (error, stdout) => error ? reject(error) : resolve(stdout)));
       need(!signal.aborted && typeof output === "string" && Buffer.byteLength(output) <= 32768, "SOURCE_HEALTH_REMOTE_RESPONSE_INVALID");

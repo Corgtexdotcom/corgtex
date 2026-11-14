@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, writeFile, rm, symlink, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -623,6 +623,31 @@ describe("Ops/Core executable operator", () => {
     expect(migrationCliResult("inspect-source-fence", f.plan, result)).toMatchObject({
       pending: { to: "SOURCE_FENCED" }, baselineRetained: false, operations: [] });
     expect(f.writes()).toBe(writes);
+  });
+  it.each([true, false])("checks project credential binding before source access (matches=%s)", async matches => {
+    const f = fixture();
+    await runOpsCoreMigration({ ...f.options, action: "initialize" });
+    const binding = f.plan.source.writers.binding;
+    const railwayProjectToken = randomUUID();
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, options) => {
+      expect(options.headers["Project-Access-Token"]).toBe(railwayProjectToken);
+      expect(options.headers.authorization).toBeUndefined();
+      expect(JSON.parse(options.body).query).toContain("projectToken { projectId environmentId }");
+      return Response.json({ data: { projectToken: { projectId: binding.projectId,
+        environmentId: matches ? binding.environmentId : randomUUID() } } });
+    });
+    const inspectSourceFence = vi.fn(async ({ railway }) => {
+      expect(typeof railway.transport).toBe("function");
+      return { status: "SOURCE_FENCE_INSPECTED" };
+    });
+    try {
+      const action = runOpsCoreMigration({ ...f.options, action: "inspect-source-fence",
+        credentials: { railwayProjectToken }, runtime: { inspectSourceFence } });
+      if (matches) await expect(action).resolves.toMatchObject({ status: "SOURCE_FENCE_INSPECTED" });
+      else await expect(action).rejects.toThrow("MIGRATION_RAILWAY_PROJECT_TOKEN_SCOPE_MISMATCH");
+      expect(inspectSourceFence).toHaveBeenCalledTimes(matches ? 1 : 0);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally { fetch.mockRestore(); }
   });
   it("classifies a source-fence failure without exposing provider text", async () => {
     const f = fixture();

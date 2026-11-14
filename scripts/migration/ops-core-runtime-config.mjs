@@ -9,6 +9,9 @@ const same = (a, b) => archiveEvidenceHash(a) === archiveEvidenceHash(b);
 const ENV_NAME = /^[A-Z][A-Z0-9_]{0,100}$/;
 const GUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const OMIT = /^(?:RAILWAY_[A-Z0-9_]+|S3_(?:BUCKET_NAME|ENDPOINT|ACCESS_KEY_ID|ACCESS_KEY|SECRET_ACCESS_KEY|SECRET_KEY|REGION|FORCE_PATH_STYLE)|R2_(?:BUCKET_NAME|ACCOUNT_ID|ACCESS_KEY_ID|SECRET_ACCESS_KEY|ENDPOINT)|AWS_S3_BUCKET_NAME|ACCESS_KEY_ID|SECRET_ACCESS_KEY|BUCKET|BUCKET_ENDPOINT|BUCKET_REGION|PORT|HOSTNAME|SEED_SCRIPTS|CORGTEX_AUTO_SEED_[A-Z0-9_]+)$/;
+// The Ops web receives Railway incident callbacks at its stable public origin.
+const omitSourceInfrastructure = (name, domain, role) =>
+  OMIT.test(name) && !(domain === "ops" && role === "web" && name === "RAILWAY_WEBHOOK_SECRET");
 const url = value => { try { return new URL(value); } catch { throw new RuntimeConfigError("RUNTIME_URL_INVALID"); } };
 const secretName = (domain, role, name) => `migration-${domain}-${role}-${archiveEvidenceHash({ name }).slice(0, 32)}`;
 
@@ -70,10 +73,10 @@ export function prepareOpsCoreRuntimeValues({ plan, sourceEnvironments, database
       && inventory.sourceNames.every(name => ENV_NAME.test(name) && typeof source[name] === "string"
         && Buffer.byteLength(source[name]) <= 25_000 && !source[name].includes("\0"))
       && new Set(inventory.omit).size === inventory.omit.length
-      && inventory.omit.every(name => inventory.sourceNames.includes(name) && OMIT.test(name)), "RUNTIME_SOURCE_INVENTORY_MISMATCH");
+      && inventory.omit.every(name => inventory.sourceNames.includes(name) && omitSourceInfrastructure(name, p.domain, role)), "RUNTIME_SOURCE_INVENTORY_MISMATCH");
     // Railway build identity and source infrastructure must not masquerade as
     // the new runtime. Require explicit decisions even for injected metadata.
-    need(inventory.sourceNames.filter(name => OMIT.test(name)).every(name => inventory.omit.includes(name)), "RUNTIME_SOURCE_INFRASTRUCTURE_UNCLASSIFIED");
+    need(inventory.sourceNames.filter(name => omitSourceInfrastructure(name, p.domain, role)).every(name => inventory.omit.includes(name)), "RUNTIME_SOURCE_INFRASTRUCTURE_UNCLASSIFIED");
     need((source.SHARED_STATE_BACKEND ?? "redis") === "redis", "RUNTIME_SOURCE_SHARED_STATE_UNSUPPORTED");
     const generated = {
       SHARED_STATE_BACKEND: backend,

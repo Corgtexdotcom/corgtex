@@ -58,6 +58,24 @@ test("runtime projection preserves exact continuity/provider/origin/build-key va
   assert.equal(p.roles.web.values.RAILWAY_SERVICE_ID, undefined);
   assert.equal(p.roles.web.values.CORGTEX_AUTO_SEED_INTERNAL_VALIDATION, undefined);
 });
+test("Ops web retains its Railway callback secret while dropping source provider credentials", () => {
+  const { options, credential } = fixture();
+  options.plan.domain = "ops";
+  options.databaseUrl = options.databaseUrl.replace("/corgtex_core?", "/corgtex_ops?");
+  const config = options.sourceEnvironments.web;
+  config.RAILWAY_WEBHOOK_SECRET = credential;
+  config.RAILWAY_API_TOKEN = "fixture-provider-token";
+  options.plan.roles.web = {
+    sourceNames: Object.keys(config),
+    omit: [...options.plan.roles.web.omit, "RAILWAY_API_TOKEN"],
+  };
+  const { roles } = prepareOpsCoreRuntimeValues(options);
+  assert.equal(roles.web.values.RAILWAY_WEBHOOK_SECRET, credential);
+  assert.equal(roles.worker.values.RAILWAY_WEBHOOK_SECRET, undefined);
+  assert.equal(roles.web.values.RAILWAY_API_TOKEN, undefined);
+  options.plan.roles.web.omit.push("RAILWAY_WEBHOOK_SECRET");
+  assert.throws(() => prepareOpsCoreRuntimeValues(options), /RUNTIME_SOURCE_INVENTORY_MISMATCH/);
+});
 test("retains versioned private references, reads bytes back and reuses identical versions without writes", async () => {
   const f = fixture(); const result = await retainOpsCoreRuntimeConfig(f.options);
   assert.equal(JSON.stringify(result).includes(f.credential), false);
