@@ -1,3 +1,4 @@
+import { createActionEvent } from "@corgtex/shared/work-item-events";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import type { Prisma } from "@prisma/client";
@@ -134,10 +135,9 @@ export async function resolveActionDuplicate(actor: AppActor, params: Pair & {
         workspaceId: params.workspaceId, action: "action.updated", entityType: "Action", entityId: params.canonicalId,
         meta: { mergedDuplicateActionId: params.duplicateId, fields: ["bodyMd"] },
       });
-      await appendEvents(tx, [{
-        workspaceId: params.workspaceId, type: "action.updated", aggregateType: "Action", aggregateId: params.canonicalId,
-        payload: { actionId: params.canonicalId, fields: ["bodyMd"] },
-      }]);
+      await appendEvents(tx, [createActionEvent("action.updated", {
+        actionId: params.canonicalId, fields: ["bodyMd"],
+      }, params.workspaceId)]);
     }
 
     await tx.meetingInsight.updateMany({
