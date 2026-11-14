@@ -8,6 +8,7 @@ import "driver.js/dist/driver.css";
 import "../../../demo-tour-theme.css";
 import { Dialog } from "@/lib/components/Dialog";
 import { workspaceRouteMatches, workspaceStepUrl } from "./onboarding-tour-routing";
+import { onTourHighlightStarted } from "./tour-accessibility";
 
 interface TourStep {
   path: string;
@@ -125,6 +126,7 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
       showProgress: true,
       animate: true,
       allowClose: true,
+      onHighlightStarted: onTourHighlightStarted,
       popoverClass: "demo-tour-popover",
       onPopoverRender: (popover) => {
         popover.closeButton.textContent = t("skip");
