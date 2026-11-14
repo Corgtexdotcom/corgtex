@@ -175,7 +175,10 @@ jobs:
       statuses: write
     steps:
       # Evaluate live queue members from the immutable trusted base. Native
-      # approval protects the code; no custom reviewer attestation is required.
+      # approval protects the code; the validator also requires a current-head
+      # approval from the pinned eligible reviewer selected by PR author.
+      # No custom attestation payload is required. Policy changes cannot
+      # authorize their own adoption before reaching this immutable base.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.event.merge_group.base_sha }}

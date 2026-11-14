@@ -1,8 +1,11 @@
 # Independent QA and review
 
 A separate GPT-6 agent evaluates the integrated outcome after implementation.
-Use `beepto-codex` for protected GitHub review. Do not edit, fix, push, merge, or
-approve your own work; the delivery owner handles corrections in the same PR.
+Protected GitHub review requires `puncar-dev` for PRs authored by `beepto-codex`,
+and `beepto-codex` for other authors. The reviewer must be independent and have
+current write, maintain or admin repository permission. Do not edit, fix, push,
+merge, or approve your own work; the delivery owner handles corrections in the
+same PR. Changing accounts does not establish independence.
 
 1. Read the user's outcome, PR description, complete current diff, relevant tests,
    and available CI/behavior evidence. Assess the whole feature and its integration.

@@ -1,13 +1,83 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { api, computeSnapshot, decide, encodeLabelSet, evaluateMergeGroup, evaluatePolicy, resolveMergeGroupMembers, resolveMergeGroupPrNumbers, selectLatestReviewerReview, sha256Bytes, validateMergeGroupEvent } from "./review-snapshot-integrity.mjs";
+const BEEPTO = { login: "beepto-codex", node_id: "U_kgDOEJnzqQ" };
+const PUNCAR = { login: "puncar-dev", node_id: "MDQ6VXNlcjcyODkwNDA0" };
+const reviewerFor = (pr) => pr.user?.node_id === BEEPTO.node_id ? PUNCAR : BEEPTO;
+const eligibilityFor = (pr) => ({ user: { ...reviewerFor(pr) }, permission: "admin" });
 const PLAN = "## Outcome\n\nDeliver the complete feature.\n\n## Risk tier\n\n- `low`\n\n## Acceptance criteria\n\n- [x] done\n\n## Test plan\n\nFocused regression tests passed.\n\n## Risk and rollback\n\nRevert the change if needed.\n";
 const FILES = [{ filename: "scripts/x.mjs", additions: 1, deletions: 1 }];
-const makePr = (over = {}) => ({ number: 7, state: "open", draft: false, body: PLAN, head: { sha: "a".repeat(40) }, base: { sha: "b".repeat(40) }, labels: [{ name: "ok" }], auto_merge: null, ...over });
-const approvalFor = (pr, over = {}) => ({ id: 1, state: "APPROVED", submitted_at: "2026-01-01T00:00:00Z", commit_id: pr.head.sha, user: { login: "beepto-codex" }, body: "Independent QA passed.", ...over });
-const state = (over = {}, prOver = {}) => { const pr = makePr(prOver); return { pr, reviews: [approvalFor(pr)], files: FILES, filesTruncated: false, ...over }; };
+const makePr = (over = {}) => ({ number: 7, user: { login: "Corgtex-builder", node_id: "fixture-builder" }, state: "open", draft: false, body: PLAN, head: { sha: "a".repeat(40) }, base: { sha: "b".repeat(40) }, labels: [{ name: "ok" }], auto_merge: null, ...over });
+const approvalFor = (pr, over = {}) => ({ id: 1, state: "APPROVED", submitted_at: "2026-01-01T00:00:00Z", commit_id: pr.head.sha, user: { ...reviewerFor(pr) }, body: "Independent QA passed.", ...over });
+const state = (over = {}, prOver = {}) => { const pr = over.pr ?? makePr(prOver); return { pr, reviews: [approvalFor(pr)], reviewerEligibility: eligibilityFor(pr), files: FILES, filesTruncated: false, ...over }; };
 
 describe("merge-group delivery policy", () => {
+  it("requires precisely the author-conditioned independent reviewer", () => {
+    for (const user of [{ ...BEEPTO }, makePr().user, { ...PUNCAR }]) {
+      const pr = makePr({ user });
+      expect(decide(state({ pr })).pass).toBe(true);
+      const wrong = reviewerFor(pr).login === BEEPTO.login ? PUNCAR : BEEPTO;
+      expect(decide(state({ pr, reviews: [approvalFor(pr, { user: { ...wrong } })] })).pass).toBe(false);
+      expect(decide(state({ pr, reviews: [approvalFor(pr, { user: { login: "outsider", node_id: "outsider-id" } })] })).pass).toBe(false);
+    }
+  });
+  it("requires an eligible pinned account for both author paths", () => {
+    for (const user of [makePr().user, { ...BEEPTO }]) {
+      const pr = makePr({ user });
+      for (const permission of ["write", "maintain", "admin"]) {
+        expect(decide(state({ pr, reviewerEligibility: { ...eligibilityFor(pr), permission } })).pass).toBe(true);
+      }
+      for (const permission of [undefined, "none", "read", "triage", "", "owner"]) {
+        expect(() => decide(state({ pr, reviewerEligibility: { ...eligibilityFor(pr), permission } }))).toThrow("ineligible reviewer permission");
+      }
+      for (const reviewerEligibility of [undefined, {}, { user: null }, { ...eligibilityFor(pr), user: { ...reviewerFor(pr), node_id: "replacement-id" } }]) {
+        expect(() => decide(state({ pr, reviewerEligibility }))).toThrow();
+      }
+      for (const reviewUser of [{ ...reviewerFor(pr), node_id: "replacement-id" }, { ...reviewerFor(pr), login: "replacement-login" }]) {
+        expect(() => decide(state({ pr, reviews: [approvalFor(pr, { user: reviewUser })] }))).toThrow("inconsistent pinned reviewer identity");
+      }
+    }
+  });
+  it("retains current-head, dismissal and later decisive-state enforcement on both paths", () => {
+    for (const user of [makePr().user, { ...BEEPTO }]) {
+      const pr = makePr({ user });
+      expect(decide(state({ pr, reviews: [approvalFor(pr, { commit_id: "f".repeat(40) })] })).pass).toBe(false);
+      for (const reviewState of ["CHANGES_REQUESTED", "DISMISSED"]) {
+        const decisive = approvalFor(pr, { id: 2, state: reviewState });
+        const crossover = approvalFor(pr, { id: 3, user: { ...(reviewerFor(pr).login === BEEPTO.login ? PUNCAR : BEEPTO) } });
+        expect(decide(state({ pr, reviews: [approvalFor(pr), decisive, crossover] })).pass).toBe(false);
+        expect(decide(state({ pr, reviews: [decisive, approvalFor(pr, { id: 4 })] })).pass).toBe(true);
+      }
+      for (const reviewState of ["COMMENTED", "PENDING"]) {
+        expect(decide(state({ pr, reviews: [approvalFor(pr), approvalFor(pr, { id: 2, state: reviewState })] })).pass).toBe(true);
+      }
+    }
+  });
+  it("rejects PR-author approval even if supplied by inconsistent API evidence", () => {
+    const pr = makePr({ user: { ...BEEPTO } });
+    // GitHub disallows submitting this review. The validator must independently
+    // reject it rather than accepting contradictory or drifted API evidence.
+    expect(decide(state({ pr, reviews: [approvalFor(pr, { user: { ...BEEPTO } })] })).pass).toBe(false);
+  });
+  it("binds PR author identity into the snapshot used for drift checks", () => {
+    const first = makePr({ user: { login: "Corgtex-builder", node_id: "fixture-builder" } });
+    const changed = { ...first, user: { ...BEEPTO } };
+    expect(computeSnapshot(first)).not.toEqual(computeSnapshot(changed));
+    expect(computeSnapshot(first)).not.toEqual(computeSnapshot({ ...first, user: { ...first.user, node_id: "different-author" } }));
+  });
+  it("fails closed on missing or malformed PR and selected reviewer identities", () => {
+    for (const user of [undefined, null, {}, { login: "" }, { login: "Corgtex-builder", node_id: "" }, { login: "bad login", node_id: "fixture-builder" }]) {
+      expect(() => decide(state({}, { user }))).toThrow("author identity");
+    }
+    for (const node_id of [undefined, null, "", " "]) {
+      expect(() => decide(state({ reviews: [approvalFor(makePr(), { user: { login: "beepto-codex", node_id } })] }))).toThrow("author identity");
+    }
+  });
+  it("rejects self-review by case-insensitive login or stable author ID", () => {
+    for (const user of [{ login: "BEEPTO-CODEX", node_id: "different-id" }, { login: "renamed-author", node_id: BEEPTO.node_id }]) {
+      expect(() => decide(state({}, { user }))).toThrow("inconsistent pinned author identity");
+    }
+  });
   it("hashes exact body bytes; CRLF/whitespace/newline variants differ", () => {
     expect(computeSnapshot(makePr()).bodyDigest).toBe(createHash("sha256").update(PLAN, "utf8").digest("hex"));
     const ds = ["a", "a\r\n", "a\n", " a", "a "].map((b) => computeSnapshot(makePr({ body: b })).bodyDigest);
@@ -123,7 +193,7 @@ describe("merge-group delivery policy", () => {
   });
   it("auto-revert relaxes plan/scope/criteria only", () => {
     const files = [{ filename: "anywhere/z.ts", additions: 1, deletions: 1 }];
-    const run = (prOver, revPr = null) => { const pr = makePr({ body: "garbage", labels: [{ name: "auto-revert" }], ...prOver }); return decide({ pr, reviews: [approvalFor(revPr ?? pr)], files, filesTruncated: false }); };
+    const run = (prOver, revPr = null) => { const pr = makePr({ body: "garbage", labels: [{ name: "auto-revert" }], ...prOver }); return decide({ pr, reviewerEligibility: eligibilityFor(pr), reviews: [approvalFor(revPr ?? pr)], files, filesTruncated: false }); };
     expect(run().pass).toBe(true);
     expect(run({}, makePr({ head: { sha: "c".repeat(40) } })).pass).toBe(false);
     expect(run({ labels: [{ name: "auto-revert" }, { name: "force-merge" }] }).pass).toBe(false);
@@ -160,7 +230,8 @@ describe("merge-group live validation", () => {
   const event = { action: "checks_requested", repository: { full_name: repo }, merge_group: group };
   const queueEntries = (numbers) => numbers.map((number, index) => { const prHead = String(number + 10).padStart(40, "0"); return { position: index + 1, baseCommit: { oid: String(number + 100).padStart(40, "0") }, headCommit: { oid: String(number + 200).padStart(40, "0") }, pullRequest: { number, state: "OPEN", headRefOid: prHead, baseRefOid: group.base_sha } }; });
   const queuePr = (number, { baseSha = group.base_sha, baseRef = "main", baseRepo = repo } = {}) => makePr({ number, updated_at: "2026-01-02T00:00:00Z", head: { sha: String(number + 10).padStart(40, "0"), repo: { full_name: `fork${number}/r` } }, base: { sha: baseSha, ref: baseRef, repo: { full_name: baseRepo } } });
-  const stub = (entries, { truncateFiles = false, fileOverride = null, paginatedProtectedFile = false, reviewOverrides = {}, finalLabelDriftPr = null, finalHeadDriftPr = null, finalBaseDrift = false, driftPr = null, finalBodyDriftPr = null, finalReviewDriftPr = null, memberCount = entries.length, malformedGroupCommit = false, prBaseSha = group.base_sha, queueBaseSha = prBaseSha, prBaseRef = "main", prBaseRepo = repo } = {}) => {
+  const stub = (entries, { truncateFiles = false, fileOverride = null, paginatedProtectedFile = false, reviewOverrides = {}, finalLabelDriftPr = null, finalHeadDriftPr = null, finalBaseDrift = false, driftPr = null, finalBodyDriftPr = null, finalReviewDriftPr = null, memberCount = entries.length, malformedGroupCommit = false, prBaseSha = group.base_sha, queueBaseSha = prBaseSha, prBaseRef = "main", prBaseRepo = repo, prAuthors = {} } = {}) => {
+    const livePr = (number) => ({ ...queuePr(number, { baseSha: prBaseSha, baseRef: prBaseRef, baseRepo: prBaseRepo }), user: prAuthors[number] ?? makePr().user });
     const seen = [];
     const pullReads = new Map();
     const groupCommits = new Map(); let base = group.base_sha;
@@ -177,10 +248,15 @@ describe("merge-group live validation", () => {
       if (u.endsWith("/graphql")) {
         const query = JSON.parse(opts.body).query;
         if (query.includes("mergeQueue")) return reply({ data: { repository: { mergeQueue: { entries: { nodes: liveEntries, pageInfo: { hasPreviousPage: false, hasNextPage: false } } } } } });
-        return reply({ data: { repository: Object.fromEntries(liveEntries.slice(0, memberCount).map((entry, index) => { const pr = queuePr(entry.pullRequest.number, { baseSha: prBaseSha, baseRef: prBaseRef, baseRepo: prBaseRepo }); const review = approvalFor(pr, entry.pullRequest.number === finalReviewDriftPr ? { state: "CHANGES_REQUESTED" } : {}); return [`p${index}`, { number: pr.number, state: "OPEN", isDraft: pr.draft, body: pr.number === finalBodyDriftPr ? `${pr.body}drift` : pr.body, headRefOid: pr.number === finalHeadDriftPr ? "c".repeat(40) : entry.pullRequest.headRefOid, baseRefOid: finalBaseDrift ? "d".repeat(40) : prBaseSha, labels: { nodes: pr.number === finalLabelDriftPr ? [...pr.labels, { name: "halt-agents" }] : pr.labels, pageInfo: { hasPreviousPage: false, hasNextPage: false } }, reviews: { nodes: [{ fullDatabaseId: String(review.id), state: review.state, submittedAt: review.submitted_at, body: review.body, commit: { oid: review.commit_id }, author: review.user }], pageInfo: { hasPreviousPage: false, hasNextPage: false } } }]; })) } });
+        return reply({ data: { repository: Object.fromEntries(liveEntries.slice(0, memberCount).map((entry, index) => { const pr = livePr(entry.pullRequest.number); const review = approvalFor(pr, entry.pullRequest.number === finalReviewDriftPr ? { state: "CHANGES_REQUESTED" } : {}); return [`p${index}`, { number: pr.number, author: { login: pr.user.login, id: pr.user.node_id }, state: "OPEN", isDraft: pr.draft, body: pr.number === finalBodyDriftPr ? `${pr.body}drift` : pr.body, headRefOid: pr.number === finalHeadDriftPr ? "c".repeat(40) : entry.pullRequest.headRefOid, baseRefOid: finalBaseDrift ? "d".repeat(40) : prBaseSha, labels: { nodes: pr.number === finalLabelDriftPr ? [...pr.labels, { name: "halt-agents" }] : pr.labels, pageInfo: { hasPreviousPage: false, hasNextPage: false } }, reviews: { nodes: [{ fullDatabaseId: String(review.id), state: review.state, submittedAt: review.submitted_at, body: review.body, commit: { oid: review.commit_id }, author: { login: review.user.login, id: review.user.node_id } }], pageInfo: { hasPreviousPage: false, hasNextPage: false } } }]; })) } });
+      }
+      if (u.includes("/collaborators/")) {
+        const login = u.match(/collaborators\/([^/]+)/)[1];
+        const user = login === BEEPTO.login ? BEEPTO : PUNCAR;
+        return reply({ user: { ...user }, permission: "admin" });
       }
       if (u.includes("/git/commits/")) return reply(groupCommits.get(u.split("/").at(-1)));
-      const number = Number(u.match(/\/pulls\/(\d+)/)?.[1]); const pr = queuePr(number, { baseSha: prBaseSha, baseRef: prBaseRef, baseRepo: prBaseRepo });
+      const number = Number(u.match(/\/pulls\/(\d+)/)?.[1]); const pr = livePr(number);
       if (u.endsWith(`/pulls/${number}`)) { const reads = (pullReads.get(number) ?? 0) + 1; pullReads.set(number, reads); return reply(number === driftPr && reads > 1 ? { ...pr, body: `${pr.body}drift` } : pr); }
       if (u.includes(`/pulls/${number}/files`)) {
         if (fileOverride) return reply(fileOverride);
@@ -209,6 +285,63 @@ describe("merge-group live validation", () => {
     expect(seen.every((r) => r.method === "GET" || (r.u.endsWith("/graphql") && r.method === "POST" && JSON.parse(r.body).query.startsWith("query(")))).toBe(true);
     expect(seen.some((r) => /statuses|dismissals/.test(r.u) || /mutation/i.test(r.body ?? ""))).toBe(false);
     vi.unstubAllGlobals();
+  });
+  it("uses the same per-author contract in mixed-author REST and final GraphQL evaluation", async () => {
+    const seen = stub(queueEntries([1, 2]), { prAuthors: { 1: { ...BEEPTO } } });
+    expect((await evaluateMergeGroup(repo, event, group.head_sha)).failed).toBe(false);
+    const query = JSON.parse(seen.find(({ body }) => body?.includes("p0:pullRequest" )).body).query;
+    expect(query.slice(query.indexOf("p0:"), query.indexOf("p1:"))).toContain('author:"puncar-dev"');
+    expect(query.slice(query.indexOf("p1:"))).toContain('author:"beepto-codex"');
+    expect(seen.filter(({ u }) => u.includes("/collaborators/puncar-dev/permission"))).toHaveLength(3);
+    expect(seen.filter(({ u }) => u.includes("/collaborators/beepto-codex/permission"))).toHaveLength(3);
+    vi.unstubAllGlobals();
+  });
+  it("rejects alternate-path final reviewer crossover, supersession, truncation and author drift", async () => {
+    for (const mode of ["crossover", "stale", "dismissed", "superseded", "pagination", "author-route-change"]) {
+      stub(queueEntries([1]), { prAuthors: { 1: { ...BEEPTO } } });
+      const fetchSnapshot = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async (url, options) => {
+        const response = await fetchSnapshot(url, options);
+        if (!String(url).endsWith("/graphql") || JSON.parse(options.body).query.includes("mergeQueue")) return response;
+        const json = await response.json();
+        const final = json.data.repository.p0;
+        const review = final.reviews.nodes[0];
+        if (mode === "crossover") review.author = { login: BEEPTO.login, id: BEEPTO.node_id };
+        else if (mode === "stale") review.commit.oid = "f".repeat(40);
+        else if (mode === "dismissed") review.state = "DISMISSED";
+        else if (mode === "superseded") final.reviews.nodes.push({ ...review, fullDatabaseId: "2", state: "CHANGES_REQUESTED" });
+        else if (mode === "pagination") final.reviews.pageInfo.hasPreviousPage = true;
+        else final.author = { login: "Corgtex-builder", id: "fixture-builder" };
+        return { ...response, json: async () => json };
+      }));
+      await expect(evaluateMergeGroup(repo, event, group.head_sha)).rejects.toThrow();
+      vi.unstubAllGlobals();
+    }
+  });
+  it("fails closed on reviewer eligibility errors or drift at each of the three reads", async () => {
+    for (const prAuthor of [makePr().user, { ...BEEPTO }]) {
+      for (const stage of [1, 2, 3]) {
+        for (const mode of ["api-error", "missing-user", "wrong-id", "revoked", "permission-drift"]) {
+          // An eligible-but-different role has no earlier snapshot at stage 1.
+          if (stage === 1 && mode === "permission-drift") continue;
+          stub(queueEntries([1]), { prAuthors: { 1: prAuthor } });
+          const fetchSnapshot = globalThis.fetch;
+          let reads = 0;
+          vi.stubGlobal("fetch", vi.fn(async (url, options) => {
+            const response = await fetchSnapshot(url, options);
+            if (!String(url).includes("/collaborators/") || ++reads !== stage) return response;
+            if (mode === "api-error") return { ok: false, status: 403 };
+            const json = await response.json();
+            if (mode === "missing-user") delete json.user;
+            else if (mode === "wrong-id") json.user.node_id = "replacement-account";
+            else json.permission = mode === "revoked" ? "read" : "write";
+            return { ...response, json: async () => json };
+          }));
+          await expect(evaluateMergeGroup(repo, event, group.head_sha)).rejects.toThrow();
+          vi.unstubAllGlobals();
+        }
+      }
+    }
   });
   it("accepts an older PR base snapshot after main advances while preserving target identity", async () => {
     stub(queueEntries([1146]), { prBaseSha: "d".repeat(40) });
@@ -278,5 +411,98 @@ describe("merge-group live validation", () => {
     expect(seen.filter((r) => r.u.includes("/files")).length).toBe(30);
     expect(seen.every((r) => r.method === "GET" || r.u.endsWith("/graphql"))).toBe(true);
     vi.unstubAllGlobals();
+  });
+  it("fails closed when REST review evidence reaches the pagination bound", async () => {
+    stub(queueEntries([1]));
+    const fetchSnapshot = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (url, options) => {
+      if (String(url).includes("/pulls/1/reviews")) {
+        return { ok: true, status: 200, json: async () => Array.from({ length: 100 }, (_, i) => approvalFor(queuePr(1), { id: i + 1 })) };
+      }
+      return fetchSnapshot(url, options);
+    }));
+    expect((await evaluateMergeGroup(repo, event, group.head_sha)).failed).toBe(true);
+    vi.unstubAllGlobals();
+  });
+  it("fails closed on missing initial author and author drift during REST re-evaluation", async () => {
+    for (const mode of ["missing", "changed-login", "changed-id", "self"]) {
+      stub(queueEntries([1]));
+      const fetchSnapshot = globalThis.fetch;
+      let reads = 0;
+      vi.stubGlobal("fetch", vi.fn(async (url, options) => {
+        const response = await fetchSnapshot(url, options);
+        if (!String(url).endsWith("/pulls/1")) return response;
+        const pr = await response.json();
+        reads++;
+        if (mode === "missing") delete pr.user;
+        else if (reads > 1) pr.user = mode === "self" ? { login: "beepto-codex", node_id: BEEPTO.node_id } : { ...pr.user, ...(mode === "changed-login" ? { login: "other-author" } : { node_id: "other-author-id" }) };
+        return { ...response, json: async () => pr };
+      }));
+      await expect(evaluateMergeGroup(repo, event, group.head_sha)).rejects.toThrow(mode === "missing" ? "author identity" : mode === "self" ? "unexpected final merge-group PR state" : "snapshot drifted");
+      vi.unstubAllGlobals();
+    }
+  });
+  it("validates final GraphQL authors and binds author and reviewer identities to REST evidence", async () => {
+    for (const mode of ["missing", "blank-login", "missing-id", "changed-login", "changed-id", "self-login", "self-id", "reviewer-id-drift", "missing-reviewer-id"]) {
+      const seen = stub(queueEntries([1]));
+      const fetchSnapshot = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async (url, options) => {
+        const response = await fetchSnapshot(url, options);
+        if (!String(url).endsWith("/graphql") || JSON.parse(options.body).query.includes("mergeQueue")) return response;
+        const json = await response.json();
+        const final = json.data.repository.p0;
+        if (mode === "missing") delete final.author;
+        else if (mode === "blank-login") final.author.login = "";
+        else if (mode === "missing-id") delete final.author.id;
+        else if (mode === "changed-login") final.author.login = "other-author";
+        else if (mode === "changed-id") final.author.id = "other-author-id";
+        else if (mode === "self-login") final.author.login = "BEEPTO-CODEX";
+        else if (mode === "self-id") final.author.id = BEEPTO.node_id;
+        else if (mode === "reviewer-id-drift") final.reviews.nodes[0].author.id = "other-reviewer-id";
+        else delete final.reviews.nodes[0].author.id;
+        return { ...response, json: async () => json };
+      }));
+      await expect(evaluateMergeGroup(repo, event, group.head_sha)).rejects.toThrow();
+      expect(seen.some(({ body }) => body?.includes("number author{login ... on Node{id}}"))).toBe(true);
+      vi.unstubAllGlobals();
+    }
+  });
+  it("rejects a same-login reviewer ID changing after the first REST snapshot", async () => {
+    stub(queueEntries([1]));
+    const fetchSnapshot = globalThis.fetch;
+    let reviewReads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url, options) => {
+      const response = await fetchSnapshot(url, options);
+      const isFinal = String(url).endsWith("/graphql") && !JSON.parse(options.body).query.includes("mergeQueue");
+      if (String(url).includes("/pulls/1/reviews")) {
+        const reviews = await response.json();
+        if (++reviewReads > 1) reviews[0].user.node_id = "replacement-reviewer";
+        return { ...response, json: async () => reviews };
+      }
+      if (isFinal) {
+        const json = await response.json();
+        json.data.repository.p0.reviews.nodes[0].author.id = "replacement-reviewer";
+        return { ...response, json: async () => json };
+      }
+      return response;
+    }));
+    await expect(evaluateMergeGroup(repo, event, group.head_sha)).rejects.toThrow("inconsistent pinned reviewer identity");
+    vi.unstubAllGlobals();
+  });
+  it("fails closed when final review evidence is incomplete or the API returns errors", async () => {
+    for (const mode of ["previous-page", "next-page", "graphql-error"]) {
+      stub(queueEntries([1]));
+      const fetchSnapshot = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async (url, options) => {
+        const response = await fetchSnapshot(url, options);
+        if (!String(url).endsWith("/graphql") || JSON.parse(options.body).query.includes("mergeQueue")) return response;
+        const json = await response.json();
+        if (mode === "graphql-error") json.errors = [{ message: "review evidence unavailable" }];
+        else json.data.repository.p0.reviews.pageInfo[mode === "previous-page" ? "hasPreviousPage" : "hasNextPage"] = true;
+        return { ...response, json: async () => json };
+      }));
+      await expect(evaluateMergeGroup(repo, event, group.head_sha)).rejects.toThrow(mode === "graphql-error" ? "graphql error" : "unexpected final merge-group PR state");
+      vi.unstubAllGlobals();
+    }
   });
 });

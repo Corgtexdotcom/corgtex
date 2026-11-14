@@ -83,8 +83,10 @@ accept manageable, reversible risk and ordinary follow-up fixes.
 
 ## GitHub delivery
 
-- Builder: `Corgtex-builder` via `$HOME/.config/gh-corgtex-builder`.
-  Independent reviewer: `beepto-codex` via `$HOME/.config/gh-codex-reviewer`.
+- Use the session-authorized PR author (currently `beepto-codex`). Independent
+  reviewer: `puncar-dev` for `beepto-codex`-authored PRs; `beepto-codex` for other
+  authors. Reviewer identities are pinned in `scripts/review-snapshot-integrity.mjs`.
+  Never switch actors to make the delivery owner appear independent.
   Verify `api user --jq .login` immediately before each GitHub write.
 - The owner never self-approves. The reviewer does not edit, push, or merge.
   Native approval, required checks, conversation resolution, and merge queue govern
