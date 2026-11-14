@@ -108,6 +108,67 @@ describe("ops-core health targets", () => {
     });
   });
 
+  const freezePayload = {
+    status: "ok",
+    proof: "freeze-proof",
+    role: "source",
+    enabled: false,
+  };
+  const freezeTarget = {
+    ...buildHealthTargets({ NEXT_PUBLIC_APP_URL: "https://app.example" })
+      .find((target) => target.name === "app"),
+    attempts: 1,
+    expectJson: freezePayload,
+  };
+
+  it.each([
+    ["HTML 200", "text/html", "<html>healthy</html>"],
+    ["missing content type", null, JSON.stringify(freezePayload)],
+    ["misleading content type", "text/html; note=application/json", JSON.stringify(freezePayload)],
+    ["non-JSON media subtype", "application/jsonp", JSON.stringify(freezePayload)],
+    ["invalid JSON", "application/json", "{invalid"],
+    ["null JSON", "application/json", "null"],
+    ["missing fields", "application/json", JSON.stringify({ status: "ok" })],
+    ["changed proof", "application/json", JSON.stringify({ ...freezePayload, proof: "other-proof" })],
+    ["changed role", "application/json", JSON.stringify({ ...freezePayload, role: "target" })],
+    ["false changed to true", "application/json", JSON.stringify({ ...freezePayload, enabled: true })],
+    ["boolean string", "application/json", JSON.stringify({ ...freezePayload, enabled: "false" })],
+  ])("rejects expected JSON health with %s", async (_label, contentType, body) => {
+    const result = await checkHealthTarget(freezeTarget, async () => new Response(
+      new TextEncoder().encode(body),
+      { status: 200, headers: contentType ? { "Content-Type": contentType } : {} },
+    ));
+
+    expect(result).toMatchObject({ ok: false, status: "degraded", httpStatus: 200 });
+    expect(result.incident).toMatchObject({ service: "web", severity: "P1", status: "degraded" });
+  });
+
+  it.each(["application/json", "application/json; charset=utf-8", "Application/JSON; charset=UTF-8"])(
+    "accepts strictly matching expected fields with %s",
+    async (contentType) => {
+      const result = await checkHealthTarget(freezeTarget, async () => new Response(
+        JSON.stringify({ ...freezePayload, extra: "allowed" }),
+        { status: 200, headers: { "Content-Type": contentType } },
+      ));
+
+      expect(result).toMatchObject({ ok: true, status: "ok", payload: freezePayload });
+      expect(result.incident).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ["text/html", "<html>healthy</html>"],
+    ["application/json", "{invalid"],
+  ])("preserves status-only targets with %s", async (contentType, body) => {
+    const result = await checkHealthTarget(
+      { ...freezeTarget, expectJson: null },
+      async () => new Response(body, { status: 200, headers: { "Content-Type": contentType } }),
+    );
+
+    expect(result).toMatchObject({ ok: true, status: "ok", payload: null });
+    expect(result.incident).toBeUndefined();
+  });
+
   it("retries transient fetch failures before returning success", async () => {
     const [target] = buildHealthTargets({
       NEXT_PUBLIC_APP_URL: "https://app.example",
