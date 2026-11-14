@@ -36,7 +36,7 @@ import { notifyFleetReleaseFailure } from "./fleet-release-alerts.mjs";
 import { runPostDeployProbe } from "./fleet-release-probes.mjs";
 
 const DEFAULT_CONTROL_PLANE_URL = "https://ops.corgtex.com";
-const DEFAULT_RAILWAY_GRAPHQL_ENDPOINT = "https://backboard.railway.com/graphql/v2";
+import { railwayCredential, railwayApiRequest } from "../lib/railway-release-credential.mjs";
 const DEFAULT_AZURE = {
   resourceGroup: "rg-corgtex-selfserve-production-wus3",
   acrName: "acrcorgtexssstgwus3",
@@ -303,7 +303,7 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
     const includesOpsRailwayTarget = selectedTargets.some((target) => target.provider === "railway" && target.group === "ops");
     const includesDurableRailwayTarget = selectedTargets.some((target) => target.provider === "railway" && ["ops", "backup-app"].includes(target.group));
     const includesAzureTarget = selectedProviders.has("azure");
-    if (includesRailwayTarget && !env.RAILWAY_API_TOKEN?.trim()) {
+    if (selectedTargets.some(target => target.provider === "railway" && !railwayCredential(target, env))) {
       missing.push("RAILWAY_API_TOKEN");
     }
     if (includesDurableRailwayTarget && !env.GHCR_IMPORT_TOKEN?.trim()) {
@@ -640,7 +640,7 @@ function preflightTarget(target, env, options = {}) {
       }
       if (!optionalText(env.POSTHOG_PROJECT_TOKEN)) blockers.push("POSTHOG_PROJECT_TOKEN is missing for Railway observability");
     }
-    if (!env.RAILWAY_API_TOKEN) blockers.push("RAILWAY_API_TOKEN is missing");
+    if (!railwayCredential(target, env)) blockers.push("RAILWAY_API_TOKEN is missing");
     if (["ops", "backup-app"].includes(target.group)) {
       const label = target.group === "ops" ? "Ops" : "backup-app";
       if (!env.GHCR_IMPORT_TOKEN?.trim()) blockers.push(`durable GHCR package-read token is missing for ${label} image pull`);
@@ -986,7 +986,7 @@ async function deployRailwayTarget(target, manifest, deps) {
       environmentId: target.railway.environmentId,
       serviceId: service.serviceId,
       input: railwayServiceUpdateInput(service.image, deps, { requireDurableCredential: protectedStagedRailway }),
-    }, deps);
+    }, deps, target);
     if (protectedStagedRailway) {
       expected.get(service.serviceId).image = service.image;
       await verifyStaging();
@@ -1015,7 +1015,7 @@ async function deployRailwayTarget(target, manifest, deps) {
       environmentId: target.railway.environmentId,
       serviceId: service.serviceId,
       variables,
-    }, deps);
+    }, deps, target);
     if (protectedStagedRailway) {
       expected.get(service.serviceId).releaseVariables = variables;
       await verifyStaging();
@@ -1041,7 +1041,7 @@ async function deployRailwayTarget(target, manifest, deps) {
     `, {
       serviceId: service.serviceId,
       environmentId: target.railway.environmentId,
-    }, deps);
+    }, deps, target);
     const deployment = { ...service, deploymentId: result.deploymentId };
     deployments.push(deployment);
     await waitForRailwayDeployment(target, deployment, deps);
@@ -1087,7 +1087,7 @@ async function readOpsRailwayStage(target, service, deps) {
     projectId: target.railway.projectId,
     environmentId: target.railway.environmentId,
     serviceId: service.serviceId,
-  }, deps);
+  }, deps, target);
   const fail = (reason) => { throw new Error(`${target.label} ${service.key} Railway staging ${reason}; reconcile before retrying`); };
   const instance = data.instance;
   const config = data.environment?.config?.services?.[service.serviceId];
@@ -1330,7 +1330,7 @@ export async function latestRailwayStatus(target, deployment, deps) {
   `, {
     serviceId: deployment.serviceId,
     environmentId: target.railway.environmentId,
-  }, deps);
+  }, deps, target);
   const nodes = result.deployments?.edges?.map((edge) => edge.node).filter(Boolean) ?? [];
   const match = nodes.find((node) => node.id === deployment.deploymentId);
   return match?.status ?? "UNKNOWN";
@@ -1561,14 +1561,14 @@ async function callControlPlaneTool(name, args, deps) {
   return text ? JSON.parse(text) : body?.result;
 }
 
-async function railwayGraphql(query, variables, deps) {
+async function railwayGraphql(query, variables, deps, target) {
   const env = deps.env ?? process.env;
-  const token = env.RAILWAY_API_TOKEN?.trim();
-  if (!token) throw new Error("RAILWAY_API_TOKEN is required.");
-  const response = await (deps.fetchImpl ?? fetch)(env.RAILWAY_GRAPHQL_ENDPOINT || DEFAULT_RAILWAY_GRAPHQL_ENDPOINT, {
+  const { headers, endpoint } = railwayApiRequest(target, env);
+  const response = await (deps.fetchImpl ?? fetch)(endpoint, {
+    redirect: "error",
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
+      ...headers,
       "content-type": "application/json",
     },
     body: JSON.stringify({ query, variables }),

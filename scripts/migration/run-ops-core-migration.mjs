@@ -19,7 +19,9 @@ import { buildHealthProbeJobDefinition, createHealthJobDispatcher } from "./ops-
 import { runOpsCoreAcceptance, validateOpsCoreAcceptanceBinding } from "./ops-core-acceptance.mjs";
 import { createOpsCoreAzureTarget, opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
 import { runOpsCoreTransferPreflight } from "./ops-core-preflight.mjs";
-import { createOpsCoreSourceHealthObserver, validateOpsCoreSourceHealthPlan } from "./ops-core-source-health.mjs";
+import { createRailwayFenceTransport } from "./railway-source-fence.mjs";
+import { createRailwayPostgresRemoteRead } from "./railway-postgres-custody.mjs";
+import { createRailwaySourceHealthRemoteRead, createOpsCoreSourceHealthObserver, validateOpsCoreSourceHealthPlan } from "./ops-core-source-health.mjs";
 import { RailwayObjectSource } from "./railway-object-source.ts";
 import { AzureBlobObjectStore } from "./shared-tenant-objects.ts";
 import { createRuntimeSecretResolver, assertOpsCoreRuntimeAccessForActivation,
@@ -307,18 +309,32 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
         resultSha256: archiveEvidenceHash(result), ...result };
     };
     if (action === "monitor-access") return await accessMonitor();
+    let railway = credentials?.railwayToken ? { token: credentials.railwayToken } : {};
+    if (credentials?.railwayProjectToken !== undefined) {
+      need(credentials.railwayToken === undefined, "MIGRATION_AMBIGUOUS_RAILWAY_CREDENTIAL");
+      const transport = createRailwayFenceTransport({ projectToken: credentials.railwayProjectToken });
+      const { projectToken } = await transport({ query: "query MigrationTokenBinding { projectToken { projectId environmentId } }",
+        variables: {}, signal: custody.signal });
+      const binding = plan.source.writers.binding;
+      need(projectToken?.projectId === binding.projectId && projectToken.environmentId === binding.environmentId,
+        "MIGRATION_RAILWAY_PROJECT_TOKEN_SCOPE_MISMATCH");
+      railway = { transport };
+    }
+    const identityFile = credentials?.railwaySshIdentityFile;
+    if (identityFile !== undefined) railway.runRemoteRead = createRailwayPostgresRemoteRead({ identityFile });
     if (action === "inspect-source-fence") {
       stage = "SOURCE_FENCE_INSPECTION";
-      need(credentials?.railwayToken || runtime.inspectSourceFence, "MIGRATION_RAILWAY_CREDENTIAL_REQUIRED");
+      need(railway.token || railway.transport || runtime.inspectSourceFence, "MIGRATION_RAILWAY_CREDENTIAL_REQUIRED");
       return await (runtime.inspectSourceFence ?? inspectOpsCoreSourceFence)({ plan, custody, operationStore,
-        railway: credentials?.railwayToken ? { token: credentials.railwayToken } : {} });
+        railway });
     }
     need(credentials && credentials.sourceConfig && credentials.readerConfig, "MIGRATION_CREDENTIALS_REQUIRED");
-    const railway = credentials.railwayToken ? { token: credentials.railwayToken } : {};
     let sourceHealth;
     const assertSourceHealthy = runtime.assertSourceHealthy ?? (request => {
       sourceHealth ??= createOpsCoreSourceHealthObserver({ plan, signal: custody.signal,
-        assertOwned: () => custody.assertOwned(), ...railway, redisSourceCredentials: credentials.redisSource });
+        assertOwned: () => custody.assertOwned(), token: railway.token, transport: railway.transport,
+        ...(identityFile !== undefined ? { runRemoteRead: createRailwaySourceHealthRemoteRead({ identityFile }) } : {}),
+        redisSourceCredentials: credentials.redisSource });
       return sourceHealth(request);
     });
     const sourceOptions = { plan, custody, operationStore, sourceConfig: credentials.sourceConfig,

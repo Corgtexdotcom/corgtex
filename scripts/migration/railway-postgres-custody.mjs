@@ -1,3 +1,4 @@
+import { railwayInstanceSsh } from "./railway-instance-ssh.mjs";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRailwayFenceTransport } from "./railway-source-fence.mjs";
@@ -85,17 +86,16 @@ function remoteScript(binding) {
  * never rely on local execFile argument separation to quote the remote shell.
  * The injected executor is for local tests; production uses an explicit instance.
  */
-export function createRailwayPostgresRemoteRead({ execFileImpl = execFile } = {}) {
+export function createRailwayPostgresRemoteRead({ execFileImpl = execFile, identityFile } = {}) {
   requireValue(typeof execFileImpl === "function", "RAILWAY_PG_EXECUTOR_INVALID");
   return async ({ binding: value, signal }) => {
     requireValue(signal instanceof AbortSignal, "RAILWAY_PG_SIGNAL_REQUIRED");
     const binding = bind(value);
     checkSignal(signal);
-    const args = ["ssh", "-p", binding.projectId, "-e", binding.environmentId, "-s", binding.serviceId,
-      "-d", binding.instanceId, "--", "sh", "-c", quote(remoteScript(binding))];
+    const [command, args] = railwayInstanceSsh({ ...binding, identityFile }, ["sh", "-c", quote(remoteScript(binding))]);
     try {
       const stdout = await new Promise((resolve, reject) => {
-        execFileImpl("railway", args, { encoding: "utf8", timeout: 30_000, maxBuffer: MAX_RESPONSE,
+        execFileImpl(command, args, { encoding: "utf8", timeout: 30_000, maxBuffer: MAX_RESPONSE,
           signal, shell: false }, (error, stdout) => error ? reject(error) : resolve(stdout));
       });
       checkSignal(signal);

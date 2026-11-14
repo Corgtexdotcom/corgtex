@@ -1786,6 +1786,22 @@ describe("fleet release runner", () => {
     expect(JSON.stringify(result)).not.toMatch(/token|password|username|deploymentId/i);
   });
 
+  it("uses the Ops project header only on the canonical Railway API for the Ops group", async () => {
+    const env = { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), OPS_RAILWAY_PROJECT_TOKEN: "fixture-project", RAILWAY_API_TOKEN: "fixture-legacy" };
+    const fetchImpl = vi.fn(async (_url, options) => {
+      expect(options.headers["Project-Access-Token"]).toBe("fixture-project");
+      expect(options.headers.authorization).toBeUndefined();
+      expect(options.redirect).toBe("error");
+      return successfulRailwayResponse(JSON.parse(options.body));
+    });
+    await runFleetRelease(["preflight-provider", "--targets", "ops"], { env, fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    await expect(runFleetRelease(["preflight-provider", "--targets", "ops"], {
+      env: { ...env, RAILWAY_GRAPHQL_ENDPOINT: "https://foreign.example.test" }, fetchImpl,
+    })).rejects.toThrow(/Unexpected Ops Railway API endpoint/);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
   it("preflights both protected groups, including the real backup workspace commands, without writes", async () => {
     for (const serviceId of [backupAppRailway.webServiceId, backupAppRailway.workerServiceId]) {
       railwayStage(serviceId).instance.startCommand = `npm run start --workspace=@corgtex/${railwayServiceRole(serviceId)}`;

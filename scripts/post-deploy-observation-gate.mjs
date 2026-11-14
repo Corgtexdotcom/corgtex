@@ -25,7 +25,7 @@ const NON_STATUS_FAILURE_EVENTS = new Set([
   "corgtex_worker_error",
 ]);
 const DEFAULT_WINDOW_MINUTES = 20;
-const DEFAULT_RAILWAY_GRAPHQL_ENDPOINT = "https://backboard.railway.com/graphql/v2";
+import { railwayCredential, railwayApiRequest } from "./lib/railway-release-credential.mjs";
 const DEFAULT_RAILWAY_LOG_LIMIT = 100;
 const TARGET_GROUPS = Object.freeze([
   "railway-customers",
@@ -203,7 +203,7 @@ async function collectObservationData({ env = process.env, manifest = {}, since,
   }
   const railwayTargets = publicOpsHealth && !providerTargets ? []
     : railwayTargetsFromEnv(env, providerTargets, { requireExactDeploymentEvidence: Boolean(targetDeploymentId) });
-  if (safeText(env.RAILWAY_API_TOKEN) && railwayTargets.length > 0) {
+  if (railwayTargets.length > 0 && railwayTargets.every(target => railwayCredential(target, env))) {
     try {
       const railwayRows = await queryRailwayRows({ env, manifest, since, until, targets: providerTargets, targetDeploymentId, deps });
       rows.push(...railwayRows);
@@ -350,7 +350,7 @@ export async function queryRailwayRows({ env = process.env, manifest = {}, since
     const deployment = await latestRailwayDeployment(target, { env, deps });
     const release = railwayTargetRelease(target, manifest);
     const httpLogs = await queryRailwayHttpLogs({
-      env,
+      env, target,
       deploymentId: deployment.id,
       since,
       until,
@@ -1032,7 +1032,7 @@ function railwayTargetsFromEnv(env, targets, { requireExactDeploymentEvidence = 
 
 async function latestRailwayDeployment(target, { env = process.env, deps = {}, serviceId = target.webServiceId }) {
   const data = await railwayGraphql({
-    env,
+    env, target,
     deps,
     query: `query LatestDeployment($serviceId: String!, $environmentId: String!) {
       deployments(first: 1, input: { serviceId: $serviceId, environmentId: $environmentId }) {
@@ -1058,9 +1058,9 @@ async function latestRailwayDeployment(target, { env = process.env, deps = {}, s
   return deployment;
 }
 
-async function queryRailwayHttpLogs({ env = process.env, deploymentId, since, until = new Date(), deps = {} }) {
+async function queryRailwayHttpLogs({ env = process.env, target, deploymentId, since, until = new Date(), deps = {} }) {
   const data = await railwayGraphql({
-    env,
+    env, target,
     deps,
     query: `query HttpLogs($deploymentId: String!, $filter: String, $limit: Int!) {
       httpLogs(
@@ -1093,13 +1093,13 @@ async function queryRailwayHttpLogs({ env = process.env, deploymentId, since, un
   });
 }
 
-async function railwayGraphql({ env = process.env, deps = {}, query, variables }) {
-  const token = requiredText(env.RAILWAY_API_TOKEN, "RAILWAY_API_TOKEN");
-  const endpoint = safeText(env.RAILWAY_GRAPHQL_ENDPOINT) ?? DEFAULT_RAILWAY_GRAPHQL_ENDPOINT;
+async function railwayGraphql({ env = process.env, deps = {}, target, query, variables }) {
+  const { headers, endpoint } = railwayApiRequest(target, env);
   const response = await (deps.fetchImpl ?? fetch)(endpoint, {
     method: "POST",
+    redirect: "error",
     headers: {
-      Authorization: `Bearer ${token}`,
+      ...headers,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ query, variables }),

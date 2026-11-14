@@ -1,0 +1,36 @@
+name: Configure selfserve release diagnostics
+on:
+  workflow_dispatch:
+    inputs:
+      expected_selfserve_sha:
+        description: Exact release currently serving the internal validation workspace
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selfserve-release-connector
+  cancel-in-progress: false
+
+jobs:
+  configure:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: fleet-release-production
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Bind and verify the selfserve host diagnostic credential
+        env:
+          EXPECTED_SELFSERVE_SHA: ${{ inputs.expected_selfserve_sha }}
+          CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
+          SELFSERVE_VALIDATION_EMAIL: ${{ secrets.SELFSERVE_VALIDATION_EMAIL }}
+          SELFSERVE_VALIDATION_PASSWORD: ${{ secrets.SELFSERVE_VALIDATION_PASSWORD }}
+        run: node scripts/release/configure-selfserve-release-connector.mjs

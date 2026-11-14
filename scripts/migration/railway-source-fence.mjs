@@ -101,8 +101,11 @@ const stopped = (deployment) => deployment.deploymentStopped && !UNFINISHED_STAT
 
 /** Read-only provider calls may retry transient failures. Mutations never replay;
  * token and provider error bodies never enter evidence. */
-export function createRailwayFenceTransport({ token, fetchImpl = globalThis.fetch, maxResponseBytes = 32 * 1024 * 1024 }) {
-  requireValue(typeof token === "string" && token.length > 0 && !/[\r\n]/.test(token), "RAILWAY_AUTH_REQUIRED");
+export function createRailwayFenceTransport({ token, projectToken, fetchImpl = globalThis.fetch, maxResponseBytes = 32 * 1024 * 1024 }) {
+  const credential = projectToken ?? token;
+  requireValue(!(projectToken !== undefined && token !== undefined) && typeof credential === "string"
+    && credential.length > 0 && !/[\r\n]/.test(credential), "RAILWAY_AUTH_REQUIRED");
+  const authHeader = projectToken === undefined ? { authorization: `Bearer ${token}` } : { "Project-Access-Token": projectToken };
   requireValue(Number.isSafeInteger(maxResponseBytes) && maxResponseBytes > 0 && maxResponseBytes <= 32 * 1024 * 1024, "INVALID_RESPONSE_LIMIT");
   return async ({ query, variables, signal }) => {
     // Deployment pages already own a three-attempt read budget in #deployments.
@@ -114,7 +117,7 @@ export function createRailwayFenceTransport({ token, fetchImpl = globalThis.fetc
         checkSignal(signal);
         let response;
         try { response = await fetchImpl(ENDPOINT, { method: "POST", redirect: "error",
-          headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+          headers: { "content-type": "application/json", ...authHeader },
           body: JSON.stringify({ query, variables }), signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]) }); }
         catch (error) { retryable = true; throw error; }
         retryable = [429, 500, 502, 503, 504].includes(response.status);
