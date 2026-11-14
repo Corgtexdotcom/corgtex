@@ -35,6 +35,20 @@ describe("sendEmail", () => {
     emailDeliveryUpsertMock.mockResolvedValue({});
   });
 
+  it.each([
+    ["missing_required_field", "FAILED"], ["missing_api_key", "FAILED"], ["invalid_api_key", "FAILED"],
+    ["validation_error", "FAILED"], ["rate_limit_exceeded", "FAILED"],
+    ["concurrent_idempotent_requests", "UNKNOWN"], ["invalid_idempotent_request", "UNKNOWN"],
+    ["application_error", "UNKNOWN"], ["internal_server_error", "UNKNOWN"], ["future_provider_code", "UNKNOWN"],
+  ])("classifies provider code %s as %s without changing error behavior", async (providerCode, outcome) => {
+    emailsSendMock.mockResolvedValueOnce({ data: null, error: { name: providerCode, message: "Synthetic provider response" } });
+    const { sendEmail } = await import("./email");
+    await expect(sendEmail({ to: "user@example.test", subject: "Test", html: "Test" })).rejects.toMatchObject({
+      message: "Email send failed: Synthetic provider response", outcome, providerCode,
+    });
+    expect(emailDeliveryUpsertMock).not.toHaveBeenCalled();
+  });
+
   it("passes text alternatives to Resend", async () => {
     const { sendEmail } = await import("./email");
 
