@@ -177,7 +177,7 @@ test("root provider errors never leak into diagnostics",async()=>{
 
 test("factory can precede activation and opens actual recorder lazily in correct phase",async()=>{
   const f=await fixture();f.journal.pending=null;f.journal.destinationMayHaveWritten=false;
-  const d=createHealthJobDispatcher({plan:p,custody:f.custody,operationStore:f.store,assertSourceFenced:f.opts.assertSourceFenced,transport:f.opts.transport,pollIntervalMs:0,timeoutMs:10000});
+  const d=createHealthJobDispatcher({plan:p,custody:f.custody,operationStore:f.store,assertSourceFenced:f.opts.assertSourceFenced,transport:f.opts.transport,readJobLogs:f.opts.readJobLogs,pollIntervalMs:0,timeoutMs:10000});
   assert.equal(f.records.size,0);
   f.journal.pending={to:"TARGET_ACTIVATING",operationId:"00000000-0000-4000-8000-000000000003"};f.journal.destinationMayHaveWritten=true;
   assert.equal((await f.run(d)).health.status,200);assert.equal(f.state.starts,1);
