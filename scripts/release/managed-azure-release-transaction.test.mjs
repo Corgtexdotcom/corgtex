@@ -1,3 +1,4 @@
+import * as adoption from "./managed-azure-selfserve-baseline.mjs";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
@@ -257,6 +258,47 @@ describe("managed Azure single-target transaction", () => {
     expect(deps.lease).toHaveBeenCalledWith("acquire", expect.objectContaining({ expectedTargetDigest: "7".repeat(64) }));
     expect(deps.authPreflight).toHaveBeenCalled();
     expect(deps.acceptanceProbe).toHaveBeenCalled();
+  });
+
+  it.each(["success", "recovery", "reactivation-denied"])("retains the tagged original and writes digest-only revisions (%s)", async (scenario) => {
+    const { deps } = dependencies({ selfserve: true, activationPolicy: "EXCLUSIVE", ...(scenario === "recovery"
+      ? { patchResults: [null, { state: "BASELINE", result: { terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED" } }] } : {}) });
+    const pins = {};
+    for (const role of ["web", "worker"]) {
+      const base = state(role, "BASELINE");
+      base.template.containers[0].image = base.image.replace("@" + base.imageDigest, ":sha-" + baseSha);
+      base.templateDigest = managedAzureTemplateDigest(base.template);
+      pins[role] = base;
+    }
+    const spy = vi.spyOn(adoption, "selfserveBaselineBinding").mockImplementation((_s, _r, _p, role, previous) =>
+      !previous || (previous.templateDigest === pins[role].templateDigest && previous.image === pins[role].image) ? pins[role] : undefined);
+    const read = deps.readApp.getMockImplementation();
+    deps.readApp.mockImplementation(async (request) => {
+      const current = await read(request);
+      if (request.release.gitSha !== baseSha) { expect(request.originalBaseline).toBeUndefined(); return current; }
+      expect(request.originalBaseline).toBe(pins[request.role]);
+      return structuredClone(pins[request.role]);
+    });
+    if (scenario === "reactivation-denied") {
+      deps.setRevisionMode.mockRejectedValueOnce(new Error("partial mode change"));
+      deps.readAppTemplate = vi.fn(async () => { throw new Error("historical tag no longer locked"); });
+    }
+    try {
+      const request = { ...input, deploymentId: SELFSERVE_RELEASE_HOST_ID };
+      expect(await runManagedAzureReleaseTransaction(request, deps)).toMatchObject({ status: "DRY_RUN_READY", effects: 0 });
+      expect(deps.patchTemplate).not.toHaveBeenCalled();
+      const actual = await runManagedAzureReleaseTransaction({ ...request, execute: true }, deps);
+      expect(actual.status).toBe({ success: "SUCCEEDED", recovery: "RECOVERED_COMPATIBLE", "reactivation-denied": "RECOVERY_REQUIRED" }[scenario]);
+      if (scenario === "reactivation-denied") {
+        expect(actual.code).toBe("BASELINE_REACTIVATION_AMBIGUOUS");
+        expect(deps.setRevisionActive).not.toHaveBeenCalled(); expect(deps.patchTemplate).not.toHaveBeenCalled();
+      }
+      const { rollback } = deps.lease.mock.calls.find(([op]) => op === "record_rollback")[1];
+      for (const role of ["web", "worker"]) {
+        expect(rollback.previous[role]).toMatchObject({ image: pins[role].image, readyRevision: pins[role].revisionName, templateDigest: pins[role].templateDigest });
+      }
+      expect(deps.patchTemplate.mock.calls.every(([r]) => r.template.containers[0].image.includes("@sha256:"))).toBe(true);
+    } finally { spy.mockRestore(); }
   });
 
   it("fences migration191 importer index replacement before migrate-and-web activation", async () => {

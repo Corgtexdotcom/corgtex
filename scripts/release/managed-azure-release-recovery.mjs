@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { selfserveBaselineBinding } from "./managed-azure-selfserve-baseline.mjs";
 import { isSelfserveReleaseHost, SELFSERVE_RELEASE_PROFILE } from "./managed-azure-selfserve-profile.mjs";
 import { createManagedAzureExclusiveActivation } from "./managed-azure-exclusive-activation.mjs";
 import { spawn as nodeSpawn } from "node:child_process";
@@ -126,6 +127,11 @@ function leaseArgs(handle, extra = {}) {
   return { deploymentId: handle.deploymentId, leaseId: handle.leaseId, capability: handle.capability, fence: handle.fence, ...extra };
 }
 
+function originalBaseline(status, rollback, role, release) {
+  if (rollback.schemaVersion !== 3 || !rollback.previous?.[role]) return undefined;
+  return selfserveBaselineBinding(status, release, rollback.compatibleRecovery.activationPolicy, role, rollback.previous[role]);
+}
+
 function verifyRole(role, state, rollback) {
   const expected = rollback.previous[role];
   if (!expected || typeof expected !== "object") fail("MANAGED_RELEASE_RECOVERY_BASELINE_INVALID");
@@ -135,14 +141,14 @@ function verifyRole(role, state, rollback) {
     || state.templateDigest !== expected.templateDigest) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
 }
 
-function verifyRollbackRole(role, state, rollback, baseline, expectedRevisionSuffix) {
+function verifyRollbackRole(role, state, status, rollback, baseline, expectedRevisionSuffix) {
   const expected = rollback.previous[role];
   if (!expected || typeof expected !== "object"
     || state.containerName !== expected.containerName
     || state.image !== expected.image
     || state.imageDigest !== digestFromImage(expected.image)
     || state.revisionSuffix !== expectedRevisionSuffix) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
-  const reconstructedBaseline = reconstructBaselineTemplate(role, state, rollback, baseline);
+  const reconstructedBaseline = reconstructBaselineTemplate(role, state, status, rollback, baseline);
   if (managedAzureTemplateDigest(reconstructedBaseline) !== expected.templateDigest) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
 }
 
@@ -155,7 +161,8 @@ function baselineRevisionSuffixes(role, state, rollback) {
   return derived === "" ? [""] : [derived, ""];
 }
 
-function reconstructBaselineTemplate(role, state, rollback, baseline) {
+export function reconstructBaselineTemplate(role, state, status, rollback, baseline) {
+  const original = originalBaseline(status, rollback, role, baseline);
   const candidates = [state];
   const startup = state.template.containers[0].env.find((entry) => entry.name === "CORGTEX_STARTUP_MODE");
   if (rollback.schemaVersion !== 1 && role === "web" && startup?.value === "migrate-and-web") {
@@ -167,6 +174,9 @@ function reconstructBaselineTemplate(role, state, rollback, baseline) {
     for (const revisionSuffix of baselineRevisionSuffixes(role, state, rollback)) {
       const template = buildManagedAzureReleaseTemplate({ baseline: candidate, role,
         image: rollback.previous[role].image, release: baseline, revisionSuffix });
+      // Reconstruct the original read-only comparison bytes. Every PATCH
+      // still goes through the digest-only release/recovery template builder.
+      if (original) template.containers[0].image = original.taggedImage;
       if (managedAzureTemplateDigest(template) === rollback.previous[role].templateDigest) return template;
     }
   }
@@ -181,7 +191,7 @@ function verifyForwardRole(role, state, status, rollback, baseline, incoming, ex
     || state.imageDigest !== digest
     || state.image !== `${status.target.acrServer}/corgtex/${role}@${digest}`
     || state.revisionSuffix !== revisionSuffix) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
-  const reconstructedBaseline = reconstructBaselineTemplate(role, state, rollback, baseline);
+  const reconstructedBaseline = reconstructBaselineTemplate(role, state, status, rollback, baseline);
   if (managedAzureTemplateDigest(reconstructedBaseline) !== rollback.previous[role].templateDigest) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
   const expected = {
     role,
@@ -203,13 +213,13 @@ function verifyForwardRole(role, state, status, rollback, baseline, incoming, ex
 
 async function classifyBaselineRole(deps, status, rollback, role, baseline, expectedRollbackRevisionSuffix) {
   try {
-    const state = await deps.readApp({ target: status.target, role, release: baseline, imageDigest: digestFromImage(rollback.previous[role].image), ambiguous: true });
+    const state = await deps.readApp({ target: status.target, role, release: baseline, originalBaseline: originalBaseline(status, rollback, role, baseline), imageDigest: digestFromImage(rollback.previous[role].image), ambiguous: true });
     try {
       verifyRole(role, state, rollback);
       return { kind: "BASELINE", state };
     } catch {
       if (expectedRollbackRevisionSuffix) {
-        verifyRollbackRole(role, state, rollback, baseline, expectedRollbackRevisionSuffix);
+        verifyRollbackRole(role, state, status, rollback, baseline, expectedRollbackRevisionSuffix);
         return { kind: "BASELINE", state };
       }
     }
@@ -230,7 +240,7 @@ async function classifyForwardRole(deps, status, rollback, role, baseline, incom
 function verifyCompatibleRecoveryRole(role, state, status, rollback, baseline, recovery, recoveryRelease, expectedRevisionSuffix, allowLegacyReadyWeb = false) {
   if (state.imageDigest !== recovery[role].digest || state.image !== recovery[role].image
     || state.revisionSuffix !== expectedRevisionSuffix) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
-  const reconstructedBaseline = reconstructBaselineTemplate(role, state, rollback, baseline);
+  const reconstructedBaseline = reconstructBaselineTemplate(role, state, status, rollback, baseline);
   if (managedAzureTemplateDigest(reconstructedBaseline) !== rollback.previous[role].templateDigest) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
   assertManagedAzureTemplateDelta({ ...state, template: reconstructedBaseline }, state.template, {
     role, image: recovery[role].image, release: recoveryRelease, revisionSuffix: expectedRevisionSuffix,
@@ -259,7 +269,7 @@ async function classifyLegacyWebRecovery(deps, status, rollback, baseline, recov
   const recovery = rollback.compatibleRecovery;
   const latest = await deps.readAppTemplate({ target: status.target, role: "web", release: recoveryRelease, imageDigest: recovery.web.digest });
   if (![primarySuffix, alternateSuffix].includes(latest.state.revisionSuffix)) fail("MANAGED_RELEASE_RECOVERY_WEB_DRIFT");
-  const template = reconstructBaselineTemplate("web", latest.state, rollback, baseline);
+  const template = reconstructBaselineTemplate("web", latest.state, status, rollback, baseline);
   if (template.containers[0].env.find((entry) => entry.name === "CORGTEX_STARTUP_MODE")?.value !== "web") fail("MANAGED_RELEASE_RECOVERY_WEB_DRIFT");
   const old = { ...latest.state, template, templateDigest: managedAzureTemplateDigest(template),
     revisionName: rollback.previous.web.readyRevision, revisionSuffix: template.revisionSuffix,
@@ -382,6 +392,8 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
       || rollback.compatibleRecovery.activationPolicy !== "EXCLUSIVE")) fail("SELFSERVE_PROTECTED_RELEASE_PROTOCOL_REQUIRED");
     const baseline = releaseIdentity(status.release?.baselineImageTag, rollback?.previous?.releaseVersion);
     if (!same(rollback.target, status.target)) fail("MANAGED_RELEASE_RECOVERY_TARGET_DRIFT");
+    if (["web", "worker"].some(role => originalBaseline(status, rollback, role, baseline))
+      && !["web", "worker"].every(role => originalBaseline(status, rollback, role, baseline))) fail("MANAGED_RELEASE_LEGACY_BASELINE_PAIR_DRIFT");
     const originatingLease = originatingReleaseLease(status);
     const forwardSuffixes = {
       web: managedAzureRevisionSuffix({ ...originatingLease, role: "web", phase: "forward" }),
@@ -450,7 +462,7 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
           const plan = await readManagedAzureRecoveryIntentPlan(deps, { intent: recorded[role], originatingLease,
             target: status.target, release: recoveryRelease, image: recovery[role].image,
             releases: [{ release: recoveryRelease, imageDigest: recovery[role].digest },
-              { release: baseline, imageDigest: digestFromImage(rollback.previous[role].image) },
+              { release: baseline, originalBaseline: originalBaseline(status, rollback, role, baseline), imageDigest: digestFromImage(rollback.previous[role].image) },
               { release: incomingReleaseIdentity(status), imageDigest: rollback.incoming[role === "web" ? "webDigest" : "workerDigest"] }] });
           const revisionName = `${recorded[role].appName}--${recorded[role].revisionSuffix}`;
           const state = await deps.readRevisionState({ target: status.target, role, revisionName, expectedTemplate: plan.template });
@@ -471,7 +483,7 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
               intent: recorded[role], originatingLease, target: status.target, release: recoveryRelease, image: recovery[role].image,
               releases: [
                 { release: recoveryRelease, imageDigest: recovery[role].digest },
-                { release: baseline, imageDigest: digestFromImage(rollback.previous[role].image) },
+                { release: baseline, originalBaseline: originalBaseline(status, rollback, role, baseline), imageDigest: digestFromImage(rollback.previous[role].image) },
                 { release: incomingReleaseIdentity(status), imageDigest: rollback.incoming[role === "web" ? "webDigest" : "workerDigest"] },
               ],
             });
@@ -593,7 +605,7 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
           fail("MANAGED_RELEASE_RECOVERY_ROLLBACK_AMBIGUOUS");
         }
         await heartbeat();
-        await deps.waitForState({ target: status.target, role, release: baseline, imageDigest: digestFromImage(image), expectedTemplate: template, onProgress: heartbeat });
+        await deps.waitForState({ target: status.target, role, release: baseline, originalBaseline: originalBaseline(status, rollback, role, baseline), imageDigest: digestFromImage(image), expectedTemplate: template, onProgress: heartbeat });
       }
       await heartbeat();
       for (const role of ["web", "worker"]) {

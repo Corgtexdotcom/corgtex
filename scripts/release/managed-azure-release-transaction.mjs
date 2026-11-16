@@ -1,5 +1,6 @@
 import { isSelfserveReleaseHost, SELFSERVE_RELEASE_HOST_ID, SELFSERVE_RELEASE_ORIGIN, SELFSERVE_RELEASE_PROFILE } from "./managed-azure-selfserve-profile.mjs";
 import { createManagedAzureExclusiveActivation, snapshotManagedAzureExclusiveActivation } from "./managed-azure-exclusive-activation.mjs";
+import { selfserveBaselineBinding } from "./managed-azure-selfserve-baseline.mjs";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { assertHotfixResolvedImages } from "./selfserve-hotfix-gate.mjs";
@@ -106,9 +107,9 @@ function failReleaseResolution(error) {
   fail("MANAGED_RELEASE_IMAGE_PREFLIGHT_FAILED");
 }
 
-async function readBaselineApp(deps, target, role, release) {
+async function readBaselineApp(deps, target, role, release, originalBaseline) {
   try {
-    return await deps.readApp({ target, role, release });
+    return await deps.readApp({ target, role, release, originalBaseline });
   } catch (error) {
     if (error instanceof ManagedAzureContainerAppError) fail(`MANAGED_RELEASE_BASELINE_${role.toUpperCase()}_${error.code}`);
     fail(`MANAGED_RELEASE_BASELINE_${role.toUpperCase()}_READ_FAILED`);
@@ -277,13 +278,18 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   if (protectedRelease && (!recoveryPlan || ROLES.some((role) => !/^sha256:[0-9a-f]{64}$/.test(recoveryPlan.roles?.[role]?.digest)
     || !["MATCH", "ABSENT"].includes(recoveryPlan.roles?.[role]?.destinationState)))) fail("MANAGED_RELEASE_RECOVERY_PREFLIGHT_FAILED");
 
+  const originalBaseline = (role) => selfserveBaselineBinding(preflight, baselineRelease, configured.target.activationPolicy, role);
   const baselines = {};
-  for (const role of ROLES) baselines[role] = await readBaselineApp(deps, preflight.target, role, baselineRelease);
+  for (const role of ROLES) baselines[role] = await readBaselineApp(deps, preflight.target, role, baselineRelease, originalBaseline(role));
   const previous = {
     releaseVersion: baselineRelease.version,
     web: { containerName: baselines.web.containerName, image: baselines.web.image, readyRevision: baselines.web.revisionName, templateDigest: baselines.web.templateDigest },
     worker: { containerName: baselines.worker.containerName, image: baselines.worker.image, readyRevision: baselines.worker.revisionName, templateDigest: baselines.worker.templateDigest },
   };
+  if (ROLES.some(role => baselines[role].template.containers[0].image !== baselines[role].image)
+    && ROLES.some(role => !selfserveBaselineBinding(preflight, baselineRelease, configured.target.activationPolicy, role, previous[role]))) {
+    fail("MANAGED_RELEASE_LEGACY_BASELINE_PAIR_DRIFT");
+  }
   const exclusiveActivation = protectedRelease && configured.target.activationPolicy === "EXCLUSIVE"
     ? await snapshotManagedAzureExclusiveActivation(deps, preflight.target, baselines) : null;
   if (exclusiveActivation && preflight.writeIntentProtocolVersion !== 2) fail("EXCLUSIVE_ACTIVATION_PROTOCOL_UNAVAILABLE");
@@ -358,7 +364,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
 
   const classifyRole = async (role, forwardTemplate) => {
     try {
-      const state = await deps.readApp({ target: preflight.target, role, release: baselineRelease, imageDigest: baselines[role].imageDigest, ambiguous: true });
+      const state = await deps.readApp({ target: preflight.target, role, release: baselineRelease, originalBaseline: originalBaseline(role), imageDigest: baselines[role].imageDigest, ambiguous: true });
       if (state.templateDigest === baselines[role].templateDigest) return { kind: "BASELINE", state };
     } catch { /* Try the transaction-owned revision next. */ }
     try {
@@ -488,6 +494,18 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   };
 
   const restoreDrainedBaseline = async (stage, code, detail = {}) => {
+    // Reactivation can pull the original tag again. First prove both immutable
+    // bindings and original templates while the owner still holds the fence.
+    for (const role of ROLES) {
+      if (baselines[role].template.containers[0].image === baselines[role].image) continue;
+      try {
+        const { state } = await deps.readAppTemplate({ target: preflight.target, role, release: baselineRelease,
+          originalBaseline: originalBaseline(role), imageDigest: baselines[role].imageDigest });
+        if (state.revisionName !== baselines[role].revisionName || state.templateDigest !== baselines[role].templateDigest) {
+          return markRecovery("FENCING", "BASELINE_REACTIVATION_DRIFT", detail);
+        }
+      } catch { return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS", detail); }
+    }
     const activations = {};
     for (const role of ["worker", "web"]) {
       try {
@@ -500,7 +518,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     }
     for (const role of ROLES) {
       try {
-        const restored = await deps.readApp({ target: preflight.target, role, release: baselineRelease, imageDigest: baselines[role].imageDigest });
+        const restored = await deps.readApp({ target: preflight.target, role, release: baselineRelease, originalBaseline: originalBaseline(role), imageDigest: baselines[role].imageDigest });
         if (restored.templateDigest !== baselines[role].templateDigest) return markRecovery("FENCING", "BASELINE_REACTIVATION_DRIFT", detail);
       } catch {
         return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS", detail);
@@ -533,7 +551,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       fail("MANAGED_RELEASE_LEASE_TARGET_DRIFT");
     }
     for (const role of ROLES) {
-      const current = await deps.readApp({ target: preflight.target, role, release: baselineRelease, imageDigest: baselines[role].imageDigest });
+      const current = await deps.readApp({ target: preflight.target, role, release: baselineRelease, originalBaseline: originalBaseline(role), imageDigest: baselines[role].imageDigest });
       if (current.templateDigest !== baselines[role].templateDigest) {
         await deps.lease("abort", leaseArgs(handle, { reason: input.reason }));
         fail("MANAGED_RELEASE_BASELINE_DRIFT");
