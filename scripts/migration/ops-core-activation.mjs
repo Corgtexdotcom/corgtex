@@ -4,12 +4,13 @@ import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createOpsCoreAzureTarget, opsCoreAzureTargetBindingSha256, opsCoreSharedStateBackend } from "./ops-core-azure-target.mjs";
 import { opsCoreImageRepository } from "./ops-core-image-repository.mjs";
-import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
+import { optionalSetting, optionalBinding, withoutOptionalBinding, matchesOptionalFetchFailure, failedCreateDefaults, errorApi } from "./ops-core-activation-empty.mjs";
+import { openProviderOperationRecorder, SOURCE_PHASE_ARTIFACT_LIMIT } from "./ops-core-provider-operations.mjs";
 import { validateRuntimeAccessActivationBinding } from "./ops-core-runtime-access-binding.mjs";
 import { assertManagedAzureRevisionProjection, managedAzureConsumptionEphemeralStorage } from "../release/managed-azure-container-app-transport.mjs";
 import { managedAzureHealthReady } from "../release/managed-azure-release-transaction.mjs";
 
-import { validateManagedAzureWorkerDemand, managedAzureWorkerDemandScale, buildManagedAzureSchedulerJob,
+import { managedAzureWorkerDemandDiagnostic, validateManagedAzureWorkerDemand, managedAzureWorkerDemandScale, buildManagedAzureSchedulerJob,
   schedulerJobWithRelease, createManagedAzureWorkerDemandLifecycle } from "../release/managed-azure-worker-demand.mjs";
 
 const ARM = "https://management.azure.com";
@@ -98,7 +99,7 @@ export function createOpsCoreActivationArmTransport({ subscriptionId, fetchImpl 
     requireValue(signal instanceof AbortSignal && ["GET", "PUT", "POST"].includes(method)
       && (method !== "POST" || /\/providers\/Microsoft\.App\/jobs\/[a-z0-9-]+\/start$/.test(resourceId))
       && resourceId.startsWith(`/subscriptions/${subscriptionId}/resourceGroups/`)
-      && /^\/[A-Za-z0-9_.()\/-]+$/.test(resourceId) && /^20\d{2}-\d{2}-\d{2}$/.test(apiVersion), "ACTIVATION_REQUEST_INVALID");
+      && /^\/[A-Za-z0-9_.()\/-]+$/.test(resourceId) && (/^20\d{2}-\d{2}-\d{2}$/.test(apiVersion) || method === "GET" && apiVersion === errorApi && /\/providers\/Microsoft\.App\/containerApps\/[a-z0-9-]+$/.test(resourceId)), "ACTIVATION_REQUEST_INVALID");
     const base = new URL(`${ARM}${resourceId}?api-version=${apiVersion}`);
     const url = nextLink ? new URL(nextLink) : base;
     requireValue(url.origin === ARM && url.pathname === base.pathname && !url.username && !url.password && !url.hash
@@ -120,7 +121,15 @@ export function createOpsCoreActivationArmTransport({ subscriptionId, fetchImpl 
       }
       bounded.throwIfAborted();
       const text = Buffer.concat(chunks).toString("utf8");
-      return { status: response.status, body: text ? JSON.parse(text) : null };
+      const result = { status: response.status, body: text ? JSON.parse(text) : null };
+      if (apiVersion === errorApi && response.status === 200) {
+        // ARM accepted this token. Match its application identity to the immutable
+        // creation metadata on the failed resource before allowing any repair.
+        const claims = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"));
+        result.callerApplicationId = claims.appid ?? claims.azp;
+        requireValue(GUID.test(result.callerApplicationId), "ACTIVATION_AUTH_FAILED");
+      }
+      return result;
     } catch (error) {
       throw error instanceof ActivationError ? error : new ActivationError("ACTIVATION_ARM_UNCERTAIN");
     }
@@ -160,11 +169,20 @@ function appBody(plan, role, suffix) {
             : { minReplicas: 1, maxReplicas: 1, cooldownPeriod: 300, pollingInterval: 30, rules: [] } } } };
 }
 
-function assertBootstrapProjection(expected, actual, appName, revisionName) {
+function assertBootstrapProjection(expected, actual, appName, revisionName, optionalEmpty) {
   // ARM may materialize or omit the documented probe successThreshold=1.
   // Normalize this default alone; every other field remains subject to the
   // shared exact projection check (including commands, image, env and scale).
   const projection = structuredClone(actual);
+  for (const key of ["initContainers", "serviceBinds", "volumes"]) {
+    if (!(key in expected) && projection?.[key] === null) delete projection[key];
+  }
+  if (optionalEmpty && Array.isArray(projection?.containers?.[0]?.env)) {
+    const env = projection.containers[0].env, optional = env.filter(entry => entry.name === optionalSetting);
+    if (optional.length === 1 && (exact(optional[0], "name") || exact(optional[0], "name,value") && optional[0].value === "")) {
+      projection.containers[0].env = env.filter(entry => entry !== optional[0]);
+    }
+  }
   for (const container of projection?.containers ?? []) for (const probe of container.probes ?? []) {
     if (probe.successThreshold == null) probe.successThreshold = 1;
   }
@@ -182,7 +200,7 @@ function assertBootstrapProjection(expected, actual, appName, revisionName) {
  * Any inherited pending phase is refused; recovery requires explicit readback.
  */
 export function createOpsCoreActivation({ plan: input, custody, operationStore, assertSourceFenced, healthProbe,
-  armTransport, schedulerProof, assertRuntimeAccess, now = Date.now, wait = (ms, signal) => sleep(ms, undefined, { signal }), timeoutMs = 15 * 60_000 } = {}) {
+  armTransport, schedulerProof, assertRuntimeAccess, observeEmptySecret, now = Date.now, wait = (ms, signal) => sleep(ms, undefined, { signal }), timeoutMs = 15 * 60_000 } = {}) {
   const plan = validateOpsCoreActivationPlan(input), planSha256 = hash(plan), target = plan.target;
   requireValue(custody?.signal instanceof AbortSignal && typeof custody.assertOwned === "function"
     && typeof custody.begin === "function" && typeof custody.complete === "function"
@@ -196,6 +214,20 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
   function schedulerBody(workerBody) {
     return buildManagedAzureSchedulerJob({ workerApp: { ...workerBody, id: appId("worker") }, demand: plan.workerDemand, target });
   }
+  function bodyInput(role, body) {
+    return { planSha256, resourceId: appId(role), bodySha256: hash(body) };
+  }
+  function renderOverlay(original, roles) {
+    requireValue(Array.isArray(roles) && roles.length > 0 && ROLES.filter(r => roles.includes(r)).join() === roles.join()
+      && roles.every(r => optionalBinding(original[r])), "ACTIVATION_EMPTY_BINDING_INVALID");
+    const bodies = { ...original };
+    for (const role of roles) bodies[role] = withoutOptionalBinding(original[role]);
+    if (plan.workerDemand) bodies.scheduler = schedulerBody(bodies.worker);
+    return bodies;
+  }
+  function overlayRecord(original, bodies, roles) {
+    return { schemaVersion: 1, planSha256, originalSha256: hash(original), effectiveSha256: hash(bodies), roles };
+  }
   let used = false;
   async function run(action, { customDomains = [] } = {}) {
       requireValue(!used, "ACTIVATION_ALREADY_ATTEMPTED"); used = true;
@@ -203,6 +235,7 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
         && Array.isArray(customDomains) && customDomains.every(name => typeof name === "string" && /^[a-z0-9.-]+$/.test(name))
         && new Set(customDomains).size === customDomains.length, "ACTIVATION_ACTION_INVALID");
       const signal = AbortSignal.any([custody.signal, AbortSignal.timeout(timeoutMs)]), deadline = now() + timeoutMs;
+      let emptyRoles = [];
       const intentSha256 = custody.snapshot().intentSha256;
       requireValue(HASH.test(intentSha256), "ACTIVATION_CUSTODY_MISMATCH");
       async function check() {
@@ -238,7 +271,7 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
         } while (nextLink);
         return rows;
       }
-      function assertApp(app, role, expected, fqdn) {
+      function assertApp(app, role, expected, fqdn, optionalEmpty = emptyRoles.includes(role)) {
         const p = app?.properties, c = p?.configuration, ingress = c?.ingress;
         const identities = Object.entries(app?.identity?.userAssignedIdentities ?? {});
         const registry = c?.registries?.[0];
@@ -257,15 +290,15 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
           && new Set(c.secrets.map(s => s.name)).size === c.secrets.length
           && c.secrets.every(s => expectedSecrets.some(e => e.name === s.name && e.keyVaultUrl === s.keyVaultUrl
             && same(e.identity, s.identity)) && s.value == null)
-          && ingress?.fqdn === fqdn && ingress.external === (role === "web")
+          && (ingress?.fqdn ?? null) === fqdn && ingress.external === (role === "web")
           && ingress.targetPort === (role === "web" ? 3000 : 9090) && ingress.allowInsecure === false
-          && ingress.transport === "auto" && canonical(ingress.traffic) === canonical([{ latestRevision: true, weight: 100 }])
+          && same(ingress.transport, "auto") && canonical(ingress.traffic) === canonical([{ latestRevision: true, weight: 100 }])
           && (action === "observe"
             ? canonical((ingress.customDomains ?? []).map(d => d.name).sort()) === canonical(role === "web" ? [...customDomains].sort() : [])
               && (ingress.customDomains ?? []).every(d => d.bindingType === "SniEnabled" && typeof d.certificateId === "string")
             : !(ingress.customDomains?.length)) && !(ingress.ipSecurityRestrictions?.length)
           && p.template?.revisionSuffix === expected.properties.template.revisionSuffix, "ACTIVATION_APP_DRIFT");
-        assertBootstrapProjection(expected.properties.template, p.template, target.apps[role], `${target.apps[role]}--${p.template.revisionSuffix}`);
+        assertBootstrapProjection(expected.properties.template, p.template, target.apps[role], `${target.apps[role]}--${p.template.revisionSuffix}`, optionalEmpty);
         return p;
       }
       async function ready(role, expected, fqdn, invocationContext) {
@@ -286,7 +319,7 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
           requireValue(revisions.length === 1 && revisions[0]?.name === revisionName
             && same(revisions[0].id, `${appId(role)}/revisions/${revisionName}`), "ACTIVATION_REVISION_DRIFT");
           const rev = revisions[0].properties;
-          assertBootstrapProjection(expected.properties.template, rev.template, target.apps[role], revisionName);
+          assertBootstrapProjection(expected.properties.template, rev.template, target.apps[role], revisionName, emptyRoles.includes(role));
           const replicas = await list(`${appId(role)}/revisions/${revisionName}/replicas`);
           requireValue(replicas.length <= 1, "ACTIVATION_REPLICA_DRIFT");
           if (plan.workerDemand && role === "worker" && replicas.length === 0) {
@@ -349,19 +382,26 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
             requireValue(typeof text === "string" && Buffer.byteLength(text) <= limit, "ACTIVATION_EVIDENCE_MISMATCH");
             return JSON.parse(text);
           };
-          const bodies = Object.fromEntries(ROLES.map(role => [role,
+          const original = Object.fromEntries(ROLES.map(role => [role,
             appBody(plan, role, `boot-${operationId.replaceAll("-", "").slice(0, 16)}-${role}`)]));
-          if (plan.workerDemand) bodies.scheduler = schedulerBody(bodies.worker);
-          const retainedPlan = await read("phase-plan");
+          if (plan.workerDemand) original.scheduler = schedulerBody(original.worker);
+          const retainedPlan = await read("phase-plan", SOURCE_PHASE_ARTIFACT_LIMIT);
+          await check(); await operationStore.assertPrivate();
+          const overlayBytes = await operationStore.readOptional(prefix + "activation-empty-bindings.json", signal);
+          await check();
+          const overlay = overlayBytes === null ? null : JSON.parse(overlayBytes);
+          const bodies = overlay ? renderOverlay(original, overlay.roles) : original;
+          requireValue(!overlay || hash(overlay) === hash(overlayRecord(original, bodies, overlay.roles)), "ACTIVATION_EVIDENCE_MISMATCH");
           requireValue(exact(retainedPlan, "schemaVersion,planSha256,activationOperationId,environmentDomain,bodies")
             && retainedPlan.schemaVersion === 1 && retainedPlan.planSha256 === planSha256
             && retainedPlan.activationOperationId === operationId
             && /^[a-z0-9.-]+\.azurecontainerapps\.io$/.test(retainedPlan.environmentDomain)
-            && hash(retainedPlan.bodies) === hash(bodies), "ACTIVATION_EVIDENCE_MISMATCH");
+            && hash(retainedPlan.bodies) === hash(original), "ACTIVATION_EVIDENCE_MISMATCH");
           for (const entry of [activation[0], active[0]]) {
             const evidence = await read(`phase-evidence-${entry.evidenceSha256}`, 32 * 1024 * 1024);
             requireValue(hash(evidence) === entry.evidenceSha256 && evidence.schemaVersion === 1
               && evidence.domain === target.domain && evidence.intentSha256 === intentSha256 && evidence.planSha256 === planSha256
+              && (overlay ? evidence.emptyBindingSha256 === hash(overlay) : !Object.hasOwn(evidence, "emptyBindingSha256"))
               && evidence.activationOperationId === operationId && evidence.retainedPlanSha256 === hash(retainedPlan), "ACTIVATION_EVIDENCE_MISMATCH");
             for (const role of ROLES) {
               const proof = evidence.finalProofs?.[role], value = proof?.evidence;
@@ -386,15 +426,27 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
           // Independently retain the original create intents/receipts as the
           // causal record. Opening a pending-phase recorder here would invent a
           // phase; validate its immutable recorded descriptor directly instead.
-          for (const role of ROLES) {
-            const kind = `azure.create.${role}`, inputSha256 = hash({ planSha256, resourceId: appId(role), bodySha256: hash(bodies[role]) });
-            const operationKey = hash({ kind, inputSha256 });
+          async function retainedOperation(kind, input, optional = false) {
+            const inputSha256 = hash(input), operationKey = hash({ kind, inputSha256 });
+            if (optional && await operationStore.readOptional(`${prefix}${operationKey}/intent.json`, signal) === null) return null;
             const intent = await read(`${operationKey}/intent`), receipt = await read(`${operationKey}/receipt`);
             requireValue(intent.schemaVersion === 1 && intent.type === "intent" && intent.kind === kind
               && intent.inputSha256 === inputSha256 && intent.operationKey === operationKey && GUID.test(intent.operationId)
               && hash(intent.binding) === hash({ domain: target.domain, intentSha256, phase: "TARGET_ACTIVATING", phaseOperationId: operationId })
               && receipt.schemaVersion === 1 && receipt.type === "receipt" && receipt.operationId === intent.operationId
               && receipt.intentSha256 === hash(intent) && HASH.test(receipt.evidenceSha256), "ACTIVATION_EVIDENCE_MISMATCH");
+            return intent;
+          }
+          for (const role of ROLES) {
+            const kind = `azure.create.${role}`, input = bodyInput(role, bodies[role]);
+            if (overlay?.roles.includes(role)) {
+              const previous = await retainedOperation(kind, bodyInput(role, original[role]), true);
+              if (previous) {
+                await retainedOperation(`azure.repair.${role}`, { ...input, originalIntentSha256: hash(previous) });
+                continue;
+              }
+            }
+            await retainedOperation(kind, input);
           }
           return { complete: true, historical: true, freshAcceptance: false, domain: target.domain, phase: "TARGET_ACTIVE",
             planSha256, evidenceSha256: active[0].evidenceSha256 };
@@ -427,10 +479,10 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
           : pendingActivation ? initial.pending : initial.history?.find(x => x.phase === "TARGET_ACTIVATING");
         requireValue(GUID.test(pending?.operationId) && pending.intentSha256 === planSha256, "ACTIVATION_LINEAGE_UNPROVEN");
         const prefix = `operations/${target.domain}/${intentSha256}/${pending.operationId}/`;
-        const bodies = Object.fromEntries(ROLES.map(role => [role,
+        const original = Object.fromEntries(ROLES.map(role => [role,
           appBody(plan, role, `boot-${pending.operationId.replaceAll("-", "").slice(0, 16)}-${role}`)]));
-        if (plan.workerDemand) bodies.scheduler = schedulerBody(bodies.worker);
-        const retainedPlan = { schemaVersion: 1, planSha256, activationOperationId: pending.operationId, environmentDomain: domain, bodies };
+        if (plan.workerDemand) original.scheduler = schedulerBody(original.worker);
+        const retainedPlan = { schemaVersion: 1, planSha256, activationOperationId: pending.operationId, environmentDomain: domain, bodies: original };
         async function retain(name, value) {
           await check(); await operationStore.assertPrivate();
           const key = `${prefix}${name}.json`, prior = await operationStore.readOptional(key, signal);
@@ -450,24 +502,105 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
         } else requireValue(hash(JSON.parse(prior)) === hash(retainedPlan), "ACTIVATION_EVIDENCE_MISMATCH");
         const fqdn = role => `${target.apps[role]}.${role === "worker" ? "internal." : ""}${domain}`;
         const receipts = {};
-        if (fresh || pendingActivation) {
-          const recorder = await openProviderOperationRecorder({ custody, store: operationStore, phase: "TARGET_ACTIVATING", signal });
+        const recorder = fresh || pendingActivation
+          ? await openProviderOperationRecorder({ custody, store: operationStore, phase: "TARGET_ACTIVATING", signal }) : null;
+        const overlayBytes = await operationStore.readOptional(prefix + "activation-empty-bindings.json", signal);
+        await check();
+        const overlay = overlayBytes === null ? null : JSON.parse(overlayBytes);
+        async function observeBinding(role) {
+          const secret = optionalBinding(original[role]);
+          if (!secret) return false;
+          requireValue(typeof observeEmptySecret === "function", "ACTIVATION_EMPTY_OBSERVER_REQUIRED");
+          await check(); const empty = await observeEmptySecret(secret.keyVaultUrl); await check();
+          requireValue(typeof empty === "boolean", "ACTIVATION_EMPTY_BINDING_UNPROVEN");
+          return empty;
+        }
+        if (overlay) {
+          requireValue(Array.isArray(overlay.roles) && overlay.roles.length > 0, "ACTIVATION_EVIDENCE_MISMATCH");
+          emptyRoles = overlay.roles;
+          for (const role of emptyRoles) requireValue(ROLES.includes(role) && await observeBinding(role), "ACTIVATION_EMPTY_BINDING_UNPROVEN");
+        } else if (recorder) {
+          for (const role of ROLES) {
+            if (!await observeBinding(role)) continue;
+            const previous = await recorder.readStatus(`azure.create.${role}`, bodyInput(role, original[role]));
+            // An already-serving original stays on its original representation.
+            if (!previous.intent || !previous.receipt && (await request(appId(role))).body?.properties?.provisioningState === "Failed") emptyRoles.push(role);
+          }
+        }
+        const bodies = emptyRoles.length ? renderOverlay(original, emptyRoles) : original;
+        if (overlay) requireValue(hash(overlay) === hash(overlayRecord(original, bodies, emptyRoles)), "ACTIVATION_EVIDENCE_MISMATCH");
+        if (emptyRoles.length && !overlay && action !== "reconcile") {
+          await retain("activation-empty-bindings", overlayRecord(original, bodies, emptyRoles));
+        }
+        async function failedBeforeRevision(role) {
+          await guard.assertPostgresPrivate(); await fenced();
+          requireValue(await observeBinding(role), "ACTIVATION_EMPTY_BINDING_UNPROVEN");
+          if (role === "web") {
+            await absent("worker");
+            const siblings = await openProviderOperationRecorder({ custody, store: operationStore, phase: "TARGET_ACTIVATING", signal });
+            for (const candidate of [original.worker, bodies.worker]) {
+              const peer = await siblings.readStatus("azure.create.worker", bodyInput("worker", candidate));
+              requireValue(!peer.intent, "ACTIVATION_FAILED_CREATE_UNPROVEN");
+            }
+          }
+          if (schedulerId) {
+            const job = await request(schedulerId);
+            requireValue(job.status === 404 && job.body?.error?.code === "ResourceNotFound", "ACTIVATION_SCHEDULER_NOT_ABSENT");
+          }
+          const current = await request(appId(role));
+          requireValue(current.status === 200 && current.body.properties?.provisioningState === "Failed"
+            && !current.body.properties.latestRevisionName && !current.body.properties.latestReadyRevisionName
+            && failedCreateDefaults(current.body), "ACTIVATION_FAILED_CREATE_UNPROVEN");
+          assertApp(current.body, role, original[role], null, false);
+          requireValue((await list(appId(role) + "/revisions")).length === 0, "ACTIVATION_FAILED_CREATE_UNPROVEN");
+          const detail = await request(appId(role), { apiVersion: errorApi });
+          const metadata = detail.body?.systemData;
+          requireValue(detail.status === 200 && same(detail.body?.id, appId(role)) && detail.body.properties?.provisioningState === "Failed"
+            && GUID.test(detail.callerApplicationId) && metadata?.createdByType === "Application" && metadata.lastModifiedByType === "Application"
+            && same(metadata.createdBy, detail.callerApplicationId) && same(metadata.lastModifiedBy, detail.callerApplicationId)
+            && Number.isFinite(Date.parse(metadata.createdAt)) && metadata.createdAt === metadata.lastModifiedAt
+            && matchesOptionalFetchFailure(detail.body.properties.deploymentErrors, optionalBinding(original[role])), "ACTIVATION_FAILED_CREATE_UNPROVEN");
+
+        }
+        if (recorder) {
           for (const role of ROLES) {
             const body = bodies[role], kind = `azure.create.${role}`;
-            const input = { planSha256, resourceId: appId(role), bodySha256: hash(body) };
-            const status = await recorder.readStatus(kind, input);
-            if (!status.intent && action === "reconcile") return { status: "CONTINUATION_AVAILABLE", complete: false,
+            let input = bodyInput(role, body);
+            const effective = await recorder.readStatus(kind, input);
+            const previous = emptyRoles.includes(role) ? await recorder.readStatus(kind, bodyInput(role, original[role])) : null;
+            if (previous?.intent) requireValue(!effective.intent, "ACTIVATION_CREATE_LINEAGE_CONFLICT");
+            const continuation = { status: "CONTINUATION_AVAILABLE", complete: false,
               domain: target.domain, phase: "TARGET_ACTIVATING", role, nextAction: "resume-activate" };
+            if (!effective.intent && !previous?.intent && action === "reconcile") return continuation;
             await fenced();
             if (role === "worker") await ready("web", bodies.web, fqdn("web"), "web-before-worker");
-            receipts[role] = await recorder.runRecordedOperation({ kind, input,
+            const verify = () => ready(role, body, fqdn(role), `${role}-after-create`);
+            if (previous?.intent) {
+              const repairKind = `azure.repair.${role}`, repair = { ...input, originalIntentSha256: hash(previous.intent) };
+              const tracked = await recorder.readStatus(repairKind, repair);
+              if (!tracked.intent) {
+                requireValue(!previous.receipt, "ACTIVATION_CREATE_LINEAGE_CONFLICT");
+                await failedBeforeRevision(role);
+                if (action === "reconcile") return continuation;
+              }
+              await recorder.runRecordedOperation({ kind: repairKind, input: repair, verify,
+                async apply() {
+                  requireValue(action === "resume", "ACTIVATION_REPLAY_FORBIDDEN");
+                  await failedBeforeRevision(role);
+                  const result = await request(appId(role), { method: "PUT", body });
+                  requireValue([200, 201, 202].includes(result.status), "ACTIVATION_WRITE_UNCERTAIN");
+                } });
+              input = bodyInput(role, original[role]);
+            }
+            receipts[role] = await recorder.runRecordedOperation({ kind, input, verify,
               async apply() {
-                requireValue(action !== "reconcile", "ACTIVATION_REPLAY_FORBIDDEN");
+                requireValue(action !== "reconcile" && !previous?.intent, "ACTIVATION_REPLAY_FORBIDDEN");
                 await absent(role); if (role === "web") await absent("worker");
+                if (emptyRoles.includes(role)) requireValue(await observeBinding(role), "ACTIVATION_EMPTY_BINDING_UNPROVEN");
                 await guard.assertPostgresPrivate();
                 const result = await request(appId(role), { method: "PUT", body });
                 requireValue([200, 201, 202].includes(result.status), "ACTIVATION_WRITE_UNCERTAIN");
-              }, verify: () => ready(role, body, fqdn(role), `${role}-after-create`) });
+              } });
           }
         }
         const finalProofs = {};
@@ -479,6 +612,7 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
             request, check: async () => { await check(); await fenced(); }, signal, schedulerProof, now,
             wait: ms => wait(ms, signal) });
           if (fresh || pendingActivation) {
+            if (emptyRoles.includes("worker")) requireValue(await observeBinding("worker"), "ACTIVATION_EMPTY_BINDING_UNPROVEN");
             await scheduler.write("WORKER_SCHEDULER_CREATE", null, bodies.scheduler, action !== "reconcile");
             const proof = await scheduler.prove(bodies.scheduler, plan.release, `activation-${pending.operationId}`, action !== "reconcile");
             await scheduler.write("WORKER_SCHEDULER_ENABLE", bodies.scheduler, scheduled, action !== "reconcile", false);
@@ -488,7 +622,8 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
         finalProofs.postgresAccess = await guard.assertPostgresPrivate();
         await fenced(); await check();
         const evidence = { schemaVersion: 1, domain: target.domain, intentSha256, planSha256,
-          activationOperationId: pending.operationId, retainedPlanSha256: hash(retainedPlan), receipts, finalProofs };
+          activationOperationId: pending.operationId, retainedPlanSha256: hash(retainedPlan),
+          ...(emptyRoles.length ? { emptyBindingSha256: hash(overlayRecord(original, bodies, emptyRoles)) } : {}), receipts, finalProofs };
         const evidenceSha256 = hash(evidence);
         await retain(`phase-evidence-${evidenceSha256}`, evidence);
         if (action === "observe") return { complete: true, domain: target.domain, phase: initial.phase, intentSha256, targetBindingSha256: hash(target), planSha256, evidenceSha256,
@@ -502,6 +637,10 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
         }
         return { complete: true, domain: target.domain, phase: "TARGET_ACTIVE", planSha256, evidenceSha256 };
       } catch (error) {
+        if (action === "reconcile" && managedAzureWorkerDemandDiagnostic(error) === "WORKER_DEMAND_CONTINUATION_REQUIRED") {
+          return { status: "CONTINUATION_AVAILABLE", complete: false, domain: target.domain,
+            phase: "TARGET_ACTIVATING", role: "scheduler", nextAction: "resume-activate" };
+        }
         throw error instanceof ActivationError ? error : new ActivationError("ACTIVATION_RECONCILIATION_REQUIRED");
       }
     }

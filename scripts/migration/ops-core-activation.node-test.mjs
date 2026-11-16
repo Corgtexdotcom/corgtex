@@ -629,3 +629,138 @@ test("demand activation rejects runtime/scaler credential reuse before effects",
   assert.throws(() => createOpsCoreActivation(f.options));
   assert.equal(f.records.size, 0);
 });
+
+const optionalName = "POSTHOG_INSTANCE_ID";
+function addOptional(plan) {
+  for (const [role, runtime] of Object.entries(plan.roles)) {
+    const name = "optional-" + role;
+    runtime.env.push({ name: optionalName, secretRef: name });
+    runtime.secrets.push({ name, keyVaultUrl: plan.runtimeVaultUri + "secrets/" + name + "/" + "a".repeat(32), identity: plan.managedIdentityId });
+  }
+}
+function failedBootstrap({ failedRole = "web", loseRepair = false } = {}) {
+  let legacy = true;
+  const f = demandFixture({ mutatePlan: addOptional, put({ request, role, body, map }) {
+    const p = body.properties;
+    if (role !== failedRole) return { status: 202 };
+    if (legacy) {
+      legacy = false;
+      const alias = "optional-" + role, identity = f.plan.managedIdentityId;
+      body.systemData = { createdByType: "Application", lastModifiedByType: "Application", createdBy: subscription,
+        lastModifiedBy: subscription, createdAt: "2026-01-01T12:00:00Z", lastModifiedAt: "2026-01-01T12:00:00Z" };
+      p.provisioningState = "Failed";
+      delete p.latestRevisionName; delete p.latestReadyRevisionName;
+      p.configuration.ingress.fqdn = null; p.configuration.ingress.transport = "Auto";
+      p.template.initContainers = p.template.volumes = p.template.serviceBinds = null;
+      p.deploymentErrors = "The following field(s) are either invalid or missing. Field 'configuration.secrets' is invalid with details: "
+        + `'Invalid value: "${alias}": Unable to get value using Managed identity ${identity} for secret ${alias}. `
+        + `Error: unable to fetch secret '${alias}' using Managed identity '${identity}'';.`;
+      map.get(request.resourceId + "/revisions").body.value = [];
+    } else if (loseRepair) throw new Error("lost acknowledgement");
+    return { status: 202 };
+  } });
+  const arm = f.options.armTransport;
+  f.options.armTransport = async request => {
+    const response = await arm(request);
+    if (request.apiVersion === "2025-10-02-preview") response.callerApplicationId = subscription;
+    return response;
+  };
+  f.options.observeEmptySecret = async () => false; // The legacy controller submitted the versioned reference.
+  const stage = async () => {
+    await assert.rejects(createOpsCoreActivation(f.options).activate());
+    f.options.observeEmptySecret = async reference => f.plan.roles.web.secrets.concat(f.plan.roles.worker.secrets)
+      .some(v => v.name.startsWith("optional-") && v.keyVaultUrl === reference);
+    assert.equal(f.journal.pending.to, "TARGET_ACTIVATING");
+  };
+  return { ...f, stage };
+}
+
+for (const failedRole of ["web", "worker"]) test(`reconciles the original failed ${failedRole} create and one uncertain repair`, async () => {
+  const f = failedBootstrap({ failedRole, loseRepair: true }); await f.stage();
+  const original = [...f.records.entries()];
+  assert.equal((await createOpsCoreActivation(f.options).reconcile()).nextAction, "resume-activate");
+  assert.equal(f.log.filter(v => v === "put:" + failedRole).length, 1);
+  await assert.rejects(createOpsCoreActivation(f.options).resume());
+  assert.equal(f.log.filter(v => v === "put:" + failedRole).length, 2);
+  const next = await createOpsCoreActivation(f.options).reconcile();
+  if (!next.complete) assert.equal((await createOpsCoreActivation(f.options).resume()).phase, "TARGET_ACTIVE");
+  assert.equal(f.log.filter(v => v === "put:" + failedRole).length, 2);
+  for (const [key, value] of original) assert.equal(f.records.get(key), value);
+  for (const role of ["web", "worker"]) {
+    const retained = f.map.get(f.appId(role)).body.properties;
+    const originalWeb = failedRole === "worker" && role === "web";
+    assert.equal(retained.configuration.secrets.some(s => s.name === "optional-" + role), originalWeb);
+    assert.equal(retained.template.containers[0].env.some(e => e.name === optionalName), originalWeb);
+  }
+  const schedule = f.map.get(f.schedulerId).body.properties;
+  assert.equal(schedule.configuration.triggerType, "Schedule");
+  assert.equal(schedule.template.containers[0].env.some(e => e.name === optionalName), false);
+  assert.equal(schedule.configuration.secrets.some(s => s.name === "optional-worker"), false);
+  assert.equal((await createOpsCoreActivation(f.options).reconcile()).historical, true);
+  assert.equal((await createOpsCoreActivation(f.options).observe()).complete, true);
+  const key = [...f.records.keys()].find(k => k.endsWith("/activation-empty-bindings.json"));
+  const overlay = JSON.parse(f.records.get(key));
+  f.records.delete(key);
+  await assert.rejects(createOpsCoreActivation(f.options).reconcile());
+  f.records.set(key, JSON.stringify({ ...overlay, effectiveSha256: "a".repeat(64) }));
+  await assert.rejects(createOpsCoreActivation(f.options).reconcile());
+});
+
+for (const [label, change] of [
+  ["image", (f, p) => { p.template.containers[0].image += "a"; }],
+  ["other env", (f, p) => { p.template.containers[0].env.pop(); }],
+  ["other alias", (f, p) => { p.configuration.secrets[0].keyVaultUrl += "b"; }],
+  ["unexpected revision", f => { f.map.get(f.appId("web") + "/revisions").body.value.push({ name:"foreign" }); }],
+  ["foreign writer", f => { f.map.get(f.appId("web")).body.systemData.lastModifiedBy = "00000000-0000-4000-8000-000000123456"; }],
+  ["foreign failure", (f, p) => { p.deploymentErrors += " second error"; }],
+  ["ready pointer", (f, p) => { p.latestReadyRevisionName = "other"; }],
+  ["custom ingress", (f, p) => { p.configuration.ingress.corsPolicy = { allowedOrigins:["*"] }; }],
+  ["competing worker", f => { f.set(f.appId("worker"), {}); }],
+  ["competing scheduler", f => { f.set(f.schedulerId, {}); }],
+  ["unavailable secret", f => { f.options.observeEmptySecret = async () => { throw new Error("unavailable"); }; }],
+]) test(`refuses failed creation repair with ${label}`, async () => {
+  const f = failedBootstrap(); await f.stage();
+  change(f, f.map.get(f.appId("web")).body.properties);
+  await assert.rejects(createOpsCoreActivation(f.options).resume());
+  assert.deepEqual(f.log.filter(v => v.startsWith("put:")), ["put:web"]);
+});
+
+test("fresh activation removes only a verified optional empty binding and preserves nonempty and shared bindings", async () => {
+  const f = demandFixture({ mutatePlan(plan) {
+    addOptional(plan);
+    plan.roles.worker.env.push({ name: "ALIAS_CONSUMER", secretRef: "optional-worker" });
+  } });
+  const seen = [];
+  f.options.observeEmptySecret = async ref => { seen.push(ref); return true; };
+  await createOpsCoreActivation(f.options).activate();
+  assert.ok(seen.length >= 2 && seen.every(ref => ref.includes("/optional-web/")));
+  const worker = f.map.get(f.appId("worker")).body.properties;
+  assert.ok(worker.configuration.secrets.some(v => v.name === "optional-worker"));
+  assert.ok(worker.template.containers[0].env.some(v => v.name === optionalName && v.secretRef === "optional-worker"));
+});
+
+test("only a verified empty field may be serialized as an explicit empty literal on readback", async () => {
+  let unexpected = false;
+  const f = demandFixture({ mutatePlan: addOptional, mutateRead(q, r) {
+    if (!r.body?.properties?.template) return;
+    const env = r.body.properties.template.containers[0].env;
+    env.push({ name: optionalName, value: unexpected ? "nonempty" : "" });
+  } });
+  f.options.observeEmptySecret = async () => true;
+  assert.equal((await createOpsCoreActivation(f.options).activate()).phase, "TARGET_ACTIVE");
+  unexpected = true;
+  await assert.rejects(createOpsCoreActivation(f.options).observe());
+});
+
+test("the failed-create diagnostic API authenticates its caller and permits only exact app reads", async () => {
+  let reads = 0;
+  const claims = Buffer.from(JSON.stringify({ appid: subscription })).toString("base64url");
+  const transport = createOpsCoreActivationArmTransport({ subscriptionId: subscription,
+    execFileImpl: async () => ({ stdout: "header." + claims + ".signature" }),
+    fetchImpl: async () => { reads++; return new Response(JSON.stringify({ safe: true }), { status: 200 }); } });
+  const q = { resourceId: id("Microsoft.App/containerApps", "fixture-web"), apiVersion: "2025-10-02-preview", signal: new AbortController().signal };
+  assert.equal((await transport(q)).callerApplicationId, subscription);
+  await rejects(transport({ ...q, method: "PUT", body: {} }), "ACTIVATION_REQUEST_INVALID");
+  await rejects(transport({ ...q, resourceId: id("Microsoft.App/jobs", "fixture") }), "ACTIVATION_REQUEST_INVALID");
+  assert.equal(reads, 1);
+});
