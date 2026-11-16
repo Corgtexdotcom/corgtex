@@ -4,7 +4,7 @@ import {archiveEvidenceHash as hash} from "./ops-core-archive.mjs";
 import {openProviderOperationRecorder} from "./ops-core-provider-operations.mjs";
 import {buildHealthProbeJobDefinition,createHealthJobDispatcher,createHealthJobTransport,preflightHealthJob} from "./ops-core-health-job.mjs";
 import {HEALTH_PROBE_PREFIX,healthProbeBuildSha256,projectWorkerHealth,runWorkerHealthProbe,runHealthProbeCli} from "./ops-core-health-probe.mjs";
-import { managedAzureWorkerDemandScale } from "../release/managed-azure-worker-demand.mjs";
+import { managedAzureWorkerDemandScale, createManagedAzureJobLogReader } from "../release/managed-azure-worker-demand.mjs";
 const base="/subscriptions/00000000-0000-4000-8000-000000000001/resourceGroups/fixture/providers/";
 const release={gitSha:"a".repeat(40),imageTag:`sha-${"a".repeat(40)}`,version:"main-fixture"};
 const image=`fixture.azurecr.io/worker@sha256:${"b".repeat(64)}`;
@@ -570,4 +570,22 @@ test("a retained legacy command reconciles to the same original execution withou
   const rec=await openProviderOperationRecorder({custody:f.custody,store:f.store,phase:"TARGET_ACTIVATING",signal:f.controller.signal});
   await rec.runRecordedOperation({...old,apply:async()=>{},verify:async()=>({complete:true,evidence:{executionResourceId:f.state.runs[0].id,challengeSha256:hash(old.input.challenge)}})});
   const resumed=await f.reopen();assert.equal((await resumed.reconcileStart()).status,"Succeeded");assert.equal(f.state.starts,1);
+});
+
+
+test("direct health reader binds subscription, group, job, execution and sole replica, filtering unframed diagnostics",async()=>{
+  const execution={id:p.jobResourceId+"/executions/fixture-run",name:"fixture-run"};
+  const payload=HEALTH_PROBE_PREFIX+'{"fixture":true}',ts="2026-09-24T05:47:18.5656455Z";
+  const allowed=ts+" stdout F "+payload, commands=[];
+  const read=createManagedAzureJobLogReader({exec:async(_az,args,options)=>{
+    commands.push(args);assert(!options.shell);
+    if(args.includes("replica"))return {stdout:JSON.stringify([{name:"fixture-run-replica"}])};
+    return {stdout:[payload,ts+" stderr F "+payload,ts+" stdout P "+payload,"connecting... "+allowed,allowed].join("\n")};
+  }});
+  const request={jobId:p.jobResourceId,execution,containerName:"health-probe",select:l=>l.startsWith(HEALTH_PROBE_PREFIX),signal:new AbortController().signal};
+  const readback=await read(request);
+  assert.deepEqual(readback.frames,[{timestamp:ts,payload}]);
+  assert.deepEqual(commands[1].slice(4),["--subscription",p.jobResourceId.split("/")[2],"--resource-group","fixture","--name","fixture-health",
+    "--execution","fixture-run","--replica","fixture-run-replica","--container","health-probe","--tail","100","--format","text","--only-show-errors"]);
+  await assert.rejects(read({...request,execution:{...execution,id:execution.id+"-other"}}));assert.equal(commands.length,2);
 });
