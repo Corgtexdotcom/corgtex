@@ -24,7 +24,7 @@ import { createRailwayPostgresRemoteRead } from "./railway-postgres-custody.mjs"
 import { createRailwaySourceHealthRemoteRead, createOpsCoreSourceHealthObserver, validateOpsCoreSourceHealthPlan } from "./ops-core-source-health.mjs";
 import { RailwayObjectSource } from "./railway-object-source.ts";
 import { AzureBlobObjectStore } from "./shared-tenant-objects.ts";
-import { createRuntimeSecretResolver, assertOpsCoreRuntimeAccessForActivation,
+import { createRuntimeEmptySecretObserver, createRuntimeSecretResolver, assertOpsCoreRuntimeAccessForActivation,
   monitorOpsCoreRuntimeAccessDrift } from "./ops-core-runtime-access-controller.mjs";
 import { openOpsCorePitrGuard, OPSCORE_CUSTODY_URL } from "./ops-core-pitr-guard.mjs";
 import { effectiveRetryScratchPolicy, resolveRetryScratchAdmission, retryCaptureLineage, retryRestoredLineage } from "./ops-core-retry-scratch.mjs";
@@ -401,6 +401,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     });
     const activation = () => (runtime.activate ?? createOpsCoreActivation)({ plan: plan.activation, custody,
       operationStore, assertSourceFenced, healthProbe: actualHealthProbe,
+      observeEmptySecret: runtime.observeEmptySecret ?? createRuntimeEmptySecretObserver({ vaultUri: plan.activation.runtimeVaultUri, signal: custody.signal }),
       ...(plan.transfer.postgres.runtimeAccess ? { assertRuntimeAccess: ({ fresh }) => assertOpsCoreRuntimeAccessForActivation({
         plan, custody, operationStore, targetAdminConfig: credentials.targetAdminConfig,
         retryScratchAdmission,

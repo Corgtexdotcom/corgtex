@@ -203,7 +203,11 @@ test("Azure adapter admits the runtime access records and bounds large catalog s
   }
   await store.createOnly(receipt, "{}", signal);
   assert.equal(await store.readOptional(receipt, signal), "{}");
-  assert.deepEqual(await store.listRecords(prefix, signal), [...largeKeys, receipt].sort());
+  const overlay = prefix + "activation-empty-bindings.json";
+  await store.createOnly(overlay, "{}", signal);
+  assert.equal(await store.readOptional(overlay, signal), "{}");
+  assert.deepEqual(await store.listRecords(prefix, signal), [...largeKeys, receipt, overlay].sort());
+  await assert.rejects(store.createOnly(overlay, payload, signal), /PROVIDER_RECORD_INVALID/);
   await assert.rejects(store.createOnly(receipt, payload, signal), /PROVIDER_RECORD_INVALID/);
   await assert.rejects(store.createOnly(`${prefix}runtime-access-other.json`, "{}", signal), /PROVIDER_RECORD_KEY_INVALID/);
   await assert.rejects(store.createOnly(descriptorKey, payload, signal), /PROVIDER_RECORD_INVALID/);

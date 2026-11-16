@@ -16,7 +16,7 @@ const same = (a, b) => archiveEvidenceHash(a) === archiveEvidenceHash(b);
 
 /** Fixed-version reads only. The result is consumed in memory by the SQL
  * adapter; neither values nor driver diagnostics enter migration evidence. */
-export function createRuntimeSecretResolver({ vaultUri, signal, secretClient }) {
+function fixedVersionReader({ vaultUri, signal, secretClient }, emptyOnly) {
   const client = secretClient ?? new SecretClient(vaultUri,
     new AzureCliCredential({ processTimeoutInMs: 10_000 }), { retryOptions: { maxRetries: 0 } });
   return async reference => {
@@ -27,12 +27,21 @@ export function createRuntimeSecretResolver({ vaultUri, signal, secretClient }) 
       const [name, version] = suffix.split("/"); signal.throwIfAborted();
       const found = await client.getSecret(name, { version, abortSignal: signal }); signal.throwIfAborted();
       need(found?.properties?.id === reference && found.properties.version === version
-        && found.properties.enabled !== false && typeof found.value === "string" && found.value.length > 0
+        && found.properties.enabled !== false && typeof found.value === "string" && (emptyOnly || found.value.length > 0)
         && (!found.properties.expiresOn || found.properties.expiresOn.getTime() > Date.now())
         && (!found.properties.notBefore || found.properties.notBefore.getTime() <= Date.now()), "RUNTIME_ACCESS_SECRET_UNAVAILABLE");
-      return found.value;
+      return emptyOnly ? found.value === "" : found.value;
     } catch { throw new Error("RUNTIME_ACCESS_SECRET_UNAVAILABLE"); }
   };
+}
+
+export function createRuntimeSecretResolver(options) {
+  return fixedVersionReader(options, false);
+}
+
+// Return only the predicate, never the value, to the activation controller.
+export function createRuntimeEmptySecretObserver(options) {
+  return fixedVersionReader(options, true);
 }
 
 function accessPlan(plan, snapshot, phase, databaseOid, admission) {

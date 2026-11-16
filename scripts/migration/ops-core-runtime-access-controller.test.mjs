@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { archiveEvidenceHash as hash } from "./ops-core-archive.mjs";
-import { runOpsCoreRuntimeAccess, assertOpsCoreRuntimeAccessForActivation, createRuntimeSecretResolver,
+import { runOpsCoreRuntimeAccess, assertOpsCoreRuntimeAccessForActivation, createRuntimeSecretResolver, createRuntimeEmptySecretObserver,
   preflightOpsCoreRuntimeAccess } from "./ops-core-runtime-access-controller.mjs";
 import { validateRuntimeAccessActivationBinding, validateTransferRuntimeAccessBinding } from "./ops-core-runtime-access-binding.mjs";
 
@@ -150,6 +150,23 @@ describe("shared runtime credential binding", () => {
   it("a scaler secret cannot masquerade as the application connection", () => {
     const f = fixture(); f.plan.activation.workerDemand.scalerConnectionSecret.keyVaultUrl = f.policy.runtimeDatabaseSecrets.web;
     expect(() => validateRuntimeAccessActivationBinding(f.plan.activation)).toThrow("SCALER_BINDING_MISMATCH");
+  });
+  it("returns only proven emptiness of an available pinned version and preserves the SQL nonempty contract", async () => {
+    const f = fixture(), reference = f.policy.runtimeDatabaseSecrets.web;
+    const metadata = { id: reference, version: "c".repeat(32), enabled: true };
+    const found = { value: "", properties: { ...metadata } };
+    const options = { vaultUri: f.plan.activation.runtimeVaultUri, signal: f.options.custody.signal,
+      secretClient: { async getSecret() { return found; } } };
+    const empty = createRuntimeEmptySecretObserver(options);
+    expect(await empty(reference)).toBe(true);
+    await expect(createRuntimeSecretResolver(options)(reference)).rejects.toThrow("SECRET_UNAVAILABLE");
+    found.value = " ";
+    expect(await empty(reference)).toBe(false);
+    for (const overrides of [{ enabled: false }, { id: reference + "0" }, { version: "other" },
+      { notBefore: new Date(Date.now() + 60000) }, { expiresOn: new Date(0) }]) {
+      found.properties = { ...metadata, ...overrides };
+      await expect(empty(reference)).rejects.toThrow(/^RUNTIME_ACCESS_SECRET_UNAVAILABLE$/);
+    }
   });
   it("reads exact Key Vault versions and suppresses upstream secret diagnostics", async () => {
     const f = fixture(), seen = [], reference = f.policy.runtimeDatabaseSecrets.web;
