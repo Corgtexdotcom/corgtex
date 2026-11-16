@@ -16,6 +16,11 @@ const revision="fixture-worker--fixture";
 function body(){return{status:"ok",phase:"running",tickCount:3,lastError:null,lastSuccessfulTickAt:new Date().toISOString(),workerId:"PRIVATE_WORKER_ID",
   release:{...release,service:"worker",runtime:{gitSha:release.gitSha,source:"baked",evidence:"baked"},drift:{gitSha:false,version:false,imageTag:false,details:[]}}};}
 const ready={ready:true,phase:"running"};
+function fixtureReceipt(run,c){
+  const observedAt=Date.parse(run.properties.startTime),raw=body();raw.lastSuccessfulTickAt=new Date(observedAt).toISOString();
+  return {schemaVersion:c.schemaVersion,...(c.authority?{authority:c.authority}:{}),type:"WORKER_HEALTH_OBSERVATION",challengeSha256:hash(c),nonce:c.nonce,domain:c.domain,intentSha256:c.intentSha256,sourceFenceSha256:c.sourceFenceSha256,
+    targetSha256:hash(p.worker),identity:c.identity,request:c.request,observedAt,...projectWorkerHealth(raw,ready,p.worker,observedAt)};
+}
 async function fixture({releaseMode=false,acceptancePhase=null}={}){
   const controller=new AbortController(),records=new Map();
   const journal={domain:"core",intentSha256:"d".repeat(64),phase:releaseMode?"RELEASE_PREPARED":"VERIFIED",...(releaseMode?{}:{destinationMayHaveWritten:true}),
@@ -45,7 +50,7 @@ async function fixture({releaseMode=false,acceptancePhase=null}={}){
       if(state.wakeOnStart){state.replicaCount=1;rev.properties.healthState="Healthy";rev.properties.runningState="Running";app.properties.latestReadyRevisionName=revision;}
       assert([...records.keys()].some(k=>k.endsWith("/descriptor.json")));assert([...records.values()].some(v=>JSON.parse(v).kind==="AZURE_HEALTH_PROBE_START"&&JSON.parse(v).type==="intent"));
       const timestamp=new Date().toISOString();const name=`fixture-health-run${state.starts}`;
-      state.runs.push({id:`${p.jobResourceId}/executions/${name}`,name,properties:{status:"Succeeded",startTime:timestamp,endTime:timestamp,template:structuredClone(input)}});
+      state.runs.push({id:`${p.jobResourceId}/executions/${name}`,name,properties:{status:state.startStatus??"Succeeded",startTime:timestamp,endTime:timestamp,template:structuredClone(input)}});
       if(state.loseStart){state.loseStart=false;throw new Error("PRIVATE_PROVIDER_MESSAGE");}
       return response({name,...(state.omitIds?{}:{id:state.runs.at(-1).id})});
     }
@@ -54,14 +59,12 @@ async function fixture({releaseMode=false,acceptancePhase=null}={}){
     if(path===`/v1/workspaces/${p.workspaceId}/query`){
       const run=state.runs.at(-1);const c=JSON.parse(run.properties.template.containers[0].env.find(e=>e.name==="CORGTEX_HEALTH_CHALLENGE").value);
       assert(input.query.includes(c.nonce));assert(input.query.includes(run.name+"-"));assert(!input.query.includes("latest"));
-      const observedAt=Date.parse(run.properties.startTime),raw=body();raw.lastSuccessfulTickAt=new Date(observedAt).toISOString();
-      const receipt={schemaVersion:c.schemaVersion,...(c.authority?{authority:c.authority}:{}),type:"WORKER_HEALTH_OBSERVATION",challengeSha256:hash(c),nonce:c.nonce,domain:c.domain,intentSha256:c.intentSha256,sourceFenceSha256:c.sourceFenceSha256,
-        targetSha256:hash(p.worker),identity:c.identity,request:c.request,observedAt,...projectWorkerHealth(raw,ready,p.worker,observedAt)};
+      const receipt=fixtureReceipt(run,c);
       const logs={tables:[{name:"PrimaryResult",columns:["TimeGenerated","EnvironmentName_s","ContainerGroupName_s","ContainerName_s","ContainerImage_s","Log_s","_ResourceId"].map(name=>({name,type:"string"})),
         rows:[[run.properties.startTime,"fixture-env",run.name+"-replica1","health-probe",p.image,HEALTH_PROBE_PREFIX+JSON.stringify(receipt),p.environmentResourceId]]}]};state.logMutation?.(logs);return response(logs);
     }throw new Error("UNEXPECTED_REQUEST");
   };
-  const opts={...(acceptancePhase?{mode:"acceptance"}:{}),plan:p,custody,descriptorStore:store,transport,pollIntervalMs:0,timeoutMs:10000,
+  const opts={...(acceptancePhase?{mode:"acceptance"}:{}),plan:p,custody,descriptorStore:store,transport,readJobLogs:async()=>null,pollIntervalMs:0,timeoutMs:10000,
     ...(releaseMode?{mode:"release",releaseContext:{migrationSourceFenceSha256:"e".repeat(64),acceptedMigrationSha256:"f".repeat(64)},
       assertDeploymentAuthority:async request=>{state.authorityCalls.push(structuredClone(request));const result={complete:state.authority,...request};state.authorityMutation?.(result);return result;}}:{}),
     assertSourceFenced:async()=>{state.sourceCalls++;if(releaseMode)throw new Error("LIVE_SOURCE_OBSERVER_MUST_NOT_RUN");
@@ -508,4 +511,63 @@ test("cold demand probe crosses the actual default transport replica allowlist",
  assert.equal((await f.run(await f.reopen())).health.status,200);
  assert.ok(f.state.requests.some(r=>r.path.includes(`/revisions/${revision}/replicas?`)));
  assert.equal(f.state.starts,1);
+});
+
+
+function directProof(run) {
+  const challenge=JSON.parse(run.properties.template.containers[0].env.find(e=>e.name==="CORGTEX_HEALTH_CHALLENGE").value);
+  const frame={timestamp:run.properties.startTime,payload:HEALTH_PROBE_PREFIX+JSON.stringify(fixtureReceipt(run,challenge))};
+  return {jobId:p.jobResourceId,executionId:run.id,replicaName:run.name+"-replica1",containerName:"health-probe",frames:[frame]};
+}
+
+test("captures a live exact stdout proof while the replica exists and accepts only after ARM terminal reread",async()=>{
+  const f=await fixture();f.state.startStatus="Running";let reads=0,terminalChecks=0;
+  f.opts.readJobLogs=async ({execution,select,containerName,signal})=>{
+    reads++;assert.equal(containerName,"health-probe");assert(!signal.aborted);
+    if(reads===1)return null;
+    if(execution.properties.status==="Succeeded")return null;
+    const direct=directProof(execution);assert(select(direct.frames[0].payload));assert(!select("private diagnostics"));
+    f.state.runs[0].properties.status="Succeeded";return direct;
+  };
+  f.state.runMutation=run=>{if(run.properties.status==="Succeeded")terminalChecks++;};
+  const result=await f.run(await f.reopen());
+  assert.equal(result.health.status,200);assert.match(result.evidence.directFrameSha256,/^[a-f0-9]{64}$/);
+  assert(terminalChecks>=2);assert(reads>=3);assert.equal(f.state.starts,1);
+  assert(!f.state.requests.some(r=>r.path.includes("/query")));assert(!JSON.stringify(result).includes("PRIVATE_WORKER_ID"));
+  const command=f.state.runs[0].properties.template.containers[0].command;
+  assert.deepEqual(command.slice(0,3),["node","--input-type=module","-e"]);assert.match(command[3],/runHealthProbeCli/);
+  assert.deepEqual(f.job.properties.template.containers[0].command,["node","/app/scripts/migration/ops-core-health-probe.mjs"]);
+});
+
+for(const [name,change] of [
+  ["foreign replica",d=>d.replicaName="other-replica"],["foreign execution",d=>d.executionId+="-other"],
+  ["foreign container",d=>d.containerName="scheduler"],["duplicate",d=>d.frames.push(d.frames[0])],
+  ["stale frame",d=>d.frames[0].timestamp="2000-01-01T00:00:00Z"],["failed probe",d=>d.frames[0].payload="CORGTEX_HEALTH_PROBE_FAILED"],
+  ["foreign nonce",d=>{const r=JSON.parse(d.frames[0].payload.slice(HEALTH_PROBE_PREFIX.length));r.nonce="f".repeat(64);d.frames[0].payload=HEALTH_PROBE_PREFIX+JSON.stringify(r);}],
+])test(`direct proof rejects ${name} even if the archive source would pass`,async()=>{
+  const f=await fixture();f.opts.readJobLogs=async({execution})=>{const d=directProof(execution);change(d);return d;};
+  await assert.rejects(f.run(await f.reopen()),/HEALTH_JOB_(DIRECT_LOG|LOG_BINDING|RECEIPT)/);
+  assert.equal(f.state.starts,1);assert(!f.state.requests.some(r=>r.path.includes("/query")));
+});
+
+test("a captured marker cannot authorize a failed execution or a mismatching later read",async()=>{
+  for(const mismatch of [false,true]){
+    const f=await fixture();let seen=0;
+    f.opts.readJobLogs=async({execution})=>{const d=directProof(execution);if(seen++&&mismatch)d.replicaName=execution.name+"-other";return d;};
+    if(!mismatch)f.state.runMutation=run=>run.properties.status="Failed";
+    await assert.rejects(f.run(await f.reopen()),/HEALTH_JOB_(EXECUTION_FAILED|DIRECT_LOG_AMBIGUOUS)/);
+    assert.equal(f.state.starts,1);
+  }
+});
+
+test("a retained legacy command reconciles to the same original execution without replay",async()=>{
+  const f=await fixture();await f.run();
+  const key=[...f.records.keys()].find(k=>k.endsWith("/descriptor.json"));
+  const old=JSON.parse(f.records.get(key));
+  old.input.template.containers[0].command=["node","/app/scripts/migration/ops-core-health-probe.mjs"];
+  f.records.set(key,JSON.stringify(old));
+  f.state.runs[0].properties.template=structuredClone(old.input.template);
+  const rec=await openProviderOperationRecorder({custody:f.custody,store:f.store,phase:"TARGET_ACTIVATING",signal:f.controller.signal});
+  await rec.runRecordedOperation({...old,apply:async()=>{},verify:async()=>({complete:true,evidence:{executionResourceId:f.state.runs[0].id,challengeSha256:hash(old.input.challenge)}})});
+  const resumed=await f.reopen();assert.equal((await resumed.reconcileStart()).status,"Succeeded");assert.equal(f.state.starts,1);
 });
