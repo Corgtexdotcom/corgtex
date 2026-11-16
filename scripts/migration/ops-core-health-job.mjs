@@ -5,7 +5,7 @@ import { archiveEvidenceHash as hash } from "./ops-core-archive.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
 import { HEALTH_PROBE_PREFIX, validateHealthTarget, validateHealthChallenge, projectWorkerHealth } from "./ops-core-health-probe.mjs";
 
-import { validateManagedAzureWorkerDemand, assertManagedAzureWorkerDemandApp } from "../release/managed-azure-worker-demand.mjs";
+import { validateManagedAzureWorkerDemand, assertManagedAzureWorkerDemandApp, createManagedAzureJobLogReader } from "../release/managed-azure-worker-demand.mjs";
 
 const API="2025-07-01",HASH=/^[a-f0-9]{64}$/,GUID=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const ROOT="^/subscriptions/([a-f0-9-]{36})/resourcegroups/[a-z0-9_.()-]{1,90}/providers/";
@@ -30,7 +30,20 @@ function plan(value){
 }
 const identity=p=>({jobResourceId:p.jobResourceId,imageDigest:p.image.split("@")[1],probeSha256:p.probeSha256});
 const pathFor=id=>`${id}?api-version=${API}`;
-function template(p,challenge=null){return{containers:[{name:"health-probe",image:p.image,command:["node","/app/scripts/migration/ops-core-health-probe.mjs"],args:[],
+const probePath = "/app/scripts/migration/ops-core-health-probe.mjs";
+// Azure removes completed replicas. Keep successful probes addressable for
+// a bounded interval while running the identical image entrypoint and exit code.
+const captureCommand = ["node", "--input-type=module", "-e", [
+  "const started = Date.now();",
+  `const {runHealthProbeCli} = await import("${probePath}");`,
+  "const ok = await runHealthProbeCli();",
+  "const {expiresAt} = JSON.parse(process.env.CORGTEX_HEALTH_CHALLENGE);",
+  "const remainingMs = Math.max(0, Math.min(started + 115000, expiresAt - 15000) - Date.now());",
+  "if (ok) await new Promise(done => setTimeout(done, Math.min(45000, remainingMs)));",
+  "process.exitCode = ok ? 0 : 1;",
+].join("\n")];
+function template(p,challenge=null,liveCapture=Boolean(challenge)){return{containers:[{name:"health-probe",image:p.image,
+  command:liveCapture?[...captureCommand]:["node",probePath],args:[],
   resources:{cpu:0.25,memory:"0.5Gi"},env:[{name:"CORGTEX_HEALTH_TARGET",value:JSON.stringify(p.worker)},
     {name:"CORGTEX_HEALTH_PROBE_IDENTITY",value:JSON.stringify(identity(p))},
     ...(challenge?[{name:"CORGTEX_HEALTH_CHALLENGE",value:JSON.stringify(challenge)}]:[])]}],initContainers:[]};}
@@ -110,13 +123,25 @@ function parseLogs(response,p,run,challenge){
   need(r.length===7&&r[1]===p.environmentResourceId.split("/").at(-1)&&typeof r[2]==="string"&&r[2].startsWith(`${run.name}-`)
     &&/^[a-z0-9-]{1,120}$/.test(r[2])&&r[3]==="health-probe"&&r[4]===p.image&&typeof r[5]==="string"&&Buffer.byteLength(r[5])<=16384
     &&r[5].startsWith(HEALTH_PROBE_PREFIX)&&[p.environmentResourceId,p.jobResourceId].some(id=>equalId(r[6],id))
-    &&Number.isFinite(at)&&at>=challenge.issuedAt&&at<=challenge.expiresAt&&at>=Date.parse(run.properties.startTime)&&at<=Date.parse(run.properties.endTime),"HEALTH_JOB_LOG_BINDING_MISMATCH");
-  let receipt;try{receipt=JSON.parse(r[5].slice(HEALTH_PROBE_PREFIX.length));}catch{throw new HealthJobError("HEALTH_JOB_RECEIPT_INVALID");}
+    &&Number.isFinite(at),"HEALTH_JOB_LOG_BINDING_MISMATCH");
+  return receiptFromFrame({timestamp:r[0],payload:r[5]},p,run,challenge);
+}
+function withinExecution(value, run, challenge) {
+  const end = run.properties.endTime;
+  // ARM can omit fractional seconds entirely. Bound any allowance to that second.
+  const last = Date.parse(end) + (/T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$/.test(end) ? 999 : 0);
+  return Number.isFinite(value) && value >= challenge.issuedAt && value <= challenge.expiresAt
+    && value >= Date.parse(run.properties.startTime) && value <= last && value <= Date.now();
+}
+function receiptFromFrame(frame,p,run,challenge) {
+  need(withinExecution(Date.parse(frame.timestamp),run,challenge) && typeof frame.payload==="string"
+    && Buffer.byteLength(frame.payload)<=16384 && frame.payload.startsWith(HEALTH_PROBE_PREFIX),"HEALTH_JOB_LOG_BINDING_MISMATCH");
+  let receipt;try{receipt=JSON.parse(frame.payload.slice(HEALTH_PROBE_PREFIX.length));}catch{throw new HealthJobError("HEALTH_JOB_RECEIPT_INVALID");}
   need(exact(receipt,`schemaVersion,type,challengeSha256,nonce,domain,intentSha256,sourceFenceSha256,targetSha256,identity,request,observedAt,health,ready${challenge.authority?",authority":""}`)
     &&receipt.schemaVersion===challenge.schemaVersion&&same(receipt.authority??null,challenge.authority??null)&&receipt.type==="WORKER_HEALTH_OBSERVATION"&&receipt.challengeSha256===hash(challenge)&&receipt.nonce===challenge.nonce
     &&receipt.domain===challenge.domain&&receipt.intentSha256===challenge.intentSha256&&receipt.sourceFenceSha256===challenge.sourceFenceSha256
     &&receipt.targetSha256===hash(p.worker)&&same(receipt.identity,identity(p))&&same(receipt.request,challenge.request)
-    &&Number.isSafeInteger(receipt.observedAt)&&receipt.observedAt>=Date.parse(run.properties.startTime)&&receipt.observedAt<=Date.parse(run.properties.endTime)
+    &&Number.isSafeInteger(receipt.observedAt)&&withinExecution(receipt.observedAt,run,challenge)
     &&receipt.health?.status===200&&receipt.ready?.status===200,"HEALTH_JOB_RECEIPT_INVALID");
   need(same(projectWorkerHealth(receipt.health.body,receipt.ready.body,p.worker,Date.now()),{health:receipt.health,ready:receipt.ready}),"HEALTH_JOB_RECEIPT_INVALID");
   return receipt;
@@ -141,11 +166,11 @@ function query(p,run,c){return`ContainerAppConsoleLogs_CL\n| where TimeGenerated
  * Up to ten immutable sequential attempts support activation's repeat checks.
  * A previous exact start intent must reconcile to a terminal execution before
  * another nonce can start; missing/unknown/running state cannot trigger replay.
- * Log Analytics must provide a fresh exact receipt. This is point-in-time health,
+ * The captured provider stdout or exact Log Analytics row must contain a fresh receipt. This is point-in-time health,
  * not proof of all business workflows, sustained uptime, or a no-write interval.
  */
 function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertDeploymentAuthority,
-  plan:value,custody,assertSourceFenced,descriptorStore,operations,transport,workerDemand,pollIntervalMs=1000,timeoutMs=180000}){
+  plan:value,custody,assertSourceFenced,descriptorStore,operations,transport,workerDemand,readJobLogs=createManagedAzureJobLogReader(),pollIntervalMs=1000,timeoutMs=180000}){
   const p=plan(value),send=transport??createHealthJobTransport(p),initial=custody?.snapshot?.();
   const releaseMode=mode==="release",acceptanceMode=mode==="acceptance";
   if(workerDemand){
@@ -160,7 +185,7 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
   need(!releaseMode||(exact(releaseContext,"migrationSourceFenceSha256,acceptedMigrationSha256")
     &&HASH.test(releaseContext.migrationSourceFenceSha256)&&HASH.test(releaseContext.acceptedMigrationSha256)),"HEALTH_JOB_RELEASE_CONTEXT_INVALID");
   need(custody?.signal instanceof AbortSignal&&[custody.assertOwned,releaseMode?assertDeploymentAuthority:assertSourceFenced,descriptorStore?.assertPrivate,descriptorStore?.readOptional,
-    descriptorStore?.createOnly,operations?.readIntent,operations?.runRecordedOperation,send].every(f=>typeof f==="function")
+    descriptorStore?.createOnly,operations?.readIntent,operations?.runRecordedOperation,send,readJobLogs].every(f=>typeof f==="function")
     &&Number.isInteger(pollIntervalMs)&&pollIntervalMs>=0&&pollIntervalMs<=5000&&Number.isInteger(timeoutMs)&&timeoutMs>0&&timeoutMs<=300000,"HEALTH_JOB_CUSTODY_REQUIRED");
   const context={domain:initial.domain,intentSha256:initial.intentSha256,
     sourceFenceSha256:releaseMode?releaseContext.migrationSourceFenceSha256:initial.history?.find(x=>x.phase==="SOURCE_FENCED")?.evidenceSha256,
@@ -176,7 +201,16 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
   function snapshotCheck(){const j=custody.snapshot();need(j.domain===context.domain&&j.intentSha256===context.intentSha256
     &&j.phase===expectedPhase&&j.pending?.to===phase&&j.pending?.operationId===context.phaseOperationId
     &&(releaseMode||(j.destinationMayHaveWritten===true&&j.history?.find(x=>x.phase==="SOURCE_FENCED")?.evidenceSha256===context.sourceFenceSha256)),"HEALTH_JOB_CUSTODY_CHANGED");}
-  async function check(signal){need(!signal.aborted&&!custody.signal.aborted,"HEALTH_JOB_ABORTED");await custody.assertOwned();snapshotCheck();
+  async function check(signal) {
+    need(!signal.aborted&&!custody.signal.aborted,"HEALTH_JOB_ABORTED");
+    await custody.assertOwned();
+    snapshotCheck();
+    need(!signal.aborted&&!custody.signal.aborted,"HEALTH_JOB_ABORTED");
+  }
+  // One source proof includes two complete Railway writer inventories and the
+  // PostgreSQL census. Bracket observations with it; lease/phase/abort still
+  // guard every ARM/log/store read and the provider recorder's own operations.
+  async function assertAuthority(signal){await check(signal);
     if(releaseMode){
       // This asserts retained migration acceptance, exact deployment target and
       // the CURRENT release lease. The source-fence hash is historical provenance;
@@ -186,7 +220,7 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
     }else{
       const s=await assertSourceFenced();need(s?.complete===true&&s.domain===context.domain&&s.intentSha256===context.intentSha256&&s.sourceFenceSha256===context.sourceFenceSha256,"HEALTH_JOB_SOURCE_UNFENCED");
     }
-    await custody.assertOwned();snapshotCheck();need(!signal.aborted&&!custody.signal.aborted,"HEALTH_JOB_ABORTED");}
+    await check(signal);}
   async function request(method,path,signal,body){await check(signal);const r=await send({method,path,signal,...(body===undefined?{}:{body})});await check(signal);
     need(r&&[200,202,404].includes(r.status),"HEALTH_JOB_TRANSPORT_INVALID");return r;}
   async function prepare(signal = custody.signal) { return prepareHealthJob(p, request, signal); }
@@ -224,7 +258,9 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
     validateHealthChallenge(record.input.challenge,p.worker,identity(p),{fresh:false});
     need(same(record.input.challenge.authority??null,authority)&&record.input.challenge.domain===context.domain
       &&record.input.challenge.intentSha256===context.intentSha256&&record.input.challenge.sourceFenceSha256===context.sourceFenceSha256,"HEALTH_JOB_DESCRIPTOR_INVALID");
-    need(same(record.input.template,template(p,record.input.challenge)),"HEALTH_JOB_DESCRIPTOR_INVALID");return record;}
+    // A retained old start must reconcile against the exact command actually dispatched.
+    need(same(record.input.template,template(p,record.input.challenge))
+      ||same(record.input.template,template(p,record.input.challenge,false)),"HEALTH_JOB_DESCRIPTOR_INVALID");return record;}
   async function retain(record,index,signal){await check(signal);await descriptorStore.assertPrivate();const text=JSON.stringify(record);
     await descriptorStore.createOnly(slotKey(index),text,signal);need(same(await readSlot(index,signal),record),"HEALTH_JOB_DESCRIPTOR_INVALID");
     const key=`${prefix}/${hash({kind:record.kind,inputSha256:hash(record.input)})}/descriptor.json`;
@@ -246,40 +282,80 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
       const requested={role,origin,release,appId,revisionName,invocationContext};const now=Date.now();const challenge={schemaVersion:releaseMode?2:1,...(authority?{authority}:{}),nonce:randomBytes(32).toString("hex"),
         domain:context.domain,intentSha256:context.intentSha256,sourceFenceSha256:context.sourceFenceSha256,targetSha256:hash(p.worker),identity:identity(p),
         issuedAt:now,expiresAt:now+timeoutMs,request:structuredClone(requested)};
-      validateHealthChallenge(challenge,p.worker,identity(p));await prepare(signal);await assertWorker(requested,signal,true);
+      validateHealthChallenge(challenge,p.worker,identity(p));await assertAuthority(signal);
+      await prepare(signal);await assertWorker(requested,signal,true);
       let index;
       for(index=0;index<10;index++){const old=await readSlot(index,signal);if(!old)break;
         const previous=await reconcile(old,signal);need(["Succeeded","Failed","Stopped"].includes(previous.properties.status),"HEALTH_JOB_PREVIOUS_EXECUTION_PENDING");}
       need(index<10,"HEALTH_JOB_ATTEMPT_BOUND");
       need((await inventory(signal)).every(r=>["Succeeded","Failed","Stopped"].includes(r.properties.status)),"HEALTH_JOB_FOREIGN_EXECUTION");
       const record={kind:"AZURE_HEALTH_PROBE_START",input:{plan:p,context,index,challenge,template:template(p,challenge)}};await retain(record,index,signal);let found,acceptedId;
+      let captured = null, captureError;
+      async function observeFrames(run) {
+        await check(signal);
+        const read = await readJobLogs({ jobId:p.jobResourceId, execution:run, containerName:"health-probe", signal,
+          select:payload=>payload.startsWith(HEALTH_PROBE_PREFIX)||payload==="CORGTEX_HEALTH_PROBE_FAILED" });
+        await check(signal);
+        if (!read) return;
+        need(equalId(read.jobId,p.jobResourceId)&&equalId(read.executionId,run.id)&&read.containerName==="health-probe"
+          &&typeof read.replicaName==="string"&&read.replicaName.startsWith(run.name+"-")&&/^[a-z0-9-]{1,100}$/.test(read.replicaName)
+          &&Array.isArray(read.frames)&&read.frames.length<=1,"HEALTH_JOB_DIRECT_LOG_AMBIGUOUS");
+        if (!read.frames.length) return;
+        const frame=read.frames[0];
+        need(typeof frame.payload==="string"&&frame.payload.startsWith(HEALTH_PROBE_PREFIX)&&Buffer.byteLength(frame.payload)<=16384
+          &&Number.isFinite(Date.parse(frame.timestamp)),"HEALTH_JOB_DIRECT_LOG_INVALID");
+        const match={replicaName:read.replicaName,timestamp:frame.timestamp,payload:frame.payload};
+        need(!captured||same(captured,match),"HEALTH_JOB_DIRECT_LOG_AMBIGUOUS");
+        captured=match;
+      }
       await operations.runRecordedOperation({...record,apply:async()=>{
         await prepare(signal);await assertWorker(requested,signal,true);const boundary=Math.ceil(challenge.issuedAt/1000)*1000;
-        if(Date.now()<boundary)await delay(boundary-Date.now(),undefined,{signal});validateHealthChallenge(challenge,p.worker,identity(p));
+        if(Date.now()<boundary)await delay(boundary-Date.now(),undefined,{signal});
+        await assertAuthority(signal);validateHealthChallenge(challenge,p.worker,identity(p));
         const r=await request("POST",pathFor(`${p.jobResourceId}/start`),signal,record.input.template);
         if(r.body){need(typeof r.body.name==="string"&&/^[a-z0-9][a-z0-9-]{0,79}$/.test(r.body.name)&&(!r.body.id||equalId(r.body.id,`${p.jobResourceId}/executions/${r.body.name}`)),"HEALTH_JOB_EXECUTION_INVALID");acceptedId=`${p.jobResourceId}/executions/${r.body.name}`;}
       },verify:async()=>{for(;;){validateHealthChallenge(challenge,p.worker,identity(p));found=await locate(record,signal);
-        if(found){need(!acceptedId||equalId(found.id,acceptedId),"HEALTH_JOB_EXECUTION_CHANGED");return{complete:true,evidence:{executionResourceId:found.id,challengeSha256:hash(challenge)}};}
+        if(found){
+          need(!acceptedId||equalId(found.id,acceptedId),"HEALTH_JOB_EXECUTION_CHANGED");
+          // Persist the proven start even if its first log read fails validation.
+          try { await observeFrames(found); } catch(error) { captureError=error; }
+          return{complete:true,evidence:{executionResourceId:found.id,challengeSha256:hash(challenge)}};
+        }
         await delay(pollIntervalMs,undefined,{signal});}}});
+      if(captureError)throw captureError;
       for(;;){validateHealthChallenge(challenge,p.worker,identity(p));const r=await request("GET",pathFor(found.id),signal);need(r.status===200,"HEALTH_JOB_EXECUTION_CHANGED");
         const next=execution(r.body,p);need(equalId(next.id,found.id),"HEALTH_JOB_EXECUTION_CHANGED");found=next;verifyTemplate(found.properties.template,record.input.template);
         need(["Running","Processing","Succeeded"].includes(found.properties.status),"HEALTH_JOB_EXECUTION_FAILED");
+        await observeFrames(found);
         if(found.properties.status==="Succeeded"){
           const start=Date.parse(found.properties.startTime),end=Date.parse(found.properties.endTime);need(Number.isFinite(start)&&Number.isFinite(end)&&start>=challenge.issuedAt&&end>=start&&end<=Date.now()&&end<=challenge.expiresAt,"HEALTH_JOB_EXECUTION_STALE");
-          const logs=await request("POST",`/v1/workspaces/${p.workspaceId}/query`,signal,{query:query(p,found,challenge),timespan:`${new Date(challenge.issuedAt).toISOString()}/${new Date(challenge.expiresAt).toISOString()}`});
-          need(logs.status===200,"HEALTH_JOB_LOG_UNAVAILABLE");const receipt=parseLogs(logs.body,p,found,challenge);
+          let receipt;
+          if(captured){receipt=receiptFromFrame(captured,p,found,challenge);}
+          else {
+            const logs=await request("POST",`/v1/workspaces/${p.workspaceId}/query`,signal,{query:query(p,found,challenge),timespan:`${new Date(challenge.issuedAt).toISOString()}/${new Date(challenge.expiresAt).toISOString()}`});
+            need(logs.status===200,"HEALTH_JOB_LOG_UNAVAILABLE");receipt=parseLogs(logs.body,p,found,challenge);
+          }
           if(receipt){await prepare(signal);const workerSha256=await assertWorker(requested,signal);const last=await request("GET",pathFor(found.id),signal);
-            need(last.status===200&&same(execution(last.body,p),found),"HEALTH_JOB_EXECUTION_CHANGED");validateHealthChallenge(challenge,p.worker,identity(p));
-            return{health:receipt.health,ready:receipt.ready,evidence:{challengeSha256:hash(challenge),receiptSha256:hash(receipt),executionSha256:hash(found),workerSha256,
+            need(last.status===200&&same(execution(last.body,p),found),"HEALTH_JOB_EXECUTION_CHANGED");
+            await assertAuthority(signal);validateHealthChallenge(challenge,p.worker,identity(p));
+            projectWorkerHealth(receipt.health.body,receipt.ready.body,p.worker,Date.now());
+            return{health:receipt.health,ready:receipt.ready,evidence:{...(captured?{directFrameSha256:hash(captured)}:{}),challengeSha256:hash(challenge),receiptSha256:hash(receipt),executionSha256:hash(found),workerSha256,
               jobIdentitySha256:hash(identity(p)),sourceFenceSha256:context.sourceFenceSha256,intentSha256:context.intentSha256,
               ...(releaseMode?{mode:"release",invocationContext,sourceFenceProvenance:"historical-migration",authoritySha256:hash(authority),requestSha256:hash(requested)}:{})}};}
         }await delay(pollIntervalMs,undefined,{signal});
       }
     }finally{busy=false;}
   }
-  return{identity:identity(p),prepare:()=>safe(()=>prepare()),probeHealth:args=>safe(()=>probeHealth(args)),readRetainedStart:()=>safe(readRetainedStart),
-    reconcileStart:()=>safe(async()=>{need(!busy,"HEALTH_JOB_CONCURRENT");busy=true;try{const record=await readRetainedStart();need(record,"HEALTH_JOB_START_INTENT_UNPROVEN");
-      const found=await reconcile(record,custody.signal);return{executionResourceId:found.id,status:found.properties.status,expired:Date.now()>=record.input.challenge.expiresAt};}finally{busy=false;}})};
+  async function guardedRead(read) {
+    await assertAuthority(custody.signal);
+    const result=await read();
+    await assertAuthority(custody.signal);
+    return result;
+  }
+  return{identity:identity(p),prepare:()=>safe(()=>guardedRead(()=>prepare())),probeHealth:args=>safe(()=>probeHealth(args)),
+    readRetainedStart:()=>safe(()=>guardedRead(readRetainedStart)),
+    reconcileStart:()=>safe(()=>guardedRead(async()=>{need(!busy,"HEALTH_JOB_CONCURRENT");busy=true;try{const record=await readRetainedStart();need(record,"HEALTH_JOB_START_INTENT_UNPROVEN");
+      const found=await reconcile(record,custody.signal);return{executionResourceId:found.id,status:found.properties.status,expired:Date.now()>=record.input.challenge.expiresAt};}finally{busy=false;}}))};
 }
 
 /** Construction does not require activation to have begun. The recorder opens

@@ -155,37 +155,61 @@ export function assertManagedAzureSchedulerJob(actual, expected, jobId) {
   return true;
 }
 
-/** Bounded direct execution logs. Raw provider output never enters evidence or diagnostics. */
-export function createManagedAzureSchedulerProofReader({ exec = promisify(execFile) } = {}) {
-  return async ({ jobId, execution, signal }) => {
-    const parts = jobId.split("/"), common = ["--subscription", parts[2], "--resource-group", parts[4], "--name", parts.at(-1), "--execution", execution.name];
+/** Read only complete stdout frames from the one replica of the exact ARM execution.
+ * A starting or already collected replica may have no available stream. */
+export function createManagedAzureJobLogReader({ exec = promisify(execFile) } = {}) {
+  return async ({ jobId, execution, containerName, select, signal }) => {
+    need(/^\/subscriptions\/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/resourcegroups\/[a-z0-9_.()-]{1,90}\/providers\/microsoft\.app\/jobs\/[a-z0-9-]{1,32}$/i.test(jobId)
+      && sameId(execution.id, `${jobId}/executions/${execution.name}`)
+      && /^[a-z0-9][a-z0-9-]{0,79}$/.test(execution.name)
+      && ["scheduler", "health-probe"].includes(containerName), "WORKER_DEMAND_PROOF_EXECUTION_INVALID");
+    const parts = jobId.split("/");
+    const common = ["--subscription", parts[2], "--resource-group", parts[4], "--name", parts.at(-1), "--execution", execution.name];
+    const options = { encoding: "utf8", timeout: 20_000, maxBuffer: 256 * 1024, shell: false, signal,
+      env: { ...process.env, AZURE_EXTENSION_USE_DYNAMIC_INSTALL: "no" } };
     try {
-      const options = { encoding: "utf8", timeout: 20_000, maxBuffer: 256 * 1024, shell: false, signal,
-        env: { ...process.env, AZURE_EXTENSION_USE_DYNAMIC_INSTALL: "no" } };
-      const replicas = JSON.parse((await exec("az", ["containerapp", "job", "replica", "list", ...common, "--output", "json", "--only-show-errors"], options)).stdout);
+      const list = await exec("az", ["containerapp", "job", "replica", "list", ...common, "--output", "json", "--only-show-errors"], options);
+      const replicas = JSON.parse(list.stdout);
+      if (Array.isArray(replicas) && replicas.length === 0) return null;
       need(Array.isArray(replicas) && replicas.length === 1 && /^[a-z0-9-]{1,100}$/.test(replicas[0].name)
         && replicas[0].name.startsWith(`${execution.name}-`), "WORKER_DEMAND_PROOF_REPLICA_INVALID");
       const replicaName = replicas[0].name;
       const { stdout } = await exec("az", ["containerapp", "job", "logs", "show", ...common, "--replica", replicaName,
-        "--container", "scheduler", "--tail", "100", "--format", "text", "--only-show-errors"], options);
-      const records = [];
-      for (const line of stdout.split(/\r?\n/).filter(Boolean)) {
-        // Native text output preserves JSON escaping, unlike the installed
-        // CLI's JSON mode. Accept only a complete stdout CRI record; connection
-        // notices, stderr, partial fragments and arbitrary JSON substrings are not proof.
-        const framed = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})) stdout F (\{.*\})$/.exec(line);
-        if (!framed || !Number.isFinite(Date.parse(framed[1]))) continue;
-        let wrapper, receipt;
-        try {
-          wrapper = JSON.parse(framed[2]);
-          if (wrapper?.level !== "info" || typeof wrapper.msg !== "string") continue;
-          receipt = JSON.parse(wrapper.msg);
-        } catch { continue; }
-        if (receipt?.event === "scheduler_complete") records.push(receipt);
+        "--container", containerName, "--tail", "100", "--format", "text", "--only-show-errors"], options);
+      const frames = [];
+      for (const line of stdout.split(/\r?\n/)) {
+        const framed = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})) stdout F (.+)$/.exec(line);
+        if (framed && Number.isFinite(Date.parse(framed[1])) && select(framed[2])) {
+          frames.push({ timestamp: framed[1], payload: framed[2] });
+        }
       }
-      need(records.length === 1, "WORKER_DEMAND_PROOF_LOG_UNPROVEN");
-      return { jobId, executionId: execution.id, replicaName, containerName: "scheduler", receipt: records[0] };
-    } catch (error) { throw error instanceof DemandError ? error : new DemandError("WORKER_DEMAND_PROOF_LOG_UNAVAILABLE"); }
+      return { jobId, executionId: execution.id, replicaName, containerName, frames };
+    } catch (error) {
+      if (error instanceof DemandError) throw error;
+      signal?.throwIfAborted();
+      return null;
+    }
+  };
+}
+
+/** Raw provider output never enters scheduler evidence or diagnostics. */
+export function createManagedAzureSchedulerProofReader(options = {}) {
+  const read = createManagedAzureJobLogReader(options);
+  return async input => {
+    const observed = await read({ ...input, containerName: "scheduler", select: payload => payload.startsWith("{") });
+    need(observed, "WORKER_DEMAND_PROOF_LOG_UNAVAILABLE");
+    const records = [];
+    for (const {payload} of observed.frames) {
+      try {
+        const wrapper = JSON.parse(payload);
+        if (wrapper?.level !== "info" || typeof wrapper.msg !== "string") continue;
+        const receipt = JSON.parse(wrapper.msg);
+        if (receipt?.event === "scheduler_complete") records.push(receipt);
+      } catch { /* Other application output is not a scheduler receipt. */ }
+    }
+    need(records.length === 1, "WORKER_DEMAND_PROOF_LOG_UNPROVEN");
+    const {jobId,executionId,replicaName,containerName} = observed;
+    return { jobId, executionId, replicaName, containerName, receipt: records[0] };
   };
 }
 
