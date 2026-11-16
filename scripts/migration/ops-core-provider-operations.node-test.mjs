@@ -180,13 +180,15 @@ test("Azure adapter only treats BlobNotFound as absence and always uses create-o
   await assert.rejects(store.readOptional("../elsewhere", signal), /PROVIDER_STORE_READ_FAILED/);
 });
 
-test("Azure adapter retains a large source phase plan while provider records stay bounded", async () => {
+test("Azure adapter admits the runtime access records and bounds large catalog snapshots separately", async () => {
   const prefix = `operations/core/${"a".repeat(64)}/11111111-1111-4111-8111-111111111111/`;
-  const phaseKey = `${prefix}phase-plan.json`;
+  const largeKeys = ["phase-plan", "runtime-access-intent", "runtime-access-expected-after"].map(name => `${prefix}${name}.json`);
+  const receipt = `${prefix}runtime-access-receipt.json`;
   const descriptorKey = `${prefix}${"b".repeat(64)}/descriptor.json`;
   const payload = JSON.stringify({ recoveryBaseline: "x".repeat(90 * 1024) });
   const writes = new Map();
   const store = azureProviderOperationStore({
+    async *listBlobsFlat() { for (const name of writes.keys()) yield { name }; },
     getBlockBlobClient(key) { return {
       async download() { const value = writes.get(key); return {
         contentLength: Buffer.byteLength(value), readableStreamBody: Readable.from([value]),
@@ -195,8 +197,15 @@ test("Azure adapter retains a large source phase plan while provider records sta
     }; },
   });
   const signal = new AbortController().signal;
-  await store.createOnly(phaseKey, payload, signal);
-  assert.equal(await store.readOptional(phaseKey, signal), payload);
+  for (const key of largeKeys) {
+    await store.createOnly(key, payload, signal);
+    assert.equal(await store.readOptional(key, signal), payload);
+  }
+  await store.createOnly(receipt, "{}", signal);
+  assert.equal(await store.readOptional(receipt, signal), "{}");
+  assert.deepEqual(await store.listRecords(prefix, signal), [...largeKeys, receipt].sort());
+  await assert.rejects(store.createOnly(receipt, payload, signal), /PROVIDER_RECORD_INVALID/);
+  await assert.rejects(store.createOnly(`${prefix}runtime-access-other.json`, "{}", signal), /PROVIDER_RECORD_KEY_INVALID/);
   await assert.rejects(store.createOnly(descriptorKey, payload, signal), /PROVIDER_RECORD_INVALID/);
   assert.equal(writes.has(descriptorKey), false);
 });
