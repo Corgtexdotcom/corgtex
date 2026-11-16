@@ -31,13 +31,14 @@ function plan(value){
 const identity=p=>({jobResourceId:p.jobResourceId,imageDigest:p.image.split("@")[1],probeSha256:p.probeSha256});
 const pathFor=id=>`${id}?api-version=${API}`;
 const probePath = "/app/scripts/migration/ops-core-health-probe.mjs";
-// Azure removes completed replicas. Keep fast successful probes addressable for
+// Azure removes completed replicas. Keep successful probes addressable for
 // a bounded interval while running the identical image entrypoint and exit code.
 const captureCommand = ["node", "--input-type=module", "-e", [
   "const started = Date.now();",
   `const {runHealthProbeCli} = await import("${probePath}");`,
   "const ok = await runHealthProbeCli();",
-  "if (ok) await new Promise(done => setTimeout(done, Math.max(0, 45000 - (Date.now() - started))));",
+  "const remainingMs = Math.max(0, 115000 - (Date.now() - started));",
+  "if (ok) await new Promise(done => setTimeout(done, Math.min(45000, remainingMs)));",
   "process.exitCode = ok ? 0 : 1;",
 ].join("\n")];
 function template(p,challenge=null,liveCapture=Boolean(challenge)){return{containers:[{name:"health-probe",image:p.image,

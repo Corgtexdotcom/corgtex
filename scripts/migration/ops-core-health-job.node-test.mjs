@@ -589,3 +589,18 @@ test("direct health reader binds subscription, group, job, execution and sole re
     "--execution","fixture-run","--replica","fixture-run-replica","--container","health-probe","--tail","100","--format","text","--only-show-errors"]);
   await assert.rejects(read({...request,execution:{...execution,id:execution.id+"-other"}}));assert.equal(commands.length,2);
 });
+
+test("capture window starts on probe completion and leaves time under the provider timeout for cold workers",async()=>{
+  const f=await fixture();await f.run();
+  const script=f.state.runs[0].properties.template.containers[0].command[3];
+  const path='"/app/scripts/migration/ops-core-health-probe.mjs"';
+  assert(script.includes("await import("+path+")"));
+  // Exercise the actual recorded command with an in-memory probe and clock.
+  const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
+  const invoke=new AsyncFunction("loadProbe","Date","setTimeout","process",script.replace("await import("+path+")","await loadProbe()"));
+  for(const [elapsed,ok,expected] of [[1000,true,45000],[60000,true,45000],[100000,true,15000],[110000,true,5000],[116000,true,0],[60000,false,null]]){
+    let now=0,waited=null;const process={};
+    await invoke(async()=>({runHealthProbeCli:async()=>{now=elapsed;return ok;}}),{now:()=>now},(finish,ms)=>{waited=ms;finish();},process);
+    assert.equal(waited,expected);assert.equal(process.exitCode,ok?0:1);
+  }
+});
