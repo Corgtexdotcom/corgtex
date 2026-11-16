@@ -604,3 +604,31 @@ test("capture window starts on probe completion and leaves time under the provid
     assert.equal(waited,expected);assert.equal(process.exitCode,ok?0:1);
   }
 });
+
+test("complete five-second-scale source censuses bracket start and acceptance while every log poll still checks custody",async()=>{
+  const f=await fixture();let custodyReads=0,logReads=0;
+  const seen=[],custodyAtLog=[],censusMs=5718,expectedDeadlineMs=180000;
+  f.custody.assertOwned=async()=>{custodyReads++;};
+  f.opts.assertSourceFenced=async()=>{seen.push({providerStarts:f.state.starts,logReads});return {
+    complete:true,domain:f.journal.domain,intentSha256:f.journal.intentSha256,sourceFenceSha256:f.journal.history[0].evidenceSha256};};
+  f.state.startStatus="Running";
+  f.opts.readJobLogs=async({execution})=>{
+    logReads++;custodyAtLog.push(custodyReads);
+    if(logReads===5){f.state.runs[0].properties.status="Succeeded";return directProof(execution);}
+    return null;
+  };
+  await f.run(await f.reopen());
+  assert.deepEqual(seen.map(x=>x.providerStarts),[0,0,1]);assert.equal(seen[2].logReads,logReads);
+  assert(custodyAtLog[0]>0&&custodyReads>custodyAtLog.at(-1));
+  assert(custodyAtLog.slice(1).every((n,i)=>n-custodyAtLog[i]>=2));
+  assert(seen.length*censusMs+45000<expectedDeadlineMs);
+});
+test("lost source fence or changed custody while polling cannot yield health evidence",async()=>{
+  for(const lost of ["source","custody"]){
+    const f=await fixture();
+    f.opts.readJobLogs=async({execution})=>{if(lost==="source")f.state.source=false;
+      else f.journal.pending.operationId="00000000-0000-4000-8000-000000000099";return directProof(execution);};
+    await assert.rejects(f.run(await f.reopen()),/HEALTH_JOB_(SOURCE_UNFENCED|RECONCILE_REQUIRED|CUSTODY_CHANGED)/);
+    assert.equal(f.state.starts,1);
+  }
+});

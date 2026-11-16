@@ -200,7 +200,16 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
   function snapshotCheck(){const j=custody.snapshot();need(j.domain===context.domain&&j.intentSha256===context.intentSha256
     &&j.phase===expectedPhase&&j.pending?.to===phase&&j.pending?.operationId===context.phaseOperationId
     &&(releaseMode||(j.destinationMayHaveWritten===true&&j.history?.find(x=>x.phase==="SOURCE_FENCED")?.evidenceSha256===context.sourceFenceSha256)),"HEALTH_JOB_CUSTODY_CHANGED");}
-  async function check(signal){need(!signal.aborted&&!custody.signal.aborted,"HEALTH_JOB_ABORTED");await custody.assertOwned();snapshotCheck();
+  async function check(signal) {
+    need(!signal.aborted&&!custody.signal.aborted,"HEALTH_JOB_ABORTED");
+    await custody.assertOwned();
+    snapshotCheck();
+    need(!signal.aborted&&!custody.signal.aborted,"HEALTH_JOB_ABORTED");
+  }
+  // One source proof includes two complete Railway writer inventories and the
+  // PostgreSQL census. Bracket observations with it; lease/phase/abort still
+  // guard every ARM/log/store read and the provider recorder's own operations.
+  async function assertAuthority(signal){await check(signal);
     if(releaseMode){
       // This asserts retained migration acceptance, exact deployment target and
       // the CURRENT release lease. The source-fence hash is historical provenance;
@@ -210,7 +219,7 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
     }else{
       const s=await assertSourceFenced();need(s?.complete===true&&s.domain===context.domain&&s.intentSha256===context.intentSha256&&s.sourceFenceSha256===context.sourceFenceSha256,"HEALTH_JOB_SOURCE_UNFENCED");
     }
-    await custody.assertOwned();snapshotCheck();need(!signal.aborted&&!custody.signal.aborted,"HEALTH_JOB_ABORTED");}
+    await check(signal);}
   async function request(method,path,signal,body){await check(signal);const r=await send({method,path,signal,...(body===undefined?{}:{body})});await check(signal);
     need(r&&[200,202,404].includes(r.status),"HEALTH_JOB_TRANSPORT_INVALID");return r;}
   async function prepare(signal = custody.signal) { return prepareHealthJob(p, request, signal); }
@@ -272,7 +281,8 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
       const requested={role,origin,release,appId,revisionName,invocationContext};const now=Date.now();const challenge={schemaVersion:releaseMode?2:1,...(authority?{authority}:{}),nonce:randomBytes(32).toString("hex"),
         domain:context.domain,intentSha256:context.intentSha256,sourceFenceSha256:context.sourceFenceSha256,targetSha256:hash(p.worker),identity:identity(p),
         issuedAt:now,expiresAt:now+timeoutMs,request:structuredClone(requested)};
-      validateHealthChallenge(challenge,p.worker,identity(p));await prepare(signal);await assertWorker(requested,signal,true);
+      validateHealthChallenge(challenge,p.worker,identity(p));await assertAuthority(signal);
+      await prepare(signal);await assertWorker(requested,signal,true);
       let index;
       for(index=0;index<10;index++){const old=await readSlot(index,signal);if(!old)break;
         const previous=await reconcile(old,signal);need(["Succeeded","Failed","Stopped"].includes(previous.properties.status),"HEALTH_JOB_PREVIOUS_EXECUTION_PENDING");}
@@ -299,7 +309,8 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
       }
       await operations.runRecordedOperation({...record,apply:async()=>{
         await prepare(signal);await assertWorker(requested,signal,true);const boundary=Math.ceil(challenge.issuedAt/1000)*1000;
-        if(Date.now()<boundary)await delay(boundary-Date.now(),undefined,{signal});validateHealthChallenge(challenge,p.worker,identity(p));
+        if(Date.now()<boundary)await delay(boundary-Date.now(),undefined,{signal});
+        await assertAuthority(signal);validateHealthChallenge(challenge,p.worker,identity(p));
         const r=await request("POST",pathFor(`${p.jobResourceId}/start`),signal,record.input.template);
         if(r.body){need(typeof r.body.name==="string"&&/^[a-z0-9][a-z0-9-]{0,79}$/.test(r.body.name)&&(!r.body.id||equalId(r.body.id,`${p.jobResourceId}/executions/${r.body.name}`)),"HEALTH_JOB_EXECUTION_INVALID");acceptedId=`${p.jobResourceId}/executions/${r.body.name}`;}
       },verify:async()=>{for(;;){validateHealthChallenge(challenge,p.worker,identity(p));found=await locate(record,signal);
@@ -324,7 +335,8 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
             need(logs.status===200,"HEALTH_JOB_LOG_UNAVAILABLE");receipt=parseLogs(logs.body,p,found,challenge);
           }
           if(receipt){await prepare(signal);const workerSha256=await assertWorker(requested,signal);const last=await request("GET",pathFor(found.id),signal);
-            need(last.status===200&&same(execution(last.body,p),found),"HEALTH_JOB_EXECUTION_CHANGED");validateHealthChallenge(challenge,p.worker,identity(p));
+            need(last.status===200&&same(execution(last.body,p),found),"HEALTH_JOB_EXECUTION_CHANGED");
+            await assertAuthority(signal);validateHealthChallenge(challenge,p.worker,identity(p));
             projectWorkerHealth(receipt.health.body,receipt.ready.body,p.worker,Date.now());
             return{health:receipt.health,ready:receipt.ready,evidence:{...(captured?{directFrameSha256:hash(captured)}:{}),challengeSha256:hash(challenge),receiptSha256:hash(receipt),executionSha256:hash(found),workerSha256,
               jobIdentitySha256:hash(identity(p)),sourceFenceSha256:context.sourceFenceSha256,intentSha256:context.intentSha256,
@@ -333,9 +345,16 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
       }
     }finally{busy=false;}
   }
-  return{identity:identity(p),prepare:()=>safe(()=>prepare()),probeHealth:args=>safe(()=>probeHealth(args)),readRetainedStart:()=>safe(readRetainedStart),
-    reconcileStart:()=>safe(async()=>{need(!busy,"HEALTH_JOB_CONCURRENT");busy=true;try{const record=await readRetainedStart();need(record,"HEALTH_JOB_START_INTENT_UNPROVEN");
-      const found=await reconcile(record,custody.signal);return{executionResourceId:found.id,status:found.properties.status,expired:Date.now()>=record.input.challenge.expiresAt};}finally{busy=false;}})};
+  async function guardedRead(read) {
+    await assertAuthority(custody.signal);
+    const result=await read();
+    await assertAuthority(custody.signal);
+    return result;
+  }
+  return{identity:identity(p),prepare:()=>safe(()=>guardedRead(()=>prepare())),probeHealth:args=>safe(()=>probeHealth(args)),
+    readRetainedStart:()=>safe(()=>guardedRead(readRetainedStart)),
+    reconcileStart:()=>safe(()=>guardedRead(async()=>{need(!busy,"HEALTH_JOB_CONCURRENT");busy=true;try{const record=await readRetainedStart();need(record,"HEALTH_JOB_START_INTENT_UNPROVEN");
+      const found=await reconcile(record,custody.signal);return{executionResourceId:found.id,status:found.properties.status,expired:Date.now()>=record.input.challenge.expiresAt};}finally{busy=false;}}))};
 }
 
 /** Construction does not require activation to have begun. The recorder opens
