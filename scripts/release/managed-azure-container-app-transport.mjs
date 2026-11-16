@@ -1,3 +1,4 @@
+import { matchesSelfserveBaseline } from "./managed-azure-selfserve-baseline.mjs";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -14,6 +15,7 @@ const RELEASE_ENV = Object.freeze([
   "CORGTEX_RELEASE_IMAGE_TAG",
   "CORGTEX_RELEASE_VERSION",
 ]);
+const VERIFIED_BASELINE = Symbol("verified selfserve baseline");
 const RUNTIME_GITHUB_SHA_ENV = "GITHUB_SHA";
 const LOWERCASE_GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 
@@ -188,7 +190,8 @@ function canonicalizeTemplateIdentity(template, location, revisionName, input) {
     || typeof template.revisionSuffix !== "string"
     || !revisionNameMatches(appName, template, revisionName)) fail("AZURE_TEMPLATE_INVALID");
   const container = template.containers[0];
-  let imageDigest = input.imageDigest;
+  const adopted = input[VERIFIED_BASELINE];
+  let imageDigest = input.imageDigest ?? adopted?.digest;
   if (imageDigest === undefined) {
     const match = new RegExp(`^${target.acrServer.replaceAll(".", "\\.")}\\/corgtex\\/${role}@(sha256:[0-9a-f]{64})$`).exec(container?.image);
     if (!match) fail("AZURE_IMAGE_MISMATCH");
@@ -196,7 +199,7 @@ function canonicalizeTemplateIdentity(template, location, revisionName, input) {
   }
   const expected = expectedImage(target, role, imageDigest);
   if (!container || typeof container.name !== "string" || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(container.name)
-    || container.image !== expected) fail("AZURE_IMAGE_MISMATCH");
+    || container.image !== (adopted?.taggedImage ?? expected) || (adopted && expected !== adopted.image)) fail("AZURE_IMAGE_MISMATCH");
   assertReleaseEnvironment(container, release);
   // Generic fleet releases do not own the separate scheduler writer. Only the
   // explicit demand-aware Core/Ops release controller may update this runtime.
@@ -209,7 +212,7 @@ function canonicalizeTemplateIdentity(template, location, revisionName, input) {
     revisionName,
     revisionSuffix: template.revisionSuffix,
     containerName: container.name,
-    image: container.image,
+    image: expected,
     imageDigest,
     template,
     templateDigest: managedAzureTemplateDigest(template),
@@ -278,6 +281,18 @@ export function assertManagedAzureRevisionProjection(expectedTemplate, revisionT
     delete actual.revisionSuffix;
   }
   const expectedContainer = expected.containers[0]; const actualContainer = actual.containers[0];
+  // ARM app templates can serialize an empty literal alongside a secretRef.
+  // The immutable revision omits just that placeholder. Retain the exact
+  // name, secretRef, ordering, and any nonempty literal for comparison.
+  if (Array.isArray(expectedContainer.env) && Array.isArray(actualContainer.env)) {
+    expectedContainer.env.forEach((entry, index) => {
+      const projected = actualContainer.env[index];
+      if (entry.value === "" && typeof entry.secretRef === "string" && entry.secretRef.length
+        && projected?.name === entry.name && projected.secretRef === entry.secretRef && !Object.hasOwn(projected, "value")) {
+        delete entry.value;
+      }
+    });
+  }
   const defaultStorage = managedAzureConsumptionEphemeralStorage(expectedContainer.resources?.cpu);
   if (defaultStorage && expectedContainer.resources?.ephemeralStorage === defaultStorage && actualContainer.resources?.ephemeralStorage == null) {
     delete expectedContainer.resources.ephemeralStorage;
@@ -305,6 +320,18 @@ function revisionUrl(target, appName, revisionName, suffix = "") {
   if (!revisionName.startsWith(`${appName}--`)
     || !/^[a-z][a-z0-9-]*[a-z0-9]--[a-z0-9][a-z0-9-]*$/.test(revisionName)) fail("AZURE_REVISION_INVALID");
   return `${MANAGEMENT_ORIGIN}/subscriptions/${target.subscriptionId}/resourceGroups/${encodeURIComponent(target.resourceGroup)}/providers/Microsoft.App/containerApps/${appName}/revisions/${revisionName}${suffix}?api-version=${API_VERSION}`;
+}
+
+function nextRevisionPage(link, first) {
+  const invalid = () => fail("AZURE_EXCLUSIVE_REVISION_LIST_INVALID", true);
+  let page;
+  try { page = new URL(link); } catch { invalid(); }
+  const initial = new URL(first);
+  const query = page.searchParams;
+  if (page.origin !== initial.origin || page.pathname !== initial.pathname || page.username || page.password || page.hash
+    || [...query].length !== 3 || query.get("api-version") !== initial.searchParams.get("api-version")
+    || !/^(?:[1-9]|[1-9][0-9]|100)$/.test(query.get("pageSize")) || !/^[!-~]{1,2048}$/.test(query.get("skipToken") ?? "")) invalid();
+  return page.href;
 }
 
 function validOperationSearch(url) {
@@ -368,6 +395,13 @@ function operationUrl(raw, target) {
   }
 }
 
+async function readAzureRegistryTag(target, binding) {
+  const { stdout } = await execFileAsync("az", ["acr", "repository", "show", "--subscription", target.subscriptionId,
+    "--name", target.acrName, "--image", `${binding.repo}:${binding.tag}`, "--only-show-errors", "--output", "json"],
+  { timeout: REQUEST_TIMEOUT_MS, maxBuffer: 16_384, encoding: "utf8" });
+  return JSON.parse(stdout);
+}
+
 async function defaultAccessToken() {
   try {
     const { stdout, stderr } = await execFileAsync("az", ["account", "get-access-token", "--resource", MANAGEMENT_ORIGIN, "--query", "accessToken", "--output", "tsv"], {
@@ -411,13 +445,13 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
   const sleep = dependencies.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const clock = dependencies.clock ?? Date.now;
 
-  async function request(url, init, ambiguous) {
+  async function request(url, init, ambiguous, acquireToken = getAccessToken) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     let requestStage = "ACCESS_TOKEN";
     let requestAttempts = 0;
     try {
-      const token = await getAccessToken();
+      const token = await acquireToken();
       if (controller.signal.aborted) throw new Error("REQUEST_DEADLINE");
       requestStage = "FETCH";
       const attempts = init.method === "GET" ? 3 : 1;
@@ -452,13 +486,39 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     }
   }
 
+  async function verifyTaggedBaseline(app, input) {
+    const binding = input.originalBaseline;
+    if (!binding || app?.properties?.template?.containers?.[0]?.image !== binding.taggedImage) return input;
+    const { target, role } = input;
+    if (!matchesSelfserveBaseline(binding, target, role, input.release) || app.properties.latestRevisionName !== binding.revision
+      || managedAzureTemplateDigest(app.properties.template) !== binding.appTemplate
+      || (input.imageDigest !== undefined && input.imageDigest !== binding.digest)) fail("AZURE_LEGACY_BASELINE_DRIFT");
+    const response = await request(revisionUrl(target, appNameFor(target, role), binding.revision), { method: "GET" }, true);
+    if (response.status !== 200) fail("AZURE_LEGACY_REVISION_UNPROVEN");
+    const revision = await responseBody(response);
+    if (revision?.name !== binding.revision || revision.properties?.createdTime !== binding.revisionCreated
+      || revision.properties?.template?.containers?.[0]?.image !== binding.taggedImage
+      || managedAzureTemplateDigest(revision.properties.template) !== binding.revisionTemplate) fail("AZURE_LEGACY_REVISION_UNPROVEN");
+    // The protected runner only needs the registry's existing metadata-read permission.
+    let tag;
+    try {
+      const readTag = dependencies.readRegistryTag ?? readAzureRegistryTag;
+      tag = await readTag(target, binding);
+    } catch { fail("AZURE_LEGACY_TAG_UNREADABLE"); }
+    if (tag?.name !== binding.tag || tag.digest !== binding.digest || tag.createdTime !== binding.tagCreated || tag.lastUpdateTime !== binding.tagCreated
+      || tag.changeableAttributes?.writeEnabled !== false || tag.changeableAttributes?.deleteEnabled !== false
+      || tag.changeableAttributes?.readEnabled !== true) fail("AZURE_LEGACY_TAG_DRIFT");
+    return { ...input, [VERIFIED_BASELINE]: binding };
+  }
+
   async function readApp(input) {
     const target = targetValue(input.target);
     const appName = appNameFor(target, input.role);
     const url = resourceUrl(target, appName);
     const response = await request(url, { method: "GET" }, input.ambiguous === true);
     if (response.status !== 200) fail(input.ambiguous === true ? "AZURE_READBACK_AMBIGUOUS" : "AZURE_READ_FAILED", input.ambiguous === true);
-    return canonicalizeManagedAzureContainerAppState(await responseBody(response), input);
+    const app = await responseBody(response);
+    return canonicalizeManagedAzureContainerAppState(app, await verifyTaggedBaseline(app, input));
   }
 
   async function readAppTemplate(input) {
@@ -469,7 +529,7 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     assertRevisionMode(app?.properties?.configuration, input);
     if (typeof app?.properties?.latestRevisionName !== "string"
       || typeof app.properties.latestReadyRevisionName !== "string") fail("AZURE_BASELINE_NOT_READY", true);
-    return Object.freeze({ state: canonicalizeTemplateIdentity(app.properties.template, app.location, app.properties.latestRevisionName, input),
+    return Object.freeze({ state: canonicalizeTemplateIdentity(app.properties.template, app.location, app.properties.latestRevisionName, await verifyTaggedBaseline(app, input)),
       latestReadyRevisionName: app.properties.latestReadyRevisionName, provisioningState: app.properties.provisioningState });
   }
 
@@ -643,7 +703,9 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     const target = targetValue(input.target);
     const appName = appNameFor(target, input.role);
     const url = input.workerDemandEnabled ? resourceUrl(target, appName).replace(`api-version=${API_VERSION}`, "api-version=2025-07-01") : resourceUrl(target, appName);
-    const response = await request(url, { method: "GET" }, true);
+    let censusToken;
+    const read = (resource) => request(resource, { method: "GET" }, true, () => (censusToken ??= getAccessToken()));
+    const response = await read(url);
     if (response.status !== 200) fail("AZURE_EXCLUSIVE_READ_FAILED", true);
     const app = await responseBody(response);
     const configuration = app?.properties?.configuration;
@@ -655,19 +717,37 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
       || traffic[0].weight !== 100 || Object.keys(traffic[0]).some((key) => !["latestRevision", "weight"].includes(key))) {
       fail("AZURE_EXCLUSIVE_ROUTING_UNSUPPORTED");
     }
-    const revisionResponse = await request(url.replace("?", "/revisions?"), { method: "GET" }, true);
-    if (revisionResponse.status !== 200) fail(`AZURE_EXCLUSIVE_REVISION_LIST_HTTP_${revisionResponse.status}`, true);
-    const revisions = await responseBody(revisionResponse);
-    if (!Array.isArray(revisions?.value) || revisions.nextLink || revisions.value.length > 256) fail("AZURE_EXCLUSIVE_REVISION_LIST_INVALID", true);
+    const firstPage = url.replace("?", "/revisions?");
+    let page = firstPage;
+    const seenNames = new Set();
+    const pages = new Set();
     const inventory = [];
-    for (const revision of revisions.value) {
-      const name = revision?.name;
-      const replicasResponse = await request(revisionUrl(target, appName, name, "/replicas"), { method: "GET" }, true);
-      if (replicasResponse.status !== 200) fail(`AZURE_EXCLUSIVE_REPLICA_LIST_HTTP_${replicasResponse.status}`, true);
-      const replicas = await responseBody(replicasResponse);
-      if (typeof revision.properties?.active !== "boolean") fail("AZURE_EXCLUSIVE_REVISION_METADATA_INVALID", true);
-      if (!Array.isArray(replicas?.value) || replicas.nextLink || replicas.value.length > 256) fail("AZURE_EXCLUSIVE_REPLICA_LIST_INVALID", true);
-      inventory.push({ revisionName: name, active: revision.properties.active, replicaCount: replicas.value.length });
+    while (page) {
+      if (pages.size >= 32 || pages.has(page)) fail("AZURE_EXCLUSIVE_REVISION_LIST_INVALID", true);
+      pages.add(page);
+      const response = await read(page);
+      if (response.status !== 200) fail(`AZURE_EXCLUSIVE_REVISION_LIST_HTTP_${response.status}`, true);
+      const revisions = await responseBody(response);
+      if (!Array.isArray(revisions?.value) || seenNames.size + revisions.value.length > 256) fail("AZURE_EXCLUSIVE_REVISION_LIST_INVALID", true);
+      const names = revisions.value.map(revision => {
+        const name = revision?.name;
+        if (typeof name !== "string" || seenNames.has(name) || typeof revision.properties?.active !== "boolean") fail("AZURE_EXCLUSIVE_REVISION_METADATA_INVALID", true);
+        seenNames.add(name);
+        return { name, active: revision.properties.active, url: revisionUrl(target, appName, name, "/replicas") };
+      });
+      // Include even inactive history: a positive replica count on any former
+      // revision blocks exclusive activation. Bound parallel requests per page.
+      for (let i = 0; i < names.length; i += 8) {
+        const group = await Promise.all(names.slice(i, i + 8).map(async (revision) => {
+          const replicaResponse = await read(revision.url);
+          if (replicaResponse.status !== 200) fail(`AZURE_EXCLUSIVE_REPLICA_LIST_HTTP_${replicaResponse.status}`, true);
+          const replicas = await responseBody(replicaResponse);
+          if (!Array.isArray(replicas?.value) || replicas.nextLink || replicas.value.length > 256) fail("AZURE_EXCLUSIVE_REPLICA_LIST_INVALID", true);
+          return { revisionName: revision.name, active: revision.active, replicaCount: replicas.value.length };
+        }));
+        inventory.push(...group);
+      }
+      page = revisions.nextLink == null ? null : nextRevisionPage(revisions.nextLink, firstPage);
     }
     return Object.freeze({ mode: configuration.activeRevisionsMode,
       configurationDigest: managedAzureConfigurationDigest(configuration), location: app.location,

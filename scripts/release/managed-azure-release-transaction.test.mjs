@@ -1,3 +1,4 @@
+import * as adoption from "./managed-azure-selfserve-baseline.mjs";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
@@ -259,6 +260,47 @@ describe("managed Azure single-target transaction", () => {
     expect(deps.acceptanceProbe).toHaveBeenCalled();
   });
 
+  it.each(["success", "recovery", "reactivation-denied"])("retains the tagged original and writes digest-only revisions (%s)", async (scenario) => {
+    const { deps } = dependencies({ selfserve: true, activationPolicy: "EXCLUSIVE", ...(scenario === "recovery"
+      ? { patchResults: [null, { state: "BASELINE", result: { terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED" } }] } : {}) });
+    const pins = {};
+    for (const role of ["web", "worker"]) {
+      const base = state(role, "BASELINE");
+      base.template.containers[0].image = base.image.replace("@" + base.imageDigest, ":sha-" + baseSha);
+      base.templateDigest = managedAzureTemplateDigest(base.template);
+      pins[role] = base;
+    }
+    const spy = vi.spyOn(adoption, "selfserveBaselineBinding").mockImplementation((_s, _r, _p, role, previous) =>
+      !previous || (previous.templateDigest === pins[role].templateDigest && previous.image === pins[role].image) ? pins[role] : undefined);
+    const read = deps.readApp.getMockImplementation();
+    deps.readApp.mockImplementation(async (request) => {
+      const current = await read(request);
+      if (request.release.gitSha !== baseSha) { expect(request.originalBaseline).toBeUndefined(); return current; }
+      expect(request.originalBaseline).toBe(pins[request.role]);
+      return structuredClone(pins[request.role]);
+    });
+    if (scenario === "reactivation-denied") {
+      deps.setRevisionMode.mockRejectedValueOnce(new Error("partial mode change"));
+      deps.readAppTemplate = vi.fn(async () => { throw new Error("historical tag no longer locked"); });
+    }
+    try {
+      const request = { ...input, deploymentId: SELFSERVE_RELEASE_HOST_ID };
+      expect(await runManagedAzureReleaseTransaction(request, deps)).toMatchObject({ status: "DRY_RUN_READY", effects: 0 });
+      expect(deps.patchTemplate).not.toHaveBeenCalled();
+      const actual = await runManagedAzureReleaseTransaction({ ...request, execute: true }, deps);
+      expect(actual.status).toBe({ success: "SUCCEEDED", recovery: "RECOVERED_COMPATIBLE", "reactivation-denied": "RECOVERY_REQUIRED" }[scenario]);
+      if (scenario === "reactivation-denied") {
+        expect(actual.code).toBe("BASELINE_REACTIVATION_AMBIGUOUS");
+        expect(deps.setRevisionActive).not.toHaveBeenCalled(); expect(deps.patchTemplate).not.toHaveBeenCalled();
+      }
+      const { rollback } = deps.lease.mock.calls.find(([op]) => op === "record_rollback")[1];
+      for (const role of ["web", "worker"]) {
+        expect(rollback.previous[role]).toMatchObject({ image: pins[role].image, readyRevision: pins[role].revisionName, templateDigest: pins[role].templateDigest });
+      }
+      expect(deps.patchTemplate.mock.calls.every(([r]) => r.template.containers[0].image.includes("@sha256:"))).toBe(true);
+    } finally { spy.mockRestore(); }
+  });
+
   it("fences migration191 importer index replacement before migrate-and-web activation", async () => {
     const migration = readFileSync(new URL("../../prisma/migrations/20261014070000_transcript_source_native_authority/migration.sql", import.meta.url), "utf8");
     expect(migration).toContain('DROP INDEX "MeetingTranscriptSourceRecord_workspaceId_provider_external_key"');
@@ -481,13 +523,36 @@ describe("managed Azure single-target transaction", () => {
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
   });
 
-  it("attempts both exact baseline activations when containment is uncertain", async () => {
+  it("stops after an uncertain baseline activation", async () => {
     const { deps } = dependencies({ activationPolicy: "EXCLUSIVE" });
     deps.setRevisionMode.mockRejectedValueOnce(new Error("partial mode change"));
     deps.setRevisionActive.mockRejectedValueOnce(new Error("lost activation reply"));
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
     expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", code: "BASELINE_REACTIVATION_AMBIGUOUS" });
-    expect(deps.setRevisionActive.mock.calls.map(([r]) => [r.role, r.active])).toEqual([["worker", true], ["web", true]]);
+    expect(deps.setRevisionActive.mock.calls.map(([r]) => [r.role, r.active])).toEqual([["worker", true]]);
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+  });
+
+  it.each(["after-drain", "after-worker-reactivation"])("stops reactivation on a foreign replica %s", async (when) => {
+    const { deps } = dependencies({ selfserve: true, activationPolicy: "EXCLUSIVE" });
+    let foreign = false;
+    const set = deps.setRevisionActive.getMockImplementation();
+    deps.setRevisionActive.mockImplementation(async request => {
+      const result = await set(request);
+      if (request.role === "worker" && request.active === (when === "after-worker-reactivation")) foreign = true;
+      if (when === "after-worker-reactivation" && !request.active) throw new Error("drain reply lost");
+      return result;
+    });
+    const read = deps.readExclusiveState.getMockImplementation();
+    deps.readExclusiveState.mockImplementation(async request => {
+      const snapshot = await read(request);
+      if (foreign && request.role === "worker") snapshot.revisions.push({ revisionName: "unexpected", active: false, replicaCount: 1 });
+      return snapshot;
+    });
+    const result = await runManagedAzureReleaseTransaction({ ...input, deploymentId: SELFSERVE_RELEASE_HOST_ID, execute: true }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", code: "BASELINE_REACTIVATION_DRIFT" });
+    expect(deps.setRevisionActive.mock.calls.filter(([r]) => r.active).map(([r]) => r.role))
+      .toEqual(when === "after-drain" ? [] : ["worker"]);
     expect(deps.patchTemplate).not.toHaveBeenCalled();
   });
 

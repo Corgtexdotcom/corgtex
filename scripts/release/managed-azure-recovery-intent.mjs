@@ -70,7 +70,7 @@ export async function readManagedAzureRecoveryIntentPlan(deps, { intent, origina
   let latest;
   for (const identity of releases) {
     try {
-      latest = await deps.readAppTemplate({ target, role: intent.role, release: identity.release, imageDigest: identity.imageDigest });
+      latest = await deps.readAppTemplate({ target, role: intent.role, release: identity.release, imageDigest: identity.imageDigest, originalBaseline: identity.originalBaseline });
       break;
     } catch { /* Only the exact recorded source or candidate may be adopted. */ }
   }
