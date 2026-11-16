@@ -598,8 +598,9 @@ test("capture window starts on probe completion and leaves time under the provid
   // Exercise the actual recorded command with an in-memory probe and clock.
   const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
   const invoke=new AsyncFunction("loadProbe","Date","setTimeout","process",script.replace("await import("+path+")","await loadProbe()"));
-  for(const [elapsed,ok,expected] of [[1000,true,45000],[60000,true,45000],[100000,true,15000],[110000,true,5000],[116000,true,0],[60000,false,null]]){
-    let now=0,waited=null;const process={};
+  for(const [elapsed,ok,expected,expiresAt=180000] of [[1000,true,45000],[60000,true,45000],[100000,true,15000],[110000,true,5000],[116000,true,0],[60000,false,null],
+    [1000,true,14000,30000],[19000,true,0,30000],[1000,true,0,10000]]){
+    let now=0,waited=null;const process={env:{CORGTEX_HEALTH_CHALLENGE:JSON.stringify({expiresAt})}};
     await invoke(async()=>({runHealthProbeCli:async()=>{now=elapsed;return ok;}}),{now:()=>now},(finish,ms)=>{waited=ms;finish();},process);
     assert.equal(waited,expected);assert.equal(process.exitCode,ok?0:1);
   }

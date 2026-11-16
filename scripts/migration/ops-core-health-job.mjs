@@ -37,7 +37,8 @@ const captureCommand = ["node", "--input-type=module", "-e", [
   "const started = Date.now();",
   `const {runHealthProbeCli} = await import("${probePath}");`,
   "const ok = await runHealthProbeCli();",
-  "const remainingMs = Math.max(0, 115000 - (Date.now() - started));",
+  "const {expiresAt} = JSON.parse(process.env.CORGTEX_HEALTH_CHALLENGE);",
+  "const remainingMs = Math.max(0, Math.min(started + 115000, expiresAt - 15000) - Date.now());",
   "if (ok) await new Promise(done => setTimeout(done, Math.min(45000, remainingMs)));",
   "process.exitCode = ok ? 0 : 1;",
 ].join("\n")];
