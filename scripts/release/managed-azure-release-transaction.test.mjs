@@ -523,13 +523,36 @@ describe("managed Azure single-target transaction", () => {
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
   });
 
-  it("attempts both exact baseline activations when containment is uncertain", async () => {
+  it("stops after an uncertain baseline activation", async () => {
     const { deps } = dependencies({ activationPolicy: "EXCLUSIVE" });
     deps.setRevisionMode.mockRejectedValueOnce(new Error("partial mode change"));
     deps.setRevisionActive.mockRejectedValueOnce(new Error("lost activation reply"));
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
     expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", code: "BASELINE_REACTIVATION_AMBIGUOUS" });
-    expect(deps.setRevisionActive.mock.calls.map(([r]) => [r.role, r.active])).toEqual([["worker", true], ["web", true]]);
+    expect(deps.setRevisionActive.mock.calls.map(([r]) => [r.role, r.active])).toEqual([["worker", true]]);
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+  });
+
+  it.each(["after-drain", "after-worker-reactivation"])("stops reactivation on a foreign replica %s", async (when) => {
+    const { deps } = dependencies({ selfserve: true, activationPolicy: "EXCLUSIVE" });
+    let foreign = false;
+    const set = deps.setRevisionActive.getMockImplementation();
+    deps.setRevisionActive.mockImplementation(async request => {
+      const result = await set(request);
+      if (request.role === "worker" && request.active === (when === "after-worker-reactivation")) foreign = true;
+      if (when === "after-worker-reactivation" && !request.active) throw new Error("drain reply lost");
+      return result;
+    });
+    const read = deps.readExclusiveState.getMockImplementation();
+    deps.readExclusiveState.mockImplementation(async request => {
+      const snapshot = await read(request);
+      if (foreign && request.role === "worker") snapshot.revisions.push({ revisionName: "unexpected", active: false, replicaCount: 1 });
+      return snapshot;
+    });
+    const result = await runManagedAzureReleaseTransaction({ ...input, deploymentId: SELFSERVE_RELEASE_HOST_ID, execute: true }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", code: "BASELINE_REACTIVATION_DRIFT" });
+    expect(deps.setRevisionActive.mock.calls.filter(([r]) => r.active).map(([r]) => r.role))
+      .toEqual(when === "after-drain" ? [] : ["worker"]);
     expect(deps.patchTemplate).not.toHaveBeenCalled();
   });
 

@@ -494,28 +494,38 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   };
 
   const restoreDrainedBaseline = async (stage, code, detail = {}) => {
-    // Reactivation can pull the original tag again. First prove both immutable
-    // bindings and original templates while the owner still holds the fence.
-    for (const role of ROLES) {
-      if (baselines[role].template.containers[0].image === baselines[role].image) continue;
-      try {
-        const { state } = await deps.readAppTemplate({ target: preflight.target, role, release: baselineRelease,
-          originalBaseline: originalBaseline(role), imageDigest: baselines[role].imageDigest });
-        if (state.revisionName !== baselines[role].revisionName || state.templateDigest !== baselines[role].templateDigest) {
-          return markRecovery("FENCING", "BASELINE_REACTIVATION_DRIFT", detail);
+    async function guardOriginals() {
+      await recoveryHeartbeat();
+      for (const role of ROLES) {
+        const baseline = baselines[role];
+        if (exclusiveActivation) {
+          const state = await deps.readExclusiveState({ target: preflight.target, role, exclusiveActivation });
+          if (![exclusiveActivation.originalMode, exclusiveActivation.temporaryMode].includes(state.mode)
+            || state.provisioningState !== "Succeeded" || state.configurationDigest !== exclusiveActivation.configurationDigests[role]
+            || state.latestRevisionName !== baseline.revisionName || state.latestReadyRevisionName !== baseline.revisionName
+            || !state.revisions.some(revision => revision.revisionName === baseline.revisionName)
+            || state.revisions.some(revision => revision.revisionName !== baseline.revisionName && (revision.active || revision.replicaCount !== 0))) {
+            return false;
+          }
         }
-      } catch { return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS", detail); }
+        if (baseline.template.containers[0].image !== baseline.image) {
+          // A new activation can pull the original tag again.
+          const { state } = await deps.readAppTemplate({ target: preflight.target, role, release: baselineRelease,
+            originalBaseline: originalBaseline(role), imageDigest: baseline.imageDigest });
+          if (state.revisionName !== baseline.revisionName || state.templateDigest !== baseline.templateDigest) return false;
+        }
+      }
+      return true;
     }
-    const activations = {};
-    for (const role of ["worker", "web"]) {
-      try {
-        activations[role] = await deps.setRevisionActive({ target: preflight.target, role, revisionName: baselines[role].revisionName,
+    try {
+      for (const role of ["worker", "web"]) {
+        if (!await guardOriginals()) return markRecovery("FENCING", "BASELINE_REACTIVATION_DRIFT", detail);
+        const result = await deps.setRevisionActive({ target: preflight.target, role, revisionName: baselines[role].revisionName,
           active: true, onProgress: recoveryHeartbeat });
-      } catch { activations[role] = null; }
-    }
-    if (ROLES.some((role) => !activations[role]?.terminal || !activations[role]?.succeeded)) {
-      return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS", detail);
-    }
+        if (!result?.terminal || !result.succeeded) return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS", detail);
+      }
+      if (!await guardOriginals()) return markRecovery("FENCING", "BASELINE_REACTIVATION_DRIFT", detail);
+    } catch { return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS", detail); }
     for (const role of ROLES) {
       try {
         const restored = await deps.readApp({ target: preflight.target, role, release: baselineRelease, originalBaseline: originalBaseline(role), imageDigest: baselines[role].imageDigest });
