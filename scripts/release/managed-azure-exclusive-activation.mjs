@@ -4,10 +4,10 @@ const ROLES = ["web", "worker"];
 function fail(code) { throw new ManagedAzureContainerAppError(code, true); }
 function name(target, role) { return role === "web" ? target.webAppName : target.workerAppName; }
 
-export async function snapshotManagedAzureExclusiveActivation(deps, target, baselines) {
+export async function snapshotManagedAzureExclusiveActivation(deps, target, baselines, { onProgress, signal } = {}) {
   const configurationDigests = {};
   for (const role of ROLES) {
-    const state = await deps.readExclusiveState({ target, role });
+    const state = await deps.readExclusiveState({ target, role, onProgress, signal });
     if (state.mode !== "Single" || state.provisioningState !== "Succeeded"
       || state.latestRevisionName !== baselines[role].revisionName
       || state.latestReadyRevisionName !== baselines[role].revisionName
@@ -31,7 +31,7 @@ export function createManagedAzureExclusiveActivation(deps, { target, ownership,
   const known = Object.fromEntries(ROLES.map((role) => [role, new Set(knownRevisions[role])]));
   const allowed = { web: new Set(), worker: new Set() };
   let entered = false;
-  const input = (role) => ({ target, role, exclusiveActivation: ownership });
+  const input = (role) => ({ target, role, exclusiveActivation: ownership, onProgress });
   async function inspect(role, mode) {
     const state = await deps.readExclusiveState(input(role));
     if (mode && state.mode !== mode) fail("AZURE_EXCLUSIVE_MODE_DRIFT");

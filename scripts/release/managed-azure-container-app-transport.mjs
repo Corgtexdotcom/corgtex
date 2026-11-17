@@ -2,6 +2,7 @@ import { matchesSelfserveBaseline } from "./managed-azure-selfserve-baseline.mjs
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
 
 const execFileAsync = promisify(execFile);
 const API_VERSION = "2025-01-01";
@@ -9,6 +10,7 @@ const MANAGEMENT_ORIGIN = "https://management.azure.com";
 const MAX_JSON_BYTES = 256 * 1024;
 const REQUEST_TIMEOUT_MS = 20_000;
 const OPERATION_TIMEOUT_MS = 180_000;
+const CENSUS_TIMEOUT_MS = 180_000, CENSUS_SPACING_MS = 500, CENSUS_HEARTBEAT_MS = 15_000;
 const PATCH_CONTENT_TYPE = "application/json";
 const RELEASE_ENV = Object.freeze([
   "CORGTEX_RELEASE_GIT_SHA",
@@ -454,44 +456,49 @@ function patchResult(terminal, succeeded, code, body = null, stage, providerStat
 export function createManagedAzureContainerAppTransport(dependencies = {}) {
   const fetchImpl = dependencies.fetchImpl ?? fetch;
   const getAccessToken = dependencies.getAccessToken ?? defaultAccessToken;
-  const sleep = dependencies.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const sleep = dependencies.sleep ?? ((ms, signal) => signal ? delay(ms, undefined, { signal }) : new Promise(resolve => setTimeout(resolve, ms)));
   const clock = dependencies.clock ?? Date.now;
+  // Shared by both roles and subsequent censuses; a failed census cannot erase
+  // the provider cooldown and immediately repeat the same pressure in recovery.
+  let nextCensusReadAt = 0, censusAdmission = Promise.resolve();
 
-  async function request(url, init, ambiguous, acquireToken = getAccessToken) {
+  async function request(url, init, ambiguous, acquireToken = getAccessToken, attempts = init.method === "GET" ? 3 : 1, onFetchStart) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    let requestStage = "ACCESS_TOKEN";
+    const requestSignal = init.signal ? AbortSignal.any([controller.signal, init.signal]) : controller.signal;
+    let requestStage = "ACCESS_TOKEN", admissionFailure;
     let requestAttempts = 0;
     try {
       const token = await acquireToken();
-      if (controller.signal.aborted) throw new Error("REQUEST_DEADLINE");
+      if (requestSignal.aborted) throw new Error("REQUEST_DEADLINE");
       requestStage = "FETCH";
-      const attempts = init.method === "GET" ? 3 : 1;
       for (let attempt = 0; attempt < attempts; attempt += 1) {
-        if (controller.signal.aborted) break;
+        if (requestSignal.aborted) break;
         requestAttempts += 1;
         try {
           // Only transport rejection of an idempotent GET may be retried.
           // Responses, parsing and identity checks stay outside this loop.
+          try { onFetchStart?.(); } catch (error) { admissionFailure = error; throw error; }
           return await fetchImpl(url, {
             ...init,
             headers: { authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
             redirect: "error",
-            signal: controller.signal,
+            signal: requestSignal,
           });
         } catch (error) {
-          if (attempt + 1 === attempts || controller.signal.aborted) throw error;
+          if (attempt + 1 === attempts || requestSignal.aborted) throw error;
           await sleep(attempt === 0 ? 250 : 750);
         }
       }
       throw new Error("REQUEST_DEADLINE");
     } catch {
+      if (admissionFailure !== undefined) throw admissionFailure;
       const failure = requestStage === "ACCESS_TOKEN"
         ? new ManagedAzureContainerAppError("AZURE_ACCESS_TOKEN_UNAVAILABLE", ambiguous)
         : new ManagedAzureContainerAppError(ambiguous ? "AZURE_REQUEST_AMBIGUOUS" : "AZURE_READ_FAILED", ambiguous);
       failure.requestStage = requestStage;
       failure.requestAttempts = requestAttempts;
-      failure.requestDeadlineExceeded = controller.signal.aborted;
+      failure.requestDeadlineExceeded = requestSignal.aborted;
       throw failure;
     } finally {
       clearTimeout(timer);
@@ -722,8 +729,89 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     const target = targetValue(input.target);
     const appName = appNameFor(target, input.role);
     const url = input.workerDemandEnabled ? resourceUrl(target, appName).replace(`api-version=${API_VERSION}`, "api-version=2025-07-01") : resourceUrl(target, appName);
-    let censusToken;
-    const read = (resource) => request(resource, { method: "GET" }, true, () => (censusToken ??= getAccessToken()));
+    if (input.onProgress !== undefined && typeof input.onProgress !== "function"
+      || input.signal !== undefined && !(input.signal instanceof AbortSignal)) fail("AZURE_PROGRESS_INVALID", true);
+    const deadline = clock() + CENSUS_TIMEOUT_MS;
+    const stopped = new AbortController(), deadlineSignal = AbortSignal.timeout(CENSUS_TIMEOUT_MS);
+    const signal = AbortSignal.any([stopped.signal, deadlineSignal, ...(input.signal ? [input.signal] : [])]);
+    let censusToken, renewing, lastProgressAt = -Infinity;
+    const remaining = () => deadline - clock();
+    async function progress(force = false) {
+      if (input.signal?.aborted || stopped.signal.aborted) fail("AZURE_EXCLUSIVE_CENSUS_ABORTED", true);
+      if (deadlineSignal.aborted || remaining() <= 0) fail("AZURE_EXCLUSIVE_CENSUS_DEADLINE", true);
+      if (force || renewing || clock() - lastProgressAt >= CENSUS_HEARTBEAT_MS) {
+        renewing ??= (async () => { await input.onProgress?.(); lastProgressAt = clock(); })();
+        try { await renewing; } finally { renewing = null; }
+        if (input.signal?.aborted || stopped.signal.aborted) fail("AZURE_EXCLUSIVE_CENSUS_ABORTED", true);
+        if (deadlineSignal.aborted || remaining() <= 0) fail("AZURE_EXCLUSIVE_CENSUS_DEADLINE", true);
+      }
+    }
+    function throttled(ms) {
+      const seconds = Math.ceil(ms / 1000);
+      const error = new ManagedAzureContainerAppError(`AZURE_EXCLUSIVE_THROTTLED_RETRY_AFTER_${seconds}_SECONDS`, true);
+      error.retryAfterSeconds = seconds;
+      throw error;
+    }
+    async function wait(ms) {
+      if (ms >= remaining()) throttled(ms);
+      for (let left = ms; left > 0;) {
+        await progress();
+        const part = Math.min(left, CENSUS_HEARTBEAT_MS);
+        try { await sleep(part, signal); } catch (error) { await progress(); throw error; }
+        left -= part;
+      }
+      await progress();
+    }
+    async function admittedGet(resource) {
+      const previous = censusAdmission;
+      let release;
+      censusAdmission = new Promise(resolve => { release = resolve; });
+      const shifted = Symbol("census admission moved");
+      try {
+        await previous;
+        for (;;) {
+          await progress();
+          // Another in-flight response may extend the shared cooldown while
+          // this read waits or acquires its token. Never use a stale reservation.
+          while (nextCensusReadAt > clock()) await wait(nextCensusReadAt - clock());
+          await progress();
+          try {
+            return await request(resource, { method: "GET", signal }, true, () => (censusToken ??= getAccessToken()), 1, () => {
+              if (nextCensusReadAt > clock()) throw shifted;
+              nextCensusReadAt = clock() + CENSUS_SPACING_MS;
+              release();
+            });
+          } catch (error) { if (error !== shifted) throw error; }
+        }
+      } finally { release(); }
+    }
+    async function read(resource) {
+      try {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          let response;
+          try { response = await admittedGet(resource); }
+          catch (error) {
+            await progress();
+            // The outer budget covers network rejection and HTTP 429 together.
+            // Other callers retain the original bounded transport GET retries.
+            if (attempt < 2 && error instanceof ManagedAzureContainerAppError && error.requestStage === "FETCH" && !error.requestDeadlineExceeded) continue;
+            throw error;
+          }
+          await progress();
+          if (response.status !== 429) return response;
+          const header = response.headers.get("retry-after");
+          void response.body?.cancel().catch(() => {});
+          let retryMs;
+          if (typeof header === "string" && /^[0-9]{1,10}$/.test(header)) retryMs = Number(header) * 1000;
+          else if (typeof header === "string" && /^[A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT$/.test(header)) {
+            retryMs = Math.max(0, Date.parse(header) - clock());
+          }
+          if (!Number.isSafeInteger(retryMs)) fail("AZURE_EXCLUSIVE_THROTTLED_RETRY_AFTER_UNPROVEN", true);
+          nextCensusReadAt = Math.max(nextCensusReadAt, clock() + retryMs);
+          if (retryMs >= remaining() || attempt === 2) throttled(retryMs);
+        }
+      } catch (error) { stopped.abort(); throw error; }
+    }
     const response = await read(url);
     if (response.status !== 200) fail("AZURE_EXCLUSIVE_READ_FAILED", true);
     const app = await responseBody(response);
@@ -754,20 +842,23 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
         seenNames.add(name);
         return { name, active: revision.properties.active, url: revisionUrl(target, appName, name, "/replicas") };
       });
-      // Include even inactive history: a positive replica count on any former
-      // revision blocks exclusive activation. Bound parallel requests per page.
-      for (let i = 0; i < names.length; i += 8) {
-        const group = await Promise.all(names.slice(i, i + 8).map(async (revision) => {
-          const replicaResponse = await read(revision.url);
-          if (replicaResponse.status !== 200) fail(`AZURE_EXCLUSIVE_REPLICA_LIST_HTTP_${replicaResponse.status}`, true);
-          const replicas = await responseBody(replicaResponse);
-          if (!Array.isArray(replicas?.value) || replicas.nextLink || replicas.value.length > 256) fail("AZURE_EXCLUSIVE_REPLICA_LIST_INVALID", true);
-          return { revisionName: revision.name, active: revision.active, replicaCount: replicas.value.length };
-        }));
-        inventory.push(...group);
+      // Include all inactive history. At most two requests overlap network
+      // latency; the shared admission gate still spaces every GET start.
+      for (let i = 0; i < names.length; i += 2) {
+        try {
+          const group = await Promise.all(names.slice(i, i + 2).map(async revision => {
+            const replicaResponse = await read(revision.url);
+            if (replicaResponse.status !== 200) fail(`AZURE_EXCLUSIVE_REPLICA_LIST_HTTP_${replicaResponse.status}`, true);
+            const replicas = await responseBody(replicaResponse);
+            if (!Array.isArray(replicas?.value) || replicas.nextLink || replicas.value.length > 256) fail("AZURE_EXCLUSIVE_REPLICA_LIST_INVALID", true);
+            return { revisionName: revision.name, active: revision.active, replicaCount: replicas.value.length };
+          }));
+          inventory.push(...group);
+        } catch (error) { stopped.abort(); throw error; }
       }
       page = revisions.nextLink == null ? null : nextRevisionPage(revisions.nextLink, firstPage);
     }
+    await progress(true);
     return Object.freeze({ mode: configuration.activeRevisionsMode,
       configurationDigest: managedAzureConfigurationDigest(configuration), location: app.location,
       provisioningState: app.properties.provisioningState,

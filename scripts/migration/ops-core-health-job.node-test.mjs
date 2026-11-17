@@ -41,7 +41,7 @@ async function fixture({releaseMode=false,acceptancePhase=null}={}){
   const transport=async request=>{
     const{method,path,body:input}=request;state.requests.push({method,path,body:structuredClone(input)});
     if(path.startsWith(p.jobResourceId+"?")){const v=structuredClone(job);state.jobMutation?.(v);return response(v);}
-    if(path.startsWith(p.environmentResourceId+"?"))return response(env);
+    if(path.startsWith(p.environmentResourceId+"?")){const v=structuredClone(env);state.envMutation?.(v);return response(v);}
     if(path.startsWith(p.worker.appId+"?")){const v=structuredClone(app);state.appMutation?.(v);return response(v);}
     if(path.includes("/replicas?")&&state.replicaCount!==undefined)return response({value:Array.from({length:state.replicaCount},()=>({name:"worker-replica"}))});
     if(path.startsWith(`${p.worker.appId}/revisions/`)){const v=structuredClone(rev);state.revMutation?.(v);return response(v);}
@@ -60,8 +60,8 @@ async function fixture({releaseMode=false,acceptancePhase=null}={}){
       const run=state.runs.at(-1);const c=JSON.parse(run.properties.template.containers[0].env.find(e=>e.name==="CORGTEX_HEALTH_CHALLENGE").value);
       assert(input.query.includes(c.nonce));assert(input.query.includes(run.name+"-"));assert(!input.query.includes("latest"));
       const receipt=fixtureReceipt(run,c);
-      const logs={tables:[{name:"PrimaryResult",columns:["TimeGenerated","EnvironmentName_s","ContainerGroupName_s","ContainerName_s","ContainerImage_s","Log_s","_ResourceId"].map(name=>({name,type:"string"})),
-        rows:[[run.properties.startTime,"fixture-env",run.name+"-replica1","health-probe",p.image,HEALTH_PROBE_PREFIX+JSON.stringify(receipt),p.environmentResourceId]]}]};state.logMutation?.(logs);return response(logs);
+      const logs={tables:[{name:"PrimaryResult",columns:["TimeGenerated","EnvironmentName_s","ContainerGroupName_s","ContainerName_s","ContainerImage_s","Log_s","_ResourceId","TenantId","Category","ContainerJobName_s","Stream_s","ContainerGroupId_g","ContainerId_g"].map(name=>({name,type:"string"})),
+        rows:[[run.properties.startTime,"fixture-env",run.name+"-abc12","health-probe",p.image,HEALTH_PROBE_PREFIX+JSON.stringify(receipt),p.environmentResourceId,p.workspaceId,"ContainerAppConsoleLogs","fixture-health","stdout","00000000-0000-4000-8000-000000000010","00000000-0000-4000-8000-000000000011"]]}]};state.logMutation?.(logs);return response(logs);
     }throw new Error("UNEXPECTED_REQUEST");
   };
   const opts={...(acceptancePhase?{mode:"acceptance"}:{}),plan:p,custody,descriptorStore:store,transport,readJobLogs:async()=>null,pollIntervalMs:0,timeoutMs:10000,
@@ -155,6 +155,59 @@ for(const [name,change]of[
   ["other resource",r=>r[6]+="-foreign"],["other replica",r=>r[2]="foreign-replica"],["image",r=>r[4]="foreign:latest"],["old time",r=>r[0]="2000-01-01T00:00:00Z"],
 ])test(`logs ${name} rejected`,async()=>{const f=await fixture();f.state.logMutation=t=>change(t.tables[0].rows[0]);await assert.rejects(f.run(),/HEALTH_JOB_LOG_BINDING_MISMATCH/);});
 test("duplicate success receipts rejected",async()=>{const f=await fixture();f.state.logMutation=t=>t.tables[0].rows.push(t.tables[0].rows[0]);await assert.rejects(f.run(),/HEALTH_JOB_LOG_AMBIGUOUS/);});
+
+for(const [name,options] of [["release",{releaseMode:true}],["migration",{}],["acceptance",{acceptancePhase:"ACCEPTED"}]]) {
+  test(`${name} retained health accepts ARM-derived log namespace and blank resource ID after collected direct stream`,async()=>{
+    const f=await fixture(options);let directReads=0;
+    f.opts.readJobLogs=createManagedAzureJobLogReader({exec:async()=>{directReads++;throw Error("PRIVATE_PROVIDER_404");}});
+    f.state.logMutation=t=>{const r=t.tables[0].rows[0];r[1]="fixture";r[6]="";};
+    const result=await f.run(await f.reopen());
+    assert.equal(result.health.status,200);assert.equal(result.evidence.directFrameSha256,undefined);assert(directReads>0);assert.equal(f.state.starts,1);
+    const c=(await f.dispatcher.readRetainedStart()).input.challenge;
+    assert.equal(c.schemaVersion,name==="release"?2:1);assert.equal(result.evidence.challengeSha256,hash(c));
+    const query=f.state.requests.find(r=>r.path===`/v1/workspaces/${p.workspaceId}/query`).body.query;
+    assert(query.includes(`TenantId == '${p.workspaceId}'`));assert(query.includes("EnvironmentName_s in ('fixture-env', 'fixture')"));
+    assert(query.includes("ContainerJobName_s == 'fixture-health'"));assert(query.includes("startswith_cs 'fixture-health-run1-'"));
+    assert(query.includes(`ContainerImage_s == '${p.image}'`));assert(query.includes(c.nonce));
+  });
+}
+for(const [name,change] of [
+  ["foreign environment",r=>r[1]="foreign"],["foreign workspace",r=>r[7]="00000000-0000-4000-8000-000000000099"],
+  ["wrong category",r=>r[8]="ContainerAppSystemLogs"],["foreign job",r=>r[9]="foreign-health"],
+  ["stderr frame",r=>r[10]="stderr"],["missing group identity",r=>r[11]=""],["missing container identity",r=>r[12]=""],
+  ["foreign resource",r=>r[6]=p.jobResourceId+"-foreign"],["foreign container",r=>r[3]="scheduler"],
+  ["wrong replica suffix",r=>r[2]+="-other"],
+])test(`blank-resource retained release logs reject ${name}`,async()=>{
+  const f=await fixture({releaseMode:true});f.state.logMutation=t=>{const r=t.tables[0].rows[0];r[1]="fixture";r[6]="";change(r);};
+  await assert.rejects(f.run(),/HEALTH_JOB_LOG_BINDING_MISMATCH/);assert.equal(f.state.starts,1);
+});
+test("retained release rejects distinct replica frames as ambiguous",async()=>{
+  const f=await fixture({releaseMode:true});f.state.logMutation=t=>{
+    const row=t.tables[0].rows[0];row[1]="fixture";row[6]="";const other=[...row];other[2]=f.state.runs[0].name+"-xyz34";t.tables[0].rows.push(other);
+  };
+  await assert.rejects(f.run(),/HEALTH_JOB_LOG_AMBIGUOUS/);
+});
+for(const [name,change] of [
+  ["workspace",e=>e.properties.appLogsConfiguration.logAnalyticsConfiguration.customerId="00000000-0000-4000-8000-000000000099"],
+  ["namespace",e=>e.properties.defaultDomain="foreign.eastus.azurecontainerapps.io"],
+  ["resource",e=>e.id+="-foreign"],
+  ["subnet",e=>e.properties.vnetConfiguration.infrastructureSubnetId+="-foreign"],
+])test(`retained log lookup freshly rejects environment ${name} drift after dispatch`,async()=>{
+  const f=await fixture({releaseMode:true});f.state.envMutation=e=>{if(f.state.starts)change(e);};
+  await assert.rejects(f.run(),/HEALTH_JOB_ENVIRONMENT_CHANGED/);assert.equal(f.state.starts,1);
+  assert(!f.state.requests.some(r=>r.path===`/v1/workspaces/${p.workspaceId}/query`));
+});
+test("retained row cannot be accepted after its challenge expires during ingestion",async t=>{
+  const f=await fixture({releaseMode:true}),now=Date.now();
+  // Leave real timers/recorded dispatch intact; advance only the validation clock
+  // when the first actual retained row becomes available.
+  f.state.logMutation=()=>{t.mock.method(Date,"now",()=>now+300001);};
+  await assert.rejects(f.run(),/HEALTH_JOB_RECONCILE_REQUIRED/);assert.equal(f.state.starts,1);
+});
+test("retained health rechecks environment after a valid row before acceptance",async()=>{
+  const f=await fixture({releaseMode:true});f.state.logMutation=()=>{f.env.properties.defaultDomain="foreign.eastus.azurecontainerapps.io";};
+  await assert.rejects(f.run(),/HEALTH_JOB_ENVIRONMENT_CHANGED/);
+});
 
 function probeFixture(){const identity={jobResourceId:p.jobResourceId,imageDigest:p.image.split("@")[1],probeSha256:p.probeSha256};const c={schemaVersion:1,nonce:"f".repeat(64),domain:"core",intentSha256:"d".repeat(64),
   sourceFenceSha256:"e".repeat(64),targetSha256:hash(p.worker),identity,issuedAt:Date.now()-1000,expiresAt:Date.now()+30000,

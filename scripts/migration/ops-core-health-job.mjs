@@ -116,14 +116,16 @@ function execution(value,p){
   // The stable list schema can omit id; only the exact bound endpoint grants it.
   return{...value,id:`${p.jobResourceId}/executions/${value.name}`};
 }
-function parseLogs(response,p,run,challenge){
-  const columns=["TimeGenerated","EnvironmentName_s","ContainerGroupName_s","ContainerName_s","ContainerImage_s","Log_s","_ResourceId"];
-  need(!response?.error&&response?.tables?.length===1&&same(response.tables[0].columns?.map(c=>c.name),columns)&&Array.isArray(response.tables[0].rows),"HEALTH_JOB_LOG_INVALID");
+const logColumns=["TimeGenerated","EnvironmentName_s","ContainerGroupName_s","ContainerName_s","ContainerImage_s","Log_s","_ResourceId",
+  "TenantId","Category","ContainerJobName_s","Stream_s","ContainerGroupId_g","ContainerId_g"];
+function parseLogs(response,p,run,challenge,environments){
+  const columns=logColumns;
+  need(!response?.error&&response?.tables?.length===1&&response.tables[0].name==="PrimaryResult"&&same(response.tables[0].columns?.map(c=>c.name),columns)&&Array.isArray(response.tables[0].rows),"HEALTH_JOB_LOG_INVALID");
   const rows=response.tables[0].rows;if(!rows.length)return null;need(rows.length===1,"HEALTH_JOB_LOG_AMBIGUOUS");const r=rows[0],at=Date.parse(r[0]);
-  need(r.length===7&&r[1]===p.environmentResourceId.split("/").at(-1)&&typeof r[2]==="string"&&r[2].startsWith(`${run.name}-`)
-    &&/^[a-z0-9-]{1,120}$/.test(r[2])&&r[3]==="health-probe"&&r[4]===p.image&&typeof r[5]==="string"&&Buffer.byteLength(r[5])<=16384
-    &&r[5].startsWith(HEALTH_PROBE_PREFIX)&&[p.environmentResourceId,p.jobResourceId].some(id=>equalId(r[6],id))
-    &&Number.isFinite(at),"HEALTH_JOB_LOG_BINDING_MISMATCH");
+  need(r.length===columns.length&&environments.includes(r[1])&&typeof r[2]==="string"&&new RegExp(`^${run.name}-[a-z0-9]{5}$`).test(r[2])&&r[3]==="health-probe"&&r[4]===p.image&&typeof r[5]==="string"&&Buffer.byteLength(r[5])<=16384
+    &&r[5].startsWith(HEALTH_PROBE_PREFIX)&&(r[6]===""||[p.environmentResourceId,p.jobResourceId].some(id=>equalId(r[6],id)))
+    &&r[7]===p.workspaceId&&r[8]==="ContainerAppConsoleLogs"&&r[9]===p.jobResourceId.split("/").at(-1)
+    &&r[10]==="stdout"&&typeof r[11]==="string"&&GUID.test(r[11])&&typeof r[12]==="string"&&GUID.test(r[12])&&Number.isFinite(at),"HEALTH_JOB_LOG_BINDING_MISMATCH");
   return receiptFromFrame({timestamp:r[0],payload:r[5]},p,run,challenge);
 }
 function withinExecution(value, run, challenge) {
@@ -146,12 +148,28 @@ function receiptFromFrame(frame,p,run,challenge) {
   need(same(projectWorkerHealth(receipt.health.body,receipt.ready.body,p.worker,Date.now()),{health:receipt.health,ready:receipt.ready}),"HEALTH_JOB_RECEIPT_INVALID");
   return receipt;
 }
-function query(p,run,c){return`ContainerAppConsoleLogs_CL\n| where TimeGenerated between (datetime(${new Date(c.issuedAt).toISOString()}) .. datetime(${new Date(c.expiresAt).toISOString()}))\n`
-  +`| where tolower(_ResourceId) in ('${p.environmentResourceId.toLowerCase()}', '${p.jobResourceId.toLowerCase()}')\n`
-  +`| where EnvironmentName_s == '${p.environmentResourceId.split("/").at(-1)}' and ContainerGroupName_s startswith '${run.name}-'\n`
+function query(p,run,c,environments){return`ContainerAppConsoleLogs_CL\n| where TimeGenerated between (datetime(${new Date(c.issuedAt).toISOString()}) .. datetime(${new Date(c.expiresAt).toISOString()}))\n`
+  +`| where TenantId == '${p.workspaceId}' and Category == 'ContainerAppConsoleLogs' and EnvironmentName_s in (${environments.map(e=>`'${e}'`).join(", ")})\n`
+  +`| where _ResourceId == '' or tolower(_ResourceId) in ('${p.environmentResourceId.toLowerCase()}', '${p.jobResourceId.toLowerCase()}')\n`
+  +`| where ContainerJobName_s == '${p.jobResourceId.split("/").at(-1)}' and ContainerGroupName_s startswith_cs '${run.name}-'\n`
   +`| where ContainerName_s == 'health-probe' and ContainerImage_s == '${p.image}'\n`
-  +`| where (Log_s startswith '${HEALTH_PROBE_PREFIX}' and Log_s contains '${c.nonce}') or Log_s == 'CORGTEX_HEALTH_PROBE_FAILED'\n`
-  +"| project TimeGenerated, EnvironmentName_s, ContainerGroupName_s, ContainerName_s, ContainerImage_s, Log_s, _ResourceId\n| take 3";}
+  +`| where (Log_s startswith_cs '${HEALTH_PROBE_PREFIX}' and Log_s contains_cs '${c.nonce}') or Log_s == 'CORGTEX_HEALTH_PROBE_FAILED'\n`
+  +`| project ${logColumns.join(", ")}\n| take 3`;}
+
+/** Shared read-only admission for native observer history. This validates the
+ * original challenge/template; it never turns an expired observation into proof. */
+export function assertHealthJobStartDescriptor(record,{plan:value,context,index,authority}){
+  const p=plan(value);
+  need(exact(record,"kind,input")&&record.kind==="AZURE_HEALTH_PROBE_START"&&exact(record.input,"plan,context,index,challenge,template")
+    &&same(record.input.plan,p)&&same(record.input.context,context)&&record.input.index===index,"HEALTH_JOB_DESCRIPTOR_INVALID");
+  validateHealthChallenge(record.input.challenge,p.worker,identity(p),{fresh:false});
+  need(same(record.input.challenge.authority??null,authority)&&record.input.challenge.domain===context.domain
+    &&record.input.challenge.intentSha256===context.intentSha256&&record.input.challenge.sourceFenceSha256===context.sourceFenceSha256,"HEALTH_JOB_DESCRIPTOR_INVALID");
+  // A retained old start must reconcile against the exact command actually dispatched.
+  need(same(record.input.template,template(p,record.input.challenge))
+    ||same(record.input.template,template(p,record.input.challenge,false)),"HEALTH_JOB_DESCRIPTOR_INVALID");
+  return record;
+}
 
 /** Bounded worker health observations during pending TARGET_ACTIVATING only.
  * Source assertions and the external lease remain outside the probe container.
@@ -254,14 +272,7 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
   const slotKey=index=>`${prefix}/${hash({kind:"AZURE_HEALTH_PROBE_SLOT",inputSha256:hash({plan:p,context,index})})}/descriptor.json`;
   async function readSlot(index,signal){await check(signal);await descriptorStore.assertPrivate();const text=await descriptorStore.readOptional(slotKey(index),signal);await check(signal);
     if(text===null)return null;need(typeof text==="string"&&text.length<65536,"HEALTH_JOB_DESCRIPTOR_INVALID");const record=JSON.parse(text);
-    need(exact(record,"kind,input")&&record.kind==="AZURE_HEALTH_PROBE_START"&&exact(record.input,"plan,context,index,challenge,template")
-      &&same(record.input.plan,p)&&same(record.input.context,context)&&record.input.index===index,"HEALTH_JOB_DESCRIPTOR_INVALID");
-    validateHealthChallenge(record.input.challenge,p.worker,identity(p),{fresh:false});
-    need(same(record.input.challenge.authority??null,authority)&&record.input.challenge.domain===context.domain
-      &&record.input.challenge.intentSha256===context.intentSha256&&record.input.challenge.sourceFenceSha256===context.sourceFenceSha256,"HEALTH_JOB_DESCRIPTOR_INVALID");
-    // A retained old start must reconcile against the exact command actually dispatched.
-    need(same(record.input.template,template(p,record.input.challenge))
-      ||same(record.input.template,template(p,record.input.challenge,false)),"HEALTH_JOB_DESCRIPTOR_INVALID");return record;}
+    assertHealthJobStartDescriptor(record,{plan:p,context,index,authority});return record;}
   async function retain(record,index,signal){await check(signal);await descriptorStore.assertPrivate();const text=JSON.stringify(record);
     await descriptorStore.createOnly(slotKey(index),text,signal);need(same(await readSlot(index,signal),record),"HEALTH_JOB_DESCRIPTOR_INVALID");
     const key=`${prefix}/${hash({kind:record.kind,inputSha256:hash(record.input)})}/descriptor.json`;
@@ -343,8 +354,9 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
           let receipt;
           if(captured){receipt=receiptFromFrame(captured,p,found,challenge);}
           else {
-            const logs=await request("POST",`/v1/workspaces/${p.workspaceId}/query`,signal,{query:query(p,found,challenge),timespan:`${new Date(challenge.issuedAt).toISOString()}/${new Date(challenge.expiresAt).toISOString()}`});
-            need(logs.status===200,"HEALTH_JOB_LOG_UNAVAILABLE");receipt=parseLogs(logs.body,p,found,challenge);
+            const environments=await readHealthEnvironment(p,request,signal);
+            const logs=await request("POST",`/v1/workspaces/${p.workspaceId}/query`,signal,{query:query(p,found,challenge,environments),timespan:`${new Date(challenge.issuedAt).toISOString()}/${new Date(challenge.expiresAt).toISOString()}`});
+            need(logs.status===200,"HEALTH_JOB_LOG_UNAVAILABLE");receipt=parseLogs(logs.body,p,found,challenge,environments);
           }
           if(receipt){await prepare(signal);const workerSha256=await assertWorker(requested,signal);const last=await request("GET",pathFor(found.id),signal);
             need(last.status===200&&same(execution(last.body,p),found),"HEALTH_JOB_EXECUTION_CHANGED");
@@ -398,15 +410,23 @@ export function createHealthJobDispatcher(options) {
     readRetainedStart:async()=> (await get()).readRetainedStart(),reconcileStart:async()=> (await get()).reconcileStart()};
 }
 
-async function prepareHealthJob(p, request, signal) {
-    const j=await request("GET",pathFor(p.jobResourceId),signal);need(j.status===200,"HEALTH_JOB_NOT_PREPARED");verifyJob(j.body,p);
+// Like the scheduler retained reader, bind Azure's log namespace to current
+// authenticated environment metadata. Azure can leave _ResourceId empty: that
+// is admissible only alongside the exact workspace/category/job/replica fields.
+async function readHealthEnvironment(p, request, signal) {
     const e=await request("GET",pathFor(p.environmentResourceId),signal),props=e.body?.properties;
+    const domain=props?.defaultDomain,group=typeof domain==="string"?domain.split(".")[0]:null;
     need(e.status===200&&equalId(e.body?.id,p.environmentResourceId)&&props?.provisioningState==="Succeeded"
       &&equalId(props.vnetConfiguration?.infrastructureSubnetId,p.infrastructureSubnetId)&&props.appLogsConfiguration?.destination==="log-analytics"
       &&props.appLogsConfiguration.logAnalyticsConfiguration?.customerId===p.workspaceId
-      &&p.worker.origin===`https://${p.worker.appId.split("/").at(-1)}.internal.${props.defaultDomain}`,"HEALTH_JOB_ENVIRONMENT_CHANGED");
+      &&typeof group==="string"&&/^[a-z0-9][a-z0-9-]{0,62}$/.test(group)&&domain===`${group}.${p.location}.azurecontainerapps.io`
+      &&p.worker.origin===`https://${p.worker.appId.split("/").at(-1)}.internal.${domain}`,"HEALTH_JOB_ENVIRONMENT_CHANGED");
+    return [...new Set([p.environmentResourceId.split("/").at(-1),group])];
+}
+async function prepareHealthJob(p, request, signal) {
+    const j=await request("GET",pathFor(p.jobResourceId),signal);need(j.status===200,"HEALTH_JOB_NOT_PREPARED");verifyJob(j.body,p);
+    await readHealthEnvironment(p,request,signal);
     return{identity:identity(p),planSha256:hash(p),definitionSha256:hash(buildHealthProbeJobDefinition(p))};
-
 }
 
 /** Read-only resource and query-access proof before a source fence. No probe
