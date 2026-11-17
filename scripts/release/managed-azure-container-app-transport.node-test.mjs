@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { setImmediate as settle } from "node:timers/promises";
 import { canonicalizeManagedAzureContainerAppState, createManagedAzureContainerAppTransport, managedAzureConfigurationDigest } from "./managed-azure-container-app-transport.mjs";
 const target={subscriptionId:"00000000-0000-4000-8000-000000000001",resourceGroup:"fixture",acrName:"fixtureacr",acrServer:"fixtureacr.azurecr.io",webAppName:"fixture-web",workerAppName:"fixture-worker"};
 const config={activeRevisionsMode:"Single",ingress:{traffic:[{latestRevision:true,weight:100}]}};
@@ -63,6 +64,7 @@ function censusFixture({ headers = [], revisions = 2, onSleep, requestMs = 0 } =
           replicaAttempts++;
           if (replicaAttempts <= headers.length) {
             const value = typeof headers[replicaAttempts - 1] === "function" ? headers[replicaAttempts - 1](now) : headers[replicaAttempts - 1];
+            if (value instanceof Error) throw value;
             return Response.json({message:"PRIVATE_PROVIDER_BODY"},{status:429,headers:value===null?{}:{"Retry-After":value}});
           }
           return Response.json({value:url.includes("--old0/")?[{name:"still-writing"}]:[]});
@@ -115,7 +117,7 @@ test("abort during a backoff stops before any further provider GET",async()=>{
 test("census deadline rejects a slow provider response rather than returning a partial inventory",async()=>{
   const f=censusFixture({requestMs:180001});await assert.rejects(f.transport.readExclusiveState(f.options),/AZURE_EXCLUSIVE_CENSUS_DEADLINE/);assert.equal(f.calls.length,1);
 });
-test("serial census pacing keeps complete history and throttles expensive authority callbacks",async()=>{
+test("census pacing keeps complete history and throttles expensive authority callbacks",async()=>{
   const f=censusFixture({revisions:80});const result=await f.transport.readExclusiveState(f.options);
   assert.equal(result.revisions.length,80);assert.equal(f.calls.length,83);assert.equal(f.maxInFlight,1);
   for(let i=1;i<f.calls.length;i++)assert(f.calls[i].at-f.calls[i-1].at>=500);
@@ -130,4 +132,49 @@ test("HTTP throttling on a revision mutation is never automatically retried",asy
   }});
   const result=await transport.setRevisionActive({target,role:"worker",revisionName:"fixture-worker--old",active:true});
   assert.equal(result.succeeded,false);assert.equal(result.providerStatus,429);assert.equal(posts,1);
+});
+
+test("mixed network rejection and HTTP 429 share three paced GET attempts without inner retry multiplication",async()=>{
+  const f=censusFixture({headers:[new Error("PRIVATE_NETWORK"),"1"]});
+  assert.equal((await f.transport.readExclusiveState(f.options)).revisions.length,2);
+  assert.equal(f.replicaAttempts,4); // three reads for old0, one for old1
+  const old=f.calls.filter(c=>c.url.includes("old0/replicas"));assert.equal(old.length,3);
+  assert(old[1].at-old[0].at>=500);assert(old[2].at-old[1].at>=1000);
+  const g=censusFixture({headers:[new Error("PRIVATE_NETWORK"),"1",new Error("PRIVATE_NETWORK"),"1"]});
+  await assert.rejects(g.transport.readExclusiveState(g.options),e=>e.code==="AZURE_REQUEST_AMBIGUOUS"&&!e.message.includes("PRIVATE"));
+  assert.equal(g.replicaAttempts,3);assert.equal(g.calls.filter(c=>c.url.includes("old1/replicas")).length,0);
+  assert(!g.sleeps.some(ms=>ms===250||ms===750));
+});
+
+for (const mode of ["complete", "cooldown", "owner-loss", "abort"]) test(`two overlapping census reads remain globally paced and stop collectively: ${mode}`,async t=>{
+  const base=Date.parse("2026-11-17T19:00:00Z");t.mock.timers.enable({apis:["Date","setTimeout"],now:base});
+  let inFlight=0,maxInFlight=0,finished=false,reply,error,owner=true;const starts=[],controller=new AbortController();
+  const transport=createManagedAzureContainerAppTransport({clock:()=>Date.now(),getAccessToken:async()=>"synthetic-token",
+    sleep:(ms,signal)=>new Promise((resolve,reject)=>{const id=setTimeout(resolve,ms);signal?.addEventListener("abort",()=>{clearTimeout(id);reject(Error("aborted"));},{once:true});}),
+    fetchImpl:(url,{signal,method})=>new Promise((resolve,reject)=>{
+      assert.equal(method,"GET");starts.push({url,at:Date.now()});inFlight++;maxInFlight=Math.max(maxInFlight,inFlight);let done=false;
+      const finish=(fn,value)=>{if(!done){done=true;inFlight--;fn(value);}};
+      signal.addEventListener("abort",()=>finish(reject,Error("private aborted fetch")),{once:true});
+      setTimeout(()=>{
+        if(url.includes("/replicas?")) {
+          if(mode==="cooldown"&&url.includes("old0/"))return finish(resolve,Response.json({}, {status:429,headers:{"Retry-After":"600"}}));
+          if(mode==="owner-loss")owner=false;
+          if(mode==="abort")controller.abort();
+          return finish(resolve,Response.json({value:[]}));
+        }
+        if(url.includes("/revisions?"))return finish(resolve,Response.json({value:Array.from({length:4},(_,i)=>({name:`fixture-worker--old${i}`,properties:{active:false}}))}));
+        finish(resolve,Response.json(raw()));
+      }, mode==="owner-loss"?16000:1500);
+    })});
+  const pending=transport.readExclusiveState({target,role:"worker",signal:controller.signal,onProgress:async()=>{if(!owner)throw Error("OWNER_LOST");}})
+    .then(v=>{reply=v;finished=true;},e=>{error=e;finished=true;});
+  for(let i=0;i<1500&&!finished;i++){t.mock.timers.tick(100);await settle();}
+  assert(finished);await pending;assert.equal(maxInFlight,2);
+  for(let i=1;i<starts.length;i++)assert(starts[i].at-starts[i-1].at>=500);
+  if(mode==="complete"){assert.equal(error,undefined);assert.equal(reply.revisions.length,4);}
+  else {
+    assert(error);assert.equal(reply,undefined);
+    assert(!starts.some(v=>v.url.includes("old2/")||v.url.includes("old3/")));
+    if(mode==="cooldown")assert.equal(error.retryAfterSeconds,600);
+  }
 });
