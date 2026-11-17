@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { archiveEvidenceHash as hash } from "../migration/ops-core-archive.mjs";
+import { createOpsCoreActivationArmTransport } from "../migration/ops-core-activation.mjs";
 import { openProviderOperationRecorder } from "../migration/ops-core-provider-operations.mjs";
 import { WORKER_DEMAND_QUERY } from "./worker-demand.mjs";
 import { validateManagedAzureWorkerDemand, managedAzureWorkerDemandScale, assertManagedAzureWorkerDemandApp,
@@ -166,6 +167,66 @@ test("recorded create → actual nonce-bound scheduler proof → schedule, with 
   await inherited.observe(scheduled);
   assert.equal(f.calls.filter(c => c.method !== "GET").length, effects);
   assert.equal(f.calls.filter(c => c.id.endsWith("/start")).length, 1);
+});
+
+const executionsPath = jobId + "/executions";
+const nextPage = "https://management.azure.com" + executionsPath + "?api-version=2025-07-01&$skiptoken=opaque%2B%2F%3D";
+const historicalRuns = n => Array.from({ length: n }, (_, i) => ({ name: "run-" + i, id: executionsPath + "/run-" + i,
+  properties: { status: i === 100 ? "Failed" : "Succeeded" } }));
+
+// Both migration and direct Ops updates route scheduler GETs through this ARM transport.
+function inventoryFixture(page) {
+  const body = job("Schedule"), calls = [], signal = new AbortController().signal;
+  const arm = createOpsCoreActivationArmTransport({ subscriptionId, execFileImpl: async () => ({ stdout: "fixture" }),
+    fetchImpl: async (url, opts) => {
+      assert.equal(opts.method, "GET"); assert.equal(opts.redirect, "error");
+      if (url.pathname === jobId) return Response.json(actual(body));
+      assert.equal(url.pathname, executionsPath); assert.equal(url.origin, "https://management.azure.com");
+      calls.push(url.href); return Response.json(page(calls.length, url));
+    } });
+  const lifecycle = createManagedAzureWorkerDemandLifecycle({ jobId, target, signal, check: async () => signal.throwIfAborted(),
+    request: (resourceId, options) => arm({ resourceId, signal, ...options }) });
+  return { calls, observe: () => lifecycle.observe(body), drained: () => lifecycle.drained(body) };
+}
+
+test("retains the complete 101-entry native scheduler inventory, including an old terminal failure", async () => {
+  const rows = historicalRuns(101), f = inventoryFixture(() => ({ value: rows }));
+  assert.equal((await f.observe()).executionInventorySha256, hash(rows));
+  assert.equal((await f.drained()).evidence.executionInventorySha256, hash(rows));
+  rows[100].properties.status = "Running";
+  await assert.rejects(f.drained(), /SCHEDULER_NOT_DRAINED/);
+});
+
+test("follows the same job's opaque continuation and checks every execution on the final page", async () => {
+  const rows = historicalRuns(102), f = inventoryFixture((_index, url) => {
+    if (!url.searchParams.has("$skiptoken")) return { value: rows.slice(0, 101), nextLink: nextPage };
+    assert.equal(url.href, nextPage); return { value: rows.slice(101) };
+  });
+  assert.equal((await f.observe()).executionInventorySha256, hash(rows));
+  rows[101].properties.status = "Unrecognized";
+  await assert.rejects(f.observe(), /EXECUTION_INVALID/);
+  rows[101] = rows[0];
+  await assert.rejects(f.observe(), /EXECUTION_INVALID/);
+  rows[101] = { ...rows[0], name: "other" };
+  await assert.rejects(f.observe(), /EXECUTION_INVALID/);
+});
+
+test("refuses unbounded or ambiguous scheduler execution inventories", async () => {
+  for (const link of [
+    nextPage.replace("management.azure.com", "other.example"), nextPage.replace("/fixture-scheduler/", "/another/"),
+    nextPage.replace("2025-07-01", "2025-01-01"), nextPage + "&$filter=status", nextPage + "&api-version=2025-07-01",
+    nextPage.replace("opaque%2B%2F%3D", ""), nextPage.replace("https://", "https://user@"), nextPage + "#fragment",
+  ]) {
+    const f = inventoryFixture(() => ({ value: [], nextLink: link }));
+    await assert.rejects(f.observe(), /INVENTORY_INVALID/); assert.equal(f.calls.length, 1);
+  }
+  const cycle = inventoryFixture(() => ({ value: [], nextLink: nextPage }));
+  await assert.rejects(cycle.observe(), /INVENTORY_INVALID/); assert.equal(cycle.calls.length, 2);
+  const pages = inventoryFixture(index => ({ value: [], nextLink: nextPage + index }));
+  await assert.rejects(pages.observe(), /INVENTORY_INVALID/); assert.equal(pages.calls.length, 32);
+  const rows = historicalRuns(1001), tooMany = inventoryFixture(index => index === 1
+    ? { value: rows.slice(0, 800), nextLink: nextPage } : { value: rows.slice(800) });
+  await assert.rejects(tooMany.observe(), /INVENTORY_INVALID/);
 });
 
 function redactReferences(execution) {
