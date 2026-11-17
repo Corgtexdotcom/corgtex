@@ -269,7 +269,7 @@ export function managedAzureConsumptionEphemeralStorage(cpu) {
   return cpu <= 0.25 ? "1Gi" : cpu <= 0.5 ? "2Gi" : cpu <= 1 ? "4Gi" : "8Gi";
 }
 
-export function assertManagedAzureRevisionProjection(expectedTemplate, revisionTemplate, appName, revisionName) {
+export function assertManagedAzureRevisionProjection(expectedTemplate, revisionTemplate, appName, revisionName, liveWorker) {
   const expected = safeJsonClone(expectedTemplate);
   const actual = safeJsonClone(revisionTemplate);
   if (!revisionNameMatches(appName, expected, revisionName)
@@ -302,6 +302,18 @@ export function assertManagedAzureRevisionProjection(expectedTemplate, revisionT
   if (emptyProbes(expectedContainer.probes) && emptyProbes(actualContainer.probes)) {
     delete expectedContainer.probes;
     delete actualContainer.probes;
+  }
+  // ACA omits the demand intervals from revisions even when their nondefault
+  // values are retained on the current app. Only the same live revision can
+  // supply them. Remaining rules, auth, role and template still compare exactly.
+  const live = liveWorker?.app, liveTemplate = live?.properties?.template, scale = expected.scale;
+  if (liveWorker && typeof live?.id === "string" && live.id.toLowerCase() === liveWorker.resourceId.toLowerCase()
+    && live.name === appName && live.properties.provisioningState === "Succeeded" && live.properties.latestRevisionName === revisionName
+    && liveTemplate?.containers?.length === 1 && liveTemplate.containers[0].name === "worker" && expectedContainer.name === "worker"
+    && liveTemplate.containers[0].image === expectedContainer.image && liveTemplate.containers[0].env?.some(e => e.name === "WORKER_EXECUTION_MODE" && e.value === "queue-only")
+    && scale?.minReplicas === 0 && scale.maxReplicas === 1 && scale.cooldownPeriod === 30 && scale.pollingInterval === 10
+    && canonicalJson(scale) === canonicalJson(liveTemplate.scale) && actual.scale) {
+    for (const key of ["cooldownPeriod", "pollingInterval"]) if (actual.scale[key] == null) actual.scale[key] = scale[key];
   }
   for (const [key, value] of [["cooldownPeriod", 300], ["pollingInterval", 30]]) {
     if (expected.scale?.[key] === value && actual.scale?.[key] == null) {
@@ -543,7 +555,14 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     if (response.status !== 200) fail(`AZURE_REVISION_HTTP_${response.status}`, true);
     const revision = await responseBody(response);
     if (revision?.name !== input.revisionName) fail("AZURE_REVISION_READBACK_AMBIGUOUS", true);
-    assertManagedAzureRevisionProjection(input.expectedTemplate, revision.properties?.template, appName, input.revisionName);
+    let liveWorker;
+    if (input.workerDemandEnabled && input.role === "worker") {
+      const resource = resourceUrl(target, appName);
+      const current = await request(resource, { method: "GET" }, true);
+      if (current.status !== 200) fail("AZURE_READBACK_AMBIGUOUS", true);
+      liveWorker = { app: await responseBody(current), resourceId: new URL(resource).pathname };
+    }
+    assertManagedAzureRevisionProjection(input.expectedTemplate, revision.properties?.template, appName, input.revisionName, liveWorker);
     const replicasResponse = await request(revisionUrl(target, appName, input.revisionName, "/replicas"), { method: "GET" }, true);
     if (replicasResponse.status !== 200) fail(`AZURE_REVISION_REPLICAS_HTTP_${replicasResponse.status}`, true);
     const replicas = await responseBody(replicasResponse);

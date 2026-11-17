@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createOpsCoreAzureTarget, opsCoreAzureTargetBindingSha256, opsCoreSharedStateBackend } from "./ops-core-azure-target.mjs";
 import { opsCoreImageRepository } from "./ops-core-image-repository.mjs";
+import { activationSuffix, readActivationRecovery, matchesEarlyRoute, verifyEarlyCertificate, verifyRecoveryActivity } from "./ops-core-activation-revision.mjs";
 import { optionalSetting, optionalBinding, withoutOptionalBinding, matchesOptionalFetchFailure, failedCreateDefaults, errorApi } from "./ops-core-activation-empty.mjs";
 import { openProviderOperationRecorder, SOURCE_PHASE_ARTIFACT_LIMIT } from "./ops-core-provider-operations.mjs";
 import { validateRuntimeAccessActivationBinding } from "./ops-core-runtime-access-binding.mjs";
@@ -169,7 +170,7 @@ function appBody(plan, role, suffix) {
             : { minReplicas: 1, maxReplicas: 1, cooldownPeriod: 300, pollingInterval: 30, rules: [] } } } };
 }
 
-function assertBootstrapProjection(expected, actual, appName, revisionName, optionalEmpty) {
+function assertBootstrapProjection(expected, actual, appName, revisionName, optionalEmpty, liveWorker) {
   // ARM may materialize or omit the documented probe successThreshold=1.
   // Normalize this default alone; every other field remains subject to the
   // shared exact projection check (including commands, image, env and scale).
@@ -186,7 +187,15 @@ function assertBootstrapProjection(expected, actual, appName, revisionName, opti
   for (const container of projection?.containers ?? []) for (const probe of container.probes ?? []) {
     if (probe.successThreshold == null) probe.successThreshold = 1;
   }
-  return assertManagedAzureRevisionProjection(expected, projection, appName, revisionName);
+  const types = expected.containers[0].probes.map(p => p.type);
+  const probes = projection?.containers?.[0]?.probes;
+  if (Array.isArray(probes) && probes.length === types.length && types.every(type => probes.filter(p => p.type === type).length === 1)) {
+    projection.containers[0].probes = types.map(type => probes.find(p => p.type === type));
+  }
+  if (expected.containers[0].name === "web" && expected.scale?.minReplicas === 1 && expected.scale.maxReplicas === 1
+    && expected.scale.rules?.length === 0 && projection.scale?.minReplicas === 1 && projection.scale.maxReplicas === 1
+    && projection.scale.rules == null) projection.scale.rules = [];
+  return assertManagedAzureRevisionProjection(expected, projection, appName, revisionName, liveWorker);
 }
 
 /** Bootstrap only: existing apps (including stopped apps) are not overwritten.
@@ -200,7 +209,7 @@ function assertBootstrapProjection(expected, actual, appName, revisionName, opti
  * Any inherited pending phase is refused; recovery requires explicit readback.
  */
 export function createOpsCoreActivation({ plan: input, custody, operationStore, assertSourceFenced, healthProbe,
-  armTransport, schedulerProof, assertRuntimeAccess, observeEmptySecret, now = Date.now, wait = (ms, signal) => sleep(ms, undefined, { signal }), timeoutMs = 15 * 60_000 } = {}) {
+  armTransport, schedulerProof, assertRuntimeAccess, observeEmptySecret, readRecoveryActivity, now = Date.now, wait = (ms, signal) => sleep(ms, undefined, { signal }), timeoutMs = 15 * 60_000 } = {}) {
   const plan = validateOpsCoreActivationPlan(input), planSha256 = hash(plan), target = plan.target;
   requireValue(custody?.signal instanceof AbortSignal && typeof custody.assertOwned === "function"
     && typeof custody.begin === "function" && typeof custody.complete === "function"
@@ -213,6 +222,19 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
     ? `/subscriptions/${target.subscriptionId}/resourceGroups/${target.resourceGroupName}/providers/Microsoft.App/jobs/${plan.workerDemand.schedulerJobName}` : null;
   function schedulerBody(workerBody) {
     return buildManagedAzureSchedulerJob({ workerApp: { ...workerBody, id: appId("worker") }, demand: plan.workerDemand, target });
+  }
+  function bootstrapBodies(operationId, prior) {
+    const build = legacy => {
+      const bodies = Object.fromEntries(ROLES.map(role => [role,
+        appBody(plan, role, activationSuffix(target.apps[role], operationId, role, legacy))]));
+      if (plan.workerDemand) bodies.scheduler = schedulerBody(bodies.worker);
+      return bodies;
+    };
+    const current = build(false);
+    if (!prior || hash(current) === hash(prior.bodies)) return current;
+    const legacy = build(true);
+    requireValue(hash(legacy) === hash(prior.bodies), "ACTIVATION_EVIDENCE_MISMATCH");
+    return legacy;
   }
   function bodyInput(role, body) {
     return { planSha256, resourceId: appId(role), bodySha256: hash(body) };
@@ -228,6 +250,14 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
   function overlayRecord(original, bodies, roles) {
     return { schemaVersion: 1, planSha256, originalSha256: hash(original), effectiveSha256: hash(bodies), roles };
   }
+  const activity = readRecoveryActivity ?? (async (correlationId, signal) => {
+    const fields = "[].{correlationId:correlationId,resourceId:resourceId,operationName:operationName.value,eventName:eventName.value,"
+      + "scope:authorization.scope,action:authorization.action,status:status.value,subStatus:subStatus.value,statusMessage:properties.statusMessage}";
+    const { stdout } = await promisify(execFile)("az", ["monitor", "activity-log", "list", "--subscription", target.subscriptionId,
+      "--correlation-id", correlationId, "--offset", "89d", "--max-events", "20", "--query", fields, "-o", "json", "--only-show-errors"],
+    { signal, timeout: 30000, maxBuffer: 512 * 1024, encoding: "utf8", shell: false });
+    return JSON.parse(stdout);
+  });
   let used = false;
   async function run(action, { customDomains = [] } = {}) {
       requireValue(!used, "ACTIVATION_ALREADY_ATTEMPTED"); used = true;
@@ -235,7 +265,7 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
         && Array.isArray(customDomains) && customDomains.every(name => typeof name === "string" && /^[a-z0-9.-]+$/.test(name))
         && new Set(customDomains).size === customDomains.length, "ACTIVATION_ACTION_INVALID");
       const signal = AbortSignal.any([custody.signal, AbortSignal.timeout(timeoutMs)]), deadline = now() + timeoutMs;
-      let emptyRoles = [];
+      let emptyRoles = [], earlyRoute = null;
       const intentSha256 = custody.snapshot().intentSha256;
       requireValue(HASH.test(intentSha256), "ACTIVATION_CUSTODY_MISMATCH");
       async function check() {
@@ -243,6 +273,36 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
         const s = custody.snapshot();
         requireValue(s.domain === target.domain && s.intentSha256 === intentSha256, "ACTIVATION_CUSTODY_MISMATCH");
         requireValue(now() < deadline, "ACTIVATION_DEADLINE");
+      }
+      async function recoveryFor(prefix, operationId, submitted, original) {
+        const read = async name => {
+          await check(); await operationStore.assertPrivate();
+          const bytes = await operationStore.readOptional(prefix + name + ".json", signal);
+          await check();
+          requireValue(bytes === null || typeof bytes === "string" && Buffer.byteLength(bytes) <= 65536, "ACTIVATION_EVIDENCE_MISMATCH");
+          return bytes === null ? null : JSON.parse(bytes);
+        };
+        const external = await readActivationRecovery({ read, domain: target.domain, intentSha256, operationId, workerId: appId("worker"),
+          webId: appId("web"), environmentId: target.environmentId, body: submitted.worker, createInput: bodyInput("worker", submitted.worker) });
+        const bodies = { ...submitted, worker: external.worker }, dispatch = { ...submitted };
+        for (const role of ROLES) {
+          const suffix = activationSuffix(target.apps[role], operationId, role);
+          if (bodies[role].properties.template.revisionSuffix === suffix) continue;
+          // A phase plan can predate this limit while the particular create has
+          // never been submitted. Preserve old descriptors; use the legal name
+          // for a new submission only if neither original body has an intent.
+          let attempted = false;
+          for (const body of new Set([original[role], submitted[role]])) {
+            const kind = `azure.create.${role}`, operationKey = hash({ kind, inputSha256: hash(bodyInput(role, body)) });
+            if (await read(operationKey + "/intent") !== null) attempted = true;
+          }
+          if (attempted) continue;
+          const next = structuredClone(bodies[role]);
+          next.properties.template.revisionSuffix = suffix;
+          bodies[role] = dispatch[role] = next;
+          external.evidence[role + "PlannedRevisionSha256"] = hash({ original: hash(submitted[role]), corrected: hash(next) });
+        }
+        return { ...external, bodies, dispatch };
       }
       async function request(resourceId, extra = {}) {
         await check(); const result = await transport({ resourceId, apiVersion: API, signal, ...extra }); await check(); return result;
@@ -285,7 +345,7 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
           && (!p.managedEnvironmentId || same(p.managedEnvironmentId, target.environmentId))
           && p.workloadProfileName === "Consumption" && c.activeRevisionsMode === "Single"
           && c.registries?.length === 1 && registry.server === plan.acrServer && same(registry.identity, plan.managedIdentityId)
-          && registry.username == null && registry.passwordSecretRef == null
+          && ((registry.username == null && registry.passwordSecretRef == null) || (registry.username === "" && registry.passwordSecretRef === ""))
           && Array.isArray(c.secrets) && c.secrets.length === expectedSecrets.length
           && new Set(c.secrets.map(s => s.name)).size === c.secrets.length
           && c.secrets.every(s => expectedSecrets.some(e => e.name === s.name && e.keyVaultUrl === s.keyVaultUrl
@@ -293,8 +353,8 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
           && (ingress?.fqdn ?? null) === fqdn && ingress.external === (role === "web")
           && ingress.targetPort === (role === "web" ? 3000 : 9090) && ingress.allowInsecure === false
           && same(ingress.transport, "auto") && canonical(ingress.traffic) === canonical([{ latestRevision: true, weight: 100 }])
-          && (action === "observe"
-            ? canonical((ingress.customDomains ?? []).map(d => d.name).sort()) === canonical(role === "web" ? [...customDomains].sort() : [])
+          && (earlyRoute && role === "web" ? matchesEarlyRoute(ingress, earlyRoute)
+            : action === "observe" ? canonical((ingress.customDomains ?? []).map(d => d.name).sort()) === canonical(role === "web" ? [...customDomains].sort() : [])
               && (ingress.customDomains ?? []).every(d => d.bindingType === "SniEnabled" && typeof d.certificateId === "string")
             : !(ingress.customDomains?.length)) && !(ingress.ipSecurityRestrictions?.length)
           && p.template?.revisionSuffix === expected.properties.template.revisionSuffix, "ACTIVATION_APP_DRIFT");
@@ -319,7 +379,8 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
           requireValue(revisions.length === 1 && revisions[0]?.name === revisionName
             && same(revisions[0].id, `${appId(role)}/revisions/${revisionName}`), "ACTIVATION_REVISION_DRIFT");
           const rev = revisions[0].properties;
-          assertBootstrapProjection(expected.properties.template, rev.template, target.apps[role], revisionName, emptyRoles.includes(role));
+          assertBootstrapProjection(expected.properties.template, rev.template, target.apps[role], revisionName, emptyRoles.includes(role),
+            role === "worker" && plan.workerDemand ? { app: r.body, resourceId: appId(role) } : undefined);
           const replicas = await list(`${appId(role)}/revisions/${revisionName}/replicas`);
           requireValue(replicas.length <= 1, "ACTIVATION_REPLICA_DRIFT");
           if (plan.workerDemand && role === "worker" && replicas.length === 0) {
@@ -382,16 +443,16 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
             requireValue(typeof text === "string" && Buffer.byteLength(text) <= limit, "ACTIVATION_EVIDENCE_MISMATCH");
             return JSON.parse(text);
           };
-          const original = Object.fromEntries(ROLES.map(role => [role,
-            appBody(plan, role, `boot-${operationId.replaceAll("-", "").slice(0, 16)}-${role}`)]));
-          if (plan.workerDemand) original.scheduler = schedulerBody(original.worker);
           const retainedPlan = await read("phase-plan", SOURCE_PHASE_ARTIFACT_LIMIT);
+          const original = bootstrapBodies(operationId, retainedPlan);
           await check(); await operationStore.assertPrivate();
           const overlayBytes = await operationStore.readOptional(prefix + "activation-empty-bindings.json", signal);
           await check();
           const overlay = overlayBytes === null ? null : JSON.parse(overlayBytes);
-          const bodies = overlay ? renderOverlay(original, overlay.roles) : original;
-          requireValue(!overlay || hash(overlay) === hash(overlayRecord(original, bodies, overlay.roles)), "ACTIVATION_EVIDENCE_MISMATCH");
+          const submitted = overlay ? renderOverlay(original, overlay.roles) : original;
+          const external = await recoveryFor(prefix, operationId, submitted, original);
+          const bodies = external.bodies;
+          requireValue(!overlay || hash(overlay) === hash(overlayRecord(original, submitted, overlay.roles)), "ACTIVATION_EVIDENCE_MISMATCH");
           requireValue(exact(retainedPlan, "schemaVersion,planSha256,activationOperationId,environmentDomain,bodies")
             && retainedPlan.schemaVersion === 1 && retainedPlan.planSha256 === planSha256
             && retainedPlan.activationOperationId === operationId
@@ -399,7 +460,8 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
             && hash(retainedPlan.bodies) === hash(original), "ACTIVATION_EVIDENCE_MISMATCH");
           for (const entry of [activation[0], active[0]]) {
             const evidence = await read(`phase-evidence-${entry.evidenceSha256}`, 32 * 1024 * 1024);
-            requireValue(hash(evidence) === entry.evidenceSha256 && evidence.schemaVersion === 1
+            requireValue(["workerRevisionRecoverySha256", "earlyWebRouteSha256", "webPlannedRevisionSha256", "workerPlannedRevisionSha256"].every(key => evidence[key] === external.evidence[key])
+              && hash(evidence) === entry.evidenceSha256 && evidence.schemaVersion === 1
               && evidence.domain === target.domain && evidence.intentSha256 === intentSha256 && evidence.planSha256 === planSha256
               && (overlay ? evidence.emptyBindingSha256 === hash(overlay) : !Object.hasOwn(evidence, "emptyBindingSha256"))
               && evidence.activationOperationId === operationId && evidence.retainedPlanSha256 === hash(retainedPlan), "ACTIVATION_EVIDENCE_MISMATCH");
@@ -438,7 +500,7 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
             return intent;
           }
           for (const role of ROLES) {
-            const kind = `azure.create.${role}`, input = bodyInput(role, bodies[role]);
+            const kind = `azure.create.${role}`, input = bodyInput(role, external.dispatch[role]);
             if (overlay?.roles.includes(role)) {
               const previous = await retainedOperation(kind, bodyInput(role, original[role]), true);
               if (previous) {
@@ -479,9 +541,9 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
           : pendingActivation ? initial.pending : initial.history?.find(x => x.phase === "TARGET_ACTIVATING");
         requireValue(GUID.test(pending?.operationId) && pending.intentSha256 === planSha256, "ACTIVATION_LINEAGE_UNPROVEN");
         const prefix = `operations/${target.domain}/${intentSha256}/${pending.operationId}/`;
-        const original = Object.fromEntries(ROLES.map(role => [role,
-          appBody(plan, role, `boot-${pending.operationId.replaceAll("-", "").slice(0, 16)}-${role}`)]));
-        if (plan.workerDemand) original.scheduler = schedulerBody(original.worker);
+        await operationStore.assertPrivate();
+        const prior = await operationStore.readOptional(`${prefix}phase-plan.json`, signal);
+        const original = bootstrapBodies(pending.operationId, prior === null ? null : JSON.parse(prior));
         const retainedPlan = { schemaVersion: 1, planSha256, activationOperationId: pending.operationId, environmentDomain: domain, bodies: original };
         async function retain(name, value) {
           await check(); await operationStore.assertPrivate();
@@ -491,7 +553,6 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
           await check();
           requireValue(hash(JSON.parse(await operationStore.readOptional(key, signal))) === hash(value), "ACTIVATION_EVIDENCE_MISMATCH");
         }
-        const prior = await operationStore.readOptional(`${prefix}phase-plan.json`, signal);
         if (prior === null) {
           // A lost acknowledgement before phase-plan persistence cannot have
           // dispatched an app. Resume may retain the plan only while both absent.
@@ -527,10 +588,17 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
             if (!previous.intent || !previous.receipt && (await request(appId(role))).body?.properties?.provisioningState === "Failed") emptyRoles.push(role);
           }
         }
-        const bodies = emptyRoles.length ? renderOverlay(original, emptyRoles) : original;
-        if (overlay) requireValue(hash(overlay) === hash(overlayRecord(original, bodies, emptyRoles)), "ACTIVATION_EVIDENCE_MISMATCH");
+        const submitted = emptyRoles.length ? renderOverlay(original, emptyRoles) : original;
+        const external = await recoveryFor(prefix, pending.operationId, submitted, original);
+        const bodies = external.bodies;
+        earlyRoute = external.route;
+        if (earlyRoute) {
+          requireValue(customDomains.every(name => name === earlyRoute.hostname), "ACTIVATION_APP_DRIFT");
+          verifyEarlyCertificate(await request(earlyRoute.certificateId), earlyRoute);
+        }
+        if (overlay) requireValue(hash(overlay) === hash(overlayRecord(original, submitted, emptyRoles)), "ACTIVATION_EVIDENCE_MISMATCH");
         if (emptyRoles.length && !overlay && action !== "reconcile") {
-          await retain("activation-empty-bindings", overlayRecord(original, bodies, emptyRoles));
+          await retain("activation-empty-bindings", overlayRecord(original, submitted, emptyRoles));
         }
         async function failedBeforeRevision(role) {
           await guard.assertPostgresPrivate(); await fenced();
@@ -565,8 +633,19 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
         if (recorder) {
           for (const role of ROLES) {
             const body = bodies[role], kind = `azure.create.${role}`;
-            let input = bodyInput(role, body);
+            let input = bodyInput(role, external.dispatch[role]);
             const effective = await recorder.readStatus(kind, input);
+            requireValue((target.apps[role] + "--" + body.properties.template.revisionSuffix).length <= 54
+              || effective.receipt, "ACTIVATION_REJECTED_REVISION_RECOVERY_REQUIRED");
+            if (role === "worker" && external.recovery) {
+              requireValue(effective.intent && hash(effective.intent) === external.recovery.originalCreateIntentSha256, "ACTIVATION_LINEAGE_UNPROVEN");
+              if (!effective.receipt) {
+                const originalName = target.apps.worker + "--" + submitted.worker.properties.template.revisionSuffix;
+                for (const [corrected, id] of [[false, external.recovery.rejectionCorrelationId], [true, external.recovery.correctedWriteCorrelationId]]) {
+                  await check(); verifyRecoveryActivity(await activity(id, signal), external.recovery, corrected, originalName); await check();
+                }
+              }
+            }
             const previous = emptyRoles.includes(role) ? await recorder.readStatus(kind, bodyInput(role, original[role])) : null;
             if (previous?.intent) requireValue(!effective.intent, "ACTIVATION_CREATE_LINEAGE_CONFLICT");
             const continuation = { status: "CONTINUATION_AVAILABLE", complete: false,
@@ -594,7 +673,7 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
             }
             receipts[role] = await recorder.runRecordedOperation({ kind, input, verify,
               async apply() {
-                requireValue(action !== "reconcile" && !previous?.intent, "ACTIVATION_REPLAY_FORBIDDEN");
+                requireValue(action !== "reconcile" && !previous?.intent && !(role === "worker" && external.evidence.workerRevisionRecoverySha256), "ACTIVATION_REPLAY_FORBIDDEN");
                 await absent(role); if (role === "web") await absent("worker");
                 if (emptyRoles.includes(role)) requireValue(await observeBinding(role), "ACTIVATION_EMPTY_BINDING_UNPROVEN");
                 await guard.assertPostgresPrivate();
@@ -623,7 +702,7 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
         await fenced(); await check();
         const evidence = { schemaVersion: 1, domain: target.domain, intentSha256, planSha256,
           activationOperationId: pending.operationId, retainedPlanSha256: hash(retainedPlan),
-          ...(emptyRoles.length ? { emptyBindingSha256: hash(overlayRecord(original, bodies, emptyRoles)) } : {}), receipts, finalProofs };
+          ...external.evidence, ...(emptyRoles.length ? { emptyBindingSha256: hash(overlayRecord(original, submitted, emptyRoles)) } : {}), receipts, finalProofs };
         const evidenceSha256 = hash(evidence);
         await retain(`phase-evidence-${evidenceSha256}`, evidence);
         if (action === "observe") return { complete: true, domain: target.domain, phase: initial.phase, intentSha256, targetBindingSha256: hash(target), planSha256, evidenceSha256,

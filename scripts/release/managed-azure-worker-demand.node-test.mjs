@@ -45,6 +45,21 @@ test("scheduler password registry accepts ARM's inactive empty identity default"
   }
 });
 
+test("scheduler accepts the exact managed registry login defaults from its worker app", () => {
+  const worker = app();
+  Object.assign(worker.properties.configuration.registries[0], { username: "", passwordSecretRef: "" });
+  const expected = buildManagedAzureSchedulerJob({ workerApp: worker, demand, target });
+  const observed = actual(job());
+  assertManagedAzureSchedulerJob(observed, expected, jobId);
+  assertManagedAzureSchedulerJob(actual(expected), job(), jobId);
+  for (const change of [{ username: "" }, { passwordSecretRef: "" }, { username: "other", passwordSecretRef: "" },
+    { identity: identity + "-other", username: "", passwordSecretRef: "" }]) {
+    const drifted = actual(job());
+    Object.assign(drifted.properties.configuration.registries[0], change);
+    assert.throws(() => assertManagedAzureSchedulerJob(drifted, expected, jobId), /SCHEDULER_DRIFT/);
+  }
+});
+
 test("scheduler empty registry identity does not normalize without password authentication", () => {
   const expected = job(), observed = actual(expected);
   observed.properties.configuration.registries[0].identity = "";

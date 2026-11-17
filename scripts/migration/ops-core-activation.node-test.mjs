@@ -764,3 +764,139 @@ test("the failed-create diagnostic API authenticates its caller and permits only
   await rejects(transport({ ...q, resourceId: id("Microsoft.App/jobs", "fixture") }), "ACTIVATION_REQUEST_INVALID");
   assert.equal(reads, 1);
 });
+
+async function rejectedWorkerFixture() {
+  let corrected;
+  const f = demandFixture({ mutatePlan(p) { p.target.apps.worker = "ca-corgtex-opscore-ops-worker"; addOptional(p); },
+    put({ role, request }) {
+      if (role === "worker") { corrected = structuredClone(request.body); return { status: 400 }; }
+      return { status: 202 };
+    } });
+  f.options.observeEmptySecret = async () => true;
+  await assert.rejects(createOpsCoreActivation(f.options).activate());
+  const {operationId} = f.journal.pending;
+  const prefix = `operations/ops/${f.journal.intentSha256}/${operationId}/`;
+  const long = "boot-" + operationId.replaceAll("-", "").slice(0,16) + "-worker";
+  const before = structuredClone(corrected); before.properties.template.revisionSuffix = long;
+  const phase = JSON.parse(f.records.get(prefix+"phase-plan.json"));
+  const overlay = JSON.parse(f.records.get(prefix+"activation-empty-bindings.json"));
+  phase.bodies.worker.properties.template.revisionSuffix = long;
+  f.records.set(prefix+"phase-plan.json", JSON.stringify(phase));
+  const submitted = structuredClone(phase.bodies);
+  for (const role of ["web","worker"]) {
+    const p = submitted[role].properties;
+    p.configuration.secrets = p.configuration.secrets.filter(s => s.name !== "optional-"+role);
+    p.template.containers[0].env = p.template.containers[0].env.filter(e => e.name !== optionalName);
+  }
+  submitted.scheduler.properties.configuration.secrets = submitted.scheduler.properties.configuration.secrets.filter(s => s.name !== "optional-worker");
+  submitted.scheduler.properties.template.containers[0].env = submitted.scheduler.properties.template.containers[0].env.filter(e => e.name !== optionalName);
+  overlay.originalSha256 = hash(phase.bodies); overlay.effectiveSha256 = hash(submitted);
+  f.records.set(prefix+"activation-empty-bindings.json", JSON.stringify(overlay));
+  const [key,value] = [...f.records].find(([k,v]) => k.endsWith("/intent.json") && JSON.parse(v).kind === "azure.create.worker");
+  const original = JSON.parse(value);
+  original.inputSha256 = hash({planSha256:phase.planSha256, resourceId:f.appId("worker"), bodySha256:hash(before)});
+  original.operationKey = hash({kind:original.kind,inputSha256:original.inputSha256});
+  f.records.delete(key); f.records.set(prefix+original.operationKey+"/intent.json",JSON.stringify(original));
+  const worker = f.map.get(f.appId("worker")).body;
+  const recovery = { schemaVersion:1,domain:"ops",intentSha256:f.journal.intentSha256,activationOperationId:operationId,
+    originalCreateIntentSha256:hash(original),resourceId:f.appId("worker"),originalBodySha256:hash(before),correctedBodySha256:hash(corrected),
+    correctedRevisionName:worker.properties.latestRevisionName,rejectionCorrelationId:"11111111-1111-4111-8111-111111111111",
+    correctedWriteCorrelationId:"22222222-2222-4222-8222-222222222222" };
+  assert.equal(recovery.correctedRevisionName.length,54);
+  const route = {schemaVersion:1,domain:"ops",intentSha256:f.journal.intentSha256,activationOperationId:operationId,resourceId:f.appId("web"),
+    hostname:"ops.corgtex.com",certificateId:f.plan.target.environmentId+"/managedCertificates/fixture-cert"};
+  f.set(route.certificateId,resource(route.certificateId,{subjectName:route.hostname,provisioningState:"Succeeded"}));
+  f.map.get(f.appId("web")).body.properties.configuration.ingress.customDomains = [{ name:route.hostname,bindingType:"SniEnabled",certificateId:route.certificateId }];
+  const recoveryKey = prefix+"worker-revision-recovery.json", routeKey = prefix+"activation-web-route.json";
+  f.records.set(recoveryKey,JSON.stringify(recovery)); f.records.set(routeKey,JSON.stringify(route));
+  const calls = [];
+  f.options.readRecoveryActivity = async correlationId => {
+    calls.push(correlationId);
+    const rejected = correlationId === recovery.rejectionCorrelationId;
+    return [{ eventName:"EndRequest",correlationId,resourceId:recovery.resourceId,scope:recovery.resourceId,action:"Microsoft.App/containerApps/write",
+      operationName:"Microsoft.App/containerApps/write",status:rejected?"Failed":"Succeeded",subStatus:rejected?"BadRequest":"Created",
+      ...(rejected?{statusMessage:JSON.stringify({error:{code:"ContainerAppInvalidRevisionName",message:`Invalid value '${worker.name}--${long}'`}})}:{}) }];
+  };
+  return {...f,calls,recoveryKey,routeKey,route,recovery,worker};
+}
+
+test("adopts the single corrected external worker, exact early SNI and both original operations through native proof", async () => {
+  const f = await rejectedWorkerFixture(), writes = f.log.filter(x=>x.startsWith("put:"));
+  const seen = [];
+  const health = f.options.healthProbe;
+  f.options.healthProbe = async req => { if(req.role==="worker")seen.push(req.revisionName);return health(req); };
+  assert.equal((await createOpsCoreActivation(f.options).reconcile()).nextAction,"resume-activate");
+  assert.equal((await createOpsCoreActivation(f.options).resume()).phase,"TARGET_ACTIVE");
+  assert.deepEqual(f.calls,[f.recovery.rejectionCorrelationId,f.recovery.correctedWriteCorrelationId]);
+  assert.ok(seen.length && seen.every(name=>name===f.recovery.correctedRevisionName));
+  assert.deepEqual(f.log.filter(x=>x.startsWith("put:")),writes);
+  assert.equal((await createOpsCoreActivation(f.options).observe({customDomains:["ops.corgtex.com"]})).complete,true);
+  assert.equal((await createOpsCoreActivation(f.options).reconcile()).historical,true);
+  for (const key of [f.recoveryKey,f.routeKey]) {
+    const saved=f.records.get(key);f.records.delete(key);
+    await assert.rejects(createOpsCoreActivation(f.options).reconcile());
+    f.records.set(key,saved);
+  }
+});
+
+for (const [label, change] of [
+  ["wrong intent hash", f=>f.records.set(f.recoveryKey,JSON.stringify({...f.recovery,originalCreateIntentSha256:"a".repeat(64)}))],
+  ["replaced corrected body", f=>f.records.set(f.recoveryKey,JSON.stringify({...f.recovery,correctedBodySha256:"b".repeat(64)}))],
+  ["replaced external revision", f=>{f.map.get(f.appId("worker")+"/revisions").body.value[0].properties.template.containers[0].image+="a";}],
+  ["duplicate correlation", f=>f.records.set(f.recoveryKey,JSON.stringify({...f.recovery,correctedWriteCorrelationId:f.recovery.rejectionCorrelationId}))],
+  ["unrelated cloud activity", f=>{f.options.readRecoveryActivity=async()=>[];}],
+  ["foreign certificate", f=>{f.map.get(f.route.certificateId).body.properties.subjectName="foreign.example";}],
+  ["extra route", f=>{f.map.get(f.appId("web")).body.properties.configuration.ingress.customDomains.push({name:"other.example"});}],
+]) test(`external worker recovery rejects ${label} without another create`,async()=>{
+  const f=await rejectedWorkerFixture();change(f);
+  await assert.rejects(createOpsCoreActivation(f.options).resume());
+  assert.deepEqual(f.log.filter(x=>x.startsWith("put:")),["put:web","put:worker"]);
+  assert.equal(f.log.some(x=>x.startsWith("scheduler:")),false);
+});
+
+test("accepts only named complete probe permutations, empty managed registry login and fixed-web null rules", async()=>{
+  let tamper=false;
+  const f=fixture({mutateRead(req,r){
+    const project=t=>{if(!t)return;const c=t.containers[0];c.probes.reverse();if(tamper)c.probes[0].type=c.probes[1].type;
+      if(c.name==="web")t.scale.rules=null;};
+    if(r.body?.properties?.configuration){const reg=r.body.properties.configuration.registries[0];reg.username="";reg.passwordSecretRef="";project(r.body.properties.template);}
+    if(req.resourceId.endsWith("/revisions"))for(const row of r.body.value)project(row.properties.template);
+  }});
+  assert.equal((await createOpsCoreActivation(f.options).activate()).phase,"TARGET_ACTIVE");
+  tamper=true;await assert.rejects(createOpsCoreActivation(f.options).observe());
+});
+
+test("worker revision may omit its nondefault intervals only with the exact full concurrent app scale", async()=>{
+  let drift="";
+  const f=demandFixture({mutateRead(req,r){
+    if(req.resourceId.endsWith("/fixture-worker/revisions")) {
+      const scale=r.body.value[0].properties.template.scale;
+      scale.cooldownPeriod=null;delete scale.pollingInterval;
+      if(drift==="revision")scale.pollingInterval=30;
+      if(drift==="rule")scale.rules[0].name="foreign";
+    } else if(req.resourceId.endsWith("/fixture-worker")&&drift==="app"&&r.body?.properties?.template) {
+      r.body.properties.template.scale.pollingInterval=15;
+    }
+  }});
+  assert.equal((await createOpsCoreActivation(f.options).activate()).phase,"TARGET_ACTIVE");
+  for(drift of ["app","revision","rule"])await assert.rejects(createOpsCoreActivation(f.options).observe());
+});
+
+test("a retained long plan can submit a never-attempted worker exactly once under the safe suffix", async()=>{
+  const f=await rejectedWorkerFixture();
+  const oldIntent=[...f.records].find(([k,v])=>k.endsWith("/intent.json")&&JSON.parse(v).kind==="azure.create.worker")[0];
+  f.records.delete(oldIntent);f.records.delete(f.recoveryKey);f.records.delete(f.routeKey);
+  f.map.get(f.appId("web")).body.properties.configuration.ingress.customDomains=[];
+  f.map.set(f.appId("worker"),missing());
+  const priorArm=f.options.armTransport;
+  f.options.armTransport=async req=>{
+    const res=await priorArm(req);
+    return req.method==="PUT"&&req.resourceId===f.appId("worker") ? {status:202} : res;
+  };
+  const before=f.log.filter(x=>x==="put:worker").length;
+  assert.equal((await createOpsCoreActivation(f.options).reconcile()).nextAction,"resume-activate");
+  assert.equal((await createOpsCoreActivation(f.options).resume()).phase,"TARGET_ACTIVE");
+  assert.equal((await createOpsCoreActivation(f.options).reconcile()).historical,true);
+  assert.equal(f.log.filter(x=>x==="put:worker").length,before+1);
+  assert.equal(f.map.get(f.appId("worker")).body.properties.latestRevisionName.length,54);
+});

@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { archiveEvidenceHash as hash } from "./ops-core-archive.mjs";
-import { createAzureTargetArmTransport, opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
+import { createAzureTargetArmTransport, opsCoreAzureTargetBindingSha256, OPS_CORE_APP_SNAPSHOT_API } from "./ops-core-azure-target.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
 import { createManagedAzureContainerAppTransport, buildManagedAzureReleaseTemplate,
   managedAzureTemplateDigest, managedAzureConfigurationDigest, canonicalizeManagedAzureContainerAppState } from "../release/managed-azure-container-app-transport.mjs";
@@ -11,6 +11,7 @@ import { projectWorkerHealth, validateHealthChallenge } from "./ops-core-health-
 import { buildHealthProbeJobDefinition } from "./ops-core-health-job.mjs";
 import { opsCoreImageRepository } from "./ops-core-image-repository.mjs";
 
+import { opsCoreRevisionSuffix } from "./ops-core-activation-revision.mjs";
 import { createOpsCoreActivationArmTransport } from "./ops-core-activation.mjs";
 import { validateManagedAzureWorkerDemand, assertManagedAzureWorkerDemandApp, buildManagedAzureSchedulerJob,
   schedulerJobWithRelease, createManagedAzureWorkerDemandLifecycle } from "../release/managed-azure-worker-demand.mjs";
@@ -236,15 +237,31 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
   for (const phase of ["incoming", "recovery"]) {
     candidates[phase] = {};
     for (const role of ROLES) {
-      const suffix = `${phase === "incoming" ? "upd" : "rec"}-${p.releaseId.replaceAll("-", "").slice(0, 16)}-${role}`;
-      const template = buildManagedAzureReleaseTemplate({ baseline: snapshot.baselines[role], role, image: p[phase].images[role],
-        release: p[phase].release, revisionSuffix: suffix, migrateWeb: role === "web" });
-      candidates[phase][role] = { template, revisionName: `${p.target.apps[role]}--${suffix}` };
+      const prefix = phase === "incoming" ? "upd" : "rec", app = p.target.apps[role];
+      const build = (suffix) => {
+        const template = buildManagedAzureReleaseTemplate({ baseline: snapshot.baselines[role], role, image: p[phase].images[role],
+          release: p[phase].release, revisionSuffix: suffix, migrateWeb: role === "web" });
+        return { template, revisionName: `${app}--${suffix}` };
+      };
+      const suffix = opsCoreRevisionSuffix(prefix, app, p.releaseId, role);
+      const original = opsCoreRevisionSuffix(prefix, app, p.releaseId, role, true);
+      let candidate = build(suffix);
+      // Never convert a previously submitted template into another provider write.
+      if (suffix !== original) {
+        const legacy = build(original);
+        if ((await operations.readStatus("UPDATE_TEMPLATE", descriptor(phase, role, legacy))).intent) {
+          need(!(await operations.readStatus("UPDATE_TEMPLATE", descriptor(phase, role, candidate))).intent, "UPDATE_REVISION_INTENT_CONFLICT");
+          candidate = legacy;
+        }
+      }
+      candidates[phase][role] = candidate;
     }
   }
   const inputFor = (role) => ({ target, role, exclusiveActivation: ownership, ...(p.workerDemand && role === "worker" ? { workerDemandEnabled: true } : {}) });
-  const patchInput = (phase, role) => ({ phase, role, revisionName: candidates[phase][role].revisionName,
-    templateSha256: managedAzureTemplateDigest(candidates[phase][role].template) });
+  function descriptor(phase, role, candidate) {
+    return { phase, role, revisionName: candidate.revisionName, templateSha256: managedAzureTemplateDigest(candidate.template) };
+  }
+  const patchInput = (phase, role) => descriptor(phase, role, candidates[phase][role]);
   const known = Object.fromEntries(ROLES.map(role => [role, new Set([snapshot.baselines[role].revisionName])]));
   for (const phase of ["incoming", "recovery"]) for (const role of ROLES) {
     if ((await operations.readStatus("UPDATE_TEMPLATE", patchInput(phase, role))).intent) known[role].add(candidates[phase][role].revisionName);
@@ -310,7 +327,7 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
   async function assertWebOrigin(phase) {
     await authority();
     const appId = `/subscriptions/${p.target.subscriptionId}/resourceGroups/${p.target.resourceGroupName}/providers/Microsoft.App/containerApps/${p.target.apps.web}`;
-    const response = await arm({ resourceId: appId, apiVersion: "2024-03-01", signal: custody.signal });
+    const response = await arm({ resourceId: appId, apiVersion: OPS_CORE_APP_SNAPSHOT_API, signal: custody.signal });
     await authority();
     const app = response?.body, properties = app?.properties, configuration = properties?.configuration;
     const sameId = (a, b) => typeof a === "string" && a.toLowerCase() === b.toLowerCase();
@@ -362,7 +379,7 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
         baselines[role] = await transport.readApp({ target, role, release: p.baseline.release,
           imageDigest: p.baseline.images[role].split("@")[1], ...(p.workerDemand && role === "worker" ? { workerDemandEnabled: true } : {}) });
         need(same(baselines[role], snapshot.baselines[role]), "UPDATE_UNCHANGED_BASELINE_DRIFT");
-        need((await transport.readRevisionState({ target, role, revisionName: baselines[role].revisionName,
+        need((await transport.readRevisionState({ target, role, ...(p.workerDemand && role === "worker" ? { workerDemandEnabled: true } : {}), revisionName: baselines[role].revisionName,
           expectedTemplate: baselines[role].template })).kind === "READY", "UPDATE_REVISION_NOT_READY");
       }
       need(same(await snapshotManagedAzureExclusiveActivation(transport, target, baselines), ownership), "UPDATE_UNCHANGED_BASELINE_DRIFT");

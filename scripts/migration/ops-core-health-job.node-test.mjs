@@ -147,6 +147,27 @@ test("probe requests only exact health/ready GETs and emits safe actual acceptan
   const f=probeFixture();const receipt=await runWorkerHealthProbe(f.opts);assert.deepEqual(f.requests.map(r=>r.url),[p.worker.origin+"/health",p.worker.origin+"/ready"]);
   assert(f.requests.every(r=>r.options.method==="GET"&&r.options.redirect==="error"));assert(!JSON.stringify(receipt).includes("PRIVATE_WORKER_ID"));assert.equal(receipt.health.body.tickCount,3);
 });
+test("first private GET can span a 25s cold start while readiness retains its own short bound",async t=>{
+  const f=probeFixture(), budgets=[], original=f.opts.fetchImpl, base=Date.now();
+  t.mock.timers.enable({apis:["Date","setTimeout"],now:base});
+  t.mock.method(AbortSignal,"timeout",ms=>{
+    budgets.push(ms);const c=new AbortController();setTimeout(()=>c.abort(),ms);return c.signal;
+  });
+  f.challenge.expiresAt=base+90000;
+  f.opts.fetchImpl=async(url,options)=>{
+    if(url.endsWith("/health")){t.mock.timers.tick(25000);assert.equal(options.signal.aborted,false);}
+    return original(url,options);
+  };
+  assert.equal((await runWorkerHealthProbe(f.opts)).health.status,200);
+  assert.deepEqual(budgets,[60000,10000]);
+});
+test("a cold first GET cannot extend a shorter challenge",async t=>{
+  const f=probeFixture(),base=Date.now();
+  t.mock.timers.enable({apis:["Date","setTimeout"],now:base});
+  f.challenge.expiresAt=base+12000;
+  f.opts.fetchImpl=async(url,options)=>{t.mock.timers.tick(12001);assert.equal(options.signal.aborted,true);return new Promise(()=>{});};
+  await assert.rejects(runWorkerHealthProbe(f.opts),/HEALTH_PROBE_ABORTED/);
+});
 for(const[name,change]of[
   ["stale tick",h=>h.lastSuccessfulTickAt="2000-01-01T00:00:00Z"],["future tick",h=>h.lastSuccessfulTickAt=new Date(Date.now()+5000).toISOString()],
   ["last error",h=>h.lastError="PRIVATE_ERROR"],["configured SHA",h=>h.release.runtime.source="configured"],["legacy evidence",h=>h.release.runtime.evidence="legacy_provider"],
@@ -474,8 +495,8 @@ async function coldDemandFixture() {
   f.state.replicaCount=0;f.state.wakeOnStart=true;
   return f;
 }
-test("demand private health probe wakes a zero-replica revision before strict post-probe health",async()=>{
-  const f=await coldDemandFixture();const result=await f.run(await f.reopen());
+for (const idle of ["Stopped","ScaleToZero","ScaledToZero"]) test(`demand private health probe wakes a zero-replica ${idle} revision before strict post-probe health`,async()=>{
+  const f=await coldDemandFixture();f.rev.properties.runningState=idle;const result=await f.run(await f.reopen());
   assert.equal(result.health.status,200);assert.equal(f.state.starts,1);assert.equal(f.state.replicaCount,1);
   assert.ok(f.state.requests.some(r=>r.path.includes("/replicas?")));
 });
