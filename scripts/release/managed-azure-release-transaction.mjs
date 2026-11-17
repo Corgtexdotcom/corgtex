@@ -499,7 +499,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       for (const role of ROLES) {
         const baseline = baselines[role];
         if (exclusiveActivation) {
-          const state = await deps.readExclusiveState({ target: preflight.target, role, exclusiveActivation });
+          const state = await deps.readExclusiveState({ target: preflight.target, role, exclusiveActivation, onProgress: recoveryHeartbeat });
           if (![exclusiveActivation.originalMode, exclusiveActivation.temporaryMode].includes(state.mode)
             || state.provisioningState !== "Succeeded" || state.configurationDigest !== exclusiveActivation.configurationDigests[role]
             || state.latestRevisionName !== baseline.revisionName || state.latestReadyRevisionName !== baseline.revisionName

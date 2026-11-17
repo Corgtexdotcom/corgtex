@@ -46,6 +46,16 @@ function fixture() {
 }
 
 describe("owned exclusive Azure startup interval", () => {
+  it("passes the actual owner heartbeat into both-role census reads", async () => {
+    const { deps } = fixture(), heartbeat = vi.fn(async () => {}), signal = new AbortController().signal;
+    await snapshotManagedAzureExclusiveActivation(deps, target, Object.fromEntries(Object.entries(baseline).map(([role, revisionName]) => [role, { revisionName }])), { onProgress: heartbeat, signal });
+    expect(deps.readExclusiveState.mock.calls.every(([input]) => input.onProgress === heartbeat && input.signal === signal)).toBe(true);
+    deps.readExclusiveState.mockClear();
+    const context = createManagedAzureExclusiveActivation(deps, { target, ownership, knownRevisions: { web: [baseline.web], worker: [baseline.worker] }, onProgress: heartbeat });
+    await context.enter(baseline);
+    expect(deps.readExclusiveState.mock.calls.length).toBeGreaterThan(2);
+    expect(deps.readExclusiveState.mock.calls.every(([input]) => input.onProgress === heartbeat)).toBe(true);
+  });
   it("reproduces the observed Single-mode restart despite an earlier zero-replica drain", async () => {
     const { deps, events } = fixture();
     await deps.setRevisionActive({ role: "worker", revisionName: baseline.worker, active: false });
@@ -115,7 +125,7 @@ describe("owned exclusive Azure startup interval", () => {
 
 describe("configuration-only revision mode transport", () => {
   it.each([
-    ["revision-http", "AZURE_EXCLUSIVE_REVISION_LIST_HTTP_429"],
+    ["revision-http", "AZURE_EXCLUSIVE_THROTTLED_RETRY_AFTER_UNPROVEN"],
     ["replica-http", "AZURE_EXCLUSIVE_REPLICA_LIST_HTTP_503"],
     ["revision-shape", "AZURE_EXCLUSIVE_REVISION_LIST_INVALID"],
     ["replica-shape", "AZURE_EXCLUSIVE_REPLICA_LIST_INVALID"],

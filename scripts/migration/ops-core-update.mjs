@@ -227,7 +227,7 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
       need(managedAzureTemplateDigest(raw.body.properties.template) === baselines.worker.templateDigest, "UPDATE_DEMAND_TEMPLATE_DRIFT");
       demand = { baselineJob: buildManagedAzureSchedulerJob({ workerApp: raw.body, demand: p.workerDemand, target: p.target, trigger: "Schedule" }) };
     }
-    const ownership = await snapshotManagedAzureExclusiveActivation(transport, target, baselines);
+    const ownership = await snapshotManagedAzureExclusiveActivation(transport, target, baselines, { onProgress: authority, signal: custody.signal });
     snapshot = { schemaVersion: 1, binding, baselines, ownership, ...(demand ? { demand } : {}) };
     await retain(snapshotKey, snapshot);
   }
@@ -268,7 +268,7 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
       candidates[phase][role] = candidate;
     }
   }
-  const inputFor = (role) => ({ target, role, exclusiveActivation: ownership, ...(p.workerDemand && role === "worker" ? { workerDemandEnabled: true } : {}) });
+  const inputFor = (role) => ({ target, role, exclusiveActivation: ownership, onProgress: authority, signal: custody.signal, ...(p.workerDemand && role === "worker" ? { workerDemandEnabled: true } : {}) });
   function descriptor(phase, role, candidate) {
     return { phase, role, revisionName: candidate.revisionName, templateSha256: managedAzureTemplateDigest(candidate.template) };
   }
@@ -393,7 +393,7 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
         need((await transport.readRevisionState({ target, role, ...(p.workerDemand && role === "worker" ? { workerDemandEnabled: true } : {}), revisionName: baselines[role].revisionName,
           expectedTemplate: baselines[role].template })).kind === "READY", "UPDATE_REVISION_NOT_READY");
       }
-      need(same(await snapshotManagedAzureExclusiveActivation(transport, target, baselines), ownership), "UPDATE_UNCHANGED_BASELINE_DRIFT");
+      need(same(await snapshotManagedAzureExclusiveActivation(transport, target, baselines, { onProgress: authority, signal: custody.signal }), ownership), "UPDATE_UNCHANGED_BASELINE_DRIFT");
       await authority();
     }
     await unchangedPair();

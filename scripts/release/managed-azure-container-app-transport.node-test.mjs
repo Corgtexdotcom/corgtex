@@ -49,3 +49,85 @@ test("a stop LRO cannot forward authorization to the other allowed app",async()=
 test("app-level lifecycle requires explicit worker-demand ownership before any request",async()=>{
  const f=fixture();await assert.rejects(f.transport.setAppRunningState({...input,workerDemandEnabled:false}),/AZURE_APP_ACTION_UNOWNED/);assert.equal(f.calls.length,0);
 });
+
+function censusFixture({ headers = [], revisions = 2, onSleep, requestMs = 0 } = {}) {
+  let now = Date.parse("2026-11-17T19:00:00Z"), replicaAttempts = 0, inFlight = 0, maxInFlight = 0;
+  const calls = [], sleeps = [], heartbeats = [], controller = new AbortController();
+  const options = { target, role: "worker", signal: controller.signal, onProgress: async () => { heartbeats.push(now); now += 200; } };
+  const transport = createManagedAzureContainerAppTransport({ clock: () => now, getAccessToken: async () => "synthetic-token",
+    sleep: async (ms, signal) => { assert(signal instanceof AbortSignal); sleeps.push(ms); now += ms; await onSleep?.({ms,controller,options}); },
+    fetchImpl: async (url, init) => {
+      inFlight++; maxInFlight = Math.max(maxInFlight, inFlight); calls.push({url,method:init.method,at:now}); now += requestMs;
+      try {
+        if (url.includes("/replicas?")) {
+          replicaAttempts++;
+          if (replicaAttempts <= headers.length) {
+            const value = typeof headers[replicaAttempts - 1] === "function" ? headers[replicaAttempts - 1](now) : headers[replicaAttempts - 1];
+            return Response.json({message:"PRIVATE_PROVIDER_BODY"},{status:429,headers:value===null?{}:{"Retry-After":value}});
+          }
+          return Response.json({value:url.includes("--old0/")?[{name:"still-writing"}]:[]});
+        }
+        if (url.includes("/revisions?")) {
+          const second = new URL(url).searchParams.has("skipToken"), split = Math.ceil(revisions / 2);
+          const appName = new URL(url).pathname.split("/containerApps/")[1].split("/")[0];
+          const names = Array.from({length:revisions},(_,i)=>({name:`${appName}--old${i}`,properties:{active:false}}));
+          const next = new URL(url);next.searchParams.set("pageSize","20");next.searchParams.set("skipToken","opaque%cursor");
+          return Response.json({value:second?names.slice(split):names.slice(0,split),...(!second&&revisions>1?{nextLink:next.href}:{})});
+        }
+        return Response.json(raw());
+      } finally { inFlight--; }
+    } });
+  return {transport,options,calls,sleeps,heartbeats,controller,get now(){return now;},get replicaAttempts(){return replicaAttempts;},get maxInFlight(){return maxInFlight;}};
+}
+for (const [name, header] of [["seconds","2"],["HTTP date",now=>new Date(now+2000).toUTCString()]]) {
+  test(`census honors ${name} Retry-After on the same exact GET and retains inactive replicas across pages`,async()=>{
+    const f=censusFixture({headers:[header]});const result=await f.transport.readExclusiveState(f.options);
+    const retry=f.calls.filter(c=>c.url.includes("old0/replicas"));assert.equal(retry.length,2);assert.equal(retry[0].url,retry[1].url);
+    // HTTP dates have whole-second precision; elapsed time must reach the actual date.
+    const required=typeof header==="function"?Date.parse(header(retry[0].at))-retry[0].at:2000;
+    assert(retry[1].at-retry[0].at>=required);assert.equal(f.maxInFlight,1);
+    assert.deepEqual(result.revisions.map(r=>[r.active,r.replicaCount]),[[false,1],[false,0]]);
+    assert(f.calls.every(c=>c.method==="GET"));
+  });
+}
+test("600-second provider cooldown fails immediately and binds both roles without an early GET",async()=>{
+  const f=censusFixture({headers:["600"]});
+  await assert.rejects(f.transport.readExclusiveState(f.options),e=>e.code==="AZURE_EXCLUSIVE_THROTTLED_RETRY_AFTER_600_SECONDS"&&e.retryAfterSeconds===600&&!e.message.includes("PRIVATE"));
+  const count=f.calls.length;assert.equal(f.replicaAttempts,1);assert(!f.sleeps.some(ms=>ms>=600000));
+  await assert.rejects(f.transport.readExclusiveState({...f.options,role:"web"}),/AZURE_EXCLUSIVE_THROTTLED_RETRY_AFTER_600_SECONDS/);
+  assert.equal(f.calls.length,count);
+});
+for (const header of [null,"bad","-1","1.5","99999999999999"]) test(`unproven Retry-After ${header} never retries or yields a census`,async()=>{
+  const f=censusFixture({headers:[header]});await assert.rejects(f.transport.readExclusiveState(f.options),/AZURE_EXCLUSIVE_THROTTLED_RETRY_AFTER_UNPROVEN/);assert.equal(f.replicaAttempts,1);
+});
+test("census bounds HTTP retry count and does not reset its total deadline",async()=>{
+  const f=censusFixture({headers:["1","1","1","1"]});await assert.rejects(f.transport.readExclusiveState(f.options),/AZURE_EXCLUSIVE_THROTTLED_RETRY_AFTER_1_SECONDS/);assert.equal(f.replicaAttempts,3);
+  const g=censusFixture({headers:["100","100"]});await assert.rejects(g.transport.readExclusiveState(g.options),/AZURE_EXCLUSIVE_THROTTLED_RETRY_AFTER_100_SECONDS/);assert.equal(g.replicaAttempts,2);
+});
+test("owner loss during a long backoff stops before the retry",async()=>{
+  const f=censusFixture({headers:["30"],onSleep:async({ms,options})=>{if(ms>=15000)options.onProgress=async()=>{throw Error("OWNER_LOST");};}});
+  await assert.rejects(f.transport.readExclusiveState(f.options),/OWNER_LOST/);assert.equal(f.replicaAttempts,1);
+});
+test("abort during a backoff stops before any further provider GET",async()=>{
+  const f=censusFixture({headers:["2"],onSleep:async({ms,controller})=>{if(ms>=2000)controller.abort();}});
+  await assert.rejects(f.transport.readExclusiveState(f.options),/AZURE_EXCLUSIVE_CENSUS_ABORTED/);assert.equal(f.replicaAttempts,1);
+});
+test("census deadline rejects a slow provider response rather than returning a partial inventory",async()=>{
+  const f=censusFixture({requestMs:180001});await assert.rejects(f.transport.readExclusiveState(f.options),/AZURE_EXCLUSIVE_CENSUS_DEADLINE/);assert.equal(f.calls.length,1);
+});
+test("serial census pacing keeps complete history and throttles expensive authority callbacks",async()=>{
+  const f=censusFixture({revisions:80});const result=await f.transport.readExclusiveState(f.options);
+  assert.equal(result.revisions.length,80);assert.equal(f.calls.length,83);assert.equal(f.maxInFlight,1);
+  for(let i=1;i<f.calls.length;i++)assert(f.calls[i].at-f.calls[i-1].at>=500);
+  assert(f.heartbeats.length>=3&&f.heartbeats.length<=5);
+  for(let i=1;i<f.heartbeats.length-1;i++)assert(f.heartbeats[i]-f.heartbeats[i-1]>=15000);
+  const last=f.calls.at(-1).at;await f.transport.readExclusiveState({...f.options,role:"web"});assert(f.calls[83].at-last>=500);
+});
+test("HTTP throttling on a revision mutation is never automatically retried",async()=>{
+  let posts=0;const transport=createManagedAzureContainerAppTransport({getAccessToken:async()=>"synthetic-token",fetchImpl:async(url,init)=>{
+    if(init.method==="POST"){posts++;return Response.json({error:{code:"TooManyRequests"}},{status:429,headers:{"Retry-After":"600"}});}
+    return Response.json(url.includes("/replicas?")?{value:[]}:{properties:{active:false}});
+  }});
+  const result=await transport.setRevisionActive({target,role:"worker",revisionName:"fixture-worker--old",active:true});
+  assert.equal(result.succeeded,false);assert.equal(result.providerStatus,429);assert.equal(posts,1);
+});
