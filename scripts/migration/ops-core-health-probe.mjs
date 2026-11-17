@@ -69,8 +69,8 @@ export function projectWorkerHealth(health,ready,target,observedAt=Date.now()) {
       runtime:{gitSha:release.runtime.gitSha,source:release.runtime.source,evidence:release.runtime.evidence},
       drift:{gitSha:false,imageTag:false,version:false,details:[]}}}},ready:{status:200,body:{ready:ready.ready,phase:ready.phase}}};
 }
-async function readJson(url,signal,fetchImpl) {
-  const timeout=AbortSignal.any([signal,AbortSignal.timeout(10000)]);
+async function readJson(url,signal,fetchImpl,requestTimeoutMs=10000) {
+  const timeout=AbortSignal.any([signal,AbortSignal.timeout(requestTimeoutMs)]);
   let reject;const cancelled=new Promise((_,no)=>{reject=()=>no(new ProbeError("HEALTH_PROBE_ABORTED"));timeout.addEventListener("abort",reject,{once:true});});
   let reader;
   try {
@@ -99,9 +99,14 @@ export async function runWorkerHealthProbe({target:raw,challenge,identity,signal
     const deadline=new AbortController();
     timer=setTimeout(()=>deadline.abort(),Math.min(110000,challenge.expiresAt-Date.now()));
     signal=AbortSignal.any([signal,deadline.signal]);
+    let firstRequest=true;
     for (;;) {
       need(!signal.aborted,"HEALTH_PROBE_ABORTED");validateHealthChallenge(challenge,target,identity);
-      const healthResponse=await readJson(`${target.origin}/health`,signal,fetchImpl),health=healthResponse.body;
+      // The first private GET wakes a scale-to-zero worker. A new replica may
+      // need to pull its image before HTTP returns. The same job and challenge
+      // deadline still govern this request, its body and the subsequent /ready.
+      const healthResponse=await readJson(`${target.origin}/health`,signal,fetchImpl,firstRequest?60000:10000),health=healthResponse.body;
+      firstRequest=false;
       need(healthResponse.status===200,"HEALTH_PROBE_HTTP_REJECTED");validateWorkerRelease(health,target);
       need(health?.status==="ok"&&["starting","running"].includes(health.phase)&&health.lastError===null
         &&Number.isSafeInteger(health.tickCount)&&health.tickCount>=0,"HEALTH_PROBE_WORKER_NOT_READY");
