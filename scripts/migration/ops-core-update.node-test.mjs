@@ -8,7 +8,7 @@ import { runOpsCoreUpdate, opsCoreUpdateDiagnostic, opsCoreUpdateTransportTarget
 import { openOpsCoreReleaseCustody } from "./ops-core-release-custody.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
 import { buildHealthProbeJobDefinition } from "./ops-core-health-job.mjs";
-import { canonicalizeManagedAzureContainerAppState, managedAzureConfigurationDigest,
+import { canonicalizeManagedAzureContainerAppState, managedAzureConfigurationDigest, managedAzureTemplateDigest,
   assertManagedAzureRevisionProjection } from "../release/managed-azure-container-app-transport.mjs";
 
 import { managedAzureWorkerDemandScale, buildManagedAzureSchedulerJob } from "../release/managed-azure-worker-demand.mjs";
@@ -35,7 +35,12 @@ function runtimeRelease(r, service) {
     drift: { gitSha: false, imageTag: false, version: false, details: [] } };
 }
 function fixture(options = {}) {
-  const plan = fixturePlan(), target = opsCoreUpdateTransportTarget(plan), records = new Map(), log = [], apps = {}, revisionState = {};
+  const plan = fixturePlan();
+  if (options.workerName) {
+    plan.target.apps.worker = options.workerName;
+    plan.origins.worker = `https://${options.workerName}.internal.fixture.westus3.azurecontainerapps.io`;
+  }
+  const target = opsCoreUpdateTransportTarget(plan), records = new Map(), log = [], apps = {}, revisionState = {};
   const controller = new AbortController(); let finished = null, mode = "apply", probeNumber = 0;
   for (const role of ["web", "worker"]) {
     const name = plan.target.apps[role], suffix = `baseline-${role}`, revision = `${name}--${suffix}`;
@@ -175,7 +180,7 @@ function fixture(options = {}) {
             counts: { finalized: 0, dispatched: 0, processed: 0, scheduled: 0, scheduledPeriodic: 0, scheduledDrip: 0 } } };
       } } : {}),
       async armTransport(input) {
-        assert.equal(input.resourceId, apps.web.id); assert.equal(input.apiVersion, "2024-03-01");
+        assert.equal(input.resourceId, apps.web.id); assert.equal(input.apiVersion, "2025-01-01");
         assert.equal(input.signal, custody.signal); log.push("arm:web");
         const response = { status: 200, body: structuredClone(apps.web) };
         options.armRead?.(input, response, f); return response;
@@ -213,6 +218,46 @@ function fixture(options = {}) {
   };
   return f;
 }
+test("Ops updater forward and recovery use Azure-valid revisions for its production-size worker name", async () => {
+  const workerName = "ca-corgtex-opscore-ops-worker";
+  const f = fixture({ demand: true, workerName });
+  const result = await f.run("apply");
+  assert.equal(result.revisions.worker, `${workerName}--upd-${f.plan.releaseId.replaceAll("-", "").slice(0, 16)}-w`);
+  assert.ok(result.revisions.worker.length <= 54);
+  const g = fixture({ demand: true, workerName, beforeFinish() { throw Error("simulate terminal-state interruption"); } });
+  await assert.rejects(g.run("apply"), /terminal-state interruption/);
+  g.reopen();
+  await assert.rejects(g.run("recover"), /terminal-state interruption/);
+  const recovered = g.apps.worker.properties.latestRevisionName;
+  assert.equal(recovered, `${workerName}--rec-${g.plan.releaseId.replaceAll("-", "").slice(0, 16)}-w`);
+  assert.ok(recovered.length <= 54);
+});
+
+test("a long previously submitted worker update stays bound to its own intent", async () => {
+  const workerName = "ca-corgtex-opscore-ops-worker";
+  let submitted;
+  const f = fixture({ workerName, beforePatch(input) {
+    if (input.role === "worker") { submitted = input.template; throw Error("interrupted"); }
+  } });
+  await assert.rejects(f.run("apply"));
+  const legacy = structuredClone(submitted);
+  legacy.revisionSuffix = legacy.revisionSuffix.replace(/-w$/, "-worker");
+  const keyFor = template => {
+    const inputSha256 = hash({ phase: "incoming", role: "worker", revisionName: workerName + "--" + template.revisionSuffix,
+      templateSha256: managedAzureTemplateDigest(template) });
+    return { inputSha256, operationKey: hash({ kind: "UPDATE_TEMPLATE", inputSha256 }) };
+  };
+  const currentKey = keyFor(submitted), legacyKey = keyFor(legacy);
+  const path = [...f.records.keys()].find(k => k.endsWith("/" + currentKey.operationKey + "/intent.json"));
+  f.records.set(path.replace(currentKey.operationKey, legacyKey.operationKey), JSON.stringify({ ...JSON.parse(f.records.get(path)), ...legacyKey }));
+  const effects = f.effects(); f.reopen();
+  await rejected(f.run("reconcile"), "UPDATE_REVISION_INTENT_CONFLICT");
+  f.records.delete(path);
+  await assert.rejects(f.run("reconcile"));
+  assert.deepEqual(f.effects(), effects);
+  assert.equal(f.records.has(path), false);
+});
+
 const rejected = (promise, code) => assert.rejects(promise, error => opsCoreUpdateDiagnostic(error) === code);
 
 test("an accepted cross-group database binding survives app-only release and retains pinned runtime secrets", async () => {

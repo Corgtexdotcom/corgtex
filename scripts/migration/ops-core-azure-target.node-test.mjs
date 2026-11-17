@@ -337,6 +337,10 @@ test("real transport is authenticated GET only with fixed az argv, abort and red
   assert.deepEqual(calls[0].args.slice(0, 4), ["account", "get-access-token", "--subscription", subscriptionId]);
   assert.equal(calls[1].options.method, "GET"); assert.equal(calls[1].options.redirect, "error");
   assert.equal(calls[1].options.headers.Authorization, "Bearer fixture-token");
+  // Release web-origin verification needs the same app shape as the retained configuration digest.
+  const app = request.resourceId.replace(/managedEnvironments\/[^/]+$/, "containerApps/fixture-web");
+  assert.deepEqual(await transport({ ...request, resourceId: app, apiVersion: "2025-01-01" }), { status: 200, body: { id: "safe" } });
+  await rejects(transport({ ...request, apiVersion: "2025-01-01" }), "AZURE_TARGET_REQUEST_INVALID");
   const broken = createAzureTargetArmTransport({ subscriptionId,
     execFileImpl(_, __, ___, callback) { callback(new Error("credential detail must not escape")); } });
   await rejects(broken(request), "AZURE_TARGET_ARM_READ_FAILED");

@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 
 const ARM = "https://management.azure.com";
+export const OPS_CORE_APP_SNAPSHOT_API = "2025-01-01";
 const API = Object.freeze({ app: "2024-03-01", postgres: "2025-08-01", redis: "2025-07-01", network: "2024-05-01",
   storage: "2023-05-01", vault: "2023-07-01", identity: "2023-01-31" });
 const GUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
@@ -92,7 +93,8 @@ export function createAzureTargetArmTransport({ subscriptionId, execFileImpl = e
   return async ({ resourceId, apiVersion, nextLink = null, signal }) => {
     requireValue(signal instanceof AbortSignal && typeof resourceId === "string"
       && resourceId.toLowerCase().startsWith(`/subscriptions/${subscriptionId}/resourcegroups/`.toLowerCase())
-      && Object.values(API).includes(apiVersion), "AZURE_TARGET_REQUEST_INVALID");
+      && (Object.values(API).includes(apiVersion) || apiVersion === OPS_CORE_APP_SNAPSHOT_API
+        && /\/providers\/microsoft\.app\/containerapps\/[a-z0-9-]{1,32}$/i.test(resourceId)), "AZURE_TARGET_REQUEST_INVALID");
     const url = requestUrl(resourceId, apiVersion, nextLink);
     const boundedSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
     signalCheck(boundedSignal);

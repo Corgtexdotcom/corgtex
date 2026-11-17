@@ -5,12 +5,14 @@ const exact = (value, keys) => value && Object.keys(value).sort().join() === key
 const need = value => { if (!value) throw Error("ACTIVATION_EXTERNAL_RECOVERY_INVALID"); };
 const sameId = (a, b) => typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
 
-export function activationSuffix(app, operationId, role, legacy = false) {
+export function opsCoreRevisionSuffix(prefix, app, operationId, role, legacy = false) {
   const nonce = operationId.replaceAll("-", "").slice(0, 16);
-  const full = `boot-${nonce}-${role}`;
+  const full = `${prefix}-${nonce}-${role}`;
   const budget = 54 - app.length - 2;
-  return legacy || full.length <= budget ? full : `boot-${nonce.slice(0, budget - 7)}-${role[0]}`;
+  return legacy || full.length <= budget ? full : `${prefix}-${nonce.slice(0, budget - prefix.length - 3)}-${role[0]}`;
 }
+
+export const activationSuffix = (app, operationId, role, legacy) => opsCoreRevisionSuffix("boot", app, operationId, role, legacy);
 
 // These records are produced by the independent one-shot operator under the
 // original private custody. The controller can verify the corrected worker,
