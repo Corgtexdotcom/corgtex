@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { Readable } from "node:stream";
 import { mkdtemp, rm, writeFile, readFile, stat, chmod, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -85,6 +86,84 @@ function fixture() {
 }
 const rejects = (promise, message) => assert.rejects(promise, error => error.message === message);
 async function directory(t) { const path = await mkdtemp(join(tmpdir(), "ops-core-update-cli-")); t.after(() => rm(path, { recursive: true })); return path; }
+
+test("CLI entrypoint preserves typed health and Azure failures without provider details", () => {
+  const source = `
+    import { updateMain } from ${JSON.stringify(new URL("./run-ops-core-update.mjs", import.meta.url).href)};
+    import { createHealthJobTransport, buildHealthProbeJobDefinition } from ${JSON.stringify(new URL("./ops-core-health-job.mjs", import.meta.url).href)};
+    import { validateHealthTarget } from ${JSON.stringify(new URL("./ops-core-health-probe.mjs", import.meta.url).href)};
+    import { opsCoreAzureTargetBindingSha256 } from ${JSON.stringify(new URL("./ops-core-azure-target.mjs", import.meta.url).href)};
+    import { createOpsCoreActivationArmTransport } from ${JSON.stringify(new URL("./ops-core-activation.mjs", import.meta.url).href)};
+    import { ManagedAzureContainerAppError } from ${JSON.stringify(new URL("../release/managed-azure-container-app-transport.mjs", import.meta.url).href)};
+    import { validateManagedAzureWorkerDemand } from ${JSON.stringify(new URL("../release/managed-azure-worker-demand.mjs", import.meta.url).href)};
+    const capture = async fn => { try { await fn(); } catch (error) { return error; } throw Error("fixture did not fail"); };
+    const plan = ${JSON.stringify(fixture().envelope.health.baseline)};
+    const transport = createHealthJobTransport(plan, {
+      credential: { async getToken() { return { token: "fixture-secret" }; } },
+      async fetchImpl(url) { return { url, redirected: false, status: 500 }; },
+    });
+    const health = await capture(() => buildHealthProbeJobDefinition(null));
+    const failures = [
+      // Same private error type and fixed code emitted for a failed named job.
+      new health.constructor("HEALTH_JOB_EXECUTION_FAILED"),
+      await capture(() => transport({ method: "GET", path: plan.jobResourceId + "?api-version=2025-07-01", signal: new AbortController().signal })),
+      await capture(() => validateHealthTarget(null)),
+      await capture(() => opsCoreAzureTargetBindingSha256({})),
+      await capture(() => createOpsCoreActivationArmTransport({ subscriptionId: "invalid" })),
+      await capture(() => validateManagedAzureWorkerDemand({}, {})),
+      Object.assign(new ManagedAzureContainerAppError("AZURE_EXCLUSIVE_REPLICA_LIST_HTTP_429", true), {
+        message: "Bearer fixture-secret", details: { password: "fixture-secret" }, cause: Error("fixture-secret"), retryAfterMs: 600000,
+      }),
+    ];
+    for (const error of failures) await updateMain(["apply", "fixture-envelope"], {
+      readEnvelope: async () => plan, execute: async () => { throw error; },
+    });
+    await updateMain(["fetch-envelope", "ops", "a".repeat(64), "unused"], {
+      downloadEnvelope: async () => { throw failures[0]; },
+    });
+  `;
+  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", source], {
+    encoding: "utf8", timeout: 20_000, env: { PATH: process.env.PATH },
+  });
+  assert.equal(child.error, undefined);
+  assert.equal(child.status, 1);
+  assert.equal(child.stdout, "");
+  assert.deepEqual(child.stderr.trim().split("\n"), ["HEALTH_JOB_EXECUTION_FAILED", "HEALTH_JOB_PROVIDER_REJECTED",
+    "HEALTH_PROBE_TARGET_INVALID", "AZURE_TARGET_BINDING_INVALID", "ACTIVATION_TRANSPORT_INVALID",
+    "WORKER_DEMAND_PLAN_INVALID", "AZURE_EXCLUSIVE_REPLICA_LIST_HTTP_429", "HEALTH_JOB_EXECUTION_FAILED"]);
+  assert.doesNotMatch(child.stderr, /fixture-secret|Bearer|password|retryAfter|\bat .*\.mjs/);
+});
+
+test("CLI entrypoint redacts unknown, spoofed and malformed typed error messages", () => {
+  const source = `
+    import { updateMain } from ${JSON.stringify(new URL("./run-ops-core-update.mjs", import.meta.url).href)};
+    import { ManagedAzureContainerAppError } from ${JSON.stringify(new URL("../release/managed-azure-container-app-transport.mjs", import.meta.url).href)};
+    const failures = [Error("postgres://fixture-secret@invalid/database"),
+      Object.assign(Error("HEALTH_JOB_EXECUTION_FAILED"), { name: "HealthJobError", code: "HEALTH_JOB_EXECUTION_FAILED" }),
+      Object.assign(Error("Bearer fixture-secret"), { name: "ManagedAzureContainerAppError", code: "AZURE_READ_FAILED" }),
+      new ManagedAzureContainerAppError("AZURE_READ_FAILED\\nBearer fixture-secret"),
+      { message: "fixture-secret", code: "HEALTH_JOB_EXECUTION_FAILED" }, null];
+    for (const error of failures) await updateMain(["reconcile", "fixture-envelope"], {
+      readEnvelope: async () => ({}), execute: async () => { throw error; },
+    });
+  `;
+  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", source], {
+    encoding: "utf8", timeout: 20_000, env: { PATH: process.env.PATH },
+  });
+  assert.equal(child.error, undefined);
+  assert.equal(child.status, 1);
+  assert.equal(child.stdout, "");
+  assert.equal(child.stderr, "UPDATE_RECONCILIATION_REQUIRED\n".repeat(6));
+});
+
+test("native CLI invocation still emits its sanitized argument diagnostic", () => {
+  const child = spawnSync(process.execPath, [new URL("./run-ops-core-update.mjs", import.meta.url).pathname], {
+    encoding: "utf8", timeout: 20_000, env: { PATH: process.env.PATH },
+  });
+  assert.equal(child.status, 1);
+  assert.equal(child.stdout, "");
+  assert.equal(child.stderr, "UPDATE_ARGUMENTS_INVALID\n");
+});
 
 test("envelope validation binds each health phase to exact release and three distinct probe jobs", () => {
   const f = fixture(); assert.deepEqual(validateUpdateEnvelope(f.envelope), f.envelope);
