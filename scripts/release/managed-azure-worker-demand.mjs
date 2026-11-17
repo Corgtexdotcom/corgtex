@@ -110,13 +110,18 @@ function omitNull(value, keys) {
   for (const key of keys) if (value[key] == null) delete value[key];
   return value;
 }
-function configurationIdentity(value) {
+function configurationIdentity(value, jobIdentity) {
   const result = structuredClone(value);
   omitNull(result, ["dapr", "eventTriggerConfig", "manualTriggerConfig", "scheduleTriggerConfig"]);
   if (result.identitySettings?.length === 0) delete result.identitySettings;
   for (const secret of result.secrets ?? []) omitNull(secret, ["value"]);
   for (const registry of result.registries ?? []) {
     omitNull(registry, ["username", "passwordSecretRef", "identity"]);
+    // App reads materialize both empty login fields for the same managed identity that jobs return alone.
+    if (sameId(registry.identity, jobIdentity) && registry.username === "" && registry.passwordSecretRef === "") {
+      delete registry.username;
+      delete registry.passwordSecretRef;
+    }
     // ARM materializes an inactive identity for password-authenticated registries.
     if (registry.identity === "" && typeof registry.username === "string" && registry.username.length > 0
       && typeof registry.passwordSecretRef === "string" && registry.passwordSecretRef.length > 0) delete registry.identity;
@@ -150,7 +155,7 @@ export function assertManagedAzureSchedulerJob(actual, expected, jobId) {
     && actual.identity?.type === "UserAssigned" && identities.length === 1
     && sameId(identities[0], Object.keys(expected.identity.userAssignedIdentities)[0])
     && p?.provisioningState === "Succeeded" && sameId(p.environmentId, e.environmentId)
-    && p.workloadProfileName === "Consumption" && same(configurationIdentity(p.configuration), configurationIdentity(e.configuration))
+    && p.workloadProfileName === "Consumption" && same(configurationIdentity(p.configuration, identities[0]), configurationIdentity(e.configuration, identities[0]))
     && same(templateIdentity(p.template), templateIdentity(e.template)), "WORKER_DEMAND_SCHEDULER_DRIFT");
   return true;
 }
