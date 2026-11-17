@@ -474,8 +474,8 @@ async function coldDemandFixture() {
   f.state.replicaCount=0;f.state.wakeOnStart=true;
   return f;
 }
-test("demand private health probe wakes a zero-replica revision before strict post-probe health",async()=>{
-  const f=await coldDemandFixture();const result=await f.run(await f.reopen());
+for (const idle of ["Stopped","ScaleToZero","ScaledToZero"]) test(`demand private health probe wakes a zero-replica ${idle} revision before strict post-probe health`,async()=>{
+  const f=await coldDemandFixture();f.rev.properties.runningState=idle;const result=await f.run(await f.reopen());
   assert.equal(result.health.status,200);assert.equal(f.state.starts,1);assert.equal(f.state.replicaCount,1);
   assert.ok(f.state.requests.some(r=>r.path.includes("/replicas?")));
 });

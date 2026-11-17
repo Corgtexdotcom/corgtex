@@ -237,7 +237,7 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
     if(workerDemand&&allowCold){
       const replicas=await request("GET",pathFor(`${p.worker.appId}/revisions/${r.revisionName}/replicas`),signal);
       need(replicas.status===200&&Array.isArray(replicas.body?.value)&&!replicas.body.nextLink&&replicas.body.value.length<=1,"HEALTH_JOB_DEMAND_REPLICAS_INVALID");
-      cold=replicas.body.value.length===0&&["Stopped","ScaleToZero","Running","Activating"].includes(rp?.runningState);
+      cold=replicas.body.value.length===0&&["Stopped","ScaleToZero","ScaledToZero","Running","Activating"].includes(rp?.runningState);
     }
     need(rev.status===200&&rev.body?.name===r.revisionName&&(!rev.body.id||equalId(rev.body.id,`${p.worker.appId}/revisions/${r.revisionName}`))
       &&rp?.active===true&&rp.provisioningState==="Provisioned"&&(cold||rp.healthState==="Healthy"&&["Running","RunningAtMaxScale"].includes(rp.runningState))

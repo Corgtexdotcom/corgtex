@@ -362,7 +362,7 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
         baselines[role] = await transport.readApp({ target, role, release: p.baseline.release,
           imageDigest: p.baseline.images[role].split("@")[1], ...(p.workerDemand && role === "worker" ? { workerDemandEnabled: true } : {}) });
         need(same(baselines[role], snapshot.baselines[role]), "UPDATE_UNCHANGED_BASELINE_DRIFT");
-        need((await transport.readRevisionState({ target, role, revisionName: baselines[role].revisionName,
+        need((await transport.readRevisionState({ target, role, ...(p.workerDemand && role === "worker" ? { workerDemandEnabled: true } : {}), revisionName: baselines[role].revisionName,
           expectedTemplate: baselines[role].template })).kind === "READY", "UPDATE_REVISION_NOT_READY");
       }
       need(same(await snapshotManagedAzureExclusiveActivation(transport, target, baselines), ownership), "UPDATE_UNCHANGED_BASELINE_DRIFT");
