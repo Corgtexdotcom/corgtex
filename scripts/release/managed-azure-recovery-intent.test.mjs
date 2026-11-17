@@ -2,9 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createManagedAzureContainerAppTransport,
   managedAzureTemplateDigest,
+  managedAzureConfigurationDigest,
 } from "./managed-azure-container-app-transport.mjs";
 import {
   buildManagedAzureRecoveryIntent,
+  supersedeInvalidRecoveryIntent,
   managedAzureRecoveryIntents,
   readManagedAzureRecoveryIntentPlan,
   runManagedAzureRecoveryIntent,
@@ -73,6 +75,7 @@ function planFor(role = "web") {
   const digest = role === "web" ? imageDigest : workerImageDigest;
   return buildManagedAzureRecoveryIntent({
     originatingLease,
+    protocolVersion: 1,
     target,
     role,
     predecessor: predecessor(role),
@@ -372,5 +375,90 @@ describe("managed Azure recovery intent", () => {
     expect(() => managedAzureRecoveryIntents({ recovery: { schemaVersion: 1, intents: [] } })).toThrow("RECOVERY_INTENT_JOURNAL_INVALID");
     expect(() => managedAzureRecoveryIntents({ recovery: { schemaVersion: 2, intents: [web, web] } })).toThrow("RECOVERY_INTENT_JOURNAL_INVALID");
     expect(() => managedAzureRecoveryIntents({ recovery: { schemaVersion: 2, intents: [web, worker, { ...web, role: "extra" }] } })).toThrow("RECOVERY_INTENT_JOURNAL_INVALID");
+  });
+});
+
+
+describe("invalid unapplied recovery intent supersession", () => {
+  function fixture() {
+    const ownTarget = { ...target, webAppName: "ca-corgtex-ss-prod-web", workerAppName: "ca-corgtex-ss-prod-worker" };
+    const before = { ...predecessor(), appName: ownTarget.webAppName, revisionName: `${ownTarget.webAppName}--web-base` };
+    const args = { originatingLease, target: ownTarget, role: "web", predecessor: before, release,
+      image: `${ownTarget.acrServer}/corgtex/web@${imageDigest}`, imageDigest };
+    const old = buildManagedAzureRecoveryIntent({ ...args, protocolVersion: 1 });
+    const next = buildManagedAzureRecoveryIntent(args);
+    const ownership = { originalMode: "Single", temporaryMode: "Multiple", configurationDigests: { web: `sha256:${"a".repeat(64)}`, worker: `sha256:${"b".repeat(64)}` } };
+    const census = { latestRevisionName: before.revisionName, latestReadyRevisionName: before.revisionName,
+      provisioningState: "Succeeded", configurationDigest: ownership.configurationDigests.web,
+      revisions: [{ revisionName: before.revisionName, active: true, replicaCount: 1 },
+        ...Array.from({ length: 100 }, (_, n) => ({ revisionName: `${before.appName}--old-${n}`, active: false, replicaCount: 0 }))] };
+    const deps = { intentClock: () => 100_000,
+      readAppTemplate: vi.fn(async () => ({ state: before, latestReadyRevisionName: before.revisionName, provisioningState: "Succeeded" })),
+      readExclusiveState: vi.fn(async () => census),
+      lease: vi.fn(async (operation, params) => operation === "supersede_invalid_recovery_intent"
+        ? { deploymentId, leaseId: handle.leaseId, fence: handle.fence, phase: "RECOVERY_REQUIRED", created: true, intent: params.intent }
+        : { phase: "RECOVERY_REQUIRED" }) };
+    const input = { handle, reason: "Supersede the proven invalid, unapplied revision name.", intent: old.intent, originatingLease,
+      target: ownTarget, release, image: args.image, releases: [{ release, imageDigest }], exclusiveActivation: ownership };
+    return { deps, input, old, next, census, before };
+  }
+  it.each([false, true])("uses the native complete census for a drained owned Multiple predecessor (config drift=%s)", async drift => {
+    const { deps, input, before } = fixture();
+    const configuration = { activeRevisionsMode: "Multiple", ingress: { traffic: [{ latestRevision: true, weight: 100 }] } };
+    input.exclusiveActivation.configurationDigests.web = managedAzureConfigurationDigest(configuration);
+    const fetchImpl = vi.fn(async url => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/replicas")) return Response.json({ value: [] });
+      if (path.endsWith("/revisions")) return Response.json({ value: [{ name: before.revisionName, properties: { active: false } }] });
+      return Response.json({ name: before.appName, properties: { configuration: { ...configuration, ...(drift ? { ingress: { ...configuration.ingress, external: true } } : {}) },
+        provisioningState: "Succeeded", latestRevisionName: before.revisionName, latestReadyRevisionName: before.revisionName } });
+    });
+    let now = 100_000;
+    const native = createManagedAzureContainerAppTransport({ fetchImpl, getAccessToken: async () => "synthetic-token",
+      clock: () => now, sleep: async ms => { now += ms; } });
+    deps.readExclusiveState = native.readExclusiveState;
+    if (drift) {
+      await expect(supersedeInvalidRecoveryIntent(deps, input)).rejects.toThrow("AZURE_EXCLUSIVE_CONFIGURATION_DRIFT");
+      expect(deps.lease.mock.calls.some(([op]) => op === "supersede_invalid_recovery_intent")).toBe(false);
+    } else await expect(supersedeInvalidRecoveryIntent(deps, input)).resolves.toMatchObject({ creationReceipt: { created: true } });
+    expect(fetchImpl.mock.calls.every(([, init]) => init.method === "GET")).toBe(true);
+  });
+  it("proves all 101 revisions before supersession and carries one creation acknowledgement into one normal PATCH", async () => {
+    const { deps, input, next } = fixture();
+    const prepared = await supersedeInvalidRecoveryIntent(deps, input);
+    expect(prepared.intent).toEqual(next.intent);
+    const call = deps.lease.mock.calls.find(([operation]) => operation === "supersede_invalid_recovery_intent");
+    expect(call[1].evidence.revisions).toHaveLength(101);
+    expect(deps.readAppTemplate).toHaveBeenCalledTimes(2);
+    expect(deps.readExclusiveState.mock.invocationCallOrder[0]).toBeLessThan(deps.readAppTemplate.mock.invocationCallOrder[1]);
+    const live = rig({ plan: next });
+    await expect(runManagedAzureRecoveryIntent(live.deps, { ...input, ...prepared, existing: true })).resolves.toMatchObject({ patched: true });
+    expect(live.deps.patchTemplate).toHaveBeenCalledTimes(1);
+    expect(live.deps.lease.mock.calls.some(([operation]) => operation === "record_recovery_intent")).toBe(false);
+  });
+  it.each(["old-present", "new-present", "foreign-active", "foreign-replica", "predecessor-drift", "configuration-drift", "owner-lost", "ambiguous-census", "ack-lost", "created-false"])("does not grant PATCH authority after %s", async mode => {
+    const { deps, input, old, next, census, before } = fixture();
+    if (mode === "old-present" || mode === "new-present") census.revisions.push({ revisionName: `${old.intent.appName}--${mode === "old-present" ? old.intent.revisionSuffix : next.intent.revisionSuffix}`, active: false, replicaCount: 0 });
+    if (mode === "foreign-active") census.revisions[1].active = true;
+    if (mode === "foreign-replica") census.revisions[1].replicaCount = 1;
+    if (mode === "predecessor-drift") deps.readAppTemplate.mockResolvedValue({ state: { ...before, templateDigest: `sha256:${"f".repeat(64)}` } });
+    if (mode === "configuration-drift") census.configurationDigest = `sha256:${"f".repeat(64)}`;
+    if (mode === "ambiguous-census") deps.readExclusiveState.mockRejectedValue(new Error("bounded provider read failed"));
+    const lease = deps.lease.getMockImplementation();
+    if (["owner-lost", "ack-lost", "created-false"].includes(mode)) deps.lease.mockImplementation(async (operation, args) => {
+      if (operation === "heartbeat_recovery" && mode === "owner-lost" || operation === "supersede_invalid_recovery_intent" && mode === "ack-lost") throw new Error("uncertain");
+      const result = await lease(operation, args);
+      return operation === "supersede_invalid_recovery_intent" ? { ...result, created: false } : result;
+    });
+    await expect(supersedeInvalidRecoveryIntent(deps, input)).rejects.toThrow();
+    if (!["ack-lost", "created-false"].includes(mode)) expect(deps.lease.mock.calls.some(([operation]) => operation === "supersede_invalid_recovery_intent")).toBe(false);
+  });
+  it("after an interruption, a retained replacement without a revision stays blocked and never repeats its PATCH", async () => {
+    const { next, input } = fixture();const live = rig({ plan: next, revisionKinds: ["ABSENT"] });
+    await expect(runManagedAzureRecoveryIntent(live.deps, { ...input, ...next, existing: true })).rejects.toThrow("RECOVERY_INTENT_RECORDED_REVISION_ABSENT");
+    expect(live.deps.patchTemplate).not.toHaveBeenCalled();
+    live.deps.readRevisionState.mockResolvedValue({ kind: "READY" });
+    await expect(runManagedAzureRecoveryIntent(live.deps, { ...input, ...next, existing: true })).resolves.toMatchObject({ patched: false });
+    expect(live.deps.patchTemplate).not.toHaveBeenCalled();
   });
 });

@@ -12,7 +12,7 @@ import {
   managedAzureRevisionSuffix,
 } from "./managed-azure-container-app-transport.mjs";
 import { ManagedAzureRecoveryIntentError, buildManagedAzureRecoveryIntent, managedAzureRecoveryIntents,
-  readManagedAzureRecoveryIntentPlan, runManagedAzureRecoveryIntent } from "./managed-azure-recovery-intent.mjs";
+  readManagedAzureRecoveryIntentPlan, runManagedAzureRecoveryIntent, supersedeInvalidRecoveryIntent, assertRecoveryIntentName } from "./managed-azure-recovery-intent.mjs";
 import { managedAzureHealthReady } from "./managed-azure-release-transaction.mjs";
 import { createHash } from "node:crypto";
 
@@ -372,7 +372,7 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
   if (status.deploymentId !== input.deploymentId || (status.phase !== "MUTATING" && status.phase !== "RECOVERY_REQUIRED")
     || !UUID.test(status.leaseId) || !Number.isSafeInteger(status.fence) || status.fence < 1 || status.fence > MAX_INT
     || !recoveryTargetMatchesInput(status.target, input)) fail("MANAGED_RELEASE_RECOVERY_STATUS_INVALID");
-  if (![1, 2].includes(status.writeIntentProtocolVersion)) return Object.freeze({ status: "RECOVERY_BLOCKED",
+  if (![1, 2, 3].includes(status.writeIntentProtocolVersion)) return Object.freeze({ status: "RECOVERY_BLOCKED",
     deploymentId: input.deploymentId, code: "RECOVERY_INTENT_PROTOCOL_UNAVAILABLE" });
   const claimed = await deps.lease("claim_recovery", {
     deploymentId: input.deploymentId,
@@ -406,8 +406,24 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
     const alternateWebSuffix = managedAzureRevisionSuffix({ ...originatingLease, role: "web", phase: "rollback", generation: 2 });
     const intents = managedAzureRecoveryIntents(status);
     const recorded = Object.fromEntries(intents.map((intent) => [intent.role, intent]));
+    const replacementPlans = {};
+    // Reconcile invalid, unapplied history before entering the writer interval.
+    // A lost supersession acknowledgement cannot authorize a retrying PATCH.
+    for (const role of ["web", "worker"]) {
+      const intent = recorded[role];
+      if (!intent || `${intent.appName}--${intent.revisionSuffix}`.length <= 54) continue;
+      if (status.writeIntentProtocolVersion !== 3 || rollback.schemaVersion !== 3) fail("RECOVERY_INTENT_PROTOCOL_UNAVAILABLE");
+      const recovery = rollback.compatibleRecovery;
+      replacementPlans[role] = await supersedeInvalidRecoveryIntent(deps, { handle, reason: input.reason, intent, originatingLease,
+        target: status.target, release: releaseIdentity(recovery.imageTag, recovery.releaseVersion), image: recovery[role].image,
+        exclusiveActivation: rollback.exclusiveActivation,
+        releases: [{ release: baseline, originalBaseline: originalBaseline(status, rollback, role, baseline), imageDigest: digestFromImage(rollback.previous[role].image) },
+          { release: incomingReleaseIdentity(status), imageDigest: rollback.incoming[role === "web" ? "webDigest" : "workerDigest"] }] });
+      recorded[role] = replacementPlans[role].intent;
+    }
+
     if (rollback.schemaVersion === 3) {
-      if (status.writeIntentProtocolVersion !== 2) fail("EXCLUSIVE_ACTIVATION_PROTOCOL_UNAVAILABLE");
+      if (![2, 3].includes(status.writeIntentProtocolVersion)) fail("EXCLUSIVE_ACTIVATION_PROTOCOL_UNAVAILABLE");
       exclusive = createManagedAzureExclusiveActivation(deps, { target: status.target, ownership: rollback.exclusiveActivation,
         knownRevisions: Object.fromEntries(["web", "worker"].map((role) => [role, [rollback.previous[role].readyRevision,
           `${role === "web" ? status.target.webAppName : status.target.workerAppName}--${forwardSuffixes[role]}`,
@@ -454,11 +470,22 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
       const recoveryRelease = releaseIdentity(recovery.imageTag, recovery.releaseVersion);
       const current = { web, worker };
       const completedIntents = {};
+      const preparedPlans = { ...replacementPlans };
+      for (const role of ["web", "worker"]) {
+        if (recorded[role]) assertRecoveryIntentName(recorded[role]);
+        else if (current[role].state) {
+          preparedPlans[role] = buildManagedAzureRecoveryIntent({ originatingLease, target: status.target, role,
+            predecessor: current[role].state, release: recoveryRelease, image: recovery[role].image,
+            imageDigest: recovery[role].digest, protocolVersion: status.writeIntentProtocolVersion === 3 ? 2 : 1 });
+          assertRecoveryIntentName(preparedPlans[role].intent);
+        } else fail("MANAGED_RELEASE_RECOVERY_MIXED_STATE_UNSUPPORTED");
+      }
+
       if (exclusive) {
         const keep = {};
         let allReady = true;
         for (const role of ["web", "worker"]) {
-          if (!recorded[role]) { allReady = false; continue; }
+          if (!recorded[role] || replacementPlans[role]) { allReady = false; continue; }
           const plan = await readManagedAzureRecoveryIntentPlan(deps, { intent: recorded[role], originatingLease,
             target: status.target, release: recoveryRelease, image: recovery[role].image,
             releases: [{ release: recoveryRelease, imageDigest: recovery[role].digest },
@@ -478,7 +505,9 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
       for (const role of ["web", "worker"]) {
         try {
           let plan;
-          if (recorded[role]) {
+          if (replacementPlans[role]) {
+            plan = replacementPlans[role];
+          } else if (recorded[role]) {
             plan = await readManagedAzureRecoveryIntentPlan(deps, {
               intent: recorded[role], originatingLease, target: status.target, release: recoveryRelease, image: recovery[role].image,
               releases: [
@@ -508,12 +537,13 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
             }
             if (current[role].kind !== "COMPATIBLE_RECOVERY" || staleRuntime) {
               plan = buildManagedAzureRecoveryIntent({ originatingLease, target: status.target, role,
-                predecessor: current[role].state, release: recoveryRelease, image: recovery[role].image, imageDigest: recovery[role].digest });
+                predecessor: current[role].state, release: recoveryRelease, image: recovery[role].image, imageDigest: recovery[role].digest,
+                protocolVersion: status.writeIntentProtocolVersion === 3 ? 2 : 1 });
             }
           }
           if (plan) {
             const result = await runManagedAzureRecoveryIntent(deps, { handle, reason: input.reason, target: status.target,
-              release: recoveryRelease, ...plan, location: current[role].state?.location, existing: Boolean(recorded[role]) });
+              release: recoveryRelease, ...plan, location: plan.location ?? current[role].state?.location, existing: Boolean(recorded[role]) });
             current[role] = { kind: "COMPATIBLE_RECOVERY", state: result.state };
             completedIntents[role] = result.intent;
             rollbackSuffixes[role] = result.intent.revisionSuffix;

@@ -7,6 +7,7 @@ import { activeManagedAzureDeployment, managedAzureReleaseDeployment, managedAzu
 import { canonicalizeManagedAzureRollbackPayload, type ManagedAzureRollbackPayload } from "./managed-azure-recovery-payload";
 import {
   canonicalizeManagedReleaseRecoveryIntent,
+  canonicalizeInvalidRecoveryIntentSupersession,
   MANAGED_RELEASE_RUNNER_PROTOCOL_VERSION,
   type ManagedReleaseRecoveryIntent,
 } from "./managed-azure-recovery-intent";
@@ -912,6 +913,47 @@ export async function recordManagedReleaseRecoveryIntent(handle: LeaseHandle, in
       intentDigest: intent.intentDigest,
     });
     return { ...view({ ...updated, databaseNow: row.databaseNow }), expiresAt, created, intent };
+  });
+}
+
+export async function supersedeInvalidManagedReleaseRecoveryIntent(handle: LeaseHandle, oldIntentDigest: unknown, intentInput: unknown, evidenceInput: unknown) {
+  return transact(async (tx) => {
+    const row = await owned(tx, handle);
+    await requireAdmission(tx, row, true);
+    if (row.releaseLeasePhase !== "RECOVERY_REQUIRED" || !row.rollbackRecordPresent) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    const envelope = await originatingRollbackEnvelope(tx, row);
+    assertProtectedApprovalBinding(row, envelope.payload);
+    const intent = canonicalizeManagedReleaseRecoveryIntent(intentInput, envelope, {
+      invalid: () => reject("MANAGED_RELEASE_INVALID_INPUT", 400), conflict: () => reject("MANAGED_RELEASE_RECOVERY_INTENT_CONFLICT"),
+    });
+    const current = validateStoredRecoveryEvidence(row.releaseLeaseRecoveryEvidence, envelope);
+    if (!recoveryEvidenceIsV2(current)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    const old = current.intents.find(item => item.role === intent.role);
+    if (!old || typeof oldIntentDigest !== "string") reject("MANAGED_RELEASE_RECOVERY_INTENT_CONFLICT");
+    // An acknowledged retry is observational only: it never returns new write
+    // authority, even when the replacement revision has not appeared yet.
+    if (isDeepStrictEqual(old, intent)) {
+      const event = await tx.customerDeploymentEvent.findFirst({ where: { deploymentId: row.id,
+        action: "control_plane.release_lease.recovery_intent_superseded",
+        AND: [{ meta: { path: ["old", "intentDigest"], equals: oldIntentDigest } },
+          { meta: { path: ["replacement", "intentDigest"], equals: intent.intentDigest } }] }, orderBy: { createdAt: "desc" } });
+      if (!event) reject("MANAGED_RELEASE_RECOVERY_INTENT_CONFLICT");
+      return { ...view(row), created: false, intent };
+    }
+    if (old.intentDigest !== oldIntentDigest) reject("MANAGED_RELEASE_RECOVERY_INTENT_CONFLICT");
+    let evidence;
+    try { evidence = canonicalizeInvalidRecoveryIntentSupersession(old, intent, evidenceInput,
+      { ...envelope, currentLeaseId: handle.leaseId, currentFence: handle.fence, now: row.databaseNow.getTime() }); }
+    catch { reject("MANAGED_RELEASE_RECOVERY_SUPERSESSION_INVALID"); }
+    const updatedEvidence = { ...current, code: "RECOVERY_INVALID_INTENT_SUPERSEDED",
+      intents: current.intents.map(item => item.role === intent.role ? intent : item) };
+    const updated = await tx.customerDeployment.update({ where: { id: row.id }, data: {
+      releaseLeaseRecoveryEvidence: updatedEvidence as unknown as Prisma.InputJsonValue,
+      releaseLeaseError: updatedEvidence.code, releaseLeaseHeartbeatAt: row.databaseNow,
+      releaseLeaseExpiresAt: new Date(row.databaseNow.getTime() + TTL_MS),
+    } }) as LockedDeployment;
+    await event(tx, updated, "control_plane.release_lease.recovery_intent_superseded", { old, replacement: intent, evidence });
+    return { ...view({ ...updated, databaseNow: row.databaseNow }), created: true, intent };
   });
 }
 

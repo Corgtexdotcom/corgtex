@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   canonicalizeManagedReleaseRecoveryIntent,
+  canonicalizeInvalidRecoveryIntentSupersession,
   canonicalManagedReleaseRecoveryIntentJson,
   managedReleaseRecoveryIntentDigest,
   managedReleaseRecoveryIntentRevisionSuffix,
@@ -174,6 +176,67 @@ describe("managed Azure recovery intent canonicalization", () => {
       } },
     };
     expect(canonicalizeManagedReleaseRecoveryIntent(built, currentAuthority)).toEqual(built);
-    expect(built.protocolVersion).toBe(1);
+    expect(built.protocolVersion).toBe(2);
+  });
+});
+
+
+describe("bounded recovery intent names and unapplied supersession", () => {
+  it.each(Array.from({ length: 31 }, (_, i) => i + 2))("preserves supported %i-character app names and exact v1 reconstruction", async length => {
+    const appName = "a".repeat(length);
+    const current = { ...authority, payload: { ...authority.payload, target: { ...authority.payload.target, webAppName: appName } } };
+    const old = intent("web", { appName, predecessorRevisionName: `${appName}--old` });
+    const next = intent("web", { protocolVersion: 2, appName, predecessorRevisionName: `${appName}--old` });
+    expect(canonicalizeManagedReleaseRecoveryIntent(old, current)).toEqual(old);
+    expect(canonicalizeManagedReleaseRecoveryIntent(next, current)).toEqual(next);
+    expect(next.revisionSuffix.length).toBe(3 + Math.min(32, 49 - length));
+    expect(`${appName}--${next.revisionSuffix}`.length).toBeLessThanOrEqual(54);
+    const { recoveryIntentRevisionSuffix } = await import(new URL("../../../scripts/release/managed-azure-recovery-intent.mjs", import.meta.url).href);
+    expect(recoveryIntentRevisionSuffix(base("web", { protocolVersion: 2, appName, predecessorRevisionName: `${appName}--old` }))).toBe(next.revisionSuffix);
+  });
+  function proof() {
+    const appName = "ca-corgtex-ss-prod-web";
+    const old = intent("web", { appName, predecessorRevisionName: `${appName}--0000130` });
+    const next = intent("web", { protocolVersion: 2, appName, predecessorRevisionName: old.predecessorRevisionName });
+    const current = { ...authority, currentLeaseId: LEASE_ID, currentFence: 18, now: 1_000_000,
+      payload: { ...authority.payload, schemaVersion: 3 as const,
+        exclusiveActivation: { originalMode: "Single" as const, temporaryMode: "Multiple" as const, configurationDigests: { web: DIGESTS[2]!, worker: DIGESTS[3]! } },
+        target: { ...authority.payload.target, webAppName: appName } } };
+    const evidence = { schemaVersion: 1, startedAt: 900_000, observedAt: 999_000, leaseId: LEASE_ID, fence: 18,
+      targetDigest: `sha256:${createHash("sha256").update(canonicalManagedReleaseRecoveryIntentJson(current.payload.target)).digest("hex")}`,
+      oldIntentDigest: old.intentDigest, role: "web", appName, latestRevisionName: old.predecessorRevisionName,
+      latestReadyRevisionName: old.predecessorRevisionName, templateDigest: old.predecessorTemplateDigest,
+      configurationDigest: DIGESTS[2], provisioningState: "Succeeded",
+      revisions: [{ revisionName: old.predecessorRevisionName, active: true, replicaCount: 1 }] };
+    return { old, next, current, evidence };
+  }
+  it("admits the real 59-character invalid web intent with intact predecessor, including a drained predecessor", () => {
+    const { old, next, current, evidence } = proof();
+    expect(`${old.appName}--${old.revisionSuffix}`).toHaveLength(59);
+    expect(`${next.appName}--${next.revisionSuffix}`).toHaveLength(54);
+    expect(canonicalizeInvalidRecoveryIntentSupersession(old, next, evidence, current)).toEqual(evidence);
+    evidence.revisions[0]!.active = false; evidence.revisions[0]!.replicaCount = 0;
+    expect(canonicalizeInvalidRecoveryIntentSupersession(old, next, evidence, current)).toEqual(evidence);
+    const worker = intent("worker", { appName: "ca-corgtex-ss-prod-worker", predecessorRevisionName: "ca-corgtex-ss-prod-worker--old" });
+    expect(`${worker.appName}--${worker.revisionSuffix}`).toHaveLength(62);
+  });
+  it.each(["stale", "future", "duration", "owner", "target", "template", "config", "ready", "missing", "duplicate", "old-present", "new-present", "foreign-active", "foreign-replica", "foreign-app", "image", "valid-v1", "role"])("rejects %s supersession evidence", mode => {
+    const { old, next, current, evidence } = proof();
+    if (mode === "stale") evidence.observedAt = 930_000;
+    if (mode === "future") evidence.observedAt = 1_006_000;
+    if (mode === "duration") evidence.startedAt = 1;
+    if (mode === "owner") evidence.fence++;
+    if (mode === "target") evidence.targetDigest = DIGESTS[0]!;
+    if (mode === "template") evidence.templateDigest = DIGESTS[0]!;
+    if (mode === "config") evidence.configurationDigest = DIGESTS[0];
+    if (mode === "ready") evidence.latestReadyRevisionName += "-other";
+    if (mode === "missing") evidence.revisions = [];
+    if (mode === "duplicate") evidence.revisions.push({ ...evidence.revisions[0]! });
+    if (mode === "old-present" || mode === "new-present") evidence.revisions.push({ revisionName: `${old.appName}--${mode === "old-present" ? old.revisionSuffix : next.revisionSuffix}`, active: false, replicaCount: 0 });
+    if (mode.startsWith("foreign-")) evidence.revisions.push({ revisionName: `${mode === "foreign-app" ? "another-app" : old.appName}--foreign`, active: mode === "foreign-active", replicaCount: mode === "foreign-replica" ? 1 : 0 });
+    if (mode === "image") next.imageDigest = DIGESTS[4]!;
+    if (mode === "valid-v1") old.appName = "short";
+    if (mode === "role") next.role = "worker";
+    expect(() => canonicalizeInvalidRecoveryIntentSupersession(old, next, evidence, current)).toThrow();
   });
 });

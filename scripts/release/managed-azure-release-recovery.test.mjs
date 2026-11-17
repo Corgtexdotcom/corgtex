@@ -100,7 +100,7 @@ function rig(overrides = {}) {
       target,
       originatingLease: { leaseId: previousLeaseId, fence: 7 },
       recovery: { stage: "IMPORT", code: "PROTOCOL_LOCATION_VIOLATION" },
-      writeIntentProtocolVersion: 1,
+      writeIntentProtocolVersion: 3,
     },
     rollbackPayload = rollback,
     patchTemplate: patchTemplateOverride,
@@ -109,7 +109,7 @@ function rig(overrides = {}) {
   } = overrides;
   const recoveryJournal = structuredClone(recoveryStatus.recovery ?? {});
   if (recoveryJournal.schemaVersion === 2 && !Array.isArray(recoveryJournal.intents)) recoveryJournal.intents = [];
-  const statusValue = { writeIntentProtocolVersion: 1, ...recoveryStatus, recovery: recoveryJournal };
+  const statusValue = { writeIntentProtocolVersion: 3, ...recoveryStatus, recovery: recoveryJournal };
   const recordedIntentTemplates = new Map();
   let intentNow = 1_000;
   const deps = {
@@ -1523,5 +1523,78 @@ describe("historical forward runtime identity", () => {
     expect(await runManagedAzureReleaseRecovery({ deploymentId, reason: "Finalize exact current forward identity.", acrName: "acr12" }, deps))
       .toMatchObject({ status: "RECOVERY_CLEARED", resolution: "FORWARD_ALREADY_COMPLETE" });
     expect(deps.patchTemplate).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("overlength unapplied v1 recovery admission before drain", () => {
+  function invalidNameRig({ capability = 3, lostAcknowledgement = false } = {}) {
+    const ownTarget = { ...target, webAppName: "ca-corgtex-ss-prod-web", workerAppName: "ca-corgtex-ss-prod-worker" };
+    const states = Object.fromEntries(["web", "worker"].map(role => {
+      const appName = ownTarget[role === "web" ? "webAppName" : "workerAppName"];
+      return [role, { ...state(role), appName, revisionName: `${appName}--${state(role).revisionSuffix}` }];
+    }));
+    const payload = { ...compatibleRollbackPayload(), schemaVersion: 3, target: ownTarget,
+      previous: { ...rollback.previous, web: { ...rollback.previous.web, readyRevision: states.web.revisionName },
+        worker: { ...rollback.previous.worker, readyRevision: states.worker.revisionName } },
+      exclusiveActivation: { originalMode: "Single", temporaryMode: "Multiple", configurationDigests: { web: `sha256:${"8".repeat(64)}`, worker: `sha256:${"9".repeat(64)}` } } };
+    const recovery = payload.compatibleRecovery;
+    const release = { gitSha: recovery.gitSha, imageTag: recovery.imageTag, version: recovery.releaseVersion };
+    const old = buildManagedAzureRecoveryIntent({ originatingLease: { leaseId: previousLeaseId, fence: 7 }, target: ownTarget,
+      role: "web", predecessor: states.web, release, image: recovery.web.image, imageDigest: recovery.web.digest, protocolVersion: 1 });
+    const events = [], inventories = Object.fromEntries(["web", "worker"].map(role => [role, [{ revisionName: states[role].revisionName, active: true, replicaCount: 1 }]]));
+    const modes = { web: "Single", worker: "Single" };
+    const { deps } = rig({ rollbackPayload: payload, recoveryStatus: { deploymentId, leaseId: previousLeaseId, fence: 7,
+      phase: "RECOVERY_REQUIRED", writeIntentProtocolVersion: capability, origin: "https://selfserve.example", target: ownTarget,
+      originatingLease: { leaseId: previousLeaseId, fence: 7 },
+      release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1", target: { kind: "FORWARD", imageTag: `sha-${nextSha}`, version: "release-2" } },
+      recovery: { schemaVersion: 2, stage: "READBACK", code: "RECOVERY_INTENT_REVISION_READ_FAILED", intents: [old.intent] } } });
+    const lease = deps.lease.getMockImplementation();
+    deps.lease.mockImplementation(async (operation, args) => {
+      events.push(operation);
+      if (operation === "supersede_invalid_recovery_intent") {
+        expect(args.oldIntentDigest).toBe(old.intent.intentDigest);
+        expect(args.intent.protocolVersion).toBe(2);
+        expect(inventories.web[0].active).toBe(true);
+        if (lostAcknowledgement) throw new Error("reply lost after commit");
+        return { deploymentId, leaseId: claimedLeaseId, fence: 8, phase: "RECOVERY_REQUIRED", created: true, intent: args.intent };
+      }
+      return lease(operation, args);
+    });
+    deps.readApp = vi.fn(async ({ role, release: requested }) => {
+      const current = states[role];
+      if (!current.template.containers[0].env.some(e => e.name === "CORGTEX_RELEASE_GIT_SHA" && e.value === requested.gitSha)) throw new Error("different release");
+      return current;
+    });
+    deps.readAppTemplate = vi.fn(async ({ role }) => ({ state: states[role], latestReadyRevisionName: states[role].revisionName, provisioningState: "Succeeded" }));
+    deps.readExclusiveState = vi.fn(async ({ role }) => ({ mode: modes[role], configurationDigest: payload.exclusiveActivation.configurationDigests[role],
+      provisioningState: "Succeeded", latestRevisionName: states[role].revisionName, latestReadyRevisionName: states[role].revisionName, revisions: structuredClone(inventories[role]) }));
+    deps.setRevisionMode = vi.fn(async ({ role, mode }) => { events.push(`mode:${role}:${mode}`);modes[role] = mode; });
+    deps.setRevisionActive = vi.fn(async ({ role, revisionName, active }) => {
+      events.push(`active:${role}:${active}`);const revision = inventories[role].find(row => row.revisionName === revisionName);
+      revision.active = active;revision.replicaCount = active ? 1 : 0;return { terminal: true, succeeded: true, replicaCount: revision.replicaCount };
+    });
+    deps.patchTemplate = vi.fn(async ({ role, template: next }) => {
+      events.push(`patch:${role}`);expect(inventories[role].every(row => !row.active && row.replicaCount === 0)).toBe(true);
+      const before = states[role];const revisionName = `${before.appName}--${next.revisionSuffix}`;expect(revisionName.length).toBeLessThanOrEqual(54);
+      states[role] = { ...before, revisionName, revisionSuffix: next.revisionSuffix, template: next, templateDigest: managedAzureTemplateDigest(next),
+        image: next.containers[0].image, imageDigest: next.containers[0].image.split("@")[1] };
+      inventories[role].push({ revisionName, active: true, replicaCount: 1 });return { terminal: true, succeeded: true };
+    });
+    deps.readRevisionState = vi.fn(async ({ role, revisionName, expectedTemplate }) => ({ kind:
+      states[role].revisionName === revisionName && states[role].templateDigest === managedAzureTemplateDigest(expectedTemplate) ? "READY" : "ABSENT" }));
+    return { deps, events, old };
+  }
+  it("supersedes before any drain and completes both real-sized roles through the unchanged guarded recovery path", async () => {
+    const { deps, events } = invalidNameRig();
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Recover invalid unapplied name.", acrName: "acr12" }, deps);
+    expect(result, JSON.stringify({ result, events })).toMatchObject({ status: "RECOVERY_CLEARED", resolution: "COMPATIBLE_RECOVERY" });
+    expect(events.indexOf("supersede_invalid_recovery_intent")).toBeLessThan(events.findIndex(event => event.startsWith("mode:")));
+    expect(deps.patchTemplate.mock.calls.map(([args]) => args.role)).toEqual(["web", "worker"]);
+  });
+  it.each([{ capability: 2 }, { lostAcknowledgement: true }])("leaves both baselines active when supersession cannot be admitted: %j", async options => {
+    const { deps } = invalidNameRig(options);
+    expect(await runManagedAzureReleaseRecovery({ deploymentId, reason: "Verify fail closed before drain.", acrName: "acr12" }, deps)).toMatchObject({ status: "RECOVERY_BLOCKED" });
+    expect(deps.patchTemplate).not.toHaveBeenCalled();expect(deps.setRevisionMode).not.toHaveBeenCalled();expect(deps.setRevisionActive).not.toHaveBeenCalled();
   });
 });
