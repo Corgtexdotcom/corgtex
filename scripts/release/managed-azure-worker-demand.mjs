@@ -233,13 +233,31 @@ export function createManagedAzureWorkerDemandLifecycle({ jobId, target, operati
     && signal instanceof AbortSignal && [request, check, schedulerProof].every(v => typeof v === "function"), "WORKER_DEMAND_DEPENDENCY_INVALID");
   async function readJob() { await check(); const r = await request(jobId, { apiVersion: API }); await check(); return r; }
   async function executions() {
-    await check(); const r = await request(`${jobId}/executions`, { apiVersion: API }); await check();
-    need(r.status === 200 && Array.isArray(r.body?.value) && r.body.value.length <= 100 && !r.body.nextLink, "WORKER_DEMAND_EXECUTION_INVENTORY_INVALID");
-    return r.body.value.map(e => {
-      need(/^[a-z0-9][a-z0-9-]{0,79}$/.test(e.name) && (!e.id || sameId(e.id, `${jobId}/executions/${e.name}`))
-        && ["Running", "Processing", "Succeeded", "Failed", "Stopped", "Degraded", "Unknown"].includes(e.properties?.status), "WORKER_DEMAND_EXECUTION_INVALID");
-      return { ...e, id: `${jobId}/executions/${e.name}` };
-    });
+    const path = `${jobId}/executions`;
+    const rows = [], names = new Set(), cursors = new Set();
+    let nextLink;
+    for (;;) {
+      await check();
+      const r = await request(path, { apiVersion: API, ...(nextLink && { nextLink }) });
+      await check();
+      need(r.status === 200 && Array.isArray(r.body?.value) && rows.length + r.body.value.length <= 1000, "WORKER_DEMAND_EXECUTION_INVENTORY_INVALID");
+      for (const e of r.body.value) {
+        need(typeof e?.name === "string" && /^[a-z0-9][a-z0-9-]{0,79}$/.test(e.name)
+          && (e.id === undefined || sameId(e.id, `${path}/${e.name}`)) && !names.has(e.name)
+          && ["Running", "Processing", "Succeeded", "Failed", "Stopped", "Degraded", "Unknown"].includes(e.properties?.status), "WORKER_DEMAND_EXECUTION_INVALID");
+        names.add(e.name);
+        rows.push({ ...e, id: `${path}/${e.name}` });
+      }
+      nextLink = r.body.nextLink;
+      if (nextLink == null) return rows;
+      need(typeof nextLink === "string" && nextLink.length <= 8192 && URL.canParse(nextLink), "WORKER_DEMAND_EXECUTION_INVENTORY_INVALID");
+      const u = new URL(nextLink);
+      const cursor = [...u.searchParams].find(([key]) => /^(?:\$?skiptoken|continuationtoken)$/i.test(key))?.[1];
+      need(u.origin === "https://management.azure.com" && !u.username && !u.password && !u.hash && u.pathname === path
+        && u.searchParams.size === 2 && u.searchParams.get("api-version") === API && cursor
+        && !cursors.has(cursor) && cursors.size < 31, "WORKER_DEMAND_EXECUTION_INVENTORY_INVALID");
+      cursors.add(cursor);
+    }
   }
   async function assertJob(body) { const r = await readJob(); need(r.status === 200, "WORKER_DEMAND_SCHEDULER_MISSING"); assertManagedAzureSchedulerJob(r.body, body, jobId); return r.body; }
   // Jobs GET retains versioned references; execution GET redacts every reference
