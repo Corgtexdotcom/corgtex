@@ -1,4 +1,5 @@
 // Execute with `npx tsx`: object-transfer adapters are shared TypeScript code.
+import { createOpsCoreSchedulerProofReader } from "./ops-core-scheduler-logs.mjs";
 import { constants } from "node:fs";
 import { open, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -401,6 +402,8 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     });
     const activation = () => (runtime.activate ?? createOpsCoreActivation)({ plan: plan.activation, custody,
       operationStore, assertSourceFenced, healthProbe: actualHealthProbe,
+      ...(plan.activation.workerDemand && plan.health ? { schedulerProof: createOpsCoreSchedulerProofReader({ health: plan.health,
+        schedulerJobName: plan.activation.workerDemand.schedulerJobName, transport: runtime.healthTransport }) } : {}),
       observeEmptySecret: runtime.observeEmptySecret ?? createRuntimeEmptySecretObserver({ vaultUri: plan.activation.runtimeVaultUri, signal: custody.signal }),
       ...(plan.transfer.postgres.runtimeAccess ? { assertRuntimeAccess: ({ fresh }) => assertOpsCoreRuntimeAccessForActivation({
         plan, custody, operationStore, targetAdminConfig: credentials.targetAdminConfig,

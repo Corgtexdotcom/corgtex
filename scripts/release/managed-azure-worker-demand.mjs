@@ -162,7 +162,7 @@ export function assertManagedAzureSchedulerJob(actual, expected, jobId) {
 
 /** Read only complete stdout frames from the one replica of the exact ARM execution.
  * A starting or already collected replica may have no available stream. */
-export function createManagedAzureJobLogReader({ exec = promisify(execFile) } = {}) {
+export function createManagedAzureJobLogReader({ exec = promisify(execFile), retainReplica = false } = {}) {
   return async ({ jobId, execution, containerName, select, signal }) => {
     need(/^\/subscriptions\/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/resourcegroups\/[a-z0-9_.()-]{1,90}\/providers\/microsoft\.app\/jobs\/[a-z0-9-]{1,32}$/i.test(jobId)
       && sameId(execution.id, `${jobId}/executions/${execution.name}`)
@@ -172,13 +172,14 @@ export function createManagedAzureJobLogReader({ exec = promisify(execFile) } = 
     const common = ["--subscription", parts[2], "--resource-group", parts[4], "--name", parts.at(-1), "--execution", execution.name];
     const options = { encoding: "utf8", timeout: 20_000, maxBuffer: 256 * 1024, shell: false, signal,
       env: { ...process.env, AZURE_EXTENSION_USE_DYNAMIC_INSTALL: "no" } };
+    let replicaName;
     try {
       const list = await exec("az", ["containerapp", "job", "replica", "list", ...common, "--output", "json", "--only-show-errors"], options);
       const replicas = JSON.parse(list.stdout);
       if (Array.isArray(replicas) && replicas.length === 0) return null;
       need(Array.isArray(replicas) && replicas.length === 1 && /^[a-z0-9-]{1,100}$/.test(replicas[0].name)
         && replicas[0].name.startsWith(`${execution.name}-`), "WORKER_DEMAND_PROOF_REPLICA_INVALID");
-      const replicaName = replicas[0].name;
+      replicaName = replicas[0].name;
       const { stdout } = await exec("az", ["containerapp", "job", "logs", "show", ...common, "--replica", replicaName,
         "--container", containerName, "--tail", "100", "--format", "text", "--only-show-errors"], options);
       const frames = [];
@@ -192,19 +193,18 @@ export function createManagedAzureJobLogReader({ exec = promisify(execFile) } = 
     } catch (error) {
       if (error instanceof DemandError) throw error;
       signal?.throwIfAborted();
-      return null;
+      return retainReplica && replicaName ? { jobId, executionId: execution.id, replicaName, containerName, frames: [] } : null;
     }
   };
 }
 
 /** Raw provider output never enters scheduler evidence or diagnostics. */
 export function createManagedAzureSchedulerProofReader(options = {}) {
-  const read = createManagedAzureJobLogReader(options);
+  const read = createManagedAzureJobLogReader({ ...options, retainReplica: Boolean(options.readRetained) });
   return async input => {
     const observed = await read({ ...input, containerName: "scheduler", select: payload => payload.startsWith("{") });
-    need(observed, "WORKER_DEMAND_PROOF_LOG_UNAVAILABLE");
     const records = [];
-    for (const {payload} of observed.frames) {
+    for (const {payload} of observed?.frames ?? []) {
       try {
         const wrapper = JSON.parse(payload);
         if (wrapper?.level !== "info" || typeof wrapper.msg !== "string") continue;
@@ -212,6 +212,12 @@ export function createManagedAzureSchedulerProofReader(options = {}) {
         if (receipt?.event === "scheduler_complete") records.push(receipt);
       } catch { /* Other application output is not a scheduler receipt. */ }
     }
+    if (!records.length && options.readRetained) {
+      const result = await options.readRetained(input);
+      need(!observed || result.replicaName === observed.replicaName, "WORKER_DEMAND_PROOF_REPLICA_INVALID");
+      return result;
+    }
+    need(observed, "WORKER_DEMAND_PROOF_LOG_UNAVAILABLE");
     need(records.length === 1, "WORKER_DEMAND_PROOF_LOG_UNPROVEN");
     const {jobId,executionId,replicaName,containerName} = observed;
     return { jobId, executionId, replicaName, containerName, receipt: records[0] };
@@ -236,6 +242,34 @@ export function createManagedAzureWorkerDemandLifecycle({ jobId, target, operati
     });
   }
   async function assertJob(body) { const r = await readJob(); need(r.status === 200, "WORKER_DEMAND_SCHEDULER_MISSING"); assertManagedAzureSchedulerJob(r.body, body, jobId); return r.body; }
+  // Jobs GET retains versioned references; execution GET redacts every reference
+  // to one job-scoped placeholder. Reconstruct only that provider projection
+  // from the journalled request after verifying the current job and named run.
+  async function assertExecutionTemplate(execution, template, body) {
+    const expected = templateIdentity(template), observed = templateIdentity(execution.properties.template);
+    if (same(observed, expected)) return false;
+    const placeholder = "cappjob-" + jobId.split("/").at(-1);
+    const refs = expected.containers[0].env.filter(entry => entry.secretRef);
+    const secrets = body.properties.configuration.secrets, identities = Object.keys(body.identity.userAssignedIdentities);
+    need(refs.length > 0 && new Set(expected.containers[0].env.map(entry => entry.name)).size === expected.containers[0].env.length
+      && identities.length === 1 && refs.every(entry => {
+      const bound = secrets.filter(s => s.name === entry.secretRef);
+      return entry.secretRef !== placeholder && !entry.value && bound.length === 1 && sameId(bound[0].identity, identities[0])
+        && /^https:\/\/[a-z0-9-]{3,24}\.vault\.azure\.net\/secrets\/[a-zA-Z0-9-]{1,127}\/[a-f0-9]{32}$/.test(bound[0].keyVaultUrl);
+    }), "WORKER_DEMAND_PROOF_EXECUTION_INVALID");
+    for (const ref of refs) ref.secretRef = placeholder;
+    need(same(expected, observed), "WORKER_DEMAND_PROOF_EXECUTION_INVALID");
+    await assertJob(body);
+    await check(); const item = await request(execution.id, { apiVersion: API }); await check();
+    const named = item.body;
+    const state = named?.properties;
+    const unchanged = state && state.status === execution.properties.status && state.endTime === execution.properties.endTime;
+    const finished = ["Running", "Processing"].includes(execution.properties.status) && ["Succeeded", "Failed", "Stopped"].includes(state?.status);
+    need(item.status === 200 && sameId(named?.id, execution.id) && named.name === execution.name
+      && (unchanged || finished) && state.startTime === execution.properties.startTime && same(templateIdentity(state.template), observed),
+    "WORKER_DEMAND_PROOF_EXECUTION_INVALID");
+    return true;
+  }
   async function drained(body) {
     await assertJob(body);
     const rows = await executions();
@@ -321,8 +355,9 @@ export function createManagedAzureWorkerDemandLifecycle({ jobId, target, operati
         need(matching.length <= 1, "WORKER_DEMAND_PROOF_AMBIGUOUS");
         const e = matching[0];
         if (!e || ["Running", "Processing"].includes(e.properties.status)) { await wait(1000); continue; }
-        need(e.properties.status === "Succeeded" && same(templateIdentity(e.properties.template), templateIdentity(template)), "WORKER_DEMAND_PROOF_EXECUTION_INVALID");
-        const observed = await schedulerProof({ jobId, execution: e, template: structuredClone(template), nonce, release, signal }); await check();
+        need(e.properties.status === "Succeeded", "WORKER_DEMAND_PROOF_EXECUTION_INVALID");
+        await assertExecutionTemplate(e, template, body);
+        const observed = await schedulerProof({ jobId, execution: e, template: structuredClone(template), nonce, release, signal, maxWaitMs: Math.max(1, deadline - now()) }); await check();
         const r = observed?.receipt, start = Date.parse(e.properties.startTime), end = Date.parse(e.properties.endTime);
         need(observed?.jobId === jobId && observed.executionId === e.id && observed.containerName === "scheduler"
           && typeof observed.replicaName === "string" && observed.replicaName.startsWith(`${e.name}-`)
@@ -358,15 +393,23 @@ export function createManagedAzureWorkerDemandLifecycle({ jobId, target, operati
     const prior = await operations.readStatus("WORKER_SCHEDULER_PROOF", { jobId, context, nonce, templateSha256: hash(template), release });
     if (!prior.intent || prior.receipt) return;
     const matching = (await executions()).filter(e => e.properties.template?.containers?.[0]?.env?.some(v => v.name === "WORKER_SCHEDULER_PROOF_NONCE" && v.value === nonce));
-    need(matching.length === 1 && ["Succeeded", "Failed", "Stopped"].includes(matching[0].properties.status)
-      && same(templateIdentity(matching[0].properties.template), templateIdentity(template)), "WORKER_DEMAND_PROOF_START_UNSETTLED");
+    need(matching.length === 1 && ["Succeeded", "Failed", "Stopped"].includes(matching[0].properties.status), "WORKER_DEMAND_PROOF_START_UNSETTLED");
+    await assertExecutionTemplate(matching[0], template, body);
   }
   async function observe(body) {
-    await assertJob(body); const rows = await executions();
-    for (const e of rows.filter(e => !["Succeeded", "Failed", "Stopped"].includes(e.properties.status))) {
-      need(same(templateIdentity(e.properties.template), templateIdentity(body.properties.template)), "WORKER_DEMAND_FOREIGN_SCHEDULER_EXECUTION");
+    const deadline = now() + timeoutMs;
+    for (;;) {
+      await assertJob(body); const rows = await executions();
+      let redacted = false;
+      for (const e of rows.filter(e => !["Succeeded", "Failed", "Stopped"].includes(e.properties.status))) {
+        // An automatic run has no journalled override nonce. If Azure redacts
+        // its aliases we can verify its shape but must wait out the writer.
+        if (await assertExecutionTemplate(e, body.properties.template, body)) redacted = true;
+      }
+      if (!redacted) return { complete: true, jobId, bodySha256: hash(body), executionInventorySha256: hash(rows) };
+      need(now() < deadline, "WORKER_DEMAND_SCHEDULER_OBSERVATION_DEADLINE");
+      await wait(1000);
     }
-    return { complete: true, jobId, bodySha256: hash(body), executionInventorySha256: hash(rows) };
   }
   return Object.freeze({ write, prove, observe, drained, assertJob, assertProofStartSettled });
 }

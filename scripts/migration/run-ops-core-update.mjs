@@ -1,3 +1,4 @@
+import { createOpsCoreSchedulerProofReader } from "./ops-core-scheduler-logs.mjs";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -165,6 +166,7 @@ export async function executeOpsCoreUpdate(action, input, dependencies = {}) {
     }
     const result = await (dependencies.runUpdate ?? runOpsCoreUpdate)({ plan: p, custody, operationStore, action,
       assertDeploymentAuthority: authority,
+      ...(p.workerDemand ? { schedulerProof: createOpsCoreSchedulerProofReader({ health: envelope.health.baseline, schedulerJobName: p.workerDemand.schedulerJobName }) } : {}),
       prepareHealth: async ({ phase }) => {
         const phases = phase === "baseline" ? ["baseline"] : ["baseline", "incoming", "recovery"];
         for (const name of phases) await dispatchers[name].prepare();
