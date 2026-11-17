@@ -173,6 +173,7 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
   plan:value,custody,assertSourceFenced,descriptorStore,operations,transport,workerDemand,readJobLogs=createManagedAzureJobLogReader(),pollIntervalMs=1000,timeoutMs=180000}){
   const p=plan(value),send=transport??createHealthJobTransport(p),initial=custody?.snapshot?.();
   const releaseMode=mode==="release",acceptanceMode=mode==="acceptance";
+  const attemptLimit=mode==="migration"?20:10;
   if(workerDemand){
     need(exact(workerDemand,"plan,target"),"HEALTH_JOB_DEMAND_INVALID");
     validateManagedAzureWorkerDemand(workerDemand.plan,workerDemand.target);
@@ -266,29 +267,39 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
     const key=`${prefix}/${hash({kind:record.kind,inputSha256:hash(record.input)})}/descriptor.json`;
     await check(signal);await descriptorStore.createOnly(key,text,signal);await check(signal);
     need((await descriptorStore.readOptional(key,signal))===text,"HEALTH_JOB_DESCRIPTOR_INVALID");}
-  async function locate(record,signal){const c=record.input.challenge;const matches=(await inventory(signal)).filter(row=>row.properties.template?.containers?.some(v=>v.env?.some(e=>
+  async function locate(record,signal,rows){const c=record.input.challenge;const matches=(rows??await inventory(signal)).filter(row=>row.properties.template?.containers?.some(v=>v.env?.some(e=>
     e.name==="CORGTEX_HEALTH_CHALLENGE"&&e.value===JSON.stringify(c))));need(matches.length<=1,"HEALTH_JOB_EXECUTION_AMBIGUOUS");if(!matches.length)return null;
     const found=matches[0];verifyTemplate(found.properties.template,record.input.template);need(Date.parse(found.properties.startTime)>=c.issuedAt,"HEALTH_JOB_EXECUTION_STALE");return found;}
-  async function reconcile(record,signal){need(await operations.readIntent(record.kind,record.input),"HEALTH_JOB_START_INTENT_UNPROVEN");let found;
+  async function reconcile(record,signal,rows){need(await operations.readIntent(record.kind,record.input),"HEALTH_JOB_START_INTENT_UNPROVEN");let found;
     await operations.runRecordedOperation({...record,apply:async()=>{throw new HealthJobError("HEALTH_JOB_REPLAY_DENIED");},verify:async()=>{
-      found=await locate(record,signal);return{complete:!!found,evidence:found?{executionResourceId:found.id,challengeSha256:hash(record.input.challenge)}:{}};
+      found=await locate(record,signal,rows);return{complete:!!found,evidence:found?{executionResourceId:found.id,challengeSha256:hash(record.input.challenge)}:{}};
     }});return found;}
-  async function readRetainedStart(){let last=null;for(let index=0;index<10;index++){const r=await readSlot(index,custody.signal);if(!r)break;last=r;}return last;}
+  async function readRetainedStart(){let last=null;for(let index=0;index<attemptLimit;index++){const r=await readSlot(index,custody.signal);if(!r)break;last=r;}return last;}
   const safe=async action=>{try{return await action();}catch(e){throw e instanceof HealthJobError?e:new HealthJobError("HEALTH_JOB_RECONCILE_REQUIRED");}};
   async function probeHealth({role,origin,release,appId,revisionName,invocationContext,signal}){
     need(!busy,"HEALTH_JOB_CONCURRENT");busy=true;
     try{
-      need(signal instanceof AbortSignal,"HEALTH_JOB_SIGNAL_REQUIRED");signal=AbortSignal.any([signal,custody.signal,AbortSignal.timeout(timeoutMs)]);
+      need(signal instanceof AbortSignal,"HEALTH_JOB_SIGNAL_REQUIRED");
+      const ownerSignal=AbortSignal.any([signal,custody.signal]);
+      signal=AbortSignal.any([ownerSignal,AbortSignal.timeout(timeoutMs)]);
       const requested={role,origin,release,appId,revisionName,invocationContext};const now=Date.now();const challenge={schemaVersion:releaseMode?2:1,...(authority?{authority}:{}),nonce:randomBytes(32).toString("hex"),
         domain:context.domain,intentSha256:context.intentSha256,sourceFenceSha256:context.sourceFenceSha256,targetSha256:hash(p.worker),identity:identity(p),
         issuedAt:now,expiresAt:now+timeoutMs,request:structuredClone(requested)};
       validateHealthChallenge(challenge,p.worker,identity(p));await assertAuthority(signal);
       await prepare(signal);await assertWorker(requested,signal,true);
-      let index;
-      for(index=0;index<10;index++){const old=await readSlot(index,signal);if(!old)break;
-        const previous=await reconcile(old,signal);need(["Succeeded","Failed","Stopped"].includes(previous.properties.status),"HEALTH_JOB_PREVIOUS_EXECUTION_PENDING");}
-      need(index<10,"HEALTH_JOB_ATTEMPT_BOUND");
+      let index, history;
+      for(index=0;index<attemptLimit;index++){const old=await readSlot(index,signal);if(!old)break;
+        history??=await inventory(signal);
+        const previous=await reconcile(old,signal,history);need(["Succeeded","Failed","Stopped"].includes(previous.properties.status),"HEALTH_JOB_PREVIOUS_EXECUTION_PENDING");}
+      need(index<attemptLimit,"HEALTH_JOB_ATTEMPT_BOUND");
       need((await inventory(signal)).every(r=>["Succeeded","Failed","Stopped"].includes(r.properties.status)),"HEALTH_JOB_FOREIGN_EXECUTION");
+      if(mode==="migration"&&index>0){
+        // Prior executions were admitted under the first bounded interval. Give
+        // the as-yet unpublished challenge a full capture interval under the same owner.
+        await check(signal);signal=AbortSignal.any([ownerSignal,AbortSignal.timeout(timeoutMs)]);
+        challenge.issuedAt=Date.now();challenge.expiresAt=challenge.issuedAt+timeoutMs;
+        validateHealthChallenge(challenge,p.worker,identity(p));
+      }
       const record={kind:"AZURE_HEALTH_PROBE_START",input:{plan:p,context,index,challenge,template:template(p,challenge)}};await retain(record,index,signal);let found,acceptedId;
       let captured = null, captureError;
       async function observeFrames(run) {

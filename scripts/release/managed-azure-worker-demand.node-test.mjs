@@ -123,7 +123,7 @@ for (const [name, mutate] of [
   ["retry", j => { j.properties.configuration.replicaRetryLimit = 1; }],
 ]) test(`scheduler readback rejects ${name} drift`, () => { const expected = job("Schedule"), j = actual(expected); mutate(j); assert.throws(() => assertManagedAzureSchedulerJob(j, expected, jobId)); });
 
-async function fixture({ existing = null, mutateProof, mutateExecution, loseAck = false } = {}) {
+async function fixture({ existing = null, mutateProof, mutateExecution, mutateDetail, onWait, loseAck = false } = {}) {
   const controller = new AbortController(), records = new Map(), calls = [], rows = [];
   let current = existing && actual(existing), clock = Date.now();
   const custody = { signal: controller.signal, snapshot: () => ({ domain: "ops", intentSha256: "f".repeat(64), pending: { to: "RELEASING", operationId: "00000000-0000-4000-8000-000000000002" } }), async assertOwned() { controller.signal.throwIfAborted(); } };
@@ -131,7 +131,7 @@ async function fixture({ existing = null, mutateProof, mutateExecution, loseAck 
   const make = async () => createManagedAzureWorkerDemandLifecycle({ jobId, target, signal: controller.signal,
     proofStore: store, proofPrefix: `operations/ops/${"f".repeat(64)}/00000000-0000-4000-8000-000000000002/`,
     operations: await openProviderOperationRecorder({ custody, store, phase: "RELEASING", signal: controller.signal }),
-    check: () => custody.assertOwned(), now: () => clock, wait: async ms => { clock += ms; },
+    check: () => custody.assertOwned(), now: () => clock, wait: async ms => { clock += ms; onWait?.(rows); },
     request: async (id, request = {}) => {
       calls.push({ id, method: request.method ?? "GET" });
       if (request.method === "PUT") { current = actual(request.body); if (loseAck) { loseAck = false; throw new Error("private provider failure"); } return { status: 202 }; }
@@ -140,6 +140,8 @@ async function fixture({ existing = null, mutateProof, mutateExecution, loseAck 
         rows.push({ id: `${jobId}/executions/${name}`, name, properties: { status: "Succeeded", startTime: new Date(clock).toISOString(), endTime: new Date(clock + 1).toISOString(), template: structuredClone(request.body) } });
         mutateExecution?.(rows.at(-1));return { status: 202 };
       }
+      const item = rows.find(e => e.id === id);
+      if (item) { const body = structuredClone(item); mutateDetail?.(body); return { status: 200, body }; }
       if (id.endsWith("/executions")) return { status: 200, body: { value: structuredClone(rows) } };
       return current ? { status: 200, body: structuredClone(current) } : { status: 404 };
     },
@@ -164,6 +166,42 @@ test("recorded create → actual nonce-bound scheduler proof → schedule, with 
   await inherited.observe(scheduled);
   assert.equal(f.calls.filter(c => c.method !== "GET").length, effects);
   assert.equal(f.calls.filter(c => c.id.endsWith("/start")).length, 1);
+});
+
+function redactReferences(execution) {
+  for (const entry of execution.properties.template.containers[0].env) if (entry.secretRef) entry.secretRef = "cappjob-fixture-scheduler";
+}
+test("an inherited scheduler start verifies Azure's job placeholders against the current job and named execution", async () => {
+  let fail = true;
+  const f = await fixture({ mutateExecution: redactReferences, mutateProof() { if (fail) throw Error("stream collected"); } });
+  const manual = job(), c = await f.make();
+  await c.write("CREATE", null, manual, true);
+  await assert.rejects(c.prove(manual, release, "activation", true)); fail = false;
+  const resumed = await f.make(); assert.ok((await resumed.prove(manual, release, "activation", false)).complete);
+  assert.equal(f.calls.filter(c => c.id.endsWith("/start")).length, 1);
+  assert.ok(f.calls.some(c => c.id.endsWith("/executions/fixture-execution")));
+});
+for (const [name, mutate, mutateDetail] of [
+  ["wrong placeholder", e => { e.properties.template.containers[0].env.find(x => x.secretRef).secretRef = "cappjob-other"; }],
+  ["changed literal", e => { e.properties.template.containers[0].env.find(x => x.name === "WORKER_EXECUTION_MODE").value = "other"; }],
+  ["different named execution", () => {}, e => { e.name += "-other"; }],
+]) test("job secret placeholder rejects " + name, async () => {
+  const f = await fixture({ mutateExecution(e) { redactReferences(e); mutate(e); }, mutateDetail });
+  const c = await f.make(); await c.write("CREATE", null, job(), true);
+  await assert.rejects(c.prove(job(), release, "original", true));
+  assert.equal(f.current.properties.configuration.triggerType, "Manual");
+});
+
+test("scheduled redacted writer is observed only after a fresh terminal census", async () => {
+  const body = job("Schedule"); let waits = 0;
+  const f = await fixture({ existing: body, onWait(rows) { rows[0].properties.status = "Succeeded"; waits++; } });
+  const e = { id: jobId + "/executions/" + "fixture-run", name: "fixture-run", properties: { status: "Running",
+    startTime: new Date().toISOString(), template: structuredClone(body.properties.template) } };
+  redactReferences(e); f.rows.push(e);
+  assert.ok((await (await f.make()).observe(body)).complete);
+  assert.equal(waits, 1); assert.ok(f.calls.every(c => c.method === "GET"));
+  e.properties.status = "Running"; e.properties.template.containers[0].command = ["foreign"];
+  await assert.rejects((await f.make()).observe(body), /EXECUTION_INVALID/); assert.equal(waits, 1);
 });
 
 test("a lost PUT acknowledgement is reconciled without replay", async () => {

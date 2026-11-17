@@ -87,6 +87,25 @@ test("exact worker/release fresh completed receipt reaches activation callback s
 test("two activation health reads use sequential reconciled immutable attempts",async()=>{
   const f=await fixture();await f.run();f.args.invocationContext="worker-final";await f.run();assert.equal(f.state.starts,2);assert.equal((await f.dispatcher.readRetainedStart()).input.index,1);
 });
+test("long migration reopens after ten original attempts, checks every prior start, and retains the new bound",async()=>{
+  const f=await fixture();
+  for(let i=0;i<10;i++)await f.run();
+  const prior=await f.dispatcher.readRetainedStart();assert.equal(prior.input.index,9);
+  f.state.runs[0].properties.status="Running";
+  await assert.rejects(f.run(await f.reopen()),/HEALTH_JOB_PREVIOUS_EXECUTION_PENDING/);assert.equal(f.state.starts,10);
+  f.state.runs[0].properties.status="Succeeded";
+  for(let i=10;i<20;i++)await f.run(await f.reopen());
+  const retained=await (await f.reopen()).readRetainedStart();assert.equal(retained.input.index,19);
+  assert.equal((await (await f.reopen()).reconcileStart()).status,"Succeeded");
+  await assert.rejects(f.run(await f.reopen()),/HEALTH_JOB_ATTEMPT_BOUND/);assert.equal(f.state.starts,20);
+});
+for(const [mode,options] of [["release",{releaseMode:true}],["acceptance",{acceptancePhase:"ROUTED"}]]){
+  test(mode+" retains its existing ten-probe limit",async()=>{
+    const f=await fixture(options);
+    for(let i=0;i<10;i++)await f.run();
+    await assert.rejects(f.run(await f.reopen()),/HEALTH_JOB_ATTEMPT_BOUND/);assert.equal(f.state.starts,10);
+  });
+}
 test("unknown start acknowledgement and still running execution cannot create duplicate",async()=>{
   const f=await fixture();f.state.loseStart=true;await assert.rejects(f.run());assert.equal(f.state.starts,1);f.state.runs[0].properties.status="Running";
   await assert.rejects(f.run(await f.reopen()),/HEALTH_JOB_PREVIOUS_EXECUTION_PENDING/);assert.equal(f.state.starts,1);
