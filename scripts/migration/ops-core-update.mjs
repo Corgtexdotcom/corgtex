@@ -8,7 +8,7 @@ import { createManagedAzureContainerAppTransport, buildManagedAzureReleaseTempla
 import { snapshotManagedAzureExclusiveActivation } from "../release/managed-azure-exclusive-activation.mjs";
 import { managedAzureHealthReady } from "../release/managed-azure-release-transaction.mjs";
 import { projectWorkerHealth, validateHealthChallenge } from "./ops-core-health-probe.mjs";
-import { buildHealthProbeJobDefinition } from "./ops-core-health-job.mjs";
+import { buildHealthProbeJobDefinition, assertHealthJobStartDescriptor } from "./ops-core-health-job.mjs";
 import { opsCoreImageRepository } from "./ops-core-image-repository.mjs";
 
 import { opsCoreRevisionSuffix } from "./ops-core-activation-revision.mjs";
@@ -140,13 +140,21 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
     const observer = await openProviderOperationRecorder({ custody, store, phase: "RELEASING", signal: custody.signal });
     const baselineTarget = { appId: `/subscriptions/${p.target.subscriptionId}/resourceGroups/${p.target.resourceGroupName}/providers/Microsoft.App/containerApps/${p.target.apps.worker}`,
       origin: p.origins.worker, image: p.baseline.images.worker, release: p.baseline.release };
+    const indices = new Set();
     for (const key of keys.filter(key => key.endsWith("/descriptor.json"))) {
       const d = await read(key);
       // A recovery decision or a non-observer descriptor cannot establish an
       // unused attempt. Full runtime intents/receipts also remain outside the
       // allow-set built from independently validated baseline probe inputs.
       if (d?.kind !== "AZURE_HEALTH_PROBE_START" || !d.input?.plan || !d.input.challenge) return false;
-      const h = d.input.plan, challenge = d.input.challenge;
+      const h = d.input.plan, challenge = d.input.challenge, index = d.input.index;
+      if (!Number.isInteger(index) || index < 0 || index >= 10) return false;
+      const context = { domain: p.domain, intentSha256: binding.intentSha256, sourceFenceSha256: p.authority.migrationSourceFenceSha256,
+        phaseOperationId: p.releaseId, ...(p.workerDemand ? { workerDemandSha256: hash({ plan: p.workerDemand, target: p.target }) } : {}),
+        mode: "release", acceptedMigrationSha256: p.authority.acceptedMigrationSha256 };
+      const authority = { mode: "release", acceptedMigrationSha256: p.authority.acceptedMigrationSha256, releaseId: p.releaseId,
+        targetSha256: hash(baselineTarget), sourceFenceProvenance: "historical-migration" };
+      assertHealthJobStartDescriptor(d, { plan: h, context, index, authority });
       buildHealthProbeJobDefinition(h);
       if (!same(h.worker, baselineTarget) || h.environmentResourceId !== p.target.environmentId
         || challenge.domain !== p.domain || challenge.intentSha256 !== binding.intentSha256
@@ -159,9 +167,15 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
       // digest. This is read-only and never starts another observation job.
       if (!(await observer.readStatus(d.kind, d.input)).intent) return false;
       const operationKey = hash({ kind: d.kind, inputSha256: hash(d.input) });
-      allowed.add(key); allowed.add(`${prefix}/${operationKey}/intent.json`); allowed.add(`${prefix}/${operationKey}/receipt.json`);
+      const descriptorKey = `${prefix}/${operationKey}/descriptor.json`;
+      const slotKey = `${prefix}/${hash({ kind: "AZURE_HEALTH_PROBE_SLOT", inputSha256: hash({ plan: h, context, index }) })}/descriptor.json`;
+      if (![descriptorKey, slotKey].includes(key) || !same(await read(descriptorKey), d) || !same(await read(slotKey), d)) return false;
+      indices.add(index);
+      allowed.add(descriptorKey); allowed.add(slotKey);
+      allowed.add(`${prefix}/${operationKey}/intent.json`); allowed.add(`${prefix}/${operationKey}/receipt.json`);
     }
-    return keys.every(key => allowed.has(key));
+    return [...indices].sort((a, b) => a - b).every((index, position) => index === position)
+      && keys.every(key => allowed.has(key));
   }
   async function workerObservation(phase, context, revisionName) {
     await authority();
@@ -188,13 +202,10 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
   if (!snapshot) {
     need(action === "apply" && custody.mode === "apply" || action === "reconcile", "UPDATE_BASELINE_MISSING");
     if (action === "reconcile" && !unchanged) {
-      // Before baseline retention there must be no effect or health-job intent.
-      // Persist the unchanged decision before probing so another interrupted
-      // observer can continue this branch without gaining apply authority.
-      need(typeof store.listRecords === "function", "UPDATE_RECORD_INVENTORY_REQUIRED");
-      await owned();
-      need((await store.listRecords(`${prefix}/`, custody.signal)).length === 0, "UPDATE_UNRECORDED_BASELINE_EFFECTS");
-      await owned();
+      // Demand-mode baseline health runs before snapshot retention. Admit only
+      // its native bound observer records (or an empty history), never a runtime
+      // effect. Persist UNCHANGED before fresh health so reopening cannot apply.
+      need(await onlyBaselineObservations(), "UPDATE_UNRECORDED_BASELINE_EFFECTS");
       unchanged = { type: "UPDATE_UNCHANGED_DECISION", binding };
       await retain(unchangedKey, unchanged);
     }

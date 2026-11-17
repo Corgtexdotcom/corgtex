@@ -156,6 +156,21 @@ function query(p,run,c,environments){return`ContainerAppConsoleLogs_CL\n| where 
   +`| where (Log_s startswith_cs '${HEALTH_PROBE_PREFIX}' and Log_s contains_cs '${c.nonce}') or Log_s == 'CORGTEX_HEALTH_PROBE_FAILED'\n`
   +`| project ${logColumns.join(", ")}\n| take 3`;}
 
+/** Shared read-only admission for native observer history. This validates the
+ * original challenge/template; it never turns an expired observation into proof. */
+export function assertHealthJobStartDescriptor(record,{plan:value,context,index,authority}){
+  const p=plan(value);
+  need(exact(record,"kind,input")&&record.kind==="AZURE_HEALTH_PROBE_START"&&exact(record.input,"plan,context,index,challenge,template")
+    &&same(record.input.plan,p)&&same(record.input.context,context)&&record.input.index===index,"HEALTH_JOB_DESCRIPTOR_INVALID");
+  validateHealthChallenge(record.input.challenge,p.worker,identity(p),{fresh:false});
+  need(same(record.input.challenge.authority??null,authority)&&record.input.challenge.domain===context.domain
+    &&record.input.challenge.intentSha256===context.intentSha256&&record.input.challenge.sourceFenceSha256===context.sourceFenceSha256,"HEALTH_JOB_DESCRIPTOR_INVALID");
+  // A retained old start must reconcile against the exact command actually dispatched.
+  need(same(record.input.template,template(p,record.input.challenge))
+    ||same(record.input.template,template(p,record.input.challenge,false)),"HEALTH_JOB_DESCRIPTOR_INVALID");
+  return record;
+}
+
 /** Bounded worker health observations during pending TARGET_ACTIVATING only.
  * Source assertions and the external lease remain outside the probe container.
  * Explicit mode:'release' instead uses pending RELEASING and the independently
@@ -257,14 +272,7 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
   const slotKey=index=>`${prefix}/${hash({kind:"AZURE_HEALTH_PROBE_SLOT",inputSha256:hash({plan:p,context,index})})}/descriptor.json`;
   async function readSlot(index,signal){await check(signal);await descriptorStore.assertPrivate();const text=await descriptorStore.readOptional(slotKey(index),signal);await check(signal);
     if(text===null)return null;need(typeof text==="string"&&text.length<65536,"HEALTH_JOB_DESCRIPTOR_INVALID");const record=JSON.parse(text);
-    need(exact(record,"kind,input")&&record.kind==="AZURE_HEALTH_PROBE_START"&&exact(record.input,"plan,context,index,challenge,template")
-      &&same(record.input.plan,p)&&same(record.input.context,context)&&record.input.index===index,"HEALTH_JOB_DESCRIPTOR_INVALID");
-    validateHealthChallenge(record.input.challenge,p.worker,identity(p),{fresh:false});
-    need(same(record.input.challenge.authority??null,authority)&&record.input.challenge.domain===context.domain
-      &&record.input.challenge.intentSha256===context.intentSha256&&record.input.challenge.sourceFenceSha256===context.sourceFenceSha256,"HEALTH_JOB_DESCRIPTOR_INVALID");
-    // A retained old start must reconcile against the exact command actually dispatched.
-    need(same(record.input.template,template(p,record.input.challenge))
-      ||same(record.input.template,template(p,record.input.challenge,false)),"HEALTH_JOB_DESCRIPTOR_INVALID");return record;}
+    assertHealthJobStartDescriptor(record,{plan:p,context,index,authority});return record;}
   async function retain(record,index,signal){await check(signal);await descriptorStore.assertPrivate();const text=JSON.stringify(record);
     await descriptorStore.createOnly(slotKey(index),text,signal);need(same(await readSlot(index,signal),record),"HEALTH_JOB_DESCRIPTOR_INVALID");
     const key=`${prefix}/${hash({kind:record.kind,inputSha256:hash(record.input)})}/descriptor.json`;

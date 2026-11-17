@@ -282,7 +282,8 @@ async function retainBaselineObserver(f, mutate = () => {}) {
     workspaceId: "00000000-0000-4000-8000-000000000002", identityResourceId: `${prefix}Microsoft.ManagedIdentity/userAssignedIdentities/probe`,
     image: p.baseline.images.worker, probeSha256: "e".repeat(64), location: "westus3" };
   const context = { domain: p.domain, intentSha256: hash(p), sourceFenceSha256: p.authority.migrationSourceFenceSha256,
-    phaseOperationId: p.releaseId, mode: "release", acceptedMigrationSha256: p.authority.acceptedMigrationSha256 };
+    phaseOperationId: p.releaseId, ...(p.workerDemand ? { workerDemandSha256: hash({ plan: p.workerDemand, target: p.target }) } : {}),
+    mode: "release", acceptedMigrationSha256: p.authority.acceptedMigrationSha256 };
   const identity = { jobResourceId: h.jobResourceId, imageDigest: h.image.split("@")[1], probeSha256: h.probeSha256 };
   const challenge = { schemaVersion: 2, domain: p.domain, intentSha256: hash(p), sourceFenceSha256: context.sourceFenceSha256,
     targetSha256: hash(h.worker), identity, nonce: "f".repeat(64), issuedAt: Date.now() - 1000, expiresAt: Date.now() + 60000,
@@ -443,6 +444,61 @@ test("validated retained baseline health descriptors and bound intent/receipt pe
   await assert.rejects(f.run()); f.reopen();
   assert.equal((await f.run("reconcile")).outcome, "UNCHANGED"); assert.deepEqual(f.effects(), []);
 });
+
+async function interruptedDemandBaseline(mutate = () => {}) {
+  let fail = true;
+  const f = fixture({ demand: true, async workerHealth(i, r, f) {
+    if (!fail) return; fail = false;
+    await retainBaselineObserver(f);
+    await mutate(f);
+    throw Error("baseline health log unavailable before snapshot");
+  } });
+  await assert.rejects(f.run("apply"), /baseline health log unavailable/);
+  assert.equal([...f.records.keys()].some(k => k.endsWith("phase-plan.json")), false);
+  assert.deepEqual(f.effects(), []); f.reopen(); return f;
+}
+test("actual four observer records before demand snapshot reconcile UNCHANGED with fresh health and no runtime effects", async () => {
+  const f = await interruptedDemandBaseline(); assert.equal(f.records.size, 4);
+  const originals = new Map(f.records);
+  assert.equal([...originals.keys()].filter(k => k.endsWith("descriptor.json")).length, 2);
+  const result = await f.run("reconcile");
+  assert.equal(result.outcome, "UNCHANGED"); assert.deepEqual(result.release, f.plan.baseline.release);
+  assert.equal(result.evidence.scheduler.complete, true);
+  assert.equal(result.evidence.scheduler.jobId, `${prefix}Microsoft.App/jobs/fixture-scheduler`);
+  assert.deepEqual(f.effects(), []); assert.equal(f.log.filter(x => x === "health:worker:baseline-worker").length, 3);
+  for (const [key, text] of originals) assert.equal(f.records.get(key), text);
+  assert.equal(f.log.includes("images"), false);
+});
+for (const corruption of ["foreign-alias", "missing-slot", "mismatched-slot", "foreign-context", "unsafe-template", "runtime-intent", "unbound-intent", "unbound-receipt"]) {
+  test(`pre-snapshot baseline observer rejects ${corruption} without an unchanged decision or runtime effects`, async () => {
+    const f = await interruptedDemandBaseline(async f => {
+      const base = `operations/ops/${hash(f.plan)}/${f.plan.releaseId}`;
+      const descriptorKeys = [...f.records.keys()].filter(k => k.endsWith("descriptor.json"));
+      const record = JSON.parse(f.records.get(descriptorKeys[0]));
+      const operation = hash({ kind: record.kind, inputSha256: hash(record.input) });
+      const slot = descriptorKeys.find(k => k !== `${base}/${operation}/descriptor.json`);
+      if (corruption === "foreign-alias") f.records.set(`${base}/${"0".repeat(64)}/descriptor.json`, f.records.get(slot));
+      if (corruption === "missing-slot") f.records.delete(slot);
+      if (corruption === "mismatched-slot") { record.input.index = 1; f.records.set(slot, JSON.stringify(record)); }
+      if (["foreign-context", "unsafe-template"].includes(corruption)) {
+        // Even self-consistent descriptor+intent hashes must not authorize a
+        // foreign owner or a command other than the native secretless probe.
+        f.records.clear();
+        await retainBaselineObserver(f, d => {
+          if (corruption === "foreign-context") d.input.context.phaseOperationId = randomUUID();
+          else d.input.template.containers[0].command = ["node", "/app/scripts/start-worker.mjs"];
+        });
+      }
+      if (corruption === "runtime-intent") f.records.set(`${base}/${"0".repeat(64)}/intent.json`, JSON.stringify({kind:"UPDATE_TEMPLATE"}));
+      if (corruption === "unbound-intent") { const key = `${base}/${operation}/intent.json`, v = JSON.parse(f.records.get(key)); v.inputSha256="0".repeat(64); f.records.set(key,JSON.stringify(v)); }
+      if (corruption === "unbound-receipt") { const key = `${base}/${operation}/receipt.json`, v = JSON.parse(f.records.get(key)); v.intentSha256="0".repeat(64); f.records.set(key,JSON.stringify(v)); }
+    });
+    const healthReads = f.log.filter(x => x.startsWith("health:")).length;
+    await assert.rejects(f.run("reconcile")); assert.deepEqual(f.effects(), []); assert.equal(f.finished, null);
+    assert.equal(f.log.filter(x => x.startsWith("health:")).length, healthReads);
+    assert.equal([...f.records.values()].map(JSON.parse).some(r => r.type === "UPDATE_UNCHANGED_DECISION"), false);
+  });
+}
 
 for (const corruption of ["malformed-challenge", "nonbaseline", "orphan-intent", "bound-intent", "descriptor-without-intent"]) test(`${corruption} baseline observer records block unchanged unwind`, async () => {
   let fail = true;
