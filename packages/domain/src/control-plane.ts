@@ -79,6 +79,7 @@ import {
   heartbeatManagedReleaseLease,
   markManagedReleaseRecoveryRequired,
   recordManagedReleaseRecoveryIntent,
+  supersedeInvalidManagedReleaseRecoveryIntent,
   recordManagedReleaseRollbackRecord,
 } from "./control-plane-release-lease";
 import { assertCustomerAssignableWorkspaceSlug, MANAGED_RELEASE_OPERATIONAL_WORKSPACE_SLUG } from "./workspace-slugs";
@@ -11350,7 +11351,7 @@ function managedReleasePreflightProjection(value: unknown): ManagedReleasePrefli
     && record.release && typeof record.release === "object" && !Array.isArray(record.release)
     && record.target && typeof record.target === "object" && !Array.isArray(record.target),
   409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
-  invariant(record.writeIntentProtocolVersion === undefined || record.writeIntentProtocolVersion === 1 || record.writeIntentProtocolVersion === 2,
+  invariant(record.writeIntentProtocolVersion === undefined || record.writeIntentProtocolVersion === 1 || record.writeIntentProtocolVersion === 2 || record.writeIntentProtocolVersion === 3,
     409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
   invariant(record.protectedReleaseProfile === undefined && record.targetDigest === undefined
     || record.protectedReleaseProfile === "SELF_SERVE_IMPORTER_FENCE_V1"
@@ -11849,6 +11850,8 @@ export async function runControlPlaneManagedReleaseLeaseOperation(
       return getManagedReleaseRecoveryStatus(params.deploymentId as string, managedReleaseAcr(params));
     case "record_rollback":
       return recordManagedReleaseRollbackRecord(managedReleaseHandle(params), params.rollback);
+    case "supersede_invalid_recovery_intent":
+      return supersedeInvalidManagedReleaseRecoveryIntent(managedReleaseHandle(params), params.oldIntentDigest, params.intent, params.evidence);
     case "record_recovery_intent":
       return recordManagedReleaseRecoveryIntent(managedReleaseHandle(params), params.intent);
     case "begin":

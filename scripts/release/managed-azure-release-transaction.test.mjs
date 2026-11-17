@@ -133,7 +133,7 @@ function dependencies(options = {}) {
   const hosted = !options.selfserve && options.hosted !== false;
   const targetDigest = "7".repeat(64);
   const deployment = { deploymentId, deploymentKind: hosted ? "HOSTED_DEDICATED" : "REMOTE_MANAGED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: true, provider: "azure", group: hosted ? "hosted-dedicated" : "managed-customers", workload: hosted ? "hosted-dedicated" : "managed-customers", workloadClass: "ACTIVE_CLIENT_PRIMARY" };
-  const preflight = { ...(Object.hasOwn(options, "protocolVersion") && options.protocolVersion === undefined ? {} : { writeIntentProtocolVersion: options.protocolVersion ?? 2 }), deploymentId, deployment, authorityDigest: "e".repeat(64), origin: options.selfserve ? SELFSERVE_RELEASE_ORIGIN : "https://customer.example", ...(options.selfserve && !options.oldServer ? { protectedReleaseProfile: SELFSERVE_RELEASE_PROFILE, targetDigest } : {}), release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" }, target };
+  const preflight = { ...(Object.hasOwn(options, "protocolVersion") && options.protocolVersion === undefined ? {} : { writeIntentProtocolVersion: options.protocolVersion ?? 3 }), deploymentId, deployment, authorityDigest: "e".repeat(64), origin: options.selfserve ? SELFSERVE_RELEASE_ORIGIN : "https://customer.example", ...(options.selfserve && !options.oldServer ? { protectedReleaseProfile: SELFSERVE_RELEASE_PROFILE, targetDigest } : {}), release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" }, target };
   const modes = { web: "Single", worker: "Single" };
   const inactive = new Set();
   const deps = {
@@ -234,6 +234,14 @@ function dependencies(options = {}) {
 }
 
 describe("managed Azure single-target transaction", () => {
+  it("refuses either overlength recovery name on an older server before reservation or drain", async () => {
+    const { deps } = dependencies({ protocolVersion: 2 });
+    await expect(runManagedAzureReleaseTransaction({ ...input, execute: true }, deps)).rejects.toThrow("RECOVERY_INTENT_PROTOCOL_UNAVAILABLE");
+    expect(deps.lease).not.toHaveBeenCalledWith("acquire", expect.anything());
+    expect(deps.setRevisionMode).not.toHaveBeenCalled();
+    expect(deps.setRevisionActive).not.toHaveBeenCalled();
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+  });
   it("rejects the old REMOTE server even when its generic write-intent protocol is current", async () => {
     const { deps } = dependencies({ selfserve: true, oldServer: true, activationPolicy: "EXCLUSIVE" });
     await expect(runManagedAzureReleaseTransaction({ ...input, deploymentId: SELFSERVE_RELEASE_HOST_ID, execute: true }, deps))

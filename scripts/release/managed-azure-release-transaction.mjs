@@ -20,7 +20,7 @@ import {
   managedAzureRevisionSuffix,
   managedAzureTemplateDigest,
 } from "./managed-azure-container-app-transport.mjs";
-import { ManagedAzureRecoveryIntentError, buildManagedAzureRecoveryIntent, runManagedAzureRecoveryIntent } from "./managed-azure-recovery-intent.mjs";
+import { ManagedAzureRecoveryIntentError, buildManagedAzureRecoveryIntent, runManagedAzureRecoveryIntent, assertRecoveryIntentName } from "./managed-azure-recovery-intent.mjs";
 import { createManagedAzureProviderObservation } from "./managed-azure-provider-runtime.mjs";
 import { createManagedAzureSourceManifestResolver } from "./managed-azure-source-manifest-resolver.mjs";
 
@@ -240,7 +240,13 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   }
   const protectedRelease = input.workloadClass === "ACTIVE_CLIENT_PRIMARY"
     && (preflight.deployment.deploymentKind === "HOSTED_DEDICATED" || selfserve);
-  if (protectedRelease && ![1, 2].includes(preflight.writeIntentProtocolVersion)) fail("RECOVERY_INTENT_PROTOCOL_UNAVAILABLE");
+  if (protectedRelease && ![1, 2, 3].includes(preflight.writeIntentProtocolVersion)) fail("RECOVERY_INTENT_PROTOCOL_UNAVAILABLE");
+  // Legacy servers can retain only fixed 35-character v1 suffixes. Prove both
+  // prospective names before readiness, reservation, or any writer drain.
+  if (protectedRelease && preflight.writeIntentProtocolVersion !== 3
+    && [preflight.target.webAppName, preflight.target.workerAppName].some(name => name.length + 37 > 54)) {
+    fail("RECOVERY_INTENT_PROTOCOL_UNAVAILABLE");
+  }
   const configured = protectedRelease
     ? await deps.targetConfig({ deploymentId: input.deploymentId, execute: false, reason: input.reason })
     : { status: "RECONCILIATION_READY", effects: 0, target: { acrName: input.acrName, acrResourceGroup: input.acrResourceGroup, activationPolicy: "STANDARD" } };
@@ -292,7 +298,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   }
   const exclusiveActivation = protectedRelease && configured.target.activationPolicy === "EXCLUSIVE"
     ? await snapshotManagedAzureExclusiveActivation(deps, preflight.target, baselines) : null;
-  if (exclusiveActivation && preflight.writeIntentProtocolVersion !== 2) fail("EXCLUSIVE_ACTIVATION_PROTOCOL_UNAVAILABLE");
+  if (exclusiveActivation && ![2, 3].includes(preflight.writeIntentProtocolVersion)) fail("EXCLUSIVE_ACTIVATION_PROTOCOL_UNAVAILABLE");
   const rollback = protectedRelease ? {
     schemaVersion: exclusiveActivation ? 3 : 2,
     ...(exclusiveActivation ? { exclusiveActivation } : {}),
@@ -417,7 +423,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       try {
         const plan = buildManagedAzureRecoveryIntent({ originatingLease: handle, target: preflight.target, role,
           predecessor: current, release: recoveryRelease, image: recoveryPlan.roles[role].image,
-          imageDigest: recoveryPlan.roles[role].digest });
+          imageDigest: recoveryPlan.roles[role].digest, protocolVersion: preflight.writeIntentProtocolVersion === 3 ? 2 : 1 });
         recoveryTemplates[role] = plan.template;
         await runManagedAzureRecoveryIntent(deps, { handle, reason: input.reason, target: preflight.target,
           release: recoveryRelease, ...plan, location: current.location });
@@ -432,7 +438,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     }
     for (const role of ROLES) {
       const current = await deps.readApp({ target: preflight.target, role, release: recoveryRelease,
-        imageDigest: recoveryPlan.roles[role].digest });
+        imageDigest: recoveryPlan.roles[role].digest, protocolVersion: preflight.writeIntentProtocolVersion === 3 ? 2 : 1 });
       if (current.templateDigest !== managedAzureTemplateDigest(recoveryTemplates[role])) {
         return markRecovery("READBACK", "RECOVERY_INTENT_FINAL_READBACK_DRIFT", detail);
       }
@@ -566,6 +572,13 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
         await deps.lease("abort", leaseArgs(handle, { reason: input.reason }));
         fail("MANAGED_RELEASE_BASELINE_DRIFT");
       }
+    }
+    if (protectedRelease) for (const role of ROLES) {
+      const plan = buildManagedAzureRecoveryIntent({ originatingLease: handle,
+        target: preflight.target, role, predecessor: baselines[role], release: recoveryRelease,
+        image: recoveryPlan.roles[role].image, imageDigest: recoveryPlan.roles[role].digest,
+        protocolVersion: preflight.writeIntentProtocolVersion === 3 ? 2 : 1 });
+      assertRecoveryIntentName(plan.intent);
     }
     await deps.lease("record_rollback", leaseArgs(handle, { rollback, reason: input.reason }));
     for (const plan of protectedRelease ? [releasePlan, recoveryPlan] : [releasePlan]) for (const role of ROLES) {

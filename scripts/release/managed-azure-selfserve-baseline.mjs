@@ -43,7 +43,7 @@ export function matchesSelfserveBaseline(binding, target, role, release) {
 export function selfserveBaselineBinding(status, release, activationPolicy, role, previous) {
   const binding = BINDINGS[role];
   if (status.deploymentId !== SELFSERVE_RELEASE_HOST_ID || status.origin !== SELFSERVE_RELEASE_ORIGIN
-    || status.protectedReleaseProfile !== SELFSERVE_RELEASE_PROFILE || status.writeIntentProtocolVersion !== 2
+    || status.protectedReleaseProfile !== SELFSERVE_RELEASE_PROFILE || ![2, 3].includes(status.writeIntentProtocolVersion)
     || activationPolicy !== "EXCLUSIVE" || !matchesSelfserveBaseline(binding, status.target, role, release)) return undefined;
   if (previous !== undefined && (previous?.containerName !== role || previous.image !== binding.image || previous.readyRevision !== binding.revision
     || previous.templateDigest !== binding.appTemplate)) return undefined;

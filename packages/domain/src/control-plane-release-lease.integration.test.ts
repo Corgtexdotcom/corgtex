@@ -20,6 +20,7 @@ import {
   heartbeatManagedReleaseLease,
   markManagedReleaseRecoveryRequired,
   recordManagedReleaseRecoveryIntent,
+  supersedeInvalidManagedReleaseRecoveryIntent,
   recordManagedReleaseRollbackRecord,
 } from "./control-plane-release-lease";
 import {
@@ -421,7 +422,7 @@ describe("managed release lease CAS", () => {
     const before = await releaseState(target.id);
     await expect(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY)).resolves.toEqual({
       deploymentId: target.id,
-      writeIntentProtocolVersion: 2,
+      writeIntentProtocolVersion: 3,
       deployment: expect.objectContaining({ deploymentKind: "REMOTE_MANAGED", workloadClass: "ACTIVE_CLIENT_PRIMARY" }),
       authorityDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
       origin: target.url,
@@ -442,7 +443,7 @@ describe("managed release lease CAS", () => {
     const before = await releaseState(canary.id);
     await expect(getManagedReleaseTargetPreflight(canary.id, ACR_IDENTITY, "ACTIVE_CLIENT_CANARY")).resolves.toEqual({
       deploymentId: canary.id,
-      writeIntentProtocolVersion: 2,
+      writeIntentProtocolVersion: 3,
       deployment: expect.objectContaining({ deploymentKind: "HOSTED_DEDICATED", workloadClass: "ACTIVE_CLIENT_CANARY", releaseEligible: false }),
       authorityDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
       origin: canary.url,
@@ -465,7 +466,7 @@ describe("managed release lease CAS", () => {
     const before = await releaseState(target.id);
     await expect(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY)).resolves.toEqual({
       deploymentId: target.id,
-      writeIntentProtocolVersion: 2,
+      writeIntentProtocolVersion: 3,
       deployment: expect.objectContaining({ deploymentKind: "REMOTE_MANAGED", workloadClass: "ACTIVE_CLIENT_PRIMARY" }),
       authorityDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
       origin: target.url,
@@ -632,6 +633,48 @@ describe("managed release lease CAS", () => {
     expect(await getManagedReleaseRollbackRecord({ deploymentId: target.id, leaseId: claimed.leaseId,
       capability: claimed.capability, fence: claimed.fence })).toEqual(payload);
   });
+  it("atomically supersedes only an invalid unapplied v1 intent, preserves full history, and never repeats creation authority", async () => {
+    const appName = "ca-corgtex-ss-prod-web";
+    const row = await deployment({ deploymentKind: "HOSTED_DEDICATED", providerWebServiceId: appName }); await authorizeHosted(row);
+    const original = await acquire(row.id);
+    const basePayload = rollbackPayloadV2();
+    const payload = { ...basePayload, schemaVersion: 3 as const,
+      target: { ...basePayload.target, webAppName: appName },
+      previous: { ...basePayload.previous, web: { ...basePayload.previous.web, readyRevision: `${appName}--old` } },
+      exclusiveActivation: { originalMode: "Single", temporaryMode: "Multiple", configurationDigests: { web: DIGESTS[2]!, worker: DIGESTS[3]! } } };
+    await recordManagedReleaseRollbackRecord(original, payload); await beginManagedReleaseMutation(original);
+    const old = recoveryIntent("web", original, { ...payload, schemaVersion: 2 });
+    const worker = recoveryIntent("worker", original, { ...payload, schemaVersion: 2 });
+    await recordManagedReleaseRecoveryIntent(original, old); await recordManagedReleaseRecoveryIntent(original, worker);
+    const { revisionSuffix: ignoredSuffix, intentDigest: ignoredDigest, templateDigest: ignoredTemplate, ...oldBase } = old;
+    const nextBase = { ...oldBase, protocolVersion: 2 as const };
+    const unsigned = { ...nextBase, revisionSuffix: managedReleaseRecoveryIntentRevisionSuffix(nextBase), templateDigest: DIGESTS[0]! };
+    const replacement = { ...unsigned, intentDigest: managedReleaseRecoveryIntentDigest(unsigned) };
+    const now = Date.now();
+    const evidence = { schemaVersion: 1, startedAt: now - 2_000, observedAt: now, leaseId: original.leaseId, fence: original.fence,
+      targetDigest: `sha256:${createHash("sha256").update(JSON.stringify(Object.fromEntries(Object.entries(payload.target).sort()))).digest("hex")}`,
+      oldIntentDigest: old.intentDigest, role: "web", appName, latestRevisionName: old.predecessorRevisionName,
+      latestReadyRevisionName: old.predecessorRevisionName, templateDigest: old.predecessorTemplateDigest,
+      configurationDigest: payload.exclusiveActivation.configurationDigests.web, provisioningState: "Succeeded",
+      revisions: [{ revisionName: old.predecessorRevisionName, active: true, replicaCount: 1 }] };
+    const before = await releaseState(row.id);
+    await expectCode(supersedeInvalidManagedReleaseRecoveryIntent({ ...original, capability: "wrong" }, old.intentDigest, replacement, evidence), "MANAGED_RELEASE_LEASE_CONFLICT");
+    await expectCode(supersedeInvalidManagedReleaseRecoveryIntent(original, old.intentDigest, replacement, { ...evidence, fence: original.fence + 1 }), "MANAGED_RELEASE_RECOVERY_SUPERSESSION_INVALID");
+    expect(await releaseState(row.id)).toEqual(before);
+    await expect(supersedeInvalidManagedReleaseRecoveryIntent(original, old.intentDigest, replacement, evidence)).resolves.toMatchObject({ created: true, intent: replacement });
+    await expect(supersedeInvalidManagedReleaseRecoveryIntent(original, old.intentDigest, replacement, evidence)).resolves.toMatchObject({ created: false, intent: replacement });
+    const after = await releaseState(row.id);
+    expect(after.deployment.releaseLeaseRollbackRecord).toEqual(before.deployment.releaseLeaseRollbackRecord);
+    expect(after.deployment.releaseLeaseRecoveryEvidence).toMatchObject({ schemaVersion: 2, intents: [replacement, worker] });
+    const events = after.events.filter(item => item.action === "control_plane.release_lease.recovery_intent_superseded");
+    expect(events).toHaveLength(1); expect(events[0]!.meta).toMatchObject({ old, replacement, evidence });
+    expect(after.events.filter(item => item.action === "control_plane.release_lease.recovery_intent_recorded")).toHaveLength(2);
+    await markManagedReleaseRecoveryRequired(original, { stage: "READBACK", code: "RECOVERY_INTENT_RECORDED_REVISION_ABSENT" });
+    await expire(row.id);
+    const claimed = await claimManagedReleaseRecovery({ deploymentId: row.id, expectedLeaseId: original.leaseId, expectedFence: original.fence, owner: "recovery:resume" });
+    await expectCode(supersedeInvalidManagedReleaseRecoveryIntent(original, old.intentDigest, replacement, evidence), "MANAGED_RELEASE_LEASE_CONFLICT");
+    await expect(getManagedReleaseRecoveryStatus(row.id, ACR_IDENTITY)).resolves.toMatchObject({ leaseId: claimed.leaseId, recovery: { intents: [replacement, worker] } });
+  });
   it("records immutable recovery write intents and preserves them through mark, claim, and finalize", async () => {
     const target = await deployment(); const original = await acquire(target.id); const rollback = rollbackPayloadV2();
     await recordManagedReleaseRollbackRecord(original, rollback); await beginManagedReleaseMutation(original);
@@ -660,7 +703,7 @@ describe("managed release lease CAS", () => {
       intents: [webIntent, workerIntent],
     });
     await expect(getManagedReleaseRecoveryStatus(target.id, ACR_IDENTITY)).resolves.toMatchObject({
-      writeIntentProtocolVersion: 2,
+      writeIntentProtocolVersion: 3,
       recovery: { schemaVersion: 2, stage: "ROLLBACK", code: "RECOVERY_WRITE_INTENT_RECORDED", intents: [webIntent, workerIntent] },
     });
     await markManagedReleaseRecoveryRequired(original, { stage: "AUTH", code: "AUTH_ACCEPTANCE_FAILED" });
@@ -784,7 +827,7 @@ describe("selected hosted Azure release lifecycle", () => {
   it("runs a selected hosted release through V2 recording and success without relabelling", async () => {
     const row = await hosted();
     const preflight = await getManagedReleaseTargetPreflight(row.id, ACR_IDENTITY);
-    expect(preflight).toMatchObject({ writeIntentProtocolVersion: 2 });
+    expect(preflight).toMatchObject({ writeIntentProtocolVersion: 3 });
     expect(preflight.deployment).toMatchObject({ deploymentKind: "HOSTED_DEDICATED", group: "hosted-dedicated", releaseEligible: true });
     const handle = await acquire(row.id);
     await recordManagedReleaseRollbackRecord(handle, rollbackPayloadV2());

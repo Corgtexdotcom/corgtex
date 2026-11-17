@@ -386,6 +386,7 @@ const { slackAvailabilityEnv, prismaMock, encryptSecretMock, decryptSecretMock, 
     heartbeatManagedReleaseLease: vi.fn(),
     markManagedReleaseRecoveryRequired: vi.fn(),
     recordManagedReleaseRecoveryIntent: vi.fn(),
+    supersedeInvalidManagedReleaseRecoveryIntent: vi.fn(),
     recordManagedReleaseRollbackRecord: vi.fn(),
   },
 }));
@@ -9940,6 +9941,16 @@ describe("managed Azure release control-plane boundary", () => {
       reason: "Approved exact-target release.",
     })).resolves.toMatchObject({ fence: 1 });
     expect(leaseMocks.acquireManagedReleaseLease).toHaveBeenCalledWith(expect.objectContaining({ expectedTargetDigest: "c".repeat(64) }));
+    leaseMocks.supersedeInvalidManagedReleaseRecoveryIntent.mockResolvedValue({ deploymentId, phase: "RECOVERY_REQUIRED", created: true });
+    await expect(runControlPlaneManagedReleaseLeaseOperation(actor, {
+      operation: "supersede_invalid_recovery_intent", deploymentId, leaseId: "lease-1", capability: "capability", fence: 1,
+      oldIntentDigest: "sha256:" + "1".repeat(64), intent: { role: "web" }, evidence: { schemaVersion: 1 },
+      reason: "Replace the proven invalid unapplied revision name.",
+    })).resolves.toMatchObject({ created: true });
+    expect(leaseMocks.supersedeInvalidManagedReleaseRecoveryIntent).toHaveBeenCalledWith(
+      { deploymentId, leaseId: "lease-1", capability: "capability", fence: 1 }, "sha256:" + "1".repeat(64), { role: "web" }, { schemaVersion: 1 });
+    await expect(runControlPlaneManagedReleaseLeaseOperation(actor, { operation: "supersede_invalid_recovery_intent", deploymentId }))
+      .rejects.toMatchObject({ code: "CONTROL_PLANE_REASON_REQUIRED" });
     leaseMocks.recordManagedReleaseRecoveryIntent.mockResolvedValue({ deploymentId, phase: "RECOVERY_REQUIRED", created: true });
     await expect(runControlPlaneManagedReleaseLeaseOperation(actor, {
       operation: "record_recovery_intent",
