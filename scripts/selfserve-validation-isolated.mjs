@@ -135,6 +135,17 @@ export function isolatedDockerSetup(stage, args, { deadline, record, command = e
   return result;
 }
 
+export function isolatedSmokeMounts({ source, scripts, laneOutput, tlsDirectory, script }) {
+  requireValidation(["source-intake-production-smoke.mjs", "briefing-fixture-production-smoke.mjs"].includes(script),
+    "ISOLATED_SMOKE_SCRIPT_INVALID");
+  // Keep the accepted application's packages, schema and dependencies immutable.
+  // Only the verifier entrypoint comes from the reviewed workflow checkout.
+  return ["-v", `${source}:/app:ro`,
+    "-v", `${scripts}/${script}:/app/scripts/${script}:ro`,
+    "-v", `${laneOutput}:/proof`, "-v", `${tlsDirectory}:/fixture-tls:ro`,
+    "-v", `${scripts}/selfserve-validation-browser.mjs:/fixture-browser.mjs:ro`];
+}
+
 export async function runIsolatedValidation(env = process.env, { command = execFileSync } = {}) {
   requireValidation(!env.SELFSERVE_IMAGE_READ_TOKEN && !env.GITHUB_TOKEN && !env.GH_TOKEN, "ISOLATED_REGISTRY_TOKEN_FORBIDDEN");
   const { expectedSha, images } = isolatedInputs(env);
@@ -267,8 +278,7 @@ export async function runIsolatedValidation(env = process.env, { command = execF
         ...envArgs({ ...fixtureEnv, [`${prefix}_EMAIL`]: "validation@synthetic.invalid", [`${prefix}_PASSWORD`]: password,
           [`${prefix}_EXPECTED_GIT_SHA`]: expectedSha, [`${prefix}_WORKSPACE_SLUG`]: "corgtex-validation",
           NODE_EXTRA_CA_CERTS: "/fixture-tls/cert.pem", SELFSERVE_ISOLATED_TLS_SPKI: pin }),
-        "-v", `${source}:/app:ro`, "-v", `${laneOutput}:/proof`, "-v", `${tlsDirectory}:/fixture-tls:ro`,
-        "-v", `${scripts}/selfserve-validation-browser.mjs:/fixture-browser.mjs:ro`,
+        ...isolatedSmokeMounts({ source, scripts, laneOutput, tlsDirectory, script }),
         "-w", "/app", "--entrypoint", "sh", images.BROWSER, "-ec",
         `node scripts/wait-health.mjs https://fixture-web:3443/api/health && node --import tsx --import /fixture-browser.mjs scripts/${script} https://fixture-web:3443 /proof`]);
       const matrices = await loadValidationMatrices(laneOutput);

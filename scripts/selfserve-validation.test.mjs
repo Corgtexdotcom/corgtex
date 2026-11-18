@@ -13,7 +13,7 @@ import {
 } from "./lib/selfserve-validation-target.mjs";
 import { openSelfserveValidationSession } from "./selfserve-validation-smoke.mjs";
 import { resolveProductionValidationContext, requiresProductionAppRelease } from "./production-validation-context.mjs";
-import { isolatedInputs, requireFullIsolatedMatrix, stageIsolatedImages, ghcrPreparationInputs, withGhcrReadAuth, runIsolatedValidation } from "./selfserve-validation-isolated.mjs";
+import { isolatedSmokeMounts, isolatedInputs, requireFullIsolatedMatrix, stageIsolatedImages, ghcrPreparationInputs, withGhcrReadAuth, runIsolatedValidation } from "./selfserve-validation-isolated.mjs";
 import { selfserveOutcome } from "./selfserve-validation-outcome.mjs";
 import { schemaAuditConnection, schemaAuditPrismaConnection, AUDITOR_PRIVILEGES_SQL } from "./selfserve-validation-schema.mjs";
 import { databaseIdentity } from "./accepted-core-baseline.mjs";
@@ -289,6 +289,24 @@ describe("workflow and fixture secret isolation", () => {
     const runner = readFileSync(new URL("./selfserve-validation-isolated.mjs", import.meta.url), "utf8");
     for (const fragment of ["--internal", "--pull=never", "--cpus=1", "--memory=1g", "source-intake-production-smoke.mjs", "briefing-fixture-production-smoke.mjs", "ISOLATED_CLEANUP_FAILED"]) expect(runner).toContain(fragment);
     expect(runner).not.toMatch(/--publish|--network=host/);
+  });
+  it.each(["source-intake-production-smoke.mjs", "briefing-fixture-production-smoke.mjs"])(
+    "mounts reviewed %s over the accepted source at the actual runner entrypoint", (script) => {
+      const args = isolatedSmokeMounts({ source: "/accepted-716", scripts: "/verifier/scripts",
+        laneOutput: "/output/lane", tlsDirectory: "/ephemeral/tls", script });
+      expect(args).toEqual(["-v", "/accepted-716:/app:ro",
+        "-v", `/verifier/scripts/${script}:/app/scripts/${script}:ro`,
+        "-v", "/output/lane:/proof", "-v", "/ephemeral/tls:/fixture-tls:ro",
+        "-v", "/verifier/scripts/selfserve-validation-browser.mjs:/fixture-browser.mjs:ro"]);
+      const runner = readFileSync(new URL("./selfserve-validation-isolated.mjs", import.meta.url), "utf8");
+      expect(runner).toContain("...isolatedSmokeMounts({ source, scripts, laneOutput, tlsDirectory, script })");
+      expect(runner).toContain('"-w", "/app"');
+      expect(runner).toContain("scripts/${script} https://fixture-web:3443 /proof");
+      expect(args.filter((arg) => arg.includes(":/app"))).toHaveLength(2);
+    });
+  it("does not allow the verifier overlay to replace arbitrary accepted application files", () => {
+    expect(() => isolatedSmokeMounts({ script: "../packages/domain/src/brain.ts" }))
+      .toThrow("ISOLATED_SMOKE_SCRIPT_INVALID");
   });
   it.each([
     ["selfserve-validation-browser.mjs", {}, "ISOLATED_TLS_PIN_REQUIRED"],

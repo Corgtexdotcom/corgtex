@@ -135,6 +135,80 @@ describe("source-intake production smoke cleanup contract", () => {
     });
   });
 
+  async function archiveFixture({
+    removal = { response: { status: 200 }, body: { ok: true, id: "source-1", status: "archived" } },
+    archived = { id: "source-1", workspaceId: "workspace-1", archivedAt: new Date("2026-11-18T10:00:00Z") },
+  } = {}) {
+    const order = [];
+    const findFirst = vi.fn(async () => { order.push("archive-metadata"); return archived; });
+    const smoke = new SourceIntakeSmoke({
+      baseUrl: "https://fixture.invalid", outDir: ".artifacts/test-source-intake-production-smoke",
+      expectedGitSha: null, workspaceSelector: { workspaceSlug: "corgtex-validation", explicit: true },
+      authEmail: "validation@example.test", authPassword: "synthetic", headless: true,
+      prNumbers: [721], prisma: { brainSource: { findFirst } },
+    });
+    smoke.workspace = { id: "workspace-1", slug: "corgtex-validation" };
+    smoke.suppressSourceProcessing = vi.fn(async (_id, { reason }) => {
+      order.push(reason);
+      return {};
+    });
+    smoke.assertSourceWorkflowArtifactsCleared = vi.fn(async () => { order.push("artifacts-cleared"); });
+    smoke.requestJson = vi.fn(async (path, init = {}) => {
+      if (path.endsWith("/text-ingest")) {
+        const input = JSON.parse(init.body);
+        return { body: { id: "source-1", title: input.title, ingestionGuidanceMd: input.ingestionGuidanceMd.trim() } };
+      }
+      if (init.method === "DELETE") { order.push("native-delete"); return removal; }
+      // Actual archived-read policy withholds the archived record. Cleanup must
+      // consume the native removal fact instead of expecting this list to expose it.
+      return { body: { items: path.includes("archiveFilter=archived") ? [] : [{ id: "source-1" }] } };
+    });
+    await smoke.createTextSource();
+    order.length = 0;
+    return { smoke, order, findFirst, run: () => smoke.cleanupRegistry.runAll({ throwOnFailure: false }) };
+  }
+
+  it("proves native archive and scoped metadata before post-delete cleanup without reading archived bodies", async () => {
+    const f = await archiveFixture();
+    const result = await f.run();
+    expect(result.failed).toEqual([]);
+    expect(result.completed).toHaveLength(1);
+    expect(f.order).toEqual(["cleanup-before-archive", "native-delete", "archive-metadata",
+      "cleanup-after-archive", "artifacts-cleared"]);
+    expect(f.findFirst).toHaveBeenCalledExactlyOnceWith({
+      where: { id: "source-1", workspaceId: "workspace-1" },
+      select: { id: true, workspaceId: true, archivedAt: true },
+    });
+    expect(f.smoke.requestJson.mock.calls.some(([path]) => path.includes("archiveFilter=archived"))).toBe(false);
+  });
+
+  it.each([
+    ["pending", { response: { status: 202 }, body: { ok: false, id: "source-1", status: "pending" } }],
+    ["wrong source", { response: { status: 200 }, body: { ok: true, id: "other-source", status: "archived" } }],
+    ["unconfirmed", { response: { status: 200 }, body: { ok: false, id: "source-1", status: "archived" } }],
+  ])("rejects %s native removal without treating cleanup as archive proof", async (_name, removal) => {
+    const f = await archiveFixture({ removal });
+    const result = await f.run();
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0].error.message).toContain("exact completed source archive");
+    expect(f.findFirst).not.toHaveBeenCalled();
+    expect(f.order).toEqual(["cleanup-before-archive", "native-delete"]);
+  });
+
+  it.each([
+    ["missing", null],
+    ["unarchived", { id: "source-1", workspaceId: "workspace-1", archivedAt: null }],
+    ["wrong workspace", { id: "source-1", workspaceId: "other-workspace", archivedAt: new Date() }],
+    ["wrong source", { id: "other-source", workspaceId: "workspace-1", archivedAt: new Date() }],
+    ["invalid timestamp", { id: "source-1", workspaceId: "workspace-1", archivedAt: new Date(NaN) }],
+  ])("rejects %s stored metadata before post-delete cleanup", async (_name, archived) => {
+    const f = await archiveFixture({ archived });
+    const result = await f.run();
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0].error.message).toContain("archived source record");
+    expect(f.order).toEqual(["cleanup-before-archive", "native-delete", "archive-metadata"]);
+  });
+
   it("registers source cleanup before asserting returned source fields", async () => {
     const smoke = new SourceIntakeSmoke({
       baseUrl: "https://app.corgtex.com",
