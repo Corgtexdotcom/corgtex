@@ -579,7 +579,7 @@ test("demand cold preflight cannot turn an idle revision into a serving claim wi
 });
 // Model the real capture hold: the worker was ready at the probe, then the
 // 30s demand cooldown expires before the 45s capture window finishes.
-async function postReceiptIdleFixture(t,{direct=false,demand=true,change=()=>{}}={}) {
+async function postReceiptIdleFixture(t,{direct=false,demand=true,elapsedMs=45000,change=()=>{}}={}) {
   const f=demand?await coldDemandFixture():await fixture({releaseMode:true});
   f.opts.timeoutMs=180000;let transitioned=false;
   function idle(proof) {
@@ -587,7 +587,7 @@ async function postReceiptIdleFixture(t,{direct=false,demand=true,change=()=>{}}
     assert.equal(f.app.properties.latestReadyRevisionName,revision);
     assert.equal(f.rev.properties.runningState,"Running");
     assert.equal(f.rev.properties.healthState,"Healthy");
-    const now=Date.now();t.mock.method(Date,"now",()=>now+45000);
+    const now=Date.now();t.mock.method(Date,"now",()=>now+elapsedMs);
     f.rev.properties.runningState="ScaledToZero";f.state.replicaCount=0;
     change(f,proof);
   }
@@ -630,7 +630,7 @@ test("post-receipt idle requires the complete replica census",async t=>{
   await assert.rejects(f.run(await f.reopen()),/HEALTH_JOB_DEMAND_REPLICAS_INVALID/);
 });
 test("idle without a positive receipt cannot outlive the challenge",async t=>{
-  const f=await postReceiptIdleFixture(t,{change:(_f,logs)=>{logs.tables[0].rows=[];t.mock.method(Date,"now",()=>Date.parse(f.state.runs[0].properties.startTime)+181000);}});
+  const f=await postReceiptIdleFixture(t,{elapsedMs:181000,change:(_f,logs)=>{logs.tables[0].rows=[];}});
   await assert.rejects(f.run(await f.reopen()));assert.equal(f.state.starts,1);
 });
 
