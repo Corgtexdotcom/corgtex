@@ -11,12 +11,12 @@ import {
   canonicalizeManagedAzureReleaseIntentV1,
   compareManagedAzureDestinationDigestV1,
 } from "./azure-release-managed-target.mjs";
+import { createManagedAzurePacedContainerAppTransport } from "./managed-azure-arm-pacing.mjs";
 import { createManagedAzureArmImportTransport } from "./managed-azure-arm-import-transport.mjs";
 import {
   ManagedAzureContainerAppError,
   assertManagedAzureTemplateDelta,
   buildManagedAzureReleaseTemplate,
-  createManagedAzureContainerAppTransport,
   managedAzureRevisionSuffix,
   managedAzureTemplateDigest,
 } from "./managed-azure-container-app-transport.mjs";
@@ -763,7 +763,7 @@ async function callControlPlane(name, args, env, fetchImpl = fetch) {
   try { return JSON.parse(payload); } catch { fail("MANAGED_RELEASE_CONTROL_PLANE_INVALID"); }
 }
 
-function runtimeDependencies(env = process.env) {
+export function runtimeDependencies(env = process.env) {
   const hotfixProof = env.MANAGED_HOTFIX_PROOF_FILE
     ? JSON.parse(readFileSync(env.MANAGED_HOTFIX_PROOF_FILE, "utf8")) : null;
   const spawn = createSpawn();
@@ -785,7 +785,24 @@ function runtimeDependencies(env = process.env) {
       signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("aborted")); }, { once: true });
     }),
   });
-  const apps = createManagedAzureContainerAppTransport();
+  let pacingHandle, pacingReason, pacingHeartbeat = "heartbeat";
+  const lease = async (operation, args) => {
+    const result = await callControlPlane("managed_release_lease", { operation, ...args }, env);
+    if (operation === "acquire") {
+      pacingHandle = { deploymentId: args.deploymentId, leaseId: result.leaseId, capability: result.capability, fence: result.fence };
+      pacingReason = args.reason;
+      pacingHeartbeat = "heartbeat";
+    } else if (["heartbeat", "heartbeat_recovery"].includes(operation) && pacingHandle
+      && ["deploymentId", "leaseId", "capability", "fence"].every(key => args[key] === pacingHandle[key])) {
+      // Follow only a successfully admitted native phase transition. A failed
+      // heartbeat never grants the pacer a different lease or recovery policy.
+      pacingHeartbeat = operation;
+    }
+    return result;
+  };
+  const apps = createManagedAzurePacedContainerAppTransport({ onProgress: async () => {
+    if (pacingHandle) await lease(pacingHeartbeat, leaseArgs(pacingHandle, { reason: pacingReason }));
+  } });
   const runtime = {
     owner: `github:${env.GITHUB_RUN_ID || "manual"}:${env.GITHUB_RUN_ATTEMPT || "1"}`,
     templateDigest: managedAzureTemplateDigest,
@@ -800,7 +817,7 @@ function runtimeDependencies(env = process.env) {
       acrServer: input.acrServer,
     }, env),
     targetConfig: ({ deploymentId, reason }) => callControlPlane("reconcile_managed_azure_target", { deploymentId, execute: false, reason }, env),
-    lease: (operation, args) => callControlPlane("managed_release_lease", { operation, ...args }, env),
+    lease,
     readApp: apps.readApp,
     readRevisionState: apps.readRevisionState,
     readAppTemplate: apps.readAppTemplate,
