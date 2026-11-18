@@ -221,13 +221,16 @@ function fixture(options = {}) {
   return f;
 }
 test("stopped worker PATCH waits for exact asynchronous provisioning without another write", async () => {
-  let ticks = 0, reads = 0, f;
+  let ticks = 0, reads = 0, candidate, f;
   f = fixture({ demand: true, now: () => ticks,
-    afterPatch(input, state) { if (input.role === "worker") state.apps.worker.properties.provisioningState = "InProgress"; },
+    afterPatch(input, state) { if (input.role === "worker") {
+      const p = state.apps.worker.properties; candidate = p.latestRevisionName;
+      p.provisioningState = "InProgress"; p.latestRevisionName = "fixture-worker--baseline-worker";
+    } },
     workerArmRead(input, state) { if (state.apps.worker.properties.provisioningState === "InProgress") reads++; },
     async wait(ms, signal) { signal.throwIfAborted(); ticks += ms;
       assert.equal(f.log.includes("running:Running"), false);
-      if (ticks === 3000) f.apps.worker.properties.provisioningState = "Succeeded";
+      if (ticks === 3000) { f.apps.worker.properties.provisioningState = "Succeeded"; f.apps.worker.properties.latestRevisionName = candidate; }
     } });
   assert.equal((await f.run()).outcome, "UPDATED");
   assert.equal(reads, 3); assert.equal(ticks, 3000);
@@ -273,6 +276,16 @@ test("resume settles a lost worker-start acknowledgement before continuing witho
   assert.equal((await f.run("resume")).outcome, "UPDATED");
   assert.equal(f.log.filter(v => v === "running:Running").length, 1);
   assert.equal(f.log.filter(v => v === "patch:incoming:worker").length, 1);
+});
+
+test("resume refuses a retained baseline worker writer after the incoming start", async () => {
+  let lose = true;
+  const f = fixture({ demand: true, afterRunning(input) { if (input.runningStatus === "Running" && lose) { lose = false; throw Error("lost start acknowledgement"); } } });
+  await assert.rejects(f.run()); f.reopen();
+  f.revisionState.worker.set("fixture-worker--baseline-worker", { revisionName: "fixture-worker--baseline-worker", active: true, replicaCount: 1 });
+  const before = f.log.filter(v => /^(mode:|drain:|patch:|running:|scheduler:|health:worker)/.test(v));
+  await rejected(f.run("resume"), "UPDATE_PAIR_NOT_EXCLUSIVE");
+  assert.deepEqual(f.log.filter(v => /^(mode:|drain:|patch:|running:|scheduler:|health:worker)/.test(v)), before);
 });
 
 for (const blocker of ["no-plan", "recovery", "unchanged", "result"]) {

@@ -515,6 +515,9 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
     need(pair.web.mode === "Single" && pair.worker.mode === "Single" && pair.worker.latestRevisionName === candidates.incoming.worker.revisionName
       && pair.worker.runningStatus === (start.intent ? "Running" : "Stopped"), "UPDATE_RESUME_STATE_UNPROVEN");
     if (!start.intent) need(workerDrained(pair.worker), "UPDATE_WORKER_STOP_UNPROVEN");
+    else need(pair.worker.latestReadyRevisionName === candidates.incoming.worker.revisionName
+      && pair.worker.revisions.some(r => r.revisionName === candidates.incoming.worker.revisionName && r.active)
+      && pair.worker.revisions.every(r => r.revisionName === candidates.incoming.worker.revisionName || !r.active && r.replicaCount === 0), "UPDATE_PAIR_NOT_EXCLUSIVE");
     const current = await transport.readAppTemplate({ ...inputFor("worker"), release: p.incoming.release, imageDigest: p.incoming.images.worker.split("@")[1] });
     need(current.provisioningState === "Succeeded" && current.state.revisionName === candidates.incoming.worker.revisionName
       && current.state.templateDigest === managedAzureTemplateDigest(candidates.incoming.worker.template), "UPDATE_TEMPLATE_DRIFT");
