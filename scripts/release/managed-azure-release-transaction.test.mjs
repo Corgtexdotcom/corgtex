@@ -970,8 +970,8 @@ describe("managed Azure single-target transaction", () => {
     expect(workflow).toContain("--deployment-id");
     expect(workflow).not.toContain("repository_dispatch:");
     expect(workflow).not.toMatch(/schedule:|targets:|matrix:/);
-    expect(workflow.split("  dry-run:")[1].split("  execute:")[0]).toContain("timeout-minutes: 30");
-    expect(workflow.split("  execute:")[1]).toContain("timeout-minutes: 240");
+    expect(workflow.split("\n  dry-run:\n")[1].split("\n  execute:\n")[0]).toContain("timeout-minutes: 30");
+    expect(workflow.split("\n  execute:\n")[1]).toContain("timeout-minutes: 240");
     // Dry run snapshots both baseline roles before execute:false returns. The
     // unchanged 256-revision limit needs room for paced complete inventories.
     const perCensusReads = 1 + 256 + 32; // app + full history + bounded pages
