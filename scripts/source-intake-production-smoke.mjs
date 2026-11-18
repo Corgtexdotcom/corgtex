@@ -662,14 +662,23 @@ class SourceIntakeSmoke {
       target: { type: "BrainSource", id: source.id, label: title },
       runner: async () => {
         const beforeArchive = await this.suppressSourceProcessing(source.id, { reason: "cleanup-before-archive" });
-        await this.requestJson(`/api/workspaces/${this.workspace.id}/brain/sources/${source.id}`, {
+        const removal = await this.requestJson(`/api/workspaces/${this.workspace.id}/brain/sources/${source.id}`, {
           method: "DELETE",
         });
+        assert(removal.response.status === 200 && removal.body?.ok === true
+          && removal.body.id === source.id && removal.body.status === "archived",
+        "BrainSource cleanup did not return the exact completed source archive.");
+        // Archived source bodies are intentionally withheld by the read API. Verify
+        // only the scoped archive metadata, before any post-delete cleanup writes.
+        const archivedSource = await this.openDatabase().brainSource.findFirst({
+          where: { id: source.id, workspaceId: this.workspace.id },
+          select: { id: true, workspaceId: true, archivedAt: true },
+        });
+        assert(archivedSource?.id === source.id && archivedSource.workspaceId === this.workspace.id
+          && archivedSource.archivedAt instanceof Date && Number.isFinite(archivedSource.archivedAt.getTime()),
+        "BrainSource cleanup did not leave an archived source record.");
         const afterArchive = await this.suppressSourceProcessing(source.id, { reason: "cleanup-after-archive" });
         await this.assertSourceWorkflowArtifactsCleared(source.id);
-        const archived = await this.requestJson(`/api/workspaces/${this.workspace.id}/brain/sources?archiveFilter=archived&take=25`);
-        const archivedSource = archived.body?.items?.find((item) => item.id === source.id);
-        assert(archivedSource?.archivedAt, "BrainSource cleanup did not leave an archived source record.");
         return [
           "Temporary BrainSource archived through the source delete API.",
           `Suppressed before archive: ${cleanupSummaryMessage(beforeArchive)}.`,
