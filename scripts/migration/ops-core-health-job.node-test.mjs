@@ -577,6 +577,63 @@ test("demand cold preflight cannot turn an idle revision into a serving claim wi
   await assert.rejects(f.run(await f.reopen()),/HEALTH_JOB_WORKER_(BINDING|REVISION)_CHANGED/);
   assert.equal(f.state.starts,1);
 });
+// Model the real capture hold: the worker was ready at the probe, then the
+// 30s demand cooldown expires before the 45s capture window finishes.
+async function postReceiptIdleFixture(t,{direct=false,demand=true,elapsedMs=45000,change=()=>{}}={}) {
+  const f=demand?await coldDemandFixture():await fixture({releaseMode:true});
+  f.opts.timeoutMs=180000;let transitioned=false;
+  function idle(proof) {
+    if(transitioned)return;transitioned=true;
+    assert.equal(f.app.properties.latestReadyRevisionName,revision);
+    assert.equal(f.rev.properties.runningState,"Running");
+    assert.equal(f.rev.properties.healthState,"Healthy");
+    const now=Date.now();t.mock.method(Date,"now",()=>now+elapsedMs);
+    f.rev.properties.runningState="ScaledToZero";f.state.replicaCount=0;
+    change(f,proof);
+  }
+  if(direct){let proof;f.opts.readJobLogs=async({execution})=>{
+    proof??=directProof(execution);idle(proof);return proof;
+  };}else f.state.logMutation=logs=>idle(logs);
+  return f;
+}
+for(const direct of [false,true])for(const idle of ["ScaledToZero","ScaleToZero"])
+test(`fresh ${direct?"direct":"retained"} receipt accepts the same Healthy ready demand revision after ${idle} cooldown`,async t=>{
+  const f=await postReceiptIdleFixture(t,{direct,change:f=>{f.rev.properties.runningState=idle;}});
+  const result=await f.run(await f.reopen());assert.equal(result.health.status,200);
+  assert.equal(f.state.starts,1);assert.equal(f.state.replicaCount,0);
+  assert.equal(f.state.requests.filter(r=>r.path.includes("/replicas?")).length,3);
+  assert.equal(f.state.runs[0].properties.status,"Succeeded");
+});
+for(const [name,change]of[
+  ["wrong ready revision",f=>{f.app.properties.latestReadyRevisionName="previous";}],
+  ["unhealthy revision",f=>{f.rev.properties.healthState="Unhealthy";}],
+  ["inactive revision",f=>{f.rev.properties.active=false;}],
+  ["unprovisioned revision",f=>{f.rev.properties.provisioningState="Provisioning";}],
+  ["different image",f=>{f.rev.properties.template.containers[0].image="foreign:latest";}],
+  ["changed demand configuration",f=>{f.app.properties.template.scale.rules[0].custom.metadata.query="SELECT 0";}],
+  ["nonempty replica census",f=>{f.state.replicaCount=1;}],
+  ["Stopped",f=>{f.rev.properties.runningState="Stopped";}],
+  ["Activating",f=>{f.rev.properties.runningState="Activating";}],
+  ["expired worker tick",(_f,logs)=>{const row=logs.tables[0].rows[0],receipt=JSON.parse(row[5].slice(HEALTH_PROBE_PREFIX.length));receipt.health.body.lastSuccessfulTickAt="2000-01-01T00:00:00.000Z";row[5]=HEALTH_PROBE_PREFIX+JSON.stringify(receipt);}],
+  ["failed receipt",(_f,logs)=>{const row=logs.tables[0].rows[0],receipt=JSON.parse(row[5].slice(HEALTH_PROBE_PREFIX.length));receipt.health.status=503;row[5]=HEALTH_PROBE_PREFIX+JSON.stringify(receipt);}],
+])test(`post-receipt demand idle rejects ${name}`,async t=>{
+  const f=await postReceiptIdleFixture(t,{change});await assert.rejects(f.run(await f.reopen()));assert.equal(f.state.starts,1);
+});
+test("post-receipt idle remains denied for a worker without the demand contract",async t=>{
+  const f=await postReceiptIdleFixture(t,{demand:false});await assert.rejects(f.run(await f.reopen()),/HEALTH_JOB_WORKER_REVISION_CHANGED/);
+});
+test("post-receipt idle requires the complete replica census",async t=>{
+  const f=await postReceiptIdleFixture(t),transport=f.opts.transport;
+  f.opts.transport=async request=>{const response=await transport(request);
+    if(request.path.includes("/replicas?")&&f.rev.properties.runningState==="ScaledToZero")response.body.nextLink="https://management.azure.com/remaining";
+    return response;};
+  await assert.rejects(f.run(await f.reopen()),/HEALTH_JOB_DEMAND_REPLICAS_INVALID/);
+});
+test("idle without a positive receipt cannot outlive the challenge",async t=>{
+  const f=await postReceiptIdleFixture(t,{elapsedMs:181000,change:(_f,logs)=>{logs.tables[0].rows=[];}});
+  await assert.rejects(f.run(await f.reopen()));assert.equal(f.state.starts,1);
+});
+
 test("demand cold preflight refuses scaler drift before starting observation",async()=>{
   const f=await coldDemandFixture();f.app.properties.template.scale.rules[0].custom.metadata.query="SELECT 0";
   await assert.rejects(f.run(await f.reopen()));assert.equal(f.state.starts,0);

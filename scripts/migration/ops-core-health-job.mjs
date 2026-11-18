@@ -243,7 +243,7 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
   async function request(method,path,signal,body){await check(signal);const r=await send({method,path,signal,...(body===undefined?{}:{body})});await check(signal);
     need(r&&[200,202,404].includes(r.status),"HEALTH_JOB_TRANSPORT_INVALID");return r;}
   async function prepare(signal = custody.signal) { return prepareHealthJob(p, request, signal); }
-  async function assertWorker(r,signal,allowCold=false){
+  async function assertWorker(r,signal,{allowCold=false,postReceiptIdle=false}={}){
     const a=await request("GET",pathFor(p.worker.appId),signal),ap=a.body?.properties,ingress=ap?.configuration?.ingress;
     need(a.status===200&&equalId(a.body?.id,p.worker.appId)&&equalId(ap?.environmentId??ap?.managedEnvironmentId,p.environmentResourceId)
       &&ap.provisioningState==="Succeeded"&&ap.configuration?.activeRevisionsMode==="Single"&&ap.latestRevisionName===r.revisionName&&(ap.latestReadyRevisionName===r.revisionName||workerDemand&&allowCold)
@@ -252,14 +252,17 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
       &&(ingress.traffic[0].revisionName===r.revisionName||ingress.traffic[0].latestRevision===true),"HEALTH_JOB_WORKER_BINDING_CHANGED");
     if(workerDemand)assertManagedAzureWorkerDemandApp(a.body,workerDemand.plan,workerDemand.target);
     const rev=await request("GET",pathFor(`${p.worker.appId}/revisions/${r.revisionName}`),signal),rp=rev.body?.properties;
-    let cold=false;
-    if(workerDemand&&allowCold){
+    let cold=false,verifiedIdle=false;
+    if(workerDemand&&(allowCold||postReceiptIdle)){
       const replicas=await request("GET",pathFor(`${p.worker.appId}/revisions/${r.revisionName}/replicas`),signal);
       need(replicas.status===200&&Array.isArray(replicas.body?.value)&&!replicas.body.nextLink&&replicas.body.value.length<=1,"HEALTH_JOB_DEMAND_REPLICAS_INVALID");
-      cold=replicas.body.value.length===0&&["Stopped","ScaleToZero","ScaledToZero","Running","Activating"].includes(rp?.runningState);
+      cold=allowCold&&replicas.body.value.length===0&&["Stopped","ScaleToZero","ScaledToZero","Running","Activating"].includes(rp?.runningState);
+      // The completed probe can outlive the demand scaler cooldown. This final-only
+      // allowance keeps ready-revision and Healthy checks; pre-wake admission is separate.
+      verifiedIdle=postReceiptIdle&&replicas.body.value.length===0&&["ScaleToZero","ScaledToZero"].includes(rp?.runningState);
     }
     need(rev.status===200&&rev.body?.name===r.revisionName&&(!rev.body.id||equalId(rev.body.id,`${p.worker.appId}/revisions/${r.revisionName}`))
-      &&rp?.active===true&&rp.provisioningState==="Provisioned"&&(cold||rp.healthState==="Healthy"&&["Running","RunningAtMaxScale"].includes(rp.runningState))
+      &&rp?.active===true&&rp.provisioningState==="Provisioned"&&(cold||rp.healthState==="Healthy"&&(["Running","RunningAtMaxScale"].includes(rp.runningState)||verifiedIdle))
       &&rp.template?.containers?.length===1&&rp.template.containers[0].name==="worker"&&rp.template.containers[0].image===p.worker.image,"HEALTH_JOB_WORKER_REVISION_CHANGED");
     return hash({appId:p.worker.appId,revisionName:r.revisionName,image:p.worker.image,origin:p.worker.origin});
   }
@@ -297,7 +300,7 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
         domain:context.domain,intentSha256:context.intentSha256,sourceFenceSha256:context.sourceFenceSha256,targetSha256:hash(p.worker),identity:identity(p),
         issuedAt:now,expiresAt:now+timeoutMs,request:structuredClone(requested)};
       validateHealthChallenge(challenge,p.worker,identity(p));await assertAuthority(signal);
-      await prepare(signal);await assertWorker(requested,signal,true);
+      await prepare(signal);await assertWorker(requested,signal,{allowCold:true});
       let index, history;
       for(index=0;index<attemptLimit;index++){const old=await readSlot(index,signal);if(!old)break;
         history??=await inventory(signal);
@@ -331,7 +334,7 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
         captured=match;
       }
       await operations.runRecordedOperation({...record,apply:async()=>{
-        await prepare(signal);await assertWorker(requested,signal,true);const boundary=Math.ceil(challenge.issuedAt/1000)*1000;
+        await prepare(signal);await assertWorker(requested,signal,{allowCold:true});const boundary=Math.ceil(challenge.issuedAt/1000)*1000;
         if(Date.now()<boundary)await delay(boundary-Date.now(),undefined,{signal});
         await assertAuthority(signal);validateHealthChallenge(challenge,p.worker,identity(p));
         const r=await request("POST",pathFor(`${p.jobResourceId}/start`),signal,record.input.template);
@@ -358,7 +361,7 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
             const logs=await request("POST",`/v1/workspaces/${p.workspaceId}/query`,signal,{query:query(p,found,challenge,environments),timespan:`${new Date(challenge.issuedAt).toISOString()}/${new Date(challenge.expiresAt).toISOString()}`});
             need(logs.status===200,"HEALTH_JOB_LOG_UNAVAILABLE");receipt=parseLogs(logs.body,p,found,challenge,environments);
           }
-          if(receipt){await prepare(signal);const workerSha256=await assertWorker(requested,signal);const last=await request("GET",pathFor(found.id),signal);
+          if(receipt){await prepare(signal);const workerSha256=await assertWorker(requested,signal,{postReceiptIdle:true});const last=await request("GET",pathFor(found.id),signal);
             need(last.status===200&&same(execution(last.body,p),found),"HEALTH_JOB_EXECUTION_CHANGED");
             await assertAuthority(signal);validateHealthChallenge(challenge,p.worker,identity(p));
             projectWorkerHealth(receipt.health.body,receipt.ready.body,p.worker,Date.now());

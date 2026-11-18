@@ -9,10 +9,14 @@ import { AzureCliCredential } from "@azure/identity";
 import { ContainerClient } from "@azure/storage-blob";
 import { archiveEvidenceHash as hash } from "./ops-core-archive.mjs";
 import { validateCutoverJournal } from "./ops-core-custody.mjs";
-import { opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
+import { opsCoreAzureTargetBindingSha256, opsCoreAzureTargetDiagnostic } from "./ops-core-azure-target.mjs";
 import { azureProviderOperationStore, providerOperationDiagnostic } from "./ops-core-provider-operations.mjs";
 import { openOpsCoreReleaseCustody, opsCoreReleaseCustodyDiagnostic } from "./ops-core-release-custody.mjs";
-import { buildHealthProbeJobDefinition, createHealthJobDispatcher } from "./ops-core-health-job.mjs";
+import { buildHealthProbeJobDefinition, createHealthJobDispatcher, healthJobDiagnostic } from "./ops-core-health-job.mjs";
+import { healthProbeDiagnostic } from "./ops-core-health-probe.mjs";
+import { opsCoreActivationDiagnostic } from "./ops-core-activation.mjs";
+import { ManagedAzureContainerAppError } from "../release/managed-azure-container-app-transport.mjs";
+import { managedAzureWorkerDemandDiagnostic } from "../release/managed-azure-worker-demand.mjs";
 import { validateOpsCoreUpdatePlan, runOpsCoreUpdate, opsCoreUpdateDiagnostic } from "./ops-core-update.mjs";
 
 const LIMIT = 2 * 1024 * 1024;
@@ -195,20 +199,28 @@ export async function downloadUpdateEnvelope({ domain, sha256, output, env = pro
   try { await file.writeFile(JSON.stringify(e)); await file.sync(); } finally { await file.close(); }
 }
 
-export async function updateMain(argv = process.argv.slice(2)) {
+export async function updateMain(argv = process.argv.slice(2), dependencies = {}) {
   try {
     if (argv[0] === "fetch-envelope") {
       need(argv.length === 4, "UPDATE_ARGUMENTS_INVALID");
-      await downloadUpdateEnvelope({ domain: argv[1], sha256: argv[2], output: argv[3] });
+      await (dependencies.downloadEnvelope ?? downloadUpdateEnvelope)({ domain: argv[1], sha256: argv[2], output: argv[3] });
       process.stdout.write("UPDATE_ENVELOPE_VERIFIED\n");
     } else {
       need(argv.length === 2, "UPDATE_ARGUMENTS_INVALID");
-      const result = await executeOpsCoreUpdate(argv[0], await readPrivateUpdateEnvelope(argv[1]));
+      const envelope = await (dependencies.readEnvelope ?? readPrivateUpdateEnvelope)(argv[1]);
+      const result = await (dependencies.execute ?? executeOpsCoreUpdate)(argv[0], envelope);
       process.stdout.write(`${JSON.stringify(result)}\n`);
     }
   } catch (error) {
-    const code = error instanceof CliError ? error.message : opsCoreUpdateDiagnostic(error)
-      ?? opsCoreReleaseCustodyDiagnostic(error) ?? providerOperationDiagnostic(error) ?? "UPDATE_RECONCILIATION_REQUIRED";
+    const known = error instanceof CliError ? error.message : opsCoreUpdateDiagnostic(error)
+      ?? opsCoreReleaseCustodyDiagnostic(error) ?? providerOperationDiagnostic(error)
+      ?? healthJobDiagnostic(error) ?? healthProbeDiagnostic(error) ?? opsCoreAzureTargetDiagnostic(error)
+      ?? opsCoreActivationDiagnostic(error) ?? managedAzureWorkerDemandDiagnostic(error)
+      ?? (error instanceof ManagedAzureContainerAppError ? error.code : null);
+    // Only typed diagnostic codes cross the CLI boundary, never arbitrary
+    // messages, provider bodies, transport details, causes or stack traces.
+    const code = typeof known === "string" && /^[A-Z][A-Z0-9_]{2,99}$/.test(known)
+      ? known : "UPDATE_RECONCILIATION_REQUIRED";
     process.stderr.write(`${code}\n`); process.exitCode = 1;
   }
 }
