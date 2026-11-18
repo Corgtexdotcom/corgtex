@@ -8,6 +8,7 @@ import {
   coreRouteCatalog,
   demoAddGuardRouteSuffix,
   installMobileAnalyticsMock,
+  installMobileConversationMock,
   installSelfserveReadOnlyRouting,
   isFindAccountUrl,
   isWorkspaceUrl,
@@ -450,5 +451,68 @@ describe("client readiness mobile stylesheet contract", () => {
     expect(defaultHiddenIndex).toBeGreaterThanOrEqual(0);
     expect(mobileBreakpointIndex).toBeGreaterThan(defaultHiddenIndex);
     expect(mobileVisibleIndex).toBeGreaterThan(mobileBreakpointIndex);
+  });
+});
+
+
+describe("mobile conversation browser fixture", () => {
+  const origin = "https://selfserve.corgtex.com";
+  const workspacePath = "/workspaces/fixture-workspace";
+  const collection = `${origin}/api${workspacePath}/conversations`;
+  async function setup() {
+    const handlers = [];
+    await installMobileConversationMock({ route: async (pattern, handler) => handlers.push({ pattern, handler }) },
+      { origin, workspacePath, now: () => new Date("2026-11-18T14:00:00Z") });
+    const request = async (handler, method, url, body) => {
+      const route = { request: () => ({ method: () => method, url: () => url, postDataJSON: () => body }),
+        fulfill: vi.fn(), fallback: vi.fn(), continue: vi.fn() };
+      await handlers[handler].handler(route); return route;
+    };
+    return { handlers, request };
+  }
+  it("reconciles the exact committed turn, prompt and response through the issued conversation GET", async () => {
+    const f = await setup();
+    expect(f.handlers.map(x => x.pattern)).toEqual([collection, `${collection}/*`]);
+    const create = await f.request(0, "POST", collection, {});
+    const id = JSON.parse(create.fulfill.mock.calls[0][0].body).session.id;
+    const before = await f.request(1, "GET", `${collection}/${id}`);
+    expect(JSON.parse(before.fulfill.mock.calls[0][0].body)).toEqual({ conversation: { id, turns: [] } });
+    for (const [index, message] of ["Mobile smoke iphone-se", "Second exact prompt"].entries()) {
+      const post = await f.request(1, "POST", `${collection}/${id}`, { message });
+      const response = post.fulfill.mock.calls[0][0];
+      expect(response.contentType).toContain("text/event-stream");
+      const events = response.body.split("\n").filter(line => line.startsWith("data: ") && line !== "data: [DONE]")
+        .map(line => JSON.parse(line.slice(6)));
+      expect(response.body).toContain("data: [DONE]\n\n");
+      const committed = events[0].committedTurn;
+      expect(committed).toEqual({ id: `${id}-turn-${index + 1}`, sequenceNumber: index + 1, createdAt: "2026-11-18T14:00:00.000Z" });
+      const get = await f.request(1, "GET", `${collection}/${id}`);
+      const actual = JSON.parse(get.fulfill.mock.calls[0][0].body).conversation;
+      expect(actual.id).toBe(id); expect(actual.turns).toHaveLength(index + 1);
+      expect(actual.turns[index]).toEqual({ ...committed, userMessage: message, assistantMessage: events[1].text });
+    }
+    const next = await f.request(0, "POST", collection, {});
+    expect(JSON.parse(next.fulfill.mock.calls[0][0].body).session.id).not.toBe(id);
+  });
+  it.each([
+    [0, "GET", collection], [0, "POST", collection.replace("fixture-workspace", "other-workspace")],
+    [0, "POST", collection.replace(origin, "https://other.invalid")],
+    [1, "GET", `${collection}/unknown-real-id`], [1, "POST", `${collection}/unknown-real-id`],
+    [1, "POST", `${collection}/mobile-smoke-1/extra`], [1, "POST", `${collection}/mobile-smoke-1?query=1`],
+    [1, "POST", `${collection.replace("fixture-workspace", "other-workspace")}/mobile-smoke-1`],
+    [1, "POST", `${collection.replace(origin, "https://other.invalid")}/mobile-smoke-1`],
+    [1, "DELETE", `${collection}/mobile-smoke-1`],
+  ])("leaves unrelated requests to existing routing (%s %s %s)", async (handler, method, url) => {
+    const f = await setup(); await f.request(0, "POST", collection, {});
+    const result = await f.request(handler, method, url, { message: "Unrelated" });
+    expect(result.fallback).toHaveBeenCalledOnce(); expect(result.fulfill).not.toHaveBeenCalled();
+    expect(result.continue).not.toHaveBeenCalled();
+  });
+  it("does not invent a turn for a missing prompt", async () => {
+    const f = await setup(); await f.request(0, "POST", collection, {});
+    const result = await f.request(1, "POST", `${collection}/mobile-smoke-1`, {});
+    expect(result.fallback).toHaveBeenCalledOnce();
+    const get = await f.request(1, "GET", `${collection}/mobile-smoke-1`);
+    expect(JSON.parse(get.fulfill.mock.calls[0][0].body).conversation.turns).toEqual([]);
   });
 });
