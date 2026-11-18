@@ -11,7 +11,7 @@ import {
   managedAzureRevisionSuffix,
   managedAzureTemplateDigest,
 } from "./managed-azure-container-app-transport.mjs";
-import { managedAzureFailureDetail, managedAzureCliResultAccepted, managedAzureHealthReady, runManagedAzureReleaseTransaction, writeManagedAzureCliResult } from "./managed-azure-release-transaction.mjs";
+import { runtimeDependencies, managedAzureFailureDetail, managedAzureCliResultAccepted, managedAzureHealthReady, runManagedAzureReleaseTransaction, writeManagedAzureCliResult } from "./managed-azure-release-transaction.mjs";
 
 import { SELFSERVE_RELEASE_HOST_ID, SELFSERVE_RELEASE_ORIGIN, SELFSERVE_RELEASE_PROFILE } from "./managed-azure-selfserve-profile.mjs";
 
@@ -970,7 +970,13 @@ describe("managed Azure single-target transaction", () => {
     expect(workflow).toContain("--deployment-id");
     expect(workflow).not.toContain("repository_dispatch:");
     expect(workflow).not.toMatch(/schedule:|targets:|matrix:/);
-    expect(workflow).toContain("timeout-minutes: 150");
+    expect(workflow.split("\n  dry-run:\n")[1].split("\n  execute:\n")[0]).toContain("timeout-minutes: 30");
+    expect(workflow.split("\n  execute:\n")[1]).toContain("timeout-minutes: 240");
+    // Dry run snapshots both baseline roles before execute:false returns. The
+    // unchanged 256-revision limit needs room for paced complete inventories.
+    const perCensusReads = 1 + 256 + 32; // app + full history + bounded pages
+    expect(2 * perCensusReads * 1_250).toBeLessThan(30 * 60_000);
+    expect(34 * perCensusReads * 1_250 + 900_000).toBeLessThan(240 * 60_000);
   });
 
   it("passes immutable SHA build arguments to both self-serve staging images", () => {
@@ -1268,5 +1274,44 @@ describe("authoritative hosted primary release", () => {
     for (const block of workflow.split("run: >-").slice(1)) expect(block.split(/\n\n/)[0]).not.toContain("${{ inputs.");
     expect(workflow).toContain('"$RELEASE_INPUT_REASON"');
     expect(workflow).toContain("environment: managed-azure-release-production");
+  });
+});
+
+
+describe("forward CLI ARM pacing lease ownership", () => {
+  it.each(["forward", "recovery", "rejected-recovery", "mismatched-recovery"])("renews the actual acquired owner and support reason in %s phase before ARM", async phase => {
+    const handle = { deploymentId, leaseId: "123e4567-e89b-42d3-a456-426614174003", capability: "fixture-capability", fence: 9 };
+    const reason = "Deploy the approved managed release with complete ownership checks.";
+    const requests = []; let checkingPacer = false;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      expect(url).toBe("https://ops.example/api/control-plane/mcp");
+      const args = JSON.parse(init.body).params.arguments; requests.push(args);
+      if (args.operation === "acquire") return Response.json({ result: { content: [{ type: "text", text: JSON.stringify(handle) }] } });
+      expect(args).toEqual({ operation: checkingPacer && phase !== "recovery" ? "heartbeat" : "heartbeat_recovery", ...handle,
+        ...(!checkingPacer && phase === "mismatched-recovery" ? { capability: "different-fixture-capability" } : {}), reason });
+      if (!checkingPacer && ["recovery", "mismatched-recovery"].includes(phase)) return Response.json({ result: { content: [{ type: "text", text: "{}" }] } });
+      return Response.json({ error: { code: "LEASE_LOST" } }, { status: 409 });
+    });
+    try {
+      const deps = runtimeDependencies({ CONTROL_PLANE_URL: "https://ops.example", CONTROL_PLANE_AGENT_API_KEY: "fixture" });
+      await deps.lease("acquire", { deploymentId, reason, owner: "fixture-owner" });
+      if (phase === "recovery") await deps.lease("heartbeat_recovery", { ...handle, reason });
+      if (phase === "mismatched-recovery") await deps.lease("heartbeat_recovery", { ...handle, capability: "different-fixture-capability", reason });
+      if (phase === "rejected-recovery") await expect(deps.lease("heartbeat_recovery", { ...handle, reason })).rejects.toThrow("MANAGED_RELEASE_CONTROL_PLANE_REJECTED");
+      checkingPacer = true;
+      await expect(deps.readExclusiveState({ target, role: "web" })).rejects.toThrow("MANAGED_RELEASE_CONTROL_PLANE_REJECTED");
+      expect(requests.at(-1).operation).toBe(phase === "recovery" ? "heartbeat_recovery" : "heartbeat");
+      expect(requests.filter(value => value.operation === "acquire")).toHaveLength(1);
+    } finally { fetchSpy.mockRestore(); }
+  });
+  it("does not invent a lease before acquire or heartbeat an already aborted call", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => { throw Error("UNEXPECTED_NETWORK"); });
+    try {
+      const deps = runtimeDependencies({ CONTROL_PLANE_URL: "https://ops.example", CONTROL_PLANE_AGENT_API_KEY: "fixture" });
+      await expect(deps.readExclusiveState({ target: {}, role: "web" })).rejects.toThrow("AZURE_TARGET_INVALID");
+      const controller = new AbortController(); controller.abort();
+      await expect(deps.readExclusiveState({ target, role: "web", signal: controller.signal })).rejects.toThrow("AZURE_ARM_PACING_ABORTED");
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally { fetchSpy.mockRestore(); }
   });
 });

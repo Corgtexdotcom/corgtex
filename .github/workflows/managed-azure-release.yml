@@ -63,7 +63,8 @@ jobs:
   dry-run:
     if: github.ref == 'refs/heads/main' && inputs.execute != true
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Includes both complete baseline censuses and paced provider preparation.
+    timeout-minutes: 30
     environment: managed-azure-release-production
     steps:
       - uses: actions/checkout@v5
@@ -128,7 +129,8 @@ jobs:
   execute:
     if: github.ref == 'refs/heads/main' && inputs.execute == true
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    # Full supported revision history is retained during owned, paced reads.
+    timeout-minutes: 240
     environment: managed-azure-release-production
     steps:
       - uses: actions/checkout@v5
