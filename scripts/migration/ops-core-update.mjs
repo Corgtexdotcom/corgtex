@@ -5,7 +5,7 @@ import { archiveEvidenceHash as hash } from "./ops-core-archive.mjs";
 import { createAzureTargetArmTransport, opsCoreAzureTargetBindingSha256, OPS_CORE_APP_SNAPSHOT_API } from "./ops-core-azure-target.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
 import { createManagedAzureContainerAppTransport, buildManagedAzureReleaseTemplate,
-  managedAzureTemplateDigest, managedAzureConfigurationDigest, canonicalizeManagedAzureContainerAppState } from "../release/managed-azure-container-app-transport.mjs";
+  managedAzureTemplateDigest, managedAzureConfigurationDigest, canonicalizeManagedAzureContainerAppState, assertManagedAzureRevisionProjection } from "../release/managed-azure-container-app-transport.mjs";
 import { snapshotManagedAzureExclusiveActivation } from "../release/managed-azure-exclusive-activation.mjs";
 import { managedAzureHealthReady } from "../release/managed-azure-release-transaction.mjs";
 import { projectWorkerHealth, validateHealthChallenge } from "./ops-core-health-probe.mjs";
@@ -195,7 +195,7 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
         appId: workerTarget.appId, revisionName: revisionName, invocationContext: context })
       && worker.evidence.authoritySha256 === hash({ mode: "release", acceptedMigrationSha256: p.authority.acceptedMigrationSha256,
         releaseId: p.releaseId, targetSha256: hash(workerTarget), sourceFenceProvenance: "historical-migration" }), "UPDATE_WORKER_HEALTH_UNPROVEN");
-    await authority(); return worker.evidence;
+    await authority(); return worker;
   }
   let unchanged = await read(unchangedKey);
   if (unchanged) need(action === "reconcile" && same(unchanged, { type: "UPDATE_UNCHANGED_DECISION", binding }), "UPDATE_UNCHANGED_DECISION_CHANGED");
@@ -336,27 +336,70 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
     need(workerDrained((await inspect()).worker), "UPDATE_WORKER_STOP_UNPROVEN");
     return { revisionName: candidate.revisionName, templateSha256: observed.state.templateDigest, runningStatus: "Stopped" };
   }
+  async function assertDemandIdle(phase, candidate) {
+    // Only the updater's post-health selection may accept demand idle. Keep the
+    // shared transport's READY contract and all pre-wake admission unchanged.
+    await authority();
+    const response = await demandArm({ resourceId: workerAppId, apiVersion: OPS_CORE_APP_SNAPSHOT_API, signal: custody.signal });
+    await authority();
+    const app = response.body, properties = app?.properties;
+    need(response.status === 200, "UPDATE_WORKER_IDLE_UNPROVEN");
+    assertManagedAzureWorkerDemandApp(app, p.workerDemand, p.target);
+    const state = canonicalizeManagedAzureContainerAppState(app, { ...inputFor("worker"), release: p[phase].release,
+      imageDigest: p[phase].images.worker.split("@")[1] });
+    need(properties.runningStatus === "Running" && state.revisionName === candidate.revisionName
+      && state.templateDigest === managedAzureTemplateDigest(candidate.template)
+      && managedAzureConfigurationDigest(properties.configuration) === ownership.configurationDigests.worker
+      && `https://${properties.configuration.ingress.fqdn}` === p.origins.worker, "UPDATE_WORKER_IDLE_UNPROVEN");
+    const revisionId = `${workerAppId}/revisions/${candidate.revisionName}`;
+    const revision = await demandArm({ resourceId: revisionId, apiVersion: OPS_CORE_APP_SNAPSHOT_API, signal: custody.signal });
+    await authority();
+    const value = revision.body, rp = value?.properties;
+    need(revision.status === 200 && value?.id?.toLowerCase() === revisionId.toLowerCase() && value.name === candidate.revisionName
+      && rp?.active === true && rp.provisioningState === "Provisioned" && rp.healthState === "Healthy"
+      && ["ScaleToZero", "ScaledToZero"].includes(rp.runningState), "UPDATE_WORKER_IDLE_UNPROVEN");
+    assertManagedAzureRevisionProjection(candidate.template, rp.template, p.target.apps.worker, candidate.revisionName,
+      { app, resourceId: workerAppId });
+  }
   async function selected(phase, role) {
     await authority();
-    const candidate = candidates[phase][role];
+    const candidate = candidates[phase][role], demandWorker = scheduler && role === "worker";
+    const context = phase === "incoming" ? "release-final" : "recovery-final";
+    let worker;
     need(known[role].has(candidate.revisionName), "UPDATE_REVISION_INTENT_MISSING");
-    if (scheduler && role === "worker") {
+    if (demandWorker) {
       need((await inspect()).worker.runningStatus === "Running", "UPDATE_WORKER_START_UNPROVEN");
-      await workerObservation(phase, phase === "incoming" ? "release-final" : "recovery-final", candidate.revisionName);
+      worker = await workerObservation(phase, context, candidate.revisionName);
     }
     const state = await transport.readApp({ ...inputFor(role), release: p[phase].release,
       imageDigest: p[phase].images[role].split("@")[1] });
     need(state.revisionName === candidate.revisionName && state.templateDigest === managedAzureTemplateDigest(candidate.template), "UPDATE_TEMPLATE_DRIFT");
-    if (scheduler && role === "worker" && (await transport.readRevisionState({ ...inputFor(role), revisionName: candidate.revisionName,
-      expectedTemplate: candidate.template })).kind !== "READY") {
-      await workerObservation(phase, phase === "incoming" ? "release-final" : "recovery-final", candidate.revisionName);
+    const revisionInput = { ...inputFor(role), revisionName: candidate.revisionName, expectedTemplate: candidate.template };
+    let revision = await transport.readRevisionState(revisionInput), idle = false;
+    if (demandWorker && revision.kind === "UNKNOWN") {
+      await assertDemandIdle(phase, candidate); idle = true;
+    } else if (demandWorker && revision.kind !== "READY") {
+      worker = await workerObservation(phase, context, candidate.revisionName);
+      revision = await transport.readRevisionState(revisionInput);
+      if (revision.kind === "UNKNOWN") { await assertDemandIdle(phase, candidate); idle = true; }
     }
-    need((await transport.readRevisionState({ ...inputFor(role), revisionName: candidate.revisionName,
-      expectedTemplate: candidate.template })).kind === "READY", "UPDATE_REVISION_NOT_READY");
-    const inventory = (await inspect())[role];
+    need(revision.kind === "READY" || idle, "UPDATE_REVISION_NOT_READY");
+    let inventory = (await inspect())[role];
+    if (demandWorker && !idle && inventory.revisions.some(r => r.revisionName === candidate.revisionName && r.active && r.replicaCount === 0)) {
+      // A healthy running revision may scale down during the complete census.
+      // Re-prove that exact idle state, then obtain a new full census.
+      await assertDemandIdle(phase, candidate); idle = true;
+      inventory = (await inspect())[role];
+    }
     need(inventory.latestRevisionName === candidate.revisionName && inventory.latestReadyRevisionName === candidate.revisionName
-      && inventory.revisions.some(r => r.revisionName === candidate.revisionName && r.active && r.replicaCount > 0)
+      && inventory.revisions.some(r => r.revisionName === candidate.revisionName && r.active && (idle ? r.replicaCount === 0 : r.replicaCount > 0))
       && inventory.revisions.every(r => r.revisionName === candidate.revisionName || !r.active && r.replicaCount === 0), "UPDATE_PAIR_NOT_EXCLUSIVE");
+    if (idle) {
+      need(inventory.runningStatus === "Running", "UPDATE_WORKER_START_UNPROVEN");
+      // The census can be slow. An earlier healthy response must still be fresh
+      // when it is used to accept an idle revision; it is never cached authority.
+      projectWorkerHealth(worker.health.body, worker.ready.body, { release: p[phase].release });
+    }
     return { revisionName: candidate.revisionName, templateSha256: state.templateDigest };
   }
   function validateWeb(web, phase) {
@@ -403,7 +446,7 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
     await authority();
     const body = await boundWebHealth(phase);
     const workerEvidence = await workerObservation(phase, context, revisions.worker);
-    await authority(); return { webSha256: hash(body), worker: workerEvidence };
+    await authority(); return { webSha256: hash(body), worker: workerEvidence.evidence };
   }
   async function finish(result) {
     const retained = custody.result;

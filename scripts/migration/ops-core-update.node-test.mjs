@@ -162,6 +162,21 @@ function fixture(options = {}) {
       ...(options.demand ? { demandArmTransport: async input => {
         const id = `${prefix}Microsoft.App/jobs/${plan.workerDemand.schedulerJobName}`;
         if (input.resourceId === apps.worker.id) { options.workerArmRead?.(input, f); return { status: 200, body: structuredClone(apps.worker) }; }
+        if (input.resourceId.startsWith(`${apps.worker.id}/revisions/`)) {
+          assert.equal(input.method ?? "GET", "GET"); assert.equal(input.apiVersion, "2025-01-01");
+          assert.equal(input.signal, custody.signal);
+          const name = input.resourceId.split("/").at(-1), r = revisionState.worker.get(name);
+          assert.ok(r); log.push("idle:revision");
+          const body = { id: input.resourceId, name, properties: { active: r.active, provisioningState: "Provisioned",
+            healthState: "Healthy", runningState: "ScaledToZero", template: structuredClone(r.template) } };
+          // Actual immutable ACA revisions omit the suffix and the live app's
+          // demand intervals. The native pairwise projection must still pass.
+          delete body.properties.template.revisionSuffix;
+          delete body.properties.template.scale.cooldownPeriod;
+          delete body.properties.template.scale.pollingInterval;
+          options.idleRevision?.(body, f);
+          return { status: 200, body };
+        }
         if (input.method === "PUT") { schedulerJob = structuredClone(input.body); log.push(`scheduler:${schedulerJob.properties.configuration.triggerType}:${schedulerJob.properties.template.containers[0].image.slice(-1)}`); return { status: 202 }; }
         if (input.resourceId === `${id}/start`) {
           assert.equal(apps.worker.properties.runningStatus, "Running");
@@ -220,6 +235,95 @@ function fixture(options = {}) {
   };
   return f;
 }
+function idleAfterHealth(input, result, f) {
+  if (input.phase === "baseline") return;
+  const r = f.revisionState.worker.get(input.revisionName);
+  r.kind = "UNKNOWN"; r.replicaCount = 0;
+}
+test("demand update accepts exact healthy idle after fresh health through full native selection", async () => {
+  const f = fixture({ demand: true, workerHealth: idleAfterHealth });
+  const result = await f.run();
+  assert.equal(result.outcome, "UPDATED");
+  assert.ok(f.log.includes("idle:revision"));
+  assert.equal(f.revisionState.worker.get(result.revisions.worker).replicaCount, 0);
+  assert.equal(f.schedulerJob.properties.configuration.triggerType, "Schedule");
+  assert.equal(f.log.filter(v => v === "patch:incoming:worker").length, 1);
+});
+test("demand recovery and observational reconcile accept independently proven idle without replay", async () => {
+  let lose = true;
+  const f = fixture({ demand: true, workerHealth: idleAfterHealth, afterPatch(input) {
+    if (input.role === "worker" && lose) { lose = false; throw Error("lost acknowledgement"); }
+  }, beforeFinish() { throw Error("retain terminal result boundary"); } });
+  await assert.rejects(f.run()); f.reopen();
+  await assert.rejects(f.run("recover"), /retain terminal result boundary/);
+  const effects = f.effects();
+  await assert.rejects(f.run("reconcile"), /retain terminal result boundary/);
+  assert.deepEqual(f.effects(), effects);
+  assert.ok(f.log.includes("idle:revision"));
+});
+test("running revision scaling to zero during census earns a new exact idle readback", async () => {
+  let selected = false;
+  const f = fixture({ demand: true, workerHealth(input) { selected = input.phase !== "baseline"; },
+    beforeExclusive(input, f) { if (selected && input.role === "worker") {
+      const r = f.revisionState.worker.get(f.apps.worker.properties.latestRevisionName); r.replicaCount = 0;
+    } } });
+  assert.equal((await f.run()).outcome, "UPDATED");
+  assert.ok(f.log.includes("idle:revision"));
+});
+for (const [name, change] of [
+  ["foreign id", b => { b.id += "-foreign"; }], ["foreign name", b => { b.name += "-foreign"; }],
+  ["inactive", b => { b.properties.active = false; }],
+  ["unhealthy", b => { b.properties.healthState = "Unhealthy"; }],
+  ["failed provisioning", b => { b.properties.provisioningState = "Failed"; }],
+  ["stopped", b => { b.properties.runningState = "Stopped"; }],
+  ["activating", b => { b.properties.runningState = "Activating"; }],
+  ["wrong image", b => { b.properties.template.containers[0].image = images("d").worker; }],
+  ["wrong environment binding", b => { b.properties.template.containers[0].env[0].value = "foreign"; }],
+]) test(`demand idle rejects ${name} before scheduler installation`, async () => {
+  const f = fixture({ demand: true, workerHealth: idleAfterHealth, idleRevision: change });
+  await assert.rejects(f.run()); assert.equal(f.finished, null);
+  assert.ok(!f.log.some(v => v === "scheduler:Manual:b" || v === "scheduler:proof"));
+});
+for (const [name, mutate] of [
+  ["wrong ready revision", f => { f.apps.worker.properties.latestReadyRevisionName = "foreign"; }],
+  ["wrong origin", f => { f.apps.worker.properties.configuration.ingress.fqdn = "other.internal.fixture.azurecontainerapps.io"; }],
+  ["wrong demand shape", f => { f.apps.worker.properties.template.scale.minReplicas = 1; }],
+  ["competing baseline writer", f => { const r = f.revisionState.worker.values().next().value; r.active = true; r.replicaCount = 1; }],
+]) test(`demand idle rejects ${name}`, async () => {
+  const f = fixture({ demand: true, workerHealth(input, result, f) {
+    idleAfterHealth(input, result, f); if (input.phase !== "baseline") mutate(f);
+  } });
+  await assert.rejects(f.run()); assert.equal(f.finished, null);
+  assert.ok(!f.log.includes("scheduler:proof"));
+});
+test("demand idle rejects nonzero census after exact idle projection", async () => {
+  const f = fixture({ demand: true, workerHealth: idleAfterHealth, idleRevision(body, f) {
+    f.revisionState.worker.get(body.name).replicaCount = 1;
+  } });
+  await assert.rejects(f.run()); assert.ok(!f.log.includes("scheduler:proof"));
+});
+test("demand idle cannot use health that expires during its complete census", async t => {
+  const observed = Date.now(); let advanced = false;
+  t.mock.method(Date, "now", () => observed + (advanced ? 121_000 : 0));
+  const f = fixture({ demand: true, workerHealth: idleAfterHealth,
+    idleRevision() { advanced = true; } });
+  await assert.rejects(f.run()); assert.ok(!f.log.includes("scheduler:proof"));
+});
+test("demand idle requires positive fresh bound health before raw idle evidence", async () => {
+  for (const mutation of [r => { r.health.status = 503; }, r => { r.evidence.requestSha256 = "f".repeat(64); },
+    r => { r.health.body.lastSuccessfulTickAt = new Date(Date.now() - 121_000).toISOString(); }]) {
+    const f = fixture({ demand: true, workerHealth(input, result, f) {
+      idleAfterHealth(input, result, f); if (input.phase !== "baseline") mutation(result);
+    } });
+    await assert.rejects(f.run()); assert.ok(!f.log.includes("idle:revision"));
+  }
+});
+test("non-demand UNKNOWN zero-replica revision still fails without demand idle reads", async () => {
+  const f = fixture({ afterPatch(input, f) {
+    if (input.role === "worker") { const r = f.revisionState.worker.get(f.apps.worker.properties.latestRevisionName); r.kind = "UNKNOWN"; r.replicaCount = 0; }
+  } });
+  await assert.rejects(f.run()); assert.ok(!f.log.includes("idle:revision"));
+});
 test("stopped worker PATCH waits for exact asynchronous provisioning without another write", async () => {
   let ticks = 0, reads = 0, candidate, f;
   f = fixture({ demand: true, now: () => ticks,
