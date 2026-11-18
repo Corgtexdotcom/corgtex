@@ -3,12 +3,11 @@ import { selfserveBaselineBinding } from "./managed-azure-selfserve-baseline.mjs
 import { isSelfserveReleaseHost, SELFSERVE_RELEASE_PROFILE } from "./managed-azure-selfserve-profile.mjs";
 import { createManagedAzureExclusiveActivation } from "./managed-azure-exclusive-activation.mjs";
 import { spawn as nodeSpawn } from "node:child_process";
-import { setTimeout as delay } from "node:timers/promises";
+import { createManagedAzurePacedContainerAppTransport } from "./managed-azure-arm-pacing.mjs";
 import {
   ManagedAzureContainerAppError,
   assertManagedAzureTemplateDelta,
   buildManagedAzureReleaseTemplate,
-  createManagedAzureContainerAppTransport,
   managedAzureTemplateDigest,
   managedAzureRevisionSuffix,
 } from "./managed-azure-container-app-transport.mjs";
@@ -789,42 +788,11 @@ async function callControlPlane(name, args, env, fetchImpl = fetch) {
   try { return JSON.parse(payload); } catch { fail("MANAGED_RELEASE_RECOVERY_CONTROL_PLANE_INVALID"); }
 }
 
-// Repay actual ARM read pressure before the next method, never after a fresh
-// readback or inside the transport's request/census deadlines. Native methods
-// retain their complete inventory, retry and mutation semantics. This bounds
-// amortized request pressure; it does not claim a provider quota or remove the
-// bounded bursts inside a native method (for example mode restoration).
-export function createManagedAzureRecoveryArmDependencies({ fetchImpl = fetch, clock = Date.now,
-  sleep = (ms, signal) => delay(ms, undefined, { signal }), onProgress, ...transport } = {}) {
-  let nextMethodAt = 0, serial = Promise.resolve();
-  const countedFetch = (url, init) => {
-    if (init?.method === "GET" && new URL(url).origin === "https://management.azure.com") {
-      nextMethodAt = Math.max(nextMethodAt, clock()) + 1_250;
-    }
-    return fetchImpl(url, init);
-  };
-  const apps = createManagedAzureContainerAppTransport({ ...transport, fetchImpl: countedFetch, clock, sleep });
-  return Object.freeze(Object.fromEntries(Object.entries(apps).map(([name, method]) => [name, async (input) => {
-    const previous = serial;
-    let release;
-    serial = new Promise(resolve => { release = resolve; });
-    const progress = async () => {
-      if (input?.signal?.aborted) fail("MANAGED_RELEASE_RECOVERY_ARM_ABORTED");
-      await onProgress?.();
-      if (input?.signal?.aborted) fail("MANAGED_RELEASE_RECOVERY_ARM_ABORTED");
-    };
-    try {
-      await previous;
-      await progress();
-      while (nextMethodAt > clock()) {
-        await sleep(Math.min(15_000, nextMethodAt - clock()), input?.signal);
-        await progress();
-      }
-      // Owner verification may take time; delegate only after its successful
-      // completion. Preserve debt even if the native method subsequently fails.
-      return await method(input);
-    } finally { release(); }
-  }])));
+// Keep the recovery adapter's public abort diagnostic while sharing the same
+// owned method-boundary pacing with ordinary forward releases.
+export function createManagedAzureRecoveryArmDependencies(dependencies = {}) {
+  return createManagedAzurePacedContainerAppTransport({ ...dependencies,
+    abortError: () => new ManagedAzureRecoveryError("MANAGED_RELEASE_RECOVERY_ARM_ABORTED") });
 }
 
 export function runtimeDependencies(env = process.env) {
