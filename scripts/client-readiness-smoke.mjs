@@ -492,34 +492,43 @@ export async function installSelfserveReadOnlyRouting(page) {
   ) ? route.continue() : route.abort("blockedbyclient"));
 }
 
-async function verifyMobileShell(page, locale, workspacePath, findings, routeResults, build) {
-  let fakeConversationCounter = 0;
+export async function installMobileConversationMock(page, { origin, workspacePath, now = () => new Date() }) {
+  const collection = `${new URL(origin).origin}/api${workspacePath}/conversations`;
+  const sessions = new Map();
+  let counter = 0;
+  await page.route(collection, async (route) => {
+    const request = route.request();
+    if (request.url() !== collection || request.method() !== "POST") return route.fallback();
+    const id = `mobile-smoke-${++counter}`;
+    sessions.set(id, { id, turns: [] });
+    await route.fulfill({ status: 200, contentType: "application/json",
+      body: JSON.stringify({ session: { id } }) });
+  });
+  await page.route(`${collection}/*`, async (route) => {
+    const request = route.request();
+    const id = request.url().startsWith(`${collection}/`) ? request.url().slice(collection.length + 1) : null;
+    const conversation = sessions.get(id);
+    if (!conversation) return route.fallback();
+    if (request.method() === "GET") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ conversation }) });
+      return;
+    }
+    if (request.method() !== "POST") return route.fallback();
+    const payload = request.postDataJSON();
+    if (typeof payload?.message !== "string" || !payload.message.trim()) return route.fallback();
+    const turn = { id: `${id}-turn-${conversation.turns.length + 1}`, sequenceNumber: conversation.turns.length + 1,
+      userMessage: payload.message, assistantMessage: "Smoke response", createdAt: now().toISOString() };
+    conversation.turns.push(turn);
+    const committedTurn = { id: turn.id, sequenceNumber: turn.sequenceNumber, createdAt: turn.createdAt };
+    await route.fulfill({ status: 200, contentType: "text/event-stream; charset=utf-8",
+      body: `data: ${JSON.stringify({ committedTurn })}\n\ndata: ${JSON.stringify({ text: turn.assistantMessage })}\n\ndata: [DONE]\n\n` });
+  });
+}
+
+export async function verifyMobileShell(page, locale, workspacePath, findings, routeResults, build) {
   await installMobileAnalyticsMock(page);
-  await page.route("**/api/workspaces/*/conversations", async (route) => {
-    if (route.request().method() !== "POST") {
-      await route.fallback();
-      return;
-    }
-
-    fakeConversationCounter += 1;
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ session: { id: `mobile-smoke-${fakeConversationCounter}` } }),
-    });
-  });
-  await page.route("**/api/workspaces/*/conversations/*", async (route) => {
-    if (route.request().method() !== "POST") {
-      await route.fallback();
-      return;
-    }
-
-    await route.fulfill({
-      status: 200,
-      contentType: "text/event-stream; charset=utf-8",
-      body: "data: {\"text\":\"Smoke response\"}\n\ndata: [DONE]\n\n",
-    });
-  });
+  // This is a browser rendering fixture, not evidence of a server-side AI write.
+  await installMobileConversationMock(page, { origin: baseUrl, workspacePath });
 
   for (const [viewportName, viewport] of mobileShellViewports) {
     setActiveRouteLabel(`mobile-shell-${viewportName}`);
