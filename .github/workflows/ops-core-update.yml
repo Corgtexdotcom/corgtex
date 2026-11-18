@@ -9,9 +9,9 @@ on:
         options: [core, ops]
         required: true
       action:
-        description: Apply once, reconcile an interrupted attempt, or use approved compatible recovery
+        description: Apply once, inspect an interruption, resume a submitted worker update, or recover
         type: choice
-        options: [apply, reconcile, recover]
+        options: [apply, reconcile, resume, recover]
         required: true
       envelope_sha256:
         description: Canonical SHA256 of the reviewed immutable update envelope in custody storage
