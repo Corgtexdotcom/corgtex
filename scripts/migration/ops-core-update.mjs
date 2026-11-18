@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
 import { archiveEvidenceHash as hash } from "./ops-core-archive.mjs";
 import { createAzureTargetArmTransport, opsCoreAzureTargetBindingSha256, OPS_CORE_APP_SNAPSHOT_API } from "./ops-core-azure-target.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
@@ -91,15 +92,17 @@ export async function fetchOpsCoreUpdateWebHealth({ origin, signal }, fetchImpl 
  * Callers bind authority to retained ACCEPTED migration and compatibility proof.
  */
 export async function runOpsCoreUpdate({ plan: input, custody, operationStore: store, action = "apply",
-  assertDeploymentAuthority, prepareHealth, workerHealth,
+  assertDeploymentAuthority, prepareHealth, workerHealth, settleHealth,
   webHealth = fetchOpsCoreUpdateWebHealth, assertImages = assertOpsCoreUpdateImages,
-  transport = createManagedAzureContainerAppTransport(), armTransport, demandArmTransport, schedulerProof }) {
+  transport = createManagedAzureContainerAppTransport(), armTransport, demandArmTransport, schedulerProof,
+  now = Date.now, wait = (ms, signal) => delay(ms, undefined, { signal }) }) {
   const p = validateOpsCoreUpdatePlan(input), target = opsCoreUpdateTransportTarget(p);
   const arm = armTransport ?? createAzureTargetArmTransport({ subscriptionId: p.target.subscriptionId });
-  need(["apply", "reconcile", "recover"].includes(action) && custody?.signal instanceof AbortSignal
+  need(["apply", "reconcile", "recover", "resume"].includes(action) && custody?.signal instanceof AbortSignal
     && [assertDeploymentAuthority, prepareHealth, workerHealth].every(fn => typeof fn === "function"), "UPDATE_CALLBACK_REQUIRED");
   const demandArm = p.workerDemand ? demandArmTransport ?? createOpsCoreActivationArmTransport({ subscriptionId: p.target.subscriptionId }) : null;
   const schedulerId = p.workerDemand ? `/subscriptions/${p.target.subscriptionId}/resourceGroups/${p.target.resourceGroupName}/providers/Microsoft.App/jobs/${p.workerDemand.schedulerJobName}` : null;
+  const workerAppId = `/subscriptions/${p.target.subscriptionId}/resourceGroups/${p.target.resourceGroupName}/providers/Microsoft.App/containerApps/${p.target.apps.worker}`;
   const binding = { domain: p.domain, intentSha256: hash(p), releaseId: p.releaseId,
     targetBindingSha256: opsCoreAzureTargetBindingSha256(p.target), ...p.authority };
   async function owned() {
@@ -114,11 +117,13 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
   }
   await authority();
   need(custody.mode !== "finished" && (action !== "apply" || custody.mode === "apply"), "UPDATE_RECONCILE_REQUIRED");
+  if (action === "resume") need(custody.mode === "reconcile" && p.workerDemand, "UPDATE_RESUME_STAGE_UNSUPPORTED");
   need(!custody.result || action === "reconcile", "UPDATE_RESULT_RECONCILE_REQUIRED");
   const prefix = `operations/${p.domain}/${binding.intentSha256}/${p.releaseId}`;
   const snapshotKey = `${prefix}/phase-plan.json`;
   const decisionKey = `${prefix}/${hash({ kind: "UPDATE_RECOVERY_DECISION" })}/descriptor.json`;
   const unchangedKey = `${prefix}/${hash({ kind: "UPDATE_UNCHANGED_DECISION" })}/descriptor.json`;
+  const resumeKey = `${prefix}/${hash({ kind: "UPDATE_FORWARD_RESUME_DECISION" })}/descriptor.json`;
   async function read(key) {
     await owned(); await store.assertPrivate(); const text = await store.readOptional(key, custody.signal); await owned();
     if (text === null) return null;
@@ -291,9 +296,37 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
   const workerDrained = s => scheduler ? s.mode === "Single" && s.runningStatus === "Stopped"
     && s.revisions.every(r => r.replicaCount === 0) : s.revisions.every(r => !r.active && r.replicaCount === 0);
   async function stoppedTemplate(phase) {
+    // A PATCH acknowledgement can precede application provisioning completion.
+    // Observe only the exact stopped app and its retained predecessor/candidate;
+    // never dispatch another PATCH or weaken the final full census/readback.
+    const candidate = candidates[phase].worker;
+    const predecessors = [snapshot.baselines.worker, ...(phase === "recovery" && known.worker.has(candidates.incoming.worker.revisionName) ? [candidates.incoming.worker] : [])];
+    const allowed = new Map([...predecessors.map(v => [v.revisionName, managedAzureTemplateDigest(v.template)]),
+      [candidate.revisionName, managedAzureTemplateDigest(candidate.template)]]);
+    const deadline = now() + 180_000;
+    const signal = AbortSignal.any([custody.signal, AbortSignal.timeout(180_000)]);
+    for (;;) {
+      await authority(); need(now() < deadline, "UPDATE_STOPPED_TEMPLATE_TIMEOUT");
+      signal.throwIfAborted();
+      const r = await demandArm({ resourceId: workerAppId, apiVersion: OPS_CORE_APP_SNAPSHOT_API, signal });
+      await authority(); need(now() < deadline, "UPDATE_STOPPED_TEMPLATE_TIMEOUT");
+      const raw = r.body, properties = raw?.properties;
+      const templateDigest = managedAzureTemplateDigest(properties?.template);
+      need(r.status === 200 && raw?.id?.toLowerCase() === workerAppId.toLowerCase()
+        && (properties.environmentId ?? properties.managedEnvironmentId)?.toLowerCase() === p.target.environmentId.toLowerCase()
+        && properties.runningStatus === "Stopped" && properties.configuration?.activeRevisionsMode === "Single"
+        && managedAzureConfigurationDigest(properties.configuration) === ownership.configurationDigests.worker
+        && allowed.has(properties.latestRevisionName)
+        && (allowed.get(properties.latestRevisionName) === templateDigest
+          || templateDigest === managedAzureTemplateDigest(candidate.template)), "UPDATE_STOPPED_TEMPLATE_DRIFT");
+      if (properties.provisioningState === "Succeeded") {
+        need(properties.latestRevisionName === candidate.revisionName && templateDigest === managedAzureTemplateDigest(candidate.template), "UPDATE_TEMPLATE_DRIFT"); break;
+      }
+      need(["InProgress", "Accepted", "Updating", "Provisioning"].includes(properties.provisioningState), "UPDATE_STOPPED_TEMPLATE_FAILED");
+      await wait(Math.min(1000, deadline - now()), signal);
+    }
     const state = (await inspect()).worker;
     need(workerDrained(state), "UPDATE_WORKER_STOP_UNPROVEN");
-    const candidate = candidates[phase].worker;
     const observed = await transport.readAppTemplate({ ...inputFor("worker"), release: p[phase].release,
       imageDigest: p[phase].images.worker.split("@")[1] });
     need(observed.provisioningState === "Succeeded" && observed.state.revisionName === candidate.revisionName
@@ -407,8 +440,106 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
   }
   let decision = await read(decisionKey);
   if (decision) need(same(decision, { type: "UPDATE_RECOVERY_DECISION", binding }), "UPDATE_RECOVERY_DECISION_CHANGED");
-  need(!decision || action !== "apply", "UPDATE_RECOVERY_ALREADY_STARTED");
+  need(!decision || !["apply", "resume"].includes(action), "UPDATE_RECOVERY_ALREADY_STARTED");
   const phase = action === "recover" || decision ? "recovery" : "incoming";
+  async function admitForwardResume() {
+    // Deliberately limited to the already-submitted stopped worker template and
+    // subsequent start/scheduler/finalization steps. Earlier failures retain the
+    // existing reconcile/recover policy; resume never invents a baseline.
+    need(scheduler && typeof store.listRecords === "function", "UPDATE_RESUME_STAGE_UNSUPPORTED");
+    const resume = { type: "UPDATE_FORWARD_RESUME_DECISION", binding, snapshotSha256: hash(snapshot) };
+    const retained = await read(resumeKey);
+    need(retained === null || same(retained, resume), "UPDATE_RESUME_DECISION_CHANGED");
+    const allowed = new Set([snapshotKey, resumeKey]);
+    async function entry(kind, input, required = false) {
+      const status = await operations.readStatus(kind, input);
+      need(!required || status.intent && status.receipt, "UPDATE_RESUME_STAGE_UNSUPPORTED");
+      const key = `${prefix}/${hash({ kind, inputSha256: hash(input) })}`;
+      allowed.add(`${key}/intent.json`); allowed.add(`${key}/receipt.json`);
+      return { kind, input, ...status, key };
+    }
+    await entry("UPDATE_SCHEDULER_DISABLE", { jobId: schedulerId, bodySha256: hash(schedulerBody("baseline")), beforeSha256: hash(schedulerBody("baseline", "Schedule")) }, true);
+    await entry("UPDATE_WORKER_RUNNING", { phase: "incoming", runningStatus: "Stopped" }, true);
+    await entry("UPDATE_MODE", { phase: "incoming", role: "web", mode: "Multiple" }, true);
+    await entry("UPDATE_DRAIN", { phase: "incoming", role: "web", revisionName: snapshot.baselines.web.revisionName }, true);
+    await entry("UPDATE_TEMPLATE", patchInput("incoming", "web"), true);
+    await entry("UPDATE_MODE", { phase: "incoming", role: "web", mode: "Single" }, true);
+    const patch = await entry("UPDATE_TEMPLATE", patchInput("incoming", "worker"));
+    need(patch.intent, "UPDATE_RESUME_STAGE_UNSUPPORTED");
+    const start = await entry("UPDATE_WORKER_RUNNING", { phase: "incoming", runningStatus: "Running" });
+    const single = await entry("UPDATE_MODE", { phase: "incoming", role: "worker", mode: "Single" });
+    const install = await entry("UPDATE_SCHEDULER_INSTALL", { jobId: schedulerId, bodySha256: hash(schedulerBody("incoming")), beforeSha256: hash(schedulerBody("baseline")) });
+    const context = `${p.releaseId}-incoming`, nonce = hash({ jobId: schedulerId, bodySha256: hash(schedulerBody("incoming")), context });
+    const template = structuredClone(schedulerBody("incoming").properties.template);
+    template.containers[0].env.push({ name: "WORKER_SCHEDULER_PROOF_NONCE", value: nonce });
+    const proof = await entry("WORKER_SCHEDULER_PROOF", { jobId: schedulerId, context, nonce, templateSha256: hash(template), release: p.incoming.release });
+    if (proof.intent) allowed.add(`${proof.key}/descriptor.json`);
+    const enable = await entry("UPDATE_SCHEDULER_ENABLE", { jobId: schedulerId, bodySha256: hash(schedulerBody("incoming", "Schedule")), beforeSha256: hash(schedulerBody("incoming")) });
+    need((!start.intent || patch.receipt) && (!single.intent || start.receipt) && (!install.intent || single.receipt)
+      && (!proof.intent || install.receipt) && (!enable.intent || proof.receipt), "UPDATE_RESUME_EFFECT_ORDER_INVALID");
+    await authority();
+    const keys = await store.listRecords(`${prefix}/`, custody.signal), observers = new Map();
+    await authority();
+    for (const key of keys.filter(key => key.endsWith("/descriptor.json") && !allowed.has(key))) {
+      const d = await read(key), h = d?.input?.plan, index = d?.input?.index;
+      need(d?.kind === "AZURE_HEALTH_PROBE_START" && h && Number.isInteger(index) && index >= 0 && index < 10, "UPDATE_RESUME_RECORD_UNBOUND");
+      const name = ["baseline", "incoming"].find(name => same(h.worker, { appId: workerAppId, origin: p.origins.worker, image: p[name].images.worker, release: p[name].release }));
+      need(name && h.environmentResourceId === p.target.environmentId, "UPDATE_RESUME_RECORD_UNBOUND");
+      const observerContext = { domain: p.domain, intentSha256: binding.intentSha256, sourceFenceSha256: p.authority.migrationSourceFenceSha256,
+        phaseOperationId: p.releaseId, workerDemandSha256: hash({ plan: p.workerDemand, target: p.target }), mode: "release", acceptedMigrationSha256: p.authority.acceptedMigrationSha256 };
+      const observerAuthority = { mode: "release", acceptedMigrationSha256: p.authority.acceptedMigrationSha256, releaseId: p.releaseId,
+        targetSha256: hash(h.worker), sourceFenceProvenance: "historical-migration" };
+      assertHealthJobStartDescriptor(d, { plan: h, context: observerContext, index, authority: observerAuthority });
+      buildHealthProbeJobDefinition(h);
+      need(d.input.challenge.request.invocationContext === (name === "baseline" ? "baseline-worker" : "release-final")
+        && d.input.challenge.request.revisionName === (name === "baseline" ? snapshot.baselines.worker.revisionName : candidates.incoming.worker.revisionName), "UPDATE_RESUME_RECORD_UNBOUND");
+      const status = await operations.readStatus(d.kind, d.input);
+      need(status.intent, "UPDATE_RESUME_RECORD_UNBOUND");
+      const op = `${prefix}/${hash({ kind: d.kind, inputSha256: hash(d.input) })}`, slot = `${prefix}/${hash({ kind: "AZURE_HEALTH_PROBE_SLOT", inputSha256: hash({ plan: h, context: observerContext, index }) })}/descriptor.json`;
+      need([`${op}/descriptor.json`, slot].includes(key) && same(await read(`${op}/descriptor.json`), d) && same(await read(slot), d), "UPDATE_RESUME_RECORD_UNBOUND");
+      for (const k of [`${op}/descriptor.json`, slot, `${op}/intent.json`, `${op}/receipt.json`]) allowed.add(k);
+      const prior = observers.get(name);
+      need(!prior || same(prior.plan, h), "UPDATE_RESUME_RECORD_UNBOUND");
+      const observer = prior ?? { plan: h, slots: new Map() }; observer.slots.set(index, status); observers.set(name, observer);
+    }
+    need(keys.every(key => allowed.has(key)), "UPDATE_RESUME_RECORD_UNBOUND");
+    // All original inputs are validated before settlement. The recorder can
+    // append an honest readback receipt, but its inherited apply callback is a trap.
+    async function settled(e, verify) {
+      if (!e.intent || e.receipt) return;
+      await operations.runRecordedOperation({ kind: e.kind, input: e.input,
+        apply: async () => { throw Error("UPDATE_RESUME_REPLAY_DENIED"); }, verify: async () => ({ complete: true, evidence: await verify() }) });
+    }
+    if (!patch.receipt) await settled(patch, () => stoppedTemplate("incoming"));
+    const pair = await inspect();
+    need(pair.web.mode === "Single" && pair.worker.mode === "Single" && pair.worker.latestRevisionName === candidates.incoming.worker.revisionName
+      && pair.worker.runningStatus === (start.intent ? "Running" : "Stopped"), "UPDATE_RESUME_STATE_UNPROVEN");
+    if (!start.intent) need(workerDrained(pair.worker), "UPDATE_WORKER_STOP_UNPROVEN");
+    const current = await transport.readAppTemplate({ ...inputFor("worker"), release: p.incoming.release, imageDigest: p.incoming.images.worker.split("@")[1] });
+    need(current.provisioningState === "Succeeded" && current.state.revisionName === candidates.incoming.worker.revisionName
+      && current.state.templateDigest === managedAzureTemplateDigest(candidates.incoming.worker.template), "UPDATE_TEMPLATE_DRIFT");
+    await transport.readRevisionState({ ...inputFor("worker"), revisionName: candidates.incoming.worker.revisionName, expectedTemplate: candidates.incoming.worker.template });
+    await selected("incoming", "web"); await boundWebHealth("incoming");
+    await settled(start, async () => pair.worker); await settled(single, async () => pair.worker);
+    const expectedJob = enable.intent ? schedulerBody("incoming", "Schedule") : install.intent ? schedulerBody("incoming") : schedulerBody("baseline");
+    await scheduler.assertJob(expectedJob);
+    await settled(install, () => scheduler.assertJob(schedulerBody("incoming")));
+    if (proof.intent) {
+      await scheduler.assertProofStartSettled(schedulerBody("incoming"), p.incoming.release, context);
+      await scheduler.prove(schedulerBody("incoming"), p.incoming.release, context, false);
+    }
+    await settled(enable, () => scheduler.assertJob(schedulerBody("incoming", "Schedule")));
+    for (const [name, observer] of observers) {
+      const indices = [...observer.slots.keys()].sort((a, b) => a - b), last = indices.at(-1);
+      need(indices.every((v, i) => v === i && (v === last || observer.slots.get(v).receipt)), "UPDATE_RESUME_RECORD_UNBOUND");
+      need(typeof settleHealth === "function", "UPDATE_RESUME_HEALTH_SETTLEMENT_REQUIRED");
+      const result = await settleHealth({ phase: name, plan: observer.plan, index: last, signal: custody.signal });
+      need(result?.complete === true && result.phase === name && result.planSha256 === hash(observer.plan) && result.index === last, "UPDATE_RESUME_HEALTH_UNSETTLED");
+    }
+    await authority();
+    need((await store.listRecords(`${prefix}/`, custody.signal)).every(key => allowed.has(key)), "UPDATE_RESUME_RECORD_UNBOUND");
+    await inspect(); await authority(); await retain(resumeKey, resume);
+  }
   if (action !== "reconcile") {
     await assertWebOrigin();
     await authority();
@@ -419,6 +550,7 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
       // Private baseline proof happens while the known old pair still serves.
       await health("baseline", "baseline-worker", Object.fromEntries(ROLES.map(role => [role, snapshot.baselines[role].revisionName])));
     }
+    if (action === "resume") await admitForwardResume();
     await inspect();
     if (action === "recover" && !decision) {
       // Read-only settlement of every unreceipted forward effect precedes the

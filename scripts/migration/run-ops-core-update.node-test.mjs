@@ -243,6 +243,59 @@ test("finished owner returns historical result without claiming fresh acceptance
   assert.equal(result.resultSha256, hash(f.custody.result)); assert.equal(f.closed, 1);
 });
 
+function retainResumeOwner(f) {
+  const binding = { schemaVersion: 1, domain: f.plan.domain, targetBindingSha256: opsCoreAzureTargetBindingSha256(f.plan.target) };
+  f.put(`update-envelopes/ops/${f.plan.releaseId}.json`, f.envelope);
+  f.put("release-custody/ops/owner.json", { ...binding, sequence: 3,
+    current: { releaseId: f.plan.releaseId, planSha256: hash(f.plan), status: "unfinished", resultSha256: null } });
+  f.put(`release-custody/ops/releases/${f.plan.releaseId}/plan.json`, { ...binding, releaseId: f.plan.releaseId, planSha256: hash(f.plan), plan: f.plan });
+  f.custody.mode = "reconcile";
+}
+test("resume opens only the exact existing unfinished owner and settles health through read-only native reconciliation", async () => {
+  const f = fixture(); retainResumeOwner(f); const calls = [];
+  const result = await executeOpsCoreUpdate("resume", f.envelope, { ...f.dependencies,
+    healthFactory({ plan }) { return {
+      async readRetainedStart() { calls.push("read"); return { input: { plan, index: 2 } }; },
+      async reconcileStart() { calls.push("reconcile"); return { status: "Succeeded" }; },
+      async probeHealth() { assert.fail("settlement must not start a probe"); },
+    }; },
+    async runUpdate(options) {
+      assert.equal(options.action, "resume"); assert.equal(options.custody.mode, "reconcile");
+      assert.deepEqual(await options.settleHealth({ phase: "incoming", plan: f.envelope.health.incoming, index: 2 }),
+        { complete: true, phase: "incoming", planSha256: hash(f.envelope.health.incoming), index: 2 });
+      await rejects(options.settleHealth({ phase: "recovery", plan: f.envelope.health.recovery, index: 2 }), "UPDATE_RESUME_HEALTH_PLAN_MISMATCH");
+      await rejects(options.settleHealth({ phase: "incoming", plan: f.envelope.health.baseline, index: 2 }), "UPDATE_RESUME_HEALTH_PLAN_MISMATCH");
+      await rejects(options.settleHealth({ phase: "incoming", plan: f.envelope.health.incoming, index: 1 }), "UPDATE_RESUME_HEALTH_SLOT_MISMATCH");
+      return { complete: true, outcome: "UPDATED" };
+    } });
+  assert.equal(result.status, "UPDATED"); assert.deepEqual(calls, ["read", "reconcile", "read"]);
+  assert.equal(f.log.some(v => v.startsWith("upload:")), false);
+});
+for (const change of ["envelope", "foreign-owner", "finished", "plan", "result"]) {
+  test(`resume rejects ${change} before initializing envelope or acquiring custody`, async () => {
+    const f = fixture(); retainResumeOwner(f);
+    if (change === "envelope") f.blobs.delete(`update-envelopes/ops/${f.plan.releaseId}.json`);
+    if (change === "foreign-owner" || change === "finished") {
+      const owner = JSON.parse(f.blobs.get("release-custody/ops/owner.json"));
+      if (change === "foreign-owner") owner.current.releaseId = randomUUID(); else owner.current.status = "finished";
+      f.put("release-custody/ops/owner.json", owner);
+    }
+    if (change === "plan") f.put(`release-custody/ops/releases/${f.plan.releaseId}/plan.json`, {});
+    if (change === "result") f.put(`release-custody/ops/releases/${f.plan.releaseId}/result.json`, { result: "retained" });
+    await assert.rejects(executeOpsCoreUpdate("resume", f.envelope, f.dependencies));
+    assert.equal(f.log.includes("custody"), false); assert.equal(f.log.some(v => v.startsWith("upload:")), false);
+  });
+}
+test("resume health settlement refuses a still-running native execution", async () => {
+  const f = fixture(); retainResumeOwner(f);
+  await rejects(executeOpsCoreUpdate("resume", f.envelope, { ...f.dependencies,
+    healthFactory({ plan }) { return { async readRetainedStart() { return { input: { plan, index: 0 } }; },
+      async reconcileStart() { return { status: "Running" }; } }; },
+    async runUpdate(options) { return options.settleHealth({ phase: "baseline", plan: f.envelope.health.baseline, index: 0 }); },
+  }), "UPDATE_RESUME_HEALTH_UNSETTLED");
+  assert.equal(f.closed, 1);
+});
+
 test("pending retained result still invokes controller with live ownership and exact health phase bridge", async () => {
   const f = fixture(), factories = new Map(), probes = [], prepared = [];
   f.custody.mode = "reconcile"; f.custody.result = { complete: true, outcome: "UPDATED" };

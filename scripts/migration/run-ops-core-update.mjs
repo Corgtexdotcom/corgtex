@@ -123,7 +123,7 @@ export async function assertRetainedUpdateAuthority(envelope, container, signal)
 }
 
 export async function executeOpsCoreUpdate(action, input, dependencies = {}) {
-  need(["apply", "reconcile", "recover"].includes(action), "UPDATE_ACTION_INVALID");
+  need(["apply", "reconcile", "recover", "resume"].includes(action), "UPDATE_ACTION_INVALID");
   const envelope = validateUpdateEnvelope(input), p = envelope.plan;
   await (dependencies.identityCheck ?? assertUpdateAzureIdentity)(envelope.operator.azureIdentity);
   const container = (dependencies.containerFactory ?? client)(envelope.operator.custodyContainerUrl);
@@ -132,6 +132,18 @@ export async function executeOpsCoreUpdate(action, input, dependencies = {}) {
   // controller plan. A different probe job cannot bypass an uncertain start.
   const envelopeKey = `update-envelopes/${p.domain}/${p.releaseId}.json`;
   const existing = await readUpdateBlob(container, envelopeKey, undefined, true);
+  if (action === "resume") {
+    // Resume must never initialize a new owner/envelope. Native custody repeats
+    // these immutable checks while holding its lease before the controller runs.
+    need(existing !== null && same(existing, envelope), "UPDATE_RESUME_ENVELOPE_MISSING");
+    const binding = { schemaVersion: 1, domain: p.domain, targetBindingSha256: opsCoreAzureTargetBindingSha256(p.target) };
+    const root = `release-custody/${p.domain}`, owner = await readUpdateBlob(container, `${root}/owner.json`);
+    need(owner.domain === binding.domain && owner.targetBindingSha256 === binding.targetBindingSha256
+      && same(owner.current, { releaseId: p.releaseId, planSha256: hash(p), status: "unfinished", resultSha256: null }), "UPDATE_RESUME_OWNER_MISMATCH");
+    need(same(await readUpdateBlob(container, `${root}/releases/${p.releaseId}/plan.json`),
+      { ...binding, releaseId: p.releaseId, planSha256: hash(p), plan: p })
+      && await readUpdateBlob(container, `${root}/releases/${p.releaseId}/result.json`, undefined, true) === null, "UPDATE_RESUME_PLAN_MISMATCH");
+  }
   if (existing === null) {
     const text = JSON.stringify(envelope);
     await container.getBlockBlobClient(envelopeKey).upload(text, Buffer.byteLength(text), { conditions: { ifNoneMatch: "*" },
@@ -179,6 +191,14 @@ export async function executeOpsCoreUpdate(action, input, dependencies = {}) {
         need(Object.hasOwn(dispatchers, phase), "UPDATE_HEALTH_PHASE_INVALID");
         const h = envelope.health[phase];
         return dispatchers[phase].probeHealth({ role: "worker", ...h.worker, revisionName, invocationContext, signal });
+      },
+      settleHealth: async ({ phase, plan, index }) => {
+        need(["baseline", "incoming"].includes(phase) && same(plan, envelope.health[phase]), "UPDATE_RESUME_HEALTH_PLAN_MISMATCH");
+        const retained = await dispatchers[phase].readRetainedStart();
+        need(retained?.input.index === index && same(retained.input.plan, plan), "UPDATE_RESUME_HEALTH_SLOT_MISMATCH");
+        const found = await dispatchers[phase].reconcileStart();
+        need(["Succeeded", "Failed", "Stopped"].includes(found.status), "UPDATE_RESUME_HEALTH_UNSETTLED");
+        return { complete: true, phase, planSha256: hash(plan), index };
       } });
     return { status: result.outcome, freshAcceptance: true, domain: p.domain, releaseId: p.releaseId, resultSha256: hash(result) };
   } finally { await custody.close(); }

@@ -157,9 +157,11 @@ function fixture(options = {}) {
     get finished() { return finished; }, reopen() { assert.equal(finished, null); mode = "reconcile"; },
     effects: () => log.filter(item => /^(?:mode:|drain:|patch:)/.test(item)),
     async run(action = "apply") { return runOpsCoreUpdate({ plan, custody, operationStore: store, action, transport,
+      ...(options.now ? { now: options.now } : {}), ...(options.wait ? { wait: options.wait } : {}),
+      settleHealth: options.settleHealth,
       ...(options.demand ? { demandArmTransport: async input => {
         const id = `${prefix}Microsoft.App/jobs/${plan.workerDemand.schedulerJobName}`;
-        if (input.resourceId === apps.worker.id) return { status: 200, body: structuredClone(apps.worker) };
+        if (input.resourceId === apps.worker.id) { options.workerArmRead?.(input, f); return { status: 200, body: structuredClone(apps.worker) }; }
         if (input.method === "PUT") { schedulerJob = structuredClone(input.body); log.push(`scheduler:${schedulerJob.properties.configuration.triggerType}:${schedulerJob.properties.template.containers[0].image.slice(-1)}`); return { status: 202 }; }
         if (input.resourceId === `${id}/start`) {
           assert.equal(apps.worker.properties.runningStatus, "Running");
@@ -218,6 +220,149 @@ function fixture(options = {}) {
   };
   return f;
 }
+test("stopped worker PATCH waits for exact asynchronous provisioning without another write", async () => {
+  let ticks = 0, reads = 0, f;
+  f = fixture({ demand: true, now: () => ticks,
+    afterPatch(input, state) { if (input.role === "worker") state.apps.worker.properties.provisioningState = "InProgress"; },
+    workerArmRead(input, state) { if (state.apps.worker.properties.provisioningState === "InProgress") reads++; },
+    async wait(ms, signal) { signal.throwIfAborted(); ticks += ms;
+      assert.equal(f.log.includes("running:Running"), false);
+      if (ticks === 3000) f.apps.worker.properties.provisioningState = "Succeeded";
+    } });
+  assert.equal((await f.run()).outcome, "UPDATED");
+  assert.equal(reads, 3); assert.equal(ticks, 3000);
+  assert.equal(f.log.filter(v => v === "patch:incoming:worker").length, 1);
+});
+
+for (const failure of ["Failed", "template", "configuration", "Running", "cancel", "timeout", "owner"]) {
+  test(`stopped worker settlement blocks ${failure} without starting worker or replaying PATCH`, async () => {
+    let clock = 0, waiting = false, f;
+    f = fixture({ demand: true, now: () => clock,
+      authority() { if (waiting && failure === "owner") throw Error("owner lost"); },
+      afterPatch(input, state) { if (input.role === "worker") state.apps.worker.properties.provisioningState = "InProgress"; },
+      async wait(ms) { waiting = true; clock += failure === "timeout" ? 180_000 : ms;
+        const p = f.apps.worker.properties;
+        if (failure === "Failed") p.provisioningState = "Failed";
+        if (failure === "template") p.template.containers[0].image = images("c").worker;
+        if (failure === "configuration") p.configuration.ingress.targetPort++;
+        if (failure === "Running") p.runningStatus = "Running";
+        if (failure === "cancel") f.controller.abort();
+      } });
+    await assert.rejects(f.run());
+    assert.equal(f.log.filter(v => v === "patch:incoming:worker").length, 1);
+    assert.equal(f.log.includes("running:Running"), false);
+    assert.equal(f.log.includes("scheduler:proof"), false);
+  });
+}
+
+test("resume settles the retained worker PATCH and finishes the same release without replay or baseline health", async () => {
+  let lose = true;
+  const f = fixture({ demand: true, afterPatch(input) { if (input.role === "worker" && lose) { lose = false; throw Error("lost worker acknowledgement"); } } });
+  await assert.rejects(f.run()); f.reopen(); const before = f.log.length;
+  assert.equal((await f.run("resume")).outcome, "UPDATED");
+  assert.equal(f.log.filter(v => v === "patch:incoming:worker").length, 1);
+  assert.equal(f.log.filter(v => v === "patch:incoming:web").length, 1);
+  assert.equal(f.log.slice(before).includes("health:worker:baseline-worker"), false);
+  assert.equal(f.log.filter(v => v === "scheduler:proof").length, 1);
+});
+
+test("resume settles a lost worker-start acknowledgement before continuing without a second start", async () => {
+  let lose = true;
+  const f = fixture({ demand: true, afterRunning(input) { if (input.runningStatus === "Running" && lose) { lose = false; throw Error("lost start acknowledgement"); } } });
+  await assert.rejects(f.run()); f.reopen();
+  assert.equal((await f.run("resume")).outcome, "UPDATED");
+  assert.equal(f.log.filter(v => v === "running:Running").length, 1);
+  assert.equal(f.log.filter(v => v === "patch:incoming:worker").length, 1);
+});
+
+for (const blocker of ["no-plan", "recovery", "unchanged", "result"]) {
+  test(`resume rejects retained ${blocker} authority without additional runtime effects`, async () => {
+    let lose = true;
+    const f = fixture({ demand: true, afterPatch(input) { if (input.role === "worker" && lose) { lose = false; throw Error("lost ack"); } } });
+    await assert.rejects(f.run()); f.reopen();
+    const snapshotKey = [...f.records.keys()].find(k => k.endsWith("phase-plan.json"));
+    const snapshot = JSON.parse(f.records.get(snapshotKey));
+    if (blocker === "no-plan") f.records.delete(snapshotKey);
+    if (blocker === "result") f.custody.result = { complete: true };
+    if (["recovery", "unchanged"].includes(blocker)) {
+      const type = `UPDATE_${blocker.toUpperCase()}_DECISION`;
+      f.records.set(snapshotKey.replace("phase-plan.json", `${hash({ kind: type })}/descriptor.json`), JSON.stringify({ type, binding: snapshot.binding }));
+    }
+    const before = f.log.filter(v => /^(mode:|drain:|patch:|running:|scheduler:)/.test(v));
+    await assert.rejects(f.run("resume"));
+    assert.deepEqual(f.log.filter(v => /^(mode:|drain:|patch:|running:|scheduler:)/.test(v)), before);
+  });
+}
+
+for (const boundary of ["start", "single", "install", "proof", "enable", "finish"]) {
+  test(`resume after ${boundary} interruption retains completed effects and performs no duplicate writes`, async () => {
+    let interrupted = false;
+    const kind = { start: "UPDATE_WORKER_RUNNING", single: "UPDATE_MODE", install: "UPDATE_SCHEDULER_INSTALL", proof: "WORKER_SCHEDULER_PROOF", enable: "UPDATE_SCHEDULER_ENABLE" }[boundary];
+    const f = fixture({ demand: true,
+      afterCreate(key, value, state) {
+        if (interrupted || !kind || !key.endsWith("receipt.json")
+          || JSON.parse(state.records.get(key.replace("receipt.json", "intent.json"))).kind !== kind) return;
+        if (boundary === "start" && state.apps.worker.properties.runningStatus !== "Running") return;
+        if (boundary === "single" && !state.log.includes("running:Running")) return;
+        interrupted = true; throw Error("lost receipt acknowledgement");
+      }, beforeFinish() { if (boundary === "finish" && !interrupted) { interrupted = true; throw Error("lost finish"); } } });
+    await assert.rejects(f.run()); f.reopen();
+    assert.equal((await f.run("resume")).outcome, "UPDATED");
+    for (const effect of ["patch:incoming:web", "patch:incoming:worker", "running:Running", "scheduler:proof", "scheduler:Schedule:b"]) {
+      assert.equal(f.log.filter(v => v === effect).length, 1, effect);
+    }
+  });
+}
+
+for (const drift of ["foreign", "unknown-record", "missing-worker", "unsettled-worker", "wrong-worker", "owner"]) {
+  test(`resume refuses ${drift} before any new runtime effect`, async () => {
+    let lose = true;
+    const f = fixture({ demand: true, afterPatch(input) { if (input.role === "worker" && lose) { lose = false; throw Error("lost ack"); } } });
+    await assert.rejects(f.run()); f.reopen();
+    if (drift === "foreign") f.revisionState.worker.set("fixture-worker--foreign", { revisionName: "fixture-worker--foreign", active: true, replicaCount: 1 });
+    if (drift === "unknown-record") f.records.set([...f.records.keys()][0].replace(/\/[^/]+$/, "/foreign.json"), "{}");
+    if (drift === "missing-worker") for (const [key, value] of f.records) {
+      const r = JSON.parse(value);
+      if (r.kind === "UPDATE_TEMPLATE" && !f.records.has(key.replace("intent.json", "receipt.json"))) f.records.delete(key);
+    }
+    if (drift === "unsettled-worker") f.apps.worker.properties.provisioningState = "Failed";
+    if (drift === "wrong-worker") f.apps.worker.properties.template.containers[0].image = images("c").worker;
+    if (drift === "owner") f.controller.abort();
+    const effects = f.log.filter(v => /^(mode:|drain:|patch:|running:|scheduler:)/.test(v));
+    await assert.rejects(f.run("resume"));
+    assert.deepEqual(f.log.filter(v => /^(mode:|drain:|patch:|running:|scheduler:)/.test(v)), effects);
+  });
+}
+
+test("resume does not initialize a new release or continue an earlier interruption", async () => {
+  const fresh = fixture({ demand: true }); await rejected(fresh.run("resume"), "UPDATE_RESUME_STAGE_UNSUPPORTED");
+  const early = fixture({ demand: true, afterPatch(input) { if (input.role === "web") throw Error("lost web ack"); } });
+  await assert.rejects(early.run()); early.reopen(); const effects = early.effects();
+  await rejected(early.run("resume"), "UPDATE_RESUME_STAGE_UNSUPPORTED"); assert.deepEqual(early.effects(), effects);
+});
+
+for (const scenario of ["terminal", "pending", "missing-slot", "foreign-context", "unknown-receipt"]) {
+  test(`resume admits only fully bound terminal baseline observer history: ${scenario}`, async () => {
+    let lose = true, settleCalls = 0;
+    const f = fixture({ demand: true,
+      async workerHealth(input, result, state) { if (input.phase === "baseline" && !settleCalls && ![...state.records.keys()].some(k => k.endsWith("descriptor.json"))) await retainBaselineObserver(state); },
+      afterPatch(input) { if (input.role === "worker" && lose) { lose = false; throw Error("lost worker ack"); } },
+      async settleHealth({ phase, plan, index }) { settleCalls++;
+        return { complete: scenario !== "pending", phase, planSha256: hash(plan), index }; },
+    });
+    await assert.rejects(f.run()); f.reopen();
+    const descriptors = [...f.records.keys()].filter(k => k.endsWith("descriptor.json"));
+    if (scenario === "missing-slot") f.records.delete(descriptors[0]);
+    if (scenario === "foreign-context") {
+      for (const key of descriptors) { const r = JSON.parse(f.records.get(key)); r.input.context.phaseOperationId = randomUUID(); f.records.set(key, JSON.stringify(r)); }
+    }
+    if (scenario === "unknown-receipt") f.records.set(descriptors[0].replace(/\/[a-f0-9]{64}\/descriptor.json$/, `/${"e".repeat(64)}/receipt.json`), "{}");
+    const before = f.log.filter(v => /^(mode:|drain:|patch:|running:|scheduler:)/.test(v));
+    if (scenario === "terminal") { assert.equal((await f.run("resume")).outcome, "UPDATED"); assert.equal(settleCalls, 1); }
+    else { await assert.rejects(f.run("resume")); assert.deepEqual(f.log.filter(v => /^(mode:|drain:|patch:|running:|scheduler:)/.test(v)), before); }
+  });
+}
+
 test("Ops updater forward and recovery use Azure-valid revisions for its production-size worker name", async () => {
   const workerName = "ca-corgtex-opscore-ops-worker";
   const f = fixture({ demand: true, workerName });

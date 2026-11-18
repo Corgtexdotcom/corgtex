@@ -611,6 +611,7 @@ historical source-fence evidence hash.
 ```sh
 node scripts/migration/run-ops-core-update.mjs apply /private/update-envelope.json
 node scripts/migration/run-ops-core-update.mjs reconcile /private/update-envelope.json
+node scripts/migration/run-ops-core-update.mjs resume /private/update-envelope.json
 node scripts/migration/run-ops-core-update.mjs recover /private/update-envelope.json
 ```
 
@@ -639,6 +640,19 @@ reads. An explicit recovery uses distinct recorded effects and the approved Azur
 recovery images. It preserves the current database; it does not reactivate the old
 Railway source. Unknown forward effects must settle before recovery proceeds.
 Never clear an unfinished owner or use a new release identifier to bypass it.
+For demand-mode updates interrupted after both incoming template intents exist,
+`resume` continues the **same envelope and unfinished release**. It requires the
+completed incoming web, scheduler-disable, stop and drain receipts, the retained
+phase plan, and no recovery/unchanged decision or result. Fresh paired inventories
+and exact template/configuration checks settle every inherited provider intent
+before another effect can start. A pending worker PATCH is read back, never
+repeated; acknowledged provisioning is observed for at most three minutes while
+ownership, cancellation, stopped state and exact template binding remain valid.
+The original baseline health is not rerun after its web has been drained. Only
+missing subsequent intents may start the incoming worker, prove and enable its
+scheduler, and earn fresh final health. Earlier interruptions still use
+`reconcile` or approved `recover`. An absent or ambiguous inherited write blocks
+resume; it is never converted into permission to replay a provider request.
 If ownership was interrupted before baseline retention, reconciliation first
 proves the operation prefix is empty. A preflight failure after retention can
 also finish unchanged when the complete prefix contains only the baseline and
