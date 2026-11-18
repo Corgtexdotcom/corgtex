@@ -3,6 +3,7 @@ import { selfserveBaselineBinding } from "./managed-azure-selfserve-baseline.mjs
 import { isSelfserveReleaseHost, SELFSERVE_RELEASE_PROFILE } from "./managed-azure-selfserve-profile.mjs";
 import { createManagedAzureExclusiveActivation } from "./managed-azure-exclusive-activation.mjs";
 import { spawn as nodeSpawn } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   ManagedAzureContainerAppError,
   assertManagedAzureTemplateDelta,
@@ -497,10 +498,10 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
           keep[role] = revisionName;
           if (state.kind !== "READY") allReady = false;
         }
-        // A completed pair can have crashed during Single restoration. Resume
-        // that exact restoration without draining or creating another revision.
-        if (allReady) await exclusive.finish(keep);
-        else await exclusive.enter(keep);
+        // A completed pair needs no writer interval. Keep the exact intent
+        // readbacks above, then restore Single once after both role settlements.
+        // Restoring here as well repeats full historical replica censuses.
+        if (!allReady) await exclusive.enter(keep);
       }
       for (const role of ["web", "worker"]) {
         try {
@@ -788,9 +789,59 @@ async function callControlPlane(name, args, env, fetchImpl = fetch) {
   try { return JSON.parse(payload); } catch { fail("MANAGED_RELEASE_RECOVERY_CONTROL_PLANE_INVALID"); }
 }
 
-function runtimeDependencies(env = process.env) {
+// Repay actual ARM read pressure before the next method, never after a fresh
+// readback or inside the transport's request/census deadlines. Native methods
+// retain their complete inventory, retry and mutation semantics. This bounds
+// amortized request pressure; it does not claim a provider quota or remove the
+// bounded bursts inside a native method (for example mode restoration).
+export function createManagedAzureRecoveryArmDependencies({ fetchImpl = fetch, clock = Date.now,
+  sleep = (ms, signal) => delay(ms, undefined, { signal }), onProgress, ...transport } = {}) {
+  let nextMethodAt = 0, serial = Promise.resolve();
+  const countedFetch = (url, init) => {
+    if (init?.method === "GET" && new URL(url).origin === "https://management.azure.com") {
+      nextMethodAt = Math.max(nextMethodAt, clock()) + 1_250;
+    }
+    return fetchImpl(url, init);
+  };
+  const apps = createManagedAzureContainerAppTransport({ ...transport, fetchImpl: countedFetch, clock, sleep });
+  return Object.freeze(Object.fromEntries(Object.entries(apps).map(([name, method]) => [name, async (input) => {
+    const previous = serial;
+    let release;
+    serial = new Promise(resolve => { release = resolve; });
+    const progress = async () => {
+      if (input?.signal?.aborted) fail("MANAGED_RELEASE_RECOVERY_ARM_ABORTED");
+      await onProgress?.();
+      if (input?.signal?.aborted) fail("MANAGED_RELEASE_RECOVERY_ARM_ABORTED");
+    };
+    try {
+      await previous;
+      await progress();
+      while (nextMethodAt > clock()) {
+        await sleep(Math.min(15_000, nextMethodAt - clock()), input?.signal);
+        await progress();
+      }
+      // Owner verification may take time; delegate only after its successful
+      // completion. Preserve debt even if the native method subsequently fails.
+      return await method(input);
+    } finally { release(); }
+  }])));
+}
+
+export function runtimeDependencies(env = process.env) {
   const spawn = createSpawn();
-  const apps = createManagedAzureContainerAppTransport({
+  let recoveryHandle, recoveryReason;
+  const lease = async (operation, args) => {
+    const result = await callControlPlane("managed_release_lease", { operation, ...args }, env);
+    if (operation === "claim_recovery") {
+      recoveryHandle = { deploymentId: args.deploymentId, leaseId: result.leaseId, capability: result.capability, fence: result.fence };
+      recoveryReason = args.reason;
+    }
+    return result;
+  };
+  const apps = createManagedAzureRecoveryArmDependencies({
+    onProgress: async () => {
+      if (recoveryHandle) await lease("heartbeat_recovery", leaseArgs(recoveryHandle, { reason: recoveryReason }));
+    },
     getAccessToken: async () => commandText(spawn, "az", ["account", "get-access-token", "--resource", "https://management.azure.com", "--query", "accessToken", "--output", "tsv"], 8_192),
   });
   const healthProbe = async ({ origin, release }) => {
@@ -804,7 +855,7 @@ function runtimeDependencies(env = process.env) {
   };
   return {
     owner: `github:${env.GITHUB_RUN_ID || "manual"}:${env.GITHUB_RUN_ATTEMPT || "1"}:recovery`,
-    lease: (operation, args) => callControlPlane("managed_release_lease", { operation, ...args }, env),
+    lease,
     readApp: apps.readApp,
     readExclusiveState: apps.readExclusiveState,
     setRevisionMode: apps.setRevisionMode,
