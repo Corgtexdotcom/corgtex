@@ -173,7 +173,8 @@ describe("briefing fixture production smoke helpers", () => {
   it("creates new fixture rows and native lineage atomically without product events", async () => {
     const actionCreate = vi.fn().mockResolvedValue({ id: "action-1" });
     const proposalCreate = vi.fn().mockResolvedValue({ id: "proposal-1" });
-    const articleCreate = vi.fn().mockResolvedValue({ id: "article-1", slug: "briefing-fixture-run" });
+    const articleCreate = vi.fn().mockResolvedValueOnce({ id: "article-1", slug: "briefing-fixture-run" })
+      .mockResolvedValueOnce({ id: "anchor-1", title: "Private inputs", slug: "briefing-fixture-inputs-run" });
     const recordArtifactInputLineage = vi.fn();
     const tx = { action: { create: actionCreate }, proposal: { create: proposalCreate }, brainArticle: { create: articleCreate } };
     const smoke = new BriefingFixtureSmoke({
@@ -207,8 +208,16 @@ describe("briefing fixture production smoke helpers", () => {
     expect(smoke.sessionFetch).not.toHaveBeenCalled();
     expect(recordArtifactInputLineage.mock.calls.map(([p]) => ({ tx: p.tx, actor: p.actor,
       workspaceId: p.workspaceId, kind: p.artifact.kind, id: p.artifact.id, origin: p.origin, inputs: p.inputs })))
-      .toEqual(["Action", "Proposal", "BrainArticle"].map((kind, i) => ({ tx, actor: smoke.actor,
-        workspaceId: "ws-1", kind, id: ["action-1", "proposal-1", "article-1"][i], origin: "HUMAN_ORIGINAL", inputs: [] })));
+      .toEqual([{ tx, actor: smoke.actor, workspaceId: "ws-1", kind: "BrainArticle", id: "anchor-1",
+        origin: "HUMAN_ORIGINAL", inputs: [] }, ...["Action", "Proposal", "BrainArticle"].map((kind, i) => ({ tx, actor: smoke.actor,
+        workspaceId: "ws-1", kind, id: ["action-1", "proposal-1", "article-1"][i], origin: "DERIVED",
+        inputs: [{ kind: "BrainArticle", id: "anchor-1" }] }))]);
+    const anchor = articleCreate.mock.calls[1][0].data;
+    expect(anchor).toMatchObject({ isPrivate: true, ownerMemberId: "member-1" });
+    expect(JSON.parse(anchor.bodyMd)).toEqual({ action: { id: "action-1" }, proposal: { id: "proposal-1" },
+      article: { id: "article-1", slug: "briefing-fixture-run" } });
+    expect(smoke.cleanupRegistry.entries().map(x => x.id)).toEqual([
+      "archive:BrainArticle:anchor-1", "archive:Action:action-1", "archive:Proposal:proposal-1", "archive:BrainArticle:article-1"]);
     expect(actionCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({
         workspaceId: "ws-1",
@@ -223,7 +232,7 @@ describe("briefing fixture production smoke helpers", () => {
       data: expect.objectContaining({
         workspaceId: "ws-1",
         authorUserId: "user-1",
-        ownerMemberId: "member-1",
+        ownerMemberId: null,
         status: "OPEN",
         priority: 1_000_000,
         updatedAt: new Date("2026-03-16T12:00:00.000Z"),
@@ -268,7 +277,43 @@ describe("briefing fixture native provenance", () => {
     const smoke = smokeFor(prisma, { recordArtifactInputLineage: vi.fn().mockRejectedValue(new Error("SOURCE_CHANGED")) });
     await expect(smoke.createFixtureRecords()).rejects.toThrow("SOURCE_CHANGED");
     expect(smoke.cleanupRegistry.entries()).toEqual([]);
-    expect(smoke.created).toEqual({ action: null, proposal: null, article: null, briefing: null });
+    expect(smoke.created).toEqual({ inputAnchor: null, action: null, proposal: null, article: null, briefing: null });
+  });
+  it("binds a prior briefing proof to the exact saved body and rejects a concurrent body change", async () => {
+    const previous = { id: "briefing-1", title: "Saved earlier body", modelUsed: "normal-producer" };
+    const capture = vi.fn(async (_actor, _workspace, input) => {
+      expect(input.fingerprint).toBe("saved-body-fingerprint");
+      throw new Error("SOURCE_CHANGED");
+    });
+    const tx = { workspaceBriefing: { findUnique: vi.fn().mockResolvedValue(previous) },
+      artifactInputLineage: { findFirst: vi.fn().mockResolvedValue({ origin: "DERIVED" }) } };
+    const fingerprint = vi.fn().mockReturnValue("saved-body-fingerprint");
+    const smoke = smokeFor({ $transaction: (run) => run(tx) }, {
+      captureArtifactInputSnapshotProof: capture, lineageContentFingerprint: fingerprint,
+    });
+    await expect(smoke.snapshotExistingBriefing()).rejects.toThrow("SOURCE_CHANGED");
+    expect(fingerprint).toHaveBeenCalledExactlyOnceWith("WorkspaceBriefing", previous);
+    expect(capture).toHaveBeenCalledExactlyOnceWith(actor, "ws-1", {
+      kind: "WorkspaceBriefing", id: "briefing-1", fingerprint: "saved-body-fingerprint",
+    }, tx);
+    expect(smoke.cleanupRegistry.entries()).toEqual([]);
+  });
+  it.each(["row", "manifest", "new row"])("rejects a producer %s change atomically before fixture replacement", async (change) => {
+    const previous = change === "new row" ? null : { id: "old", title: "Saved body" };
+    const manifest = previous ? { id: "old-head", revision: 1 } : null;
+    const tx = { $queryRaw: vi.fn(), workspaceBriefing: {
+      findUnique: vi.fn().mockResolvedValue(change === "manifest" ? previous : { id: "old", title: "New producer" }),
+      update: vi.fn(), create: vi.fn(),
+    }, artifactInputLineage: { findFirst: vi.fn().mockResolvedValue(change === "manifest" ? { ...manifest, revision: 2 } : manifest) } };
+    const record = vi.fn(); const prisma = { $transaction: vi.fn(run => run(tx)) };
+    const smoke = smokeFor(prisma, { renderWorkspaceBriefingMarkdown: () => "Body", recordArtifactInputLineage: record });
+    smoke.previousBriefing = previous; smoke.previousBriefingManifest = manifest;
+    await expect(smoke.publishFixtureBriefing({ workspaceId: "ws-1", period: "DAILY", dateKey: "2026-11-18",
+      briefing: { sourceRefs: [], items: [], sourceCounts: {}, generatedAt: "2026-11-18T12:00:00Z" }, lineageRoots: [] }))
+      .rejects.toThrow("no fixture replacement was written");
+    expect(tx.workspaceBriefing.update).not.toHaveBeenCalled(); expect(tx.workspaceBriefing.create).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled(); expect(smoke.cleanupRegistry.entries()).toEqual([]);
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "Serializable" });
   });
   function restoreFixture({ proof = [{ kind: "ArtifactInputSnapshot", id: "original-proof" }], changedHead = false,
     changedRow = false, invalidProof = false } = {}) {
@@ -326,14 +371,15 @@ describe("briefing fixture native provenance", () => {
           { sourceType: "PROPOSAL", sourceId: data.proposal.id, lineageRoots: [{ kind: "Proposal", id: data.proposal.id }] },
           { sourceType: "BRAIN_ARTICLE", sourceId: data.article.id, lineageRoots: [{ kind: "BrainArticle", id: data.article.id }] },
         ]), buildWorkspaceBriefingFromCandidates: () => ({}), captureArtifactInputProof: vi.fn().mockResolvedValue([{ kind: "Workspace", id: "ws-1" }]),
-        mergeArtifactInputProofs: (...roots) => roots.flat(), upsertWorkspaceBriefing: vi.fn().mockResolvedValue(stored),
+        mergeArtifactInputProofs: (...roots) => roots.flat(),
         normalizeWorkspaceBriefingPayload: (value) => value, lineageContentFingerprint: () => "expected-content" };
       const smoke = smokeFor({ artifactInputLineage: tx.artifactInputLineage, $transaction: (run) => run(tx) }, domain);
       smoke.fixture = data;
+      smoke.publishFixtureBriefing = vi.fn().mockResolvedValue(stored);
       await expect(smoke.generateBriefing()).rejects.toThrow(failure === "read failure" ? "DATABASE_READ_FAILED" : "input proof changed");
       expect(smoke.created.briefing.id).toBe(stored.id);
       expect(smoke.cleanupRegistry.entries()).toHaveLength(1);
-      expect(domain.upsertWorkspaceBriefing).toHaveBeenCalledWith(expect.objectContaining({ actor,
+      expect(smoke.publishFixtureBriefing).toHaveBeenCalledWith(expect.objectContaining({ actor,
         lineageRoots: [{ kind: "Workspace", id: "ws-1" }, { kind: "Action", id: data.action.id },
           { kind: "Proposal", id: data.proposal.id }, { kind: "BrainArticle", id: data.article.id }] }));
       const result = await smoke.cleanupRegistry.runAll();

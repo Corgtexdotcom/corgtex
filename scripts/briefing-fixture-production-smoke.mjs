@@ -170,6 +170,7 @@ function snapshotWorkspaceBriefing(record) {
   if (!record) return null;
   return {
     id: record.id,
+    workspaceId: record.workspaceId,
     workflowJobId: record.workflowJobId,
     period: record.period,
     dateKey: record.dateKey,
@@ -291,6 +292,7 @@ export class BriefingFixtureSmoke {
     this.workspace = null;
     this.results = [];
     this.created = {
+      inputAnchor: null,
       action: null,
       proposal: null,
       article: null,
@@ -426,7 +428,7 @@ export class BriefingFixtureSmoke {
         data: {
           workspaceId,
           authorUserId: user.id,
-          ownerMemberId: member.id,
+          ownerMemberId: null,
           title: proposalTitle,
           summary: "Temporary stale proposal that should remain visible as continuing context.",
           bodyMd: "Temporary briefing validation proposal. It is intentionally stale but strategically relevant.",
@@ -457,13 +459,28 @@ export class BriefingFixtureSmoke {
         },
       });
 
+      // These literal run-owned inputs are private to the authenticated producer.
+      // Native ancestry keeps scheduled publishers from treating the public fixture
+      // projections as shared inputs. No ingestion or publishing events are emitted.
+      const inputAnchor = await tx.brainArticle.create({ data: {
+        workspaceId, ownerMemberId: member.id, title: `${this.validationTag} briefing fixture inputs`,
+        slug: `briefing-fixture-inputs-${slugSafeRunId}`, type: "RUNBOOK", authority: "REFERENCE",
+        bodyMd: JSON.stringify({ action, proposal, article }), frontmatterJson: {},
+        isPrivate: true, sourceIds: [],
+      } });
+      await recordArtifactInputLineage({ tx, actor: this.actor, workspaceId,
+        artifact: { kind: "BrainArticle", id: inputAnchor.id }, content: inputAnchor,
+        origin: "HUMAN_ORIGINAL", inputs: [] });
       for (const [kind, record] of [["Action", action], ["Proposal", proposal], ["BrainArticle", article]]) {
         await recordArtifactInputLineage({ tx, actor: this.actor, workspaceId,
-          artifact: { kind, id: record.id }, content: record, origin: "HUMAN_ORIGINAL", inputs: [] });
+          artifact: { kind, id: record.id }, content: record, origin: "DERIVED",
+          inputs: [{ kind: "BrainArticle", id: inputAnchor.id }] });
       }
-      return { action, proposal, article };
+      return { inputAnchor, action, proposal, article };
     });
     for (const [key, type, title, endpoint] of [
+      // Cleanup runs in reverse: restore the prior briefing and remove outputs first.
+      ["inputAnchor", "BrainArticle", records.inputAnchor.title, `brain/articles/${records.inputAnchor.slug}`],
       ["action", "Action", actionTitle, `actions/${records.action.id}`],
       ["proposal", "Proposal", proposalTitle, `proposals/${records.proposal.id}`],
       ["article", "BrainArticle", articleTitle, `brain/articles/${records.article.slug}`],
@@ -485,7 +502,8 @@ export class BriefingFixtureSmoke {
       proposalId: this.created.proposal.id,
       articleId: this.created.article.id,
       actorUserId: user.id,
-      creationMode: "atomic-fixture-native-lineage-no-product-events",
+      creationMode: "atomic-private-input-derived-fixtures-no-product-events",
+      inputAnchorId: this.created.inputAnchor.id,
       fixturePriority: BRIEFING_FIXTURE_TOP_PRIORITY,
       freshAt: freshAt.toISOString(),
       staleAt: staleAt.toISOString(),
@@ -494,7 +512,7 @@ export class BriefingFixtureSmoke {
   }
 
   async snapshotExistingBriefing() {
-    const { captureArtifactInputSnapshotProof } = await this.loadDomain();
+    const { captureArtifactInputSnapshotProof, lineageContentFingerprint } = await this.loadDomain();
     await this.prisma.$transaction(async (tx) => {
       const previous = await tx.workspaceBriefing.findUnique({ where: {
         workspaceId_period_dateKey: { workspaceId: this.workspace.id, period: "DAILY", dateKey: this.dateKey },
@@ -509,7 +527,7 @@ export class BriefingFixtureSmoke {
         this.previousBriefingManifest = manifest;
         if (manifest && manifest.origin !== "UNKNOWN") {
           this.previousBriefingProof = await captureArtifactInputSnapshotProof(this.actor, this.workspace.id,
-            { kind: "WorkspaceBriefing", id: previous.id }, tx);
+            { kind: "WorkspaceBriefing", id: previous.id, fingerprint: lineageContentFingerprint("WorkspaceBriefing", previous) }, tx);
         }
       }
     });
@@ -588,12 +606,46 @@ export class BriefingFixtureSmoke {
     return cleanupActionId;
   }
 
+  async publishFixtureBriefing(params) {
+    const { renderWorkspaceBriefingMarkdown, recordArtifactInputLineage } = await this.loadDomain();
+    const json = (value) => JSON.parse(JSON.stringify(value));
+    // Match the native producer's persisted representation, while this temporary
+    // replacement also requires the exact prior row/head captured for restoration.
+    const refs = params.briefing.sourceRefs.length ? params.briefing.sourceRefs
+      : [...new Map(params.briefing.items.flatMap(item => item.sourceRefs)
+        .map(ref => [`${ref.type}:${ref.id}`, ref])).values()];
+    const data = { workflowJobId: null, runKey: params.runKey, title: params.title,
+      status: "GENERATED", modelUsed: params.modelUsed, introMd: params.briefing.introMd,
+      bodyMd: renderWorkspaceBriefingMarkdown(params.briefing), briefingJson: json(params.briefing),
+      sourceRefsJson: json(refs), sourceCounts: json(params.briefing.sourceCounts),
+      generatedAt: new Date(params.briefing.generatedAt) };
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "WorkspaceBriefing" WHERE "workspaceId" = ${params.workspaceId} AND period = ${params.period}::"WorkspaceBriefingPeriod" AND "dateKey" = ${params.dateKey} FOR UPDATE`;
+      const current = await tx.workspaceBriefing.findUnique({ where: { workspaceId_period_dateKey: {
+        workspaceId: params.workspaceId, period: params.period, dateKey: params.dateKey,
+      } } });
+      const manifest = current ? await tx.artifactInputLineage.findFirst({ where: {
+        workspaceId: params.workspaceId, artifactType: "WorkspaceBriefing", artifactId: current.id,
+      }, orderBy: { revision: "desc" } }) : null;
+      assert(isDeepStrictEqual(current, this.previousBriefing)
+        && isDeepStrictEqual(manifest, this.previousBriefingManifest),
+      "Workspace briefing changed since the restoration snapshot; no fixture replacement was written.");
+      const stored = current
+        ? await tx.workspaceBriefing.update({ where: { id: current.id }, data })
+        : await tx.workspaceBriefing.create({ data: { workspaceId: params.workspaceId,
+          period: params.period, dateKey: params.dateKey, ...data } });
+      await recordArtifactInputLineage({ tx, actor: this.actor, workspaceId: params.workspaceId,
+        artifact: { kind: "WorkspaceBriefing", id: stored.id }, content: stored, origin: "DERIVED",
+        inputs: [], inheritedRoots: params.lineageRoots });
+      return stored;
+    }, { isolationLevel: "Serializable" });
+  }
+
   async generateBriefing() {
     const {
       buildWorkspaceBriefingFromCandidates,
       collectWorkspaceBriefingCandidates,
       normalizeWorkspaceBriefingPayload,
-      upsertWorkspaceBriefing,
       workspaceBriefingContextSince, captureArtifactInputProof, mergeArtifactInputProofs, lineageContentFingerprint,
     } = await this.loadDomain();
     const period = "DAILY";
@@ -618,7 +670,7 @@ export class BriefingFixtureSmoke {
     });
     const workspaceRoots = await captureArtifactInputProof(this.actor, this.workspace.id,
       [{ kind: "Workspace", id: this.workspace.id }]);
-    const stored = await upsertWorkspaceBriefing({
+    const stored = await this.publishFixtureBriefing({
       actor: this.actor,
       lineageRoots: mergeArtifactInputProofs(workspaceRoots, ...fixtureCandidates.map((candidate) => candidate.lineageRoots ?? [])),
       workspaceId: this.workspace.id,
@@ -693,6 +745,7 @@ export class BriefingFixtureSmoke {
         { type: "dashboard", summary: "Authenticated workspace dashboard rendered the generated briefing title and fixture items." },
       ],
       createdRecordIds: [
+        this.created.inputAnchor?.id,
         this.created.action?.id,
         this.created.proposal?.id,
         this.created.article?.id,
@@ -711,6 +764,7 @@ export class BriefingFixtureSmoke {
       blocker: error instanceof Error ? error.message : String(error),
       evidence: this.results.map((item) => ({ type: "step", summary: `${item.name}: ${item.status}` })),
       createdRecordIds: [
+        this.created.inputAnchor?.id,
         this.created.action?.id,
         this.created.proposal?.id,
         this.created.article?.id,
