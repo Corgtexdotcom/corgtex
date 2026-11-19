@@ -6,7 +6,7 @@ import { getBrainExportWorkerPurpose, isBrainExportWorkerCurrent } from "./brain
 import { canReadInformationCategory, categoryGovernorIdentities, CATEGORY_BOUND_SOURCE_KINDS } from "./information-category-policy";
 import { financeFactValue, financeValueHash, isFinanceFactRevisionIntact } from "./finance-fact-value";
 import { getTranscriptSourceImportPurpose, getRecorderTranscriptWorkerPurpose, nativeTranscriptPrincipalUserId } from "./native-transcript-principal";
-import { collectWorkItemPermissionSnapshot, artifactPermissionEpochIdentities, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof, withSourceCommitPermissionReadPass, withExternalProviderPermissionReadPass, withArtifactPermissionBatchRead, type PermissionEpochProof } from "./source-permission-epochs";
+import { collectWorkItemPermissionSnapshot, artifactPermissionEpochIdentities, assertMcpOriginForPermissionCheck, capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, mergePermissionEpochProofs, parsePermissionEpochProof, withSourceCommitPermissionReadPass, withExternalProviderPermissionReadPass, withArtifactPermissionBatchRead, type PermissionEpochProof } from "./source-permission-epochs";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { assertArtifactInputWriteFence } from "./artifact-input-write-fence";
@@ -24,7 +24,7 @@ import { isMcpToolInputEncryptedPayload } from "./mcp-tool-input-cipher";
 import { getExternalProviderPrincipalUserId } from "./external-provider-principal";
 import { artifactPermissionParents, loadArtifactPermissionMetadata, withArtifactPermissionMetadataRead } from "./source-permission-parents";
 import { loadExternalMcpConnectionSetInput } from "./external-mcp-connection-set";
-import { assertMcpOriginActive, getMcpOrigin } from "../../shared/src/mcp-context";
+import { getMcpOrigin } from "../../shared/src/mcp-context";
 import { assertSourceCommitRowCovered, assertSourceCommitTransactionCompatible,
   assertSourceCommitSemanticRootCovered, registerSourceCommitPublishedOutput,
   hasActiveSourceCommitLockPlan, sourceCommitCanonical } from "./source-commit-lock-plan";
@@ -1021,7 +1021,7 @@ async function currentCredentialCanRead(db: LineageClient, actor: AppActor, work
     if (actor.kind !== "user" || origin.workspaceId !== workspaceId) return false;
     try {
       await assertSourceCommitMcpOriginCovered(db, workspaceId, origin);
-      await assertMcpOriginActive(db, origin, workspaceId);
+      await assertMcpOriginForPermissionCheck(db, origin, workspaceId);
     } catch { return false; }
     const token = await db.mcpOAuthAccessToken.findUnique({ where: { id: origin.id } });
     if (!token || token.userId !== actor.user.id || token.workspaceId !== workspaceId

@@ -131,9 +131,9 @@ export async function assertMcpOriginActive(db: Prisma.TransactionClient, origin
   return assertMcpOriginActiveUsing(db, origin, workspaceId, true);
 }
 
-/** A nonlocking, read–token–read observation for the Prisma query interceptor.
- * It is only a diagnostic around mutations; callers must fence writes in their
- * own transaction with assertMcpOriginActive. */
+/** A nonlocking, read–token–read observation for the query interceptor and
+ * read-only inventory. Final release and writes must still use
+ * assertMcpOriginActive in their own transaction. */
 export async function assertMcpOriginActiveAdvisory(db: McpOriginReadClient, origin: McpOrigin, workspaceId: string): Promise<void> {
   return assertMcpOriginActiveUsing(db, origin, workspaceId, false);
 }
