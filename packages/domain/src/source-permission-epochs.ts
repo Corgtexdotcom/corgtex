@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Prisma } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
+import { assertMcpOriginActive, assertMcpOriginActiveAdvisory, type McpOrigin } from "../../shared/src/mcp-context";
 import { isArtifactNativeCommitPhase } from "./artifact-native-commit-phase";
 import { invariant } from "./errors";
 import { assertSourceCommitEpochCaptureCovered, assertSourceCommitPermissionReadCovered,
@@ -28,6 +29,14 @@ export function isWorkItemPermissionSnapshot(db: EpochClient, workspaceId: strin
   invariant(scope.active && scope.db === db && scope.workspaceId === workspaceId,
     409,"SOURCE_CHANGED","Collection permission snapshot belongs to another client or expired scope.");
   return true;
+}
+
+/** Inventory observes the grant without locks. Final release and writers use the locked check. */
+export function assertMcpOriginForPermissionCheck(db: EpochClient, origin: McpOrigin, workspaceId: string): Promise<void> {
+  if (origin.kind === "oauth" && isWorkItemPermissionSnapshot(db, workspaceId)) {
+    return assertMcpOriginActiveAdvisory(db, origin, workspaceId);
+  }
+  return assertMcpOriginActive(db, origin, workspaceId);
 }
 
 /** Internal work-item inventory only. A missing key discards the entire attempt;

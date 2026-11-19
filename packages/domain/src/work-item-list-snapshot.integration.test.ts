@@ -2,7 +2,7 @@ import { AsyncResource } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { prisma, getPrismaClient, type AppActor } from "@corgtex/shared";
+import { prisma, getPrismaClient, mcpScopesHash, runWithMcpOrigin, sha256, type AppActor, type McpOrigin } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { collectWorkItemReadSnapshot, lineageContentFingerprint, captureArtifactInputProof, recordArtifactInputLineage } from "./source-lineage";
 import { beginOAuthKnowledgeSync } from "./oauth-provider-native";
@@ -12,6 +12,7 @@ import { prepareArtifactCommitPreflight, withArtifactCommitPreflight } from "./a
 import { listActions } from "./actions";
 import { listProposals } from "./proposals";
 import { listTensions } from "./tensions";
+import { listMcpConnectorInstances, resolveMcpOAuthAccessToken } from "./mcp-connector";
 
 type Kind = "Action" | "Proposal" | "Tension";
 beforeEach(truncateAllTables);
@@ -34,7 +35,7 @@ async function fixture(kind: Kind, count = 101) {
     for (let index = 0; index < count; index++) await seed(tx, `row-${String(index).padStart(3,"0")}`, `Item ${String(index).padStart(3,"0")}`);
     await seed(tx,"row-denied","Item 050 denied",false);
   }, {timeout: 30_000});
-  const list = (ranked = false, take = 105) => kind === "Action" ? listActions(actor,workspace.id,{sort:"alpha",take})
+  const list = async (ranked = false, take = 105) => kind === "Action" ? listActions(actor,workspace.id,{sort:"alpha",take})
     : kind === "Proposal" ? listProposals(actor,workspace.id,{sort:"alpha",take})
     : listTensions(actor,workspace.id,{...(ranked ? {} : {sort:"alpha" as const}),take});
   // Initialize any first-use epoch keys before installing the concurrent writer.
@@ -65,6 +66,46 @@ function afterCandidatePage(f: Awaited<ReturnType<typeof fixture>>, page: number
   })), options)) as typeof prisma.$transaction);
   return () => ({pages, mutations});
 }
+
+async function issueListOrigin(f: Awaited<ReturnType<typeof fixture>>): Promise<McpOrigin> {
+  const scopes = ["workspace:read", "actions:read", "proposals:read", "tensions:read"];
+  const client = await prisma.mcpOAuthClient.create({data: {
+    clientId: randomUUID(), name: "Synthetic inventory connector",
+    redirectUris: ["https://snapshot.test/callback"], scopes,
+  }});
+  const bearer = `mcp_at_${randomUUID()}`;
+  await prisma.mcpOAuthAccessToken.create({data: {
+    clientId: client.id, userId: f.actor.user.id, workspaceId: f.workspace.id,
+    instanceSlug: listMcpConnectorInstances()[0]!.slug, tokenHash: sha256(bearer), scopes,
+    expiresAt: new Date(Date.now() + 60_000), refreshExpiresAt: new Date(Date.now() + 3600_000),
+  }});
+  const session = await resolveMcpOAuthAccessToken(bearer);
+  if (!session) throw new Error("Could not resolve the synthetic inventory connector.");
+  return {
+    kind: "oauth", id: session.connectionId, workspaceId: session.workspaceId,
+    grantEpoch: session.grantEpoch, scopeHash: mcpScopesHash(session.scopes), requiredScopes: scopes,
+  };
+}
+
+it.each(["Action", "Proposal", "Tension"] as const)("lists and counts readable %s rows under an OAuth origin", async kind => {
+  const f = await fixture(kind, 1);
+  const origin = await issueListOrigin(f);
+  await expect(runWithMcpOrigin(origin, () => f.list(true))).resolves.toMatchObject({total: 1, items: [{id: "row-000"}]});
+  await expect(runWithMcpOrigin(origin, () => f.list(false, 0))).resolves.toMatchObject({total: 1, items: []});
+});
+
+it("rechecks an OAuth grant revoked and restored after empty inventory collection began", async () => {
+  const f = await fixture("Action", 0);
+  const origin = await issueListOrigin(f);
+  await expect(runWithMcpOrigin(origin, () => f.list())).resolves.toMatchObject({total: 0, items: []});
+  const observed = afterCandidatePage(f, 1, async () => {
+    const where = {id: origin.id};
+    await prisma.mcpOAuthAccessToken.update({where, data: {revokedAt: new Date()}});
+    await prisma.mcpOAuthAccessToken.update({where, data: {revokedAt: null}});
+  });
+  await expect(runWithMcpOrigin(origin, () => f.list())).rejects.toThrow("MCP_AUTHORIZATION_REVOKED");
+  expect(observed().mutations).toBe(1);
+});
 
 it.each(["Action","Proposal","Tension"] as const)("keeps %s page and exact total in one snapshot across an atomic ahead-and-behind insertion", async kind => {
   const f = await fixture(kind);
