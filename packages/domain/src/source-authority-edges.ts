@@ -433,7 +433,8 @@ export async function discoverSourceAuthorityEdges(context: AuthorityDiscoveryCo
         : recovery.targetKind === "Role" ? {id: recovery.targetId, circle: {workspaceId}}
           : recovery.targetKind === "GoalUpdate" || recovery.targetKind === "KeyResult"
             ? {id: recovery.targetId, goal: {workspaceId}} : {id: recovery.targetId, workspaceId};
-      const targets = await rows(recovery.targetKind, where, `recovery-target:${input.id}`, undefined, true);
+      const targetTable = recovery.targetKind === "MeetingTranscript" || recovery.targetKind === "MeetingAgenda" ? "Meeting" : recovery.targetKind;
+      const targets = await rows(targetTable, where, `recovery-target:${input.id}`, undefined, true);
       await rows("ArtifactInputLineage",{id:recovery.targetManifestId,workspaceId,artifactType:recovery.targetKind,artifactId:recovery.targetId,
         contentHash:recovery.targetFingerprint,origin:"DERIVED"},`recovery-original:${input.id}`,undefined,true);
       const targetEdges = await discoverSourceAuthorityEdges(context, {kind: recovery.targetKind, id: recovery.targetId}, targets[0]);
