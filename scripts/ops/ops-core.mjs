@@ -431,10 +431,13 @@ async function checkHealthTargetOnce(target, fetchImpl) {
     const elapsedMs = Date.now() - startedAt;
     const expectedStatus = target.expectedStatuses.includes(response.status);
     let payload = null;
-    let jsonMatches = true;
+    let jsonMatches = !target.expectJson;
 
     const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
+    const isJson = target.expectJson
+      ? contentType.split(";", 1)[0].trim().toLowerCase() === "application/json"
+      : contentType.includes("application/json");
+    if (isJson) {
       payload = await response.json().catch(() => null);
       if (target.expectJson) {
         jsonMatches = objectContains(payload, target.expectJson);
