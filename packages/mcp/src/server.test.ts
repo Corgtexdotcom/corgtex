@@ -130,6 +130,7 @@ vi.mock("@corgtex/domain", async () => {
   } = await import("../../domain/src/work-item-normalization");
 
   return {
+    ...await import("../../domain/src/agent-registry"),
   ...await import("../../domain/src/digest-lineage"),
   ...await import("../../domain/src/work-item-readable-page"),
   // This routing fixture verifies handler wiring; native permission/encryption behavior is exercised by mcp-tool-input.test.ts.

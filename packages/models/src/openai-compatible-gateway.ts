@@ -1078,7 +1078,7 @@ async function repairExtractionObject(request: ExtractionRequest, raw: string, o
     messages: [
       {
         role: "system",
-        content: `Rewrite the invalid extraction output into a valid JSON object only. Follow this schema hint exactly: ${request.schemaHint}`,
+        content: [request.systemInstruction, `Rewrite the invalid extraction output into a valid JSON object only. Follow this schema hint exactly: ${request.schemaHint}`].filter(Boolean).join("\n\n"),
       },
       {
         role: "user",
@@ -1227,7 +1227,7 @@ export const openAICompatibleModelGateway: ModelGateway = {
         messages: [
           {
             role: "system",
-            content: `Return a valid JSON object only. Follow this schema hint: ${request.schemaHint}`,
+            content: [request.systemInstruction, `Return a valid JSON object only. Follow this schema hint: ${request.schemaHint}`].filter(Boolean).join("\n\n"),
           },
           {
             role: "user",

@@ -16,6 +16,7 @@ const {
   searchIndexedKnowledgeMock,
 } = vi.hoisted(() => ({
   prismaMock: {
+    $queryRaw: vi.fn(async () => []),
     agentRun: {
       findFirst: vi.fn(),
       count: vi.fn(),
@@ -144,6 +145,7 @@ vi.mock("@corgtex/shared", () => ({
 }));
 
 vi.mock("@corgtex/domain", () => ({
+  supportsAgentGovernancePrompt: (key: string) => key === "slack-agent",
   AGENT_REGISTRY: {
     "slack-agent": {
       defaultModelTier: "standard",

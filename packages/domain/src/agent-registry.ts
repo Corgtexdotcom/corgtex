@@ -163,3 +163,11 @@ export const AGENT_REGISTRY = {
 } as const;
 
 export type RegisteredAgentKey = keyof typeof AGENT_REGISTRY;
+
+/** Routes with a proven governance-to-system-request consumer. Others retain
+ * their deterministic behavior and must not advertise a policy prompt effect. */
+export function supportsAgentGovernancePrompt(agentKey: string) {
+  return ["inbox-triage", "meeting-summary", "proposal-drafting", "constitution-update-trigger",
+    "constitution-synthesis", "slack-agent", "crm-email-extraction", "crm-drip-followup",
+    "crm-lead-enrichment", "finance-report-import"].includes(agentKey);
+}

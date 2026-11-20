@@ -330,7 +330,7 @@
     "statRecentFailures": "Recent Failures",
     "tabInbox": "Inbox",
     "editGovernancePolicy": "Edit Governance Policy",
-    "governancePolicyDesc": "Define plain-text boundaries, instructions, and thresholds for this agent. These rules are prepended to the agent's system prompt at runtime.",
+    "governancePolicyDesc": "Saved prompt guidance applies only to supported agent routes after source verification, before identity behavior. It does not grant approvals, scopes, or spending authority. Unsupported routes are labeled in the registry.",
     "governancePolicyPlaceholder": "e.g., Always ask a human before committing any financial transaction over $50.",
     "savePolicy": "Save Policy"
   },

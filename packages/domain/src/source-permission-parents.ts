@@ -102,6 +102,7 @@ export function artifactPermissionParents(kind: LineageKind, row: Record<string,
 }
 
 const MODEL_ALIASES: Partial<Record<LineageKind, string>> = {
+  WorkspaceAgentGovernance: "WorkspaceAgentConfig",
   MeetingTranscript: "Meeting", MeetingAgenda: "Meeting", WorkspaceToolLinkCredential: "WorkspaceToolLink",
   WorkflowJobInput: "WorkflowJob", ModelUsageCost: "ModelUsage", CrmQualificationEmailInput: "CrmQualification", DemoLeadIntakeInput: "DemoLead",
 };
