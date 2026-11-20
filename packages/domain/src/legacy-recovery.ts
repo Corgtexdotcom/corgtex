@@ -11,7 +11,8 @@ import { captureArtifactInputProof, captureImmutableArtifactInputProof, captureA
   captureArtifactReadHeadObservation, withArtifactCountReleaseSnapshot,
   lineageContentFingerprint, recordArtifactInputLineage, type LineageRoot } from "./source-lineage";
 import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, parsePermissionEpochProof, type PermissionEpochProof } from "./source-permission-epochs";
-import { withCompanyLegacyRecoveryCapture } from "./legacy-recovery-context";
+import { isLegacyRecoveryKind, withCompanyLegacyRecoveryCapture, type LegacyRecoveryKind } from "./legacy-recovery-context";
+export { LEGACY_RECOVERY_KINDS, type LegacyRecoveryKind } from "./legacy-recovery-context";
 import { inspectSourceLineageBackfill } from "./source-lineage-backfill";
 import { meetingAgendaInputProjection, meetingTranscriptInputProjection } from "./meeting-intelligence-context";
 import { readBrainArticleDerivation } from "./brain-source-impact";
@@ -19,8 +20,6 @@ import { readBrainArticleDerivation } from "./brain-source-impact";
 export const LEGACY_RECOVERY_OPERATION = "LEGACY_RECOVERY_PUBLICATION";
 // Request deduplication only. An alias is never an input receipt or content authority.
 const LEGACY_RECOVERY_REUSE = "LEGACY_RECOVERY_REQUEST_REUSE";
-export const LEGACY_RECOVERY_KINDS = ["Action", "Tension", "Proposal", "MeetingTranscript", "Meeting", "MeetingAgenda", "MeetingInsight", "BrainArticle", "Goal", "GoalUpdate", "KeyResult", "ConversationSession", "ConversationTurn", "Document", "BrainSource", "Role", "Circle"] as const;
-export type LegacyRecoveryKind = typeof LEGACY_RECOVERY_KINDS[number];
 const COMPANY_RECOVERY_KINDS: readonly LegacyRecoveryKind[] = [
   "Action", "Tension", "Proposal", "MeetingTranscript", "Meeting", "MeetingAgenda", "MeetingInsight", "BrainArticle", "Goal", "GoalUpdate", "KeyResult", "Document", "BrainSource", "Role", "Circle",
 ];
@@ -44,7 +43,6 @@ const pending = new AsyncLocalStorage<{ actor: AppActor; tx: Db; receiptId: stri
 const RECOVERY_EVIDENCE_CANDIDATES = 5000;
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
-const isLegacyRecoveryKind = (kind: unknown): kind is LegacyRecoveryKind => LEGACY_RECOVERY_KINDS.includes(kind as LegacyRecoveryKind);
 
 async function load(db: Db, selection: Selection): Promise<Row | null> {
   const where = { id: selection.id, workspaceId: selection.workspaceId };
