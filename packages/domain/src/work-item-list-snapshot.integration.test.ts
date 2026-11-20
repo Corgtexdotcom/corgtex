@@ -25,9 +25,9 @@ async function fixture(kind: Kind, count = 101) {
   const actor: AppActor = {kind: "user", user};
   const delegate: "action" | "proposal" | "tension" = kind === "Action" ? "action" : kind === "Proposal" ? "proposal" : "tension";
   const transaction = prisma.$transaction.bind(prisma);
-  const seed = async (tx: Prisma.TransactionClient, id: string, title: string, proven = true) => {
+  const seed = async (tx: Prisma.TransactionClient, id: string, title: string, proven = true, tensionOverrides: Partial<Pick<Prisma.TensionUncheckedCreateInput, "status" | "priority">> = {}) => {
     const data = {id, title, workspaceId: workspace.id, authorUserId: user.id, bodyMd: "Synthetic body", status: "OPEN" as const, isPrivate: false};
-    const row = kind === "Action" ? await tx.action.create({data}) : kind === "Proposal" ? await tx.proposal.create({data}) : await tx.tension.create({data});
+    const row = kind === "Action" ? await tx.action.create({data}) : kind === "Proposal" ? await tx.proposal.create({data}) : await tx.tension.create({data: {...data, ...tensionOverrides}});
     if (proven) await recordArtifactInputLineage({tx, actor, workspaceId: workspace.id, artifact: {kind, id}, content: row, origin: "HUMAN_ORIGINAL", inputs: []});
     return row;
   };
@@ -118,6 +118,24 @@ it.each(["Action","Proposal","Tension"] as const)("keeps %s page and exact total
   expect(result.items).toHaveLength(101);
   expect(result.items.some(row => ["row--new","row-zznew","row-denied"].includes(row.id))).toBe(false);
   expect(await (prisma[f.delegate].count as any)({where:{workspaceId:f.workspace.id}})).toBe(104);
+}, 60_000);
+
+it("applies the selected tension status before capping the ranked page", async () => {
+  const f = await fixture("Tension", 0);
+  await f.transaction(async tx => {
+    for (let index = 0; index < 200; index++) {
+      await f.seed(tx, `resolved-${String(index).padStart(3, "0")}`, "Resolved", true, { status: "RESOLVED", priority: 1 });
+    }
+    await f.seed(tx, "visible-open", "Open");
+  }, { timeout: 30_000 });
+
+  const unfiltered = await listTensions(f.actor, f.workspace.id, { take: 200 });
+  expect(unfiltered.total).toBe(201);
+  expect(unfiltered.items.some(item => item.id === "visible-open")).toBe(false);
+
+  const open = await listTensions(f.actor, f.workspace.id, { take: 200, statuses: ["OPEN"] });
+  expect(open.total).toBe(1);
+  expect(open.items.map(item => item.id)).toEqual(["visible-open"]);
 }, 60_000);
 
 it("keeps tension rank passes in the same snapshot across inserted vote-rank candidates", async () => {

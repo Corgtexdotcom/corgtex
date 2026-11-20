@@ -8,6 +8,8 @@ import { defaultModelGateway } from "@corgtex/models";
 import { readableArtifactIds, isArtifactInputProofPubliclyShareable, isLegacyRecoveryProofWorkspaceShareable } from "./source-lineage";
 import { NextRequest } from "next/server";
 import { getAction } from "./actions";
+import { listTensions } from "./tensions";
+import { listProposals } from "./proposals";
 import { getConversation } from "./conversations";
 const store = vi.hoisted(()=>({stream:vi.fn(), actor:vi.fn()}));
 vi.mock("@/lib/auth",()=>({resolveRequestActor:store.actor}));
@@ -19,7 +21,7 @@ async function fixture(){
   const users=await Promise.all(["owner","peer"].map(name=>db.user.create({data:{email:`${name}-${randomUUID()}@recovery.test`,passwordHash:"synthetic"}})));
   await db.member.createMany({data:users.map((user,index)=>({workspaceId:workspace.id,userId:user.id,role:index === 0 ? "ADMIN" : "CONTRIBUTOR"}))});
   const owner:AppActor={kind:"user",user:users[0]},peer:AppActor={kind:"user",user:users[1]};
-  const select=(kind:"Action"|"ConversationSession"|"ConversationTurn"|"Document"|"BrainSource",row:{id:string})=>({workspaceId:workspace.id,kind,id:row.id});
+  const select=(kind:"Action"|"Tension"|"Proposal"|"ConversationSession"|"ConversationTurn"|"Document"|"BrainSource",row:{id:string})=>({workspaceId:workspace.id,kind,id:row.id});
   const restore=async(kind:Parameters<typeof select>[0],row:{id:string},actor=owner)=>{
     const choice=await inspectLegacyRecovery(actor,select(kind,row));
     return recoverLegacyArtifact(actor,{...select(kind,row),expectedFingerprint:choice.fingerprint,requestId:randomUUID(),consent:"RESTORE_SELECTED_HISTORY"});
@@ -73,6 +75,32 @@ describe("selected current legacy recovery",()=>{
     await expect(recoverLegacyArtifact(f.owner,{...request,expectedFingerprint:"0".repeat(64)})).rejects.toThrow();
     await expect(db.conversationOperationOutcome.update({where:{id:result.receiptId!},data:{operation:"FORGED"}})).rejects.toThrow("Immutable legacy recovery");
   });
+  it.each(["Tension", "Proposal"] as const)("restores selected company %s history without changing the original row", async kind => {
+    const f = await fixture();
+    const data = { workspaceId: f.workspace.id, authorUserId: f.users[0].id, title: "Historical record",
+      bodyMd: "Original body", status: "OPEN" as const, isPrivate: false };
+    const item = kind === "Tension" ? await db.tension.create({ data }) : await db.proposal.create({ data });
+    const list = kind === "Tension" ? listTensions : listProposals;
+    expect((await list(f.peer, f.workspace.id)).items).toEqual([]);
+    await expect(f.restore(kind, item, f.peer)).rejects.toMatchObject({ code: "RECOVERY_ADMIN_REQUIRED" });
+
+    await expect(f.restore(kind, item)).resolves.toMatchObject({ basis: "CURRENT_ATTESTATION" });
+    expect((await list(f.peer, f.workspace.id)).items).toEqual([expect.objectContaining({ id: item.id, bodyMd: data.bodyMd })]);
+    const original = kind === "Tension" ? await db.tension.findUnique({ where: { id: item.id } })
+      : await db.proposal.findUnique({ where: { id: item.id } });
+    expect(original).toEqual(item);
+  });
+
+  it("withholds a legacy Tension when its linked Proposal is restricted", async () => {
+    const f = await fixture();
+    const data = { workspaceId: f.workspace.id, authorUserId: f.users[0].id, title: "Historical record", bodyMd: "Original body" };
+    const proposal = await db.proposal.create({ data: { ...data, isPrivate: true } });
+    const tension = await db.tension.create({ data: { ...data, status: "OPEN", proposalId: proposal.id } });
+    await expect(f.restore("Tension", tension)).rejects.toThrow();
+    await expect(f.restore("Proposal", proposal)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await db.conversationOperationOutcome.count()).toBe(0);
+  });
+
   it("restores a legacy mixed user message and answer only to its owner, without creating prompt inputs",async()=>{
     const f=await fixture();
     const session=await db.conversationSession.create({data:{workspaceId:f.workspace.id,userId:f.users[0].id,topic:"Historical conversation"}});

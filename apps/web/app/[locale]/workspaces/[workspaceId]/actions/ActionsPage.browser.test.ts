@@ -24,6 +24,7 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("Actions card
     const messages = JSON.parse(await readFile(new URL("messages/en.json", webRoot), "utf8"));
     const mocks: Record<string, string> = {
       "@corgtex/domain": `
+        export class AppError extends Error {}
         const user = { id: "synthetic-user", displayName: "Synthetic owner", email: "owner@example.invalid" };
         const member = { id: "synthetic-member", role: "ADMIN", isActive: true, user };
         const actions = ["OPEN", "OPEN", "DRAFT", "IN_PROGRESS", "COMPLETED"].map((status, i) => ({
@@ -58,7 +59,11 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("Actions card
         export async function getWorkspaceArchiveRecord() { return null; }
         export async function getMyGoalSlicePage() { return { items: [], complete: true, nextCursor: null }; }
         export async function listRecognitionsPage() { return { items: [], complete: true, nextCursor: null }; }
-        export async function listTensions() { return { items: [{ ...actions[0], id: "synthetic-tension", upvotes: [], raisedByMember: member }] }; }
+        export async function listTensions(_actor, _workspaceId, options) {
+          const status = options.statuses?.[0];
+          const items = status && status !== "OPEN" ? [] : [{ ...actions[0], id: "synthetic-tension", upvotes: [], raisedByMember: member }];
+          return { items, total: items.length };
+        }
         export async function listProposals() { return { items: [{ ...actions[0], id: "synthetic-proposal", ownerMemberId: member.id, ownerMember: member }] }; }
         export async function listAdviceRequestWindow() { return { items: [], complete: true, nextCursor: null }; }
         export async function listDeliberationEntriesForParents() { return new Map(); }
@@ -140,6 +145,7 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("Actions card
         import ActionsPage from "./app/[locale]/workspaces/[workspaceId]/actions/page";
         import GoalsPage from "./app/[locale]/workspaces/[workspaceId]/goals/page";
         import TensionsPage from "./app/[locale]/workspaces/[workspaceId]/tensions/page";
+        import { HistoryRecoveryForm } from "./app/[locale]/workspaces/[workspaceId]/settings/history-recovery/HistoryRecoveryForm";
         import ProposalsPage from "./app/[locale]/workspaces/[workspaceId]/proposals/page";
         import { RoleDirectorySurface } from "./app/[locale]/workspaces/[workspaceId]/roles/RoleDirectorySurface";
         import { syntheticRoleData } from "@corgtex/domain";
@@ -149,8 +155,8 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("Actions card
         (async () => {
           const query = new URLSearchParams(location.search), surface = query.get("surface") ?? "actions";
           const props = { params: Promise.resolve({ workspaceId: "synthetic-workspace" }),
-            searchParams: Promise.resolve({ scope: "workspace", status: "ALL", view: query.get("view") ?? "list" }) };
-          const tree = surface === "goals" ? await GoalsPage({ ...props, searchParams: Promise.resolve({ view: "tree" }) })
+            searchParams: Promise.resolve({ scope: "workspace", status: query.get("status") ?? "ALL", view: query.get("view") ?? "list" }) };
+          const tree = surface === "recovery" ? <HistoryRecoveryForm workspaceId="synthetic-workspace" /> : surface === "goals" ? await GoalsPage({ ...props, searchParams: Promise.resolve({ view: "tree" }) })
             : surface === "roles" ? await RoleDirectorySurface({ ...syntheticRoleData, workspaceId: "synthetic-workspace", baseHref: "/workspaces/synthetic-workspace/roles", searchParams: await props.searchParams, canManageStructure: true })
             : surface === "tensions" ? await TensionsPage(props)
             : surface === "proposals" ? await ProposalsPage(props) : await ActionsPage(props);
@@ -169,7 +175,7 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("Actions card
         setup(builder) {
           builder.onResolve({ filter: /.*/ }, args => {
             const pageActionImport = ["../actions", "./actions", "./CreateProposalForm"].includes(args.path);
-            if (Object.hasOwn(mocks, args.path) && (!pageActionImport || /\/(actions|goals|tensions|proposals)\/page\.tsx$/.test(args.importer))) {
+            if (Object.hasOwn(mocks, args.path) && (!pageActionImport || /\/(actions|goals|tensions|proposals)\/(page|GoalEditor)\.tsx$/.test(args.importer))) {
               return { path: args.path, namespace: "synthetic" };
             }
             if (args.path === "./MarkdownRenderer" && args.importer.endsWith("/MarkdownEditor.tsx")) {
@@ -349,6 +355,34 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("Actions card
       });
     }
   }
+  it("shows the selected Tension status total and leaves other status labels uncounted", async () => {
+    await page.goto(`${origin}/?surface=tensions&status=OPEN`);
+    await page.locator("#after").waitFor();
+    const filters = page.locator(".nr-filter-bar");
+    expect(await filters.getByRole("link", { name: "OPEN (1)", exact: true }).count()).toBe(1);
+    expect(await filters.getByRole("link", { name: "RESOLVED", exact: true }).count()).toBe(1);
+  });
+
+  it("previews a workspace record and submits only after explicit recovery consent", async () => {
+    const requests: { method: string; url: string; body: unknown }[] = [];
+    await page.route("**/api/workspaces/synthetic-workspace/history-recovery**", async route => {
+      const request = route.request();
+      requests.push({ method: request.method(), url: request.url(), body: request.method() === "POST" ? request.postDataJSON() : null });
+      await route.fulfill({ json: request.method() === "GET" ? { fingerprint: "a".repeat(64) } : {} });
+    });
+    await page.goto(`${origin}/?surface=recovery`);
+    await page.getByLabel("Record link").fill("/en/workspaces/synthetic-workspace/tensions/example");
+    await page.getByRole("button", { name: "Check record" }).click();
+    const restore = page.getByRole("button", { name: "Restore record" });
+    await restore.waitFor();
+    expect(requests.map(request => request.method)).toEqual(["GET"]);
+    expect(requests[0].url).toContain("kind=Tension&id=example");
+    await restore.click();
+    await page.getByRole("status").filter({ hasText: "The selected record was recovered" }).waitFor();
+    expect(requests[1].body).toMatchObject({ kind: "Tension", id: "example",
+      expectedFingerprint: "a".repeat(64), consent: "RESTORE_SELECTED_HISTORY" });
+  });
+
   it.each(["goals", "roles"])("%s secondary form retains native field navigation and submits once", async surface => {
     await page.goto(`${origin}/?surface=${surface}`); await page.locator("#after").waitFor(); await settled();
     const opener = page.locator(".item-actions .action-menu-trigger").first();

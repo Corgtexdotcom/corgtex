@@ -1022,6 +1022,17 @@
     "uploadDescription": "Choose PDFs, docs, spreadsheets, notes, images, or folders from this phone or computer.",
     "uploadTitle": "Upload files from this device"
   },
+  "historyRecovery": {
+    "title": "Recover workspace history",
+    "description": "Use an existing link to an action, proposal, or tension that no longer appears in the workspace. Current access rules still apply.",
+    "linkLabel": "Record link",
+    "confirm": "Restore the selected record to its existing workspace audience? This creates an audit record and preserves the original content.",
+    "inspect": "Check record",
+    "restore": "Restore record",
+    "invalid": "Enter an action, proposal, or tension link from this workspace.",
+    "unavailable": "The selected record could not be recovered. Check the link and current access to its sources.",
+    "restored": "The selected record was recovered. Open its original link to check visibility."
+  },
   "dashboard": {
     "achieved": "{percent}% achieved",
     "action": "Action",

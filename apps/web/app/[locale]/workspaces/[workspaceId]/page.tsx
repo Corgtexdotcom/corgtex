@@ -209,6 +209,7 @@ export default async function WorkspaceDashboard({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("dashboard");
+  const tHistory = await getTranslations("historyRecovery");
   const format = await getFormatter();
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const release = new DigestReadRelease(actor, workspaceId);
@@ -572,6 +573,9 @@ export default async function WorkspaceDashboard({
       </div>
 
       {limitedSnapshot && <p role="status">{t("limitedSnapshot")}</p>}
+      {actor.kind === "user" && membership?.role === "ADMIN" && membership.id !== "global-operator" && (
+        <Link href={`/workspaces/${workspaceId}/settings/history-recovery`}>{tHistory("title")}</Link>
+      )}
 
       <section className="nr-home-attention-strip" aria-label={t("attentionStripLabel")}>
         {attentionTiles.map((tile) => {

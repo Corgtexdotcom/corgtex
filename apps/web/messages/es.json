@@ -1022,6 +1022,17 @@
     "uploadDescription": "Elige PDFs, documentos, hojas de calculo, notas, imagenes o carpetas desde este telefono o computadora.",
     "uploadTitle": "Subir archivos desde este dispositivo"
   },
+  "historyRecovery": {
+    "title": "Recuperar el historial del espacio",
+    "description": "Usa un enlace existente a una acción, propuesta o tensión que ya no aparezca en el espacio. Se siguen aplicando las reglas de acceso actuales.",
+    "linkLabel": "Enlace al registro",
+    "confirm": "¿Restaurar el registro seleccionado para su audiencia actual? Se guardará un registro de auditoría y se conservará el contenido original.",
+    "inspect": "Comprobar registro",
+    "restore": "Restaurar registro",
+    "invalid": "Introduce el enlace a una acción, propuesta o tensión de este espacio.",
+    "unavailable": "No se pudo recuperar el registro. Comprueba el enlace y el acceso actual a sus fuentes.",
+    "restored": "Se recuperó el registro seleccionado. Abre el enlace original para comprobar su visibilidad."
+  },
   "dashboard": {
     "achieved": "{percent}% logrado",
     "action": "Acción",

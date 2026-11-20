@@ -17,8 +17,11 @@ import { inspectSourceLineageBackfill } from "./source-lineage-backfill";
 export const LEGACY_RECOVERY_OPERATION = "LEGACY_RECOVERY_PUBLICATION";
 // Request deduplication only. An alias is never an input receipt or content authority.
 const LEGACY_RECOVERY_REUSE = "LEGACY_RECOVERY_REQUEST_REUSE";
-export const LEGACY_RECOVERY_KINDS = ["Action", "Goal", "GoalUpdate", "KeyResult", "ConversationSession", "ConversationTurn", "Document", "BrainSource", "Role", "Circle"] as const;
+export const LEGACY_RECOVERY_KINDS = ["Action", "Tension", "Proposal", "Goal", "GoalUpdate", "KeyResult", "ConversationSession", "ConversationTurn", "Document", "BrainSource", "Role", "Circle"] as const;
 export type LegacyRecoveryKind = typeof LEGACY_RECOVERY_KINDS[number];
+const COMPANY_RECOVERY_KINDS: readonly LegacyRecoveryKind[] = [
+  "Action", "Tension", "Proposal", "Goal", "GoalUpdate", "KeyResult", "Document", "BrainSource", "Role", "Circle",
+];
 type Row = Record<string, unknown> & { id: string };
 type Db = Prisma.TransactionClient;
 type Selection = { workspaceId: string; kind: LegacyRecoveryKind; id: string };
@@ -38,6 +41,8 @@ async function load(db: Db, selection: Selection): Promise<Row | null> {
   const where = { id: selection.id, workspaceId: selection.workspaceId };
   switch (selection.kind) {
     case "Action": return db.action.findFirst({ where });
+    case "Tension": return db.tension.findFirst({ where });
+    case "Proposal": return db.proposal.findFirst({ where });
     case "Goal": return db.goal.findFirst({ where });
     case "GoalUpdate": return db.goalUpdate.findFirst({ where: { id: selection.id, goal: { workspaceId: selection.workspaceId } } });
     case "KeyResult": return db.keyResult.findFirst({ where: { id: selection.id, goal: { workspaceId: selection.workspaceId } } });
@@ -54,6 +59,8 @@ async function load(db: Db, selection: Selection): Promise<Row | null> {
  * artifact read bypass. Normal lineage is required everywhere outside recovery. */
 async function targetAudience(actor: AppActor, selection: Selection, row: Row, db: Db): Promise<boolean> {
   if (row.archivedAt != null || row.accessDomain === "FINANCE") return false;
+  const governanceItem = selection.kind === "Tension" || selection.kind === "Proposal";
+  if (governanceItem && row.isPrivate === true) return false;
   if (selection.kind === "GoalUpdate" || selection.kind === "KeyResult") {
     const parent = await db.goal.findFirst({ where: { id: String(row.goalId), workspaceId: selection.workspaceId } });
     return Boolean(parent && await targetAudience(actor, { ...selection, kind: "Goal", id: parent.id }, parent, db));
@@ -64,11 +71,13 @@ async function targetAudience(actor: AppActor, selection: Selection, row: Row, d
     const credential = await db.agentCredential.findFirst({where:{id:actor.credentialId,workspaceId:selection.workspaceId,isActive:true}});
     const scopes = selection.kind === "Role" || selection.kind === "Circle" ? ["circles:read"]
       : selection.kind === "Action" ? ["actions:read", "brain:read"]
-        : selection.kind === "Goal" ? ["goals:read", "brain:read"] : ["brain:read"];
+        : selection.kind === "Goal" ? ["goals:read", "brain:read"]
+          : selection.kind === "Tension" ? ["tensions:read", "brain:read"]
+            : selection.kind === "Proposal" ? ["proposals:read", "brain:read"] : ["brain:read"];
     if (!credential || mcpCredentialVersion(credential.tokenHash) !== actor.credentialVersion
       || mcpScopesHash(credential.scopes) !== mcpScopesHash(actor.scopes ?? []) || !scopes.some(scope=>credential.scopes.includes(scope))) return false;
     if (selection.kind === "Role") return Boolean(await db.circle.findFirst({ where: { id: String(row.circleId), workspaceId: selection.workspaceId, archivedAt: null } }));
-    return selection.kind === "Circle" || selection.kind === "Action" || selection.kind === "Goal" || row.accessDomain === "WORKSPACE" && typeof row.informationCategory === "string"
+    return governanceItem || selection.kind === "Circle" || selection.kind === "Action" || selection.kind === "Goal" || row.accessDomain === "WORKSPACE" && typeof row.informationCategory === "string"
       && await canReadInformationCategory(actor,selection.workspaceId,row.informationCategory,db);
   }
   const member = await db.member.findFirst({ where: { workspaceId: selection.workspaceId, userId: actor.user.id, isActive: true } });
@@ -78,6 +87,7 @@ async function targetAudience(actor: AppActor, selection: Selection, row: Row, d
   if (selection.kind === "ConversationSession") return row.userId === actor.user.id;
   if (selection.kind === "ConversationTurn") return Boolean(await db.conversationSession.findFirst({ where: {
     id: String(row.conversationId), workspaceId: selection.workspaceId, userId: actor.user.id } }));
+  if (governanceItem) return true;
   if (selection.kind === "Action" || selection.kind === "Goal") return row.isPrivate !== true || row.authorUserId === actor.user.id && row.status === "DRAFT";
   return row.accessDomain === "WORKSPACE" && typeof row.informationCategory === "string"
     && await canReadInformationCategory(actor, selection.workspaceId, row.informationCategory, db);
@@ -93,7 +103,7 @@ export function decodeLegacyRecovery(row: Record<string, unknown>): Capsule | nu
       || typeof value.targetFingerprint !== "string" || typeof value.requestHash !== "string" || !["EXISTING_EVIDENCE", "CURRENT_ATTESTATION"].includes(String(value.basis)) || !record(value.content)
       || value.content.id !== value.targetId || !Array.isArray(value.roots) || value.roots.length > 1000
       || !parsePermissionEpochProof(value.operationEpochs) || !["COMPANY","OWNER"].includes(String(value.audience))
-      || (value.audience === "COMPANY") !== (["Action","Goal","GoalUpdate","KeyResult","Document","BrainSource","Role","Circle"].includes(value.targetKind) && value.content.isPrivate !== true)
+      || (value.audience === "COMPANY") !== (COMPANY_RECOVERY_KINDS.includes(value.targetKind) && value.content.isPrivate !== true)
       || row.controlJson.audience !== value.audience || !parsePermissionEpochProof(value.epochs) || row.workspaceId !== value.workspaceId || row.userId !== value.userId
       || row.actorKind !== "user" || row.credentialId != null || row.credentialVersion != null || row.scopeHash != null
       || row.controlJson.targetKind !== value.targetKind || row.controlJson.targetId !== value.targetId
@@ -157,6 +167,12 @@ async function knownRoots(actor: AppActor, selection: Selection, row: Row, db: D
   if(selection.kind === "BrainSource" && record(row.metadata) && typeof row.metadata.documentId === "string"
     && !parents.some(parent=>parent.kind === "Document" && parent.id === (row.metadata as Record<string,unknown>).documentId)) {
     parents.push({kind:"Document",id:row.metadata.documentId});
+  }
+  if ((selection.kind === "Tension" || selection.kind === "Proposal") && typeof row.meetingId === "string") {
+    parents.push({ kind: "Meeting", id: row.meetingId });
+  }
+  if (selection.kind === "Tension" && typeof row.proposalId === "string") {
+    parents.push({ kind: "Proposal", id: row.proposalId });
   }
   for (const parent of parents) {
     for (const root of await captureArtifactInputProof(actor, selection.workspaceId, [parent], db)) retain(root);
@@ -332,7 +348,7 @@ export async function recoverLegacyArtifact(actor: AppActor, submission: Selecti
   invariant(lineageContentFingerprint(request.kind, row) === request.expectedFingerprint, 409, "RECOVERY_STALE", "The selected record changed.");
   // Goal children retain the parent as a known root, including its private audience.
   // Company capture removes only the recovering operator, never parent restrictions.
-  const company = ["Action","Goal","GoalUpdate","KeyResult","Document","BrainSource","Role","Circle"].includes(request.kind) && row.isPrivate !== true;
+  const company = COMPANY_RECOVERY_KINDS.includes(request.kind) && row.isPrivate !== true;
   const perform = async () => {
   const userId = actor.user.id, requestKey = hash([LEGACY_RECOVERY_OPERATION, request.workspaceId, userId, request.requestId]);
   const requestHash = hash(request);

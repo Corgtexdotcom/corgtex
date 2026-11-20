@@ -1,7 +1,11 @@
 # Selected legacy history recovery
 
-An authenticated workspace admin can recover existing company Actions, Documents,
-BrainSources, Roles, and Circles through `/api/workspaces/{workspaceId}/history-recovery`.
+An authenticated workspace admin can recover selected company Actions, Tensions, and
+Proposals from known record links in Settings → Recover workspace history. The
+same API at `/api/workspaces/{workspaceId}/history-recovery` supports Goals, Goal
+Updates, Key Results, Documents, BrainSources, Roles, and Circles.
+Recovery of a linked Tension or Proposal requires readable source lineage for its
+recorded meeting or proposal contributor.
 Conversation sessions and turns are recoverable only by their actual owner and
 remain private. Finance records are excluded.
 
