@@ -4,7 +4,6 @@ import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 
-// Helper function to create a slug
 function slugify(text: string) {
   return text
     .toString()
@@ -35,7 +34,6 @@ export async function createExpertiseTag(
   let slug = baseSlug;
   let counter = 1;
 
-  // Handle slug collisions
   while (await prisma.expertiseTag.findUnique({ where: { workspaceId_slug: { workspaceId: params.workspaceId, slug } } })) {
     slug = `${baseSlug}-${counter}`;
     counter++;
@@ -76,10 +74,8 @@ export async function addMemberExpertise(
     source?: "SELF" | "AI_INFERRED" | "PEER_ENDORSED";
   }
 ) {
-  // Ensure the actor can only self-declare for themselves unless they are AI (system actor could be added later)
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  
-  // Verify member exists in workspace
+
   const member = await prisma.member.findUnique({
     where: { id: params.memberId },
     select: { workspaceId: true, userId: true },

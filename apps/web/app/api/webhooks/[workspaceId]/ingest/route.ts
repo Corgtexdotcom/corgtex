@@ -27,13 +27,11 @@ export async function POST(
   try {
     const { workspaceId } = await params;
 
-    // Rate limit
     const rateLimited = await rateLimitWebhookIngest(request, workspaceId);
     if (rateLimited) return rateLimited;
 
     const source = request.nextUrl.searchParams.get("source") ?? "generic";
 
-    // Validate workspace exists
     const workspace = await prisma.workspace.findUnique({
       where: { id: workspaceId },
       select: { id: true },
@@ -43,7 +41,6 @@ export async function POST(
       return NextResponse.json({ error: "Workspace not found" }, { status: 404 });
     }
 
-    // Authenticate via agent credential token
     const authHeader = request.headers.get("authorization");
     if (!authHeader?.startsWith("Bearer ")) {
       throw new AppError(401, "UNAUTHENTICATED", "Missing authorization.");
@@ -61,7 +58,6 @@ export async function POST(
     await requireWorkspaceMembership({ actor, workspaceId });
     requireAgentScope(actor, INBOUND_WEBHOOK_SCOPE);
 
-    // Parse payload
     let payload: Record<string, unknown>;
     try {
       payload = await request.json();
@@ -69,7 +65,6 @@ export async function POST(
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
-    // Process the inbound webhook
     const result = await processInboundWebhook({
       workspaceId,
       source,

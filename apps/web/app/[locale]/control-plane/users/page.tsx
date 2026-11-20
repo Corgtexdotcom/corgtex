@@ -24,7 +24,6 @@ export default async function ControlPlaneUsersPage({
   }
 
   const [users, clientOptions] = await Promise.all([
-    // Fetch real users and their memberships from Prisma PostgreSQL database
     prisma.user.findMany({
       orderBy: { createdAt: "desc" },
       include: {

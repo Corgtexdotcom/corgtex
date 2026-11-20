@@ -1,6 +1,6 @@
 import { normalizeSiteLocale, type SiteLocale } from "../i18n/routing";
 
-export type SiteConfig = {
+type SiteConfig = {
   appUrl: string;
   bookDemoUrl: string;
   demoUrl: string;

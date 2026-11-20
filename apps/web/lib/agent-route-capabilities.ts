@@ -2,7 +2,7 @@ import { requireAgentOperation } from "@corgtex/domain";
 import type { McpToolName } from "@corgtex/domain";
 import type { AppActor } from "@corgtex/shared";
 
-export type AgentRouteCapability = {
+type AgentRouteCapability = {
   operation: McpToolName | null;
   feature?: "TOOL_LINKS" | "RELATIONSHIPS";
 };

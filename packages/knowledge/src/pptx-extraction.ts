@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 
 export const PPTX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 
-export type PptxExtractionErrorCode =
+type PptxExtractionErrorCode =
   | "FILE_TOO_LARGE"
   | "NOT_PPTX"
   | "MALFORMED_FILE"
