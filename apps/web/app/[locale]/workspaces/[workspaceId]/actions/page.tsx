@@ -368,8 +368,32 @@ export default async function ActionsPage({
     return t("btnComplete");
   }
 
+  const emptyStatusFilters = view === "kanban" && boardGroup === "status"
+    ? visibleActionColumnIds : statusFilters;
+  const hasViewFilters = actionScope !== "workspace" || circleIds.length > 0
+    || emptyStatusFilters.length > 0 && emptyStatusFilters.length < actionColumnStatuses.length;
+  const emptyScopeLabel = actionScope === "mine" ? t("myActions")
+    : actionScope === "assigned" ? tWork("assignedToMe")
+      : actionScope === "filtered" ? t("selectedAssignees") : t("allWorkspaceActions");
+  const emptyStatusLabel = emptyStatusFilters.length === 0 || emptyStatusFilters.length === actionColumnStatuses.length
+    ? tWork("allStatuses")
+    : emptyStatusFilters.map(status => t(ACTION_STATUS_META[status].labelKey)).join(", ");
+
   function renderEmptyActionState() {
-    return <p className="muted">{t("noActionsFound")}</p>;
+    return (
+      <div className="stack" role="status">
+        <p>{t(hasViewFilters ? "noActionsMatchView" : "noActionsFound")}</p>
+        <p className="muted">{t("emptyViewSummary", { statuses: emptyStatusLabel, scope: emptyScopeLabel })}</p>
+        {circleIds.length > 0 && <p className="muted">{t("emptyCircleFilter")}</p>}
+        {hasViewFilters && (
+          <p>
+            <a className="button secondary" href={buildActionListQuery({ view: "list", status: "ALL" }, "workspace")}>
+              {t("showAllWorkspaceActions")}
+            </a>
+          </p>
+        )}
+      </div>
+    );
   }
 
   function renderActionMove(action: ActionListItem, targetStatus: ActionColumnStatus, options: { hidden?: boolean; primary?: boolean; menuItem?: boolean } = {}) {
@@ -1038,6 +1062,9 @@ export default async function ActionsPage({
           }}
         />
 
+        {view === "kanban" && !actionColumns.some(column =>
+          (boardGroup !== "status" || visibleActionColumnIds.includes(column.id as ActionColumnStatus)) && column.items.length > 0,
+        ) && renderEmptyActionState()}
         {view === "kanban" ? (
           <WorkItemKanbanBoard
             columns={actionColumns}
