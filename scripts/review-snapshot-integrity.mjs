@@ -3,9 +3,36 @@ import { createHash } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
 import process from "node:process";
 export const REVIEWER_LOGIN = "beepto-codex";
+// Verified repository identities: PR #1620 author and issue #1595 author.
+const PRIMARY_REVIEWER = Object.freeze({ login: REVIEWER_LOGIN, nodeId: "U_kgDOEJnzqQ" });
+const ALTERNATE_REVIEWER = Object.freeze({ login: "puncar-dev", nodeId: "MDQ6VXNlcjcyODkwNDA0" });
 const SECRET_PATTERNS = [/-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/, /-----BEGIN OPENSSH PRIVATE KEY-----/, /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b/, /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/, /\b(?:A3T[A-Z0-9]|AKIA|ASIA)[A-Z0-9]{16}\b/, /\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}\b/, /\bsk-or-v1-[A-Za-z0-9_-]{20,}\b/, /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/];
 export function sha256Bytes(buf) { return createHash("sha256").update(buf).digest("hex"); }
 function invariant(ok, message) { if (!ok) throw new Error(message); }
+function authorIdentity(user) {
+  invariant(typeof user?.login === "string" && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\[bot\])?$/i.test(user.login) && typeof user.node_id === "string" && /^\S+$/.test(user.node_id), "unexpected author identity");
+  return { login: user.login, nodeId: user.node_id };
+}
+function isSelfReview(author, reviewer) {
+  return author.nodeId === reviewer.nodeId || author.login.toLowerCase() === reviewer.login.toLowerCase();
+}
+function sameAccount(actual, expected) {
+  return actual.nodeId === expected.nodeId && actual.login.toLowerCase() === expected.login.toLowerCase();
+}
+export function reviewerForAuthor(user) {
+  const author = authorIdentity(user);
+  for (const pinned of [PRIMARY_REVIEWER, ALTERNATE_REVIEWER]) {
+    if (isSelfReview(author, pinned)) invariant(sameAccount(author, pinned), "inconsistent pinned author identity");
+  }
+  return sameAccount(author, PRIMARY_REVIEWER) ? ALTERNATE_REVIEWER : PRIMARY_REVIEWER;
+}
+function snapshotWithReviewer(pr, evidence) {
+  const snapshot = computeSnapshot(pr);
+  const reviewer = reviewerForAuthor(pr.user);
+  invariant(sameAccount(authorIdentity(evidence?.user), reviewer), "inconsistent reviewer eligibility identity");
+  invariant(["write", "maintain", "admin"].includes(evidence.permission), "ineligible reviewer permission");
+  return { ...snapshot, reviewerEligibility: { reviewer, permission: evidence.permission } };
+}
 export function encodeLabelSet(names) {
   invariant(Array.isArray(names) && names.every((n) => typeof n === "string"), "unexpected label names");
   const sorted = names.map((n) => Buffer.from(n, "utf8")).sort(Buffer.compare);
@@ -22,6 +49,7 @@ export function computeSnapshot(pr) {
   invariant(Array.isArray(pr.labels) && pr.labels.every((l) => l && typeof l.name === "string"), "unexpected PR labels");
   const bodyNull = pr.body === null || pr.body === undefined;
   return {
+    author: authorIdentity(pr.user),
     headSha: pr.head.sha,
     baseSha: pr.base.sha,
     bodyDigest: bodyNull ? null : sha256Bytes(Buffer.from(pr.body, "utf8")),
@@ -29,8 +57,10 @@ export function computeSnapshot(pr) {
     bodyNull,
   };
 }
-export function selectLatestReviewerReview(reviews) {
-  const eligible = (reviews ?? []).filter((r) => r && r.user?.login === REVIEWER_LOGIN && ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(r.state) && Number.isFinite(Date.parse(r.submitted_at)) && Number.isFinite(r.id));
+export function selectLatestReviewerReview(reviews, reviewer = PRIMARY_REVIEWER) {
+  const named = (reviews ?? []).filter((r) => r && (r.user?.login?.toLowerCase() === reviewer.login.toLowerCase() || r.user?.node_id === reviewer.nodeId));
+  invariant(named.every((r) => sameAccount(authorIdentity(r.user), reviewer)), "inconsistent pinned reviewer identity");
+  const eligible = named.filter((r) => ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(r.state) && Number.isFinite(Date.parse(r.submitted_at)) && Number.isFinite(r.id));
   eligible.sort((a, b) => Date.parse(b.submitted_at) - Date.parse(a.submitted_at) || b.id - a.id);
   return eligible[0] ?? null;
 }
@@ -95,10 +125,10 @@ export function evaluatePolicy({ body, labels, files, draft }) {
   }
   return failures;
 }
-export function decide({ pr, reviews, files, filesTruncated }) {
+export function decide({ pr, reviews, files, filesTruncated, reviewerEligibility }) {
   invariant(Array.isArray(reviews) && reviews.every((r) => r && Number.isSafeInteger(r.id) && typeof r.user?.login === "string" && ["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"].includes(r.state) && (r.body === null || typeof r.body === "string") && (r.submitted_at === null || Number.isFinite(Date.parse(r.submitted_at))) && typeof r.commit_id === "string") && typeof filesTruncated === "boolean", "unexpected live API state");
   const failures = [];
-  const snapshot = computeSnapshot(pr);
+  const snapshot = snapshotWithReviewer(pr, reviewerEligibility);
   if (pr.state !== "open") return { pass: true, noop: true, snapshot, failures };
   const labelNames = pr.labels.map((label) => label.name);
   if (pr.draft) failures.push("PR is draft");
@@ -107,8 +137,9 @@ export function decide({ pr, reviews, files, filesTruncated }) {
   for (const label of ["halt-agents", "needs-replan", "force-merge"]) {
     if (labelNames.includes(label)) failures.push(`${label} label present`);
   }
-  const review = selectLatestReviewerReview(reviews);
-  if (review?.state !== "APPROVED") failures.push("no non-dismissed beepto-codex APPROVED review");
+  const review = selectLatestReviewerReview(reviews, snapshot.reviewerEligibility.reviewer);
+  if (review && isSelfReview(snapshot.author, authorIdentity(review.user))) failures.push("PR author cannot approve their own PR");
+  if (review?.state !== "APPROVED") failures.push(`no non-dismissed ${snapshot.reviewerEligibility.reviewer.login} APPROVED review`);
   else if (review.commit_id !== pr.head.sha) failures.push("review commit_id disagrees with current head sha");
   failures.push(...evaluatePolicy({ body: pr.body ?? "", labels: labelNames, files, draft: pr.draft }));
   return { pass: failures.length === 0, noop: false, snapshot, failures };
@@ -162,10 +193,12 @@ export function validateMergeGroupEvent(event, repo, runSha) {
 }
 async function evaluatePullRequest(repo, number) {
   const pr = await api(`/repos/${repo}/pulls/${number}`);
+  const reviewer = reviewerForAuthor(pr.user);
   const files = await apiAll(`/repos/${repo}/pulls/${number}/files`);
   const reviews = await apiAll(`/repos/${repo}/pulls/${number}/reviews`);
-  const verdict = decide({ pr, reviews: reviews.items, files: files.items.map((f) => ({ filename: f.filename, previous_filename: f.previous_filename, additions: f.additions, deletions: f.deletions })), filesTruncated: files.truncated || reviews.truncated });
-  return { pr, verdict, reviewerReview: selectLatestReviewerReview(reviews.items) };
+  const reviewerEligibility = await api(`/repos/${repo}/collaborators/${reviewer.login}/permission`);
+  const verdict = decide({ pr, reviewerEligibility, reviews: reviews.items, files: files.items.map((f) => ({ filename: f.filename, previous_filename: f.previous_filename, additions: f.additions, deletions: f.deletions })), filesTruncated: files.truncated || reviews.truncated });
+  return { pr, verdict, reviewerReview: selectLatestReviewerReview(reviews.items, reviewer) };
 }
 async function readMergeGroupMembers(repo, group) {
   const [owner, name] = repo.split("/");
@@ -205,38 +238,48 @@ export async function evaluateMergeGroup(repo, event, runSha) {
   const prNumbers = members.map((member) => member.number);
   const summary = [];
   const snapshots = [];
+  const reviewerAuthors = [];
   let failed = false;
   for (const { number, headSha, baseSha } of members) {
-    const { pr, verdict } = await evaluatePullRequest(repo, number);
+    const { pr, verdict, reviewerReview } = await evaluatePullRequest(repo, number);
     invariant(pr.number === number && pr.state === "open" && pr.head?.sha === headSha && pr.base?.sha === baseSha && pr.base?.ref === "main" && pr.base?.repo?.full_name === repo && typeof pr.head?.repo?.full_name === "string" && Number.isFinite(Date.parse(pr.updated_at)), "unexpected merge-group PR state");
     summary.push(`### PR #${number} (event merge_group/checks_requested)`, `- verdict: ${verdict.pass ? "pass" : `FAIL (${verdict.failures.length} reason(s))`}`);
     snapshots.push(JSON.stringify(verdict.snapshot));
+    reviewerAuthors.push(JSON.stringify(reviewIdentity(reviewerReview)?.author));
     if (!verdict.pass) failed = true;
   }
   if (!failed) {
     const [latestMembers, ...latestEvaluations] = await Promise.all([readMergeGroupMembers(repo, group), ...members.map(({ number }) => evaluatePullRequest(repo, number))]);
     invariant(JSON.stringify(latestMembers) === JSON.stringify(members), "merge-group membership drifted before success");
-    const finalStates = await readMergeGroupFinalStates(repo, members);
+    const finalStates = await readMergeGroupFinalStates(repo, members, latestEvaluations.map(({ pr }) => reviewerForAuthor(pr.user)));
     for (const [index, latest] of latestEvaluations.entries()) {
       const final = finalStates[index];
-      invariant(final.number === members[index].number && final.state === "OPEN" && final.isDraft === latest.pr.draft && final.headRefOid === members[index].headSha && final.baseRefOid === members[index].baseSha && latest.pr.head?.sha === members[index].headSha && latest.pr.base?.sha === members[index].baseSha && latest.pr.base?.ref === "main" && latest.pr.base?.repo?.full_name === repo && JSON.stringify(final.snapshot) === JSON.stringify(latest.verdict.snapshot) && JSON.stringify(final.reviewerReview) === JSON.stringify(reviewIdentity(latest.reviewerReview)) && latest.verdict.pass && !latest.verdict.noop && JSON.stringify(latest.verdict.snapshot) === snapshots[index], "merge-group PR snapshot drifted before success");
+      invariant(final.number === members[index].number && final.state === "OPEN" && final.isDraft === latest.pr.draft && final.headRefOid === members[index].headSha && final.baseRefOid === members[index].baseSha && latest.pr.head?.sha === members[index].headSha && latest.pr.base?.sha === members[index].baseSha && latest.pr.base?.ref === "main" && latest.pr.base?.repo?.full_name === repo && JSON.stringify(final.snapshot) === JSON.stringify(latest.verdict.snapshot) && JSON.stringify(final.reviewerReview) === JSON.stringify(reviewIdentity(latest.reviewerReview)) && JSON.stringify(reviewIdentity(latest.reviewerReview)?.author) === reviewerAuthors[index] && latest.verdict.pass && !latest.verdict.noop && JSON.stringify(latest.verdict.snapshot) === snapshots[index], "merge-group PR snapshot drifted before success");
     }
   }
   return { failed, prNumbers, summary };
 }
 function reviewIdentity(review) {
-  return review ? { id: String(review.id), state: review.state, submittedAt: review.submitted_at, body: review.body, commitOid: review.commit_id, author: review.user.login } : null;
+  return review ? { id: String(review.id), state: review.state, submittedAt: review.submitted_at, body: review.body, commitOid: review.commit_id, author: authorIdentity(review.user) } : null;
 }
-async function readMergeGroupFinalStates(repo, members) {
+async function readMergeGroupFinalStates(repo, members, reviewers) {
   const [owner, name] = repo.split("/");
-  const selections = members.map(({ number }, index) => `p${index}:pullRequest(number:${number}){number state isDraft body headRefOid baseRefOid labels(first:100){nodes{name}pageInfo{hasPreviousPage hasNextPage}}reviews(last:100,author:"${REVIEWER_LOGIN}",states:[APPROVED,CHANGES_REQUESTED,DISMISSED]){nodes{fullDatabaseId state submittedAt body commit{oid}author{login}}pageInfo{hasPreviousPage hasNextPage}}}`).join(" ");
-  const repository = await graphql(`query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${selections}}}`, { owner, name }, "repository");
+  const selections = members.map(({ number }, index) => `p${index}:pullRequest(number:${number}){number author{login ... on Node{id}} state isDraft body headRefOid baseRefOid labels(first:100){nodes{name}pageInfo{hasPreviousPage hasNextPage}}reviews(last:100,author:"${reviewers[index].login}",states:[APPROVED,CHANGES_REQUESTED,DISMISSED]){nodes{fullDatabaseId state submittedAt body commit{oid}author{login ... on Node{id}}}pageInfo{hasPreviousPage hasNextPage}}}`).join(" ");
+  const [repository, ...eligibility] = await Promise.all([
+    graphql(`query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${selections}}}`, { owner, name }, "repository"),
+    ...reviewers.map((reviewer) => api(`/repos/${repo}/collaborators/${reviewer.login}/permission`)),
+  ]);
   return members.map((_, index) => {
     const state = repository?.[`p${index}`];
-    invariant(Number.isSafeInteger(state?.number) && typeof state.state === "string" && typeof state.isDraft === "boolean" && typeof state.body === "string" && /^[0-9a-f]{40}$/.test(state.headRefOid) && /^[0-9a-f]{40}$/.test(state.baseRefOid) && Array.isArray(state.labels?.nodes) && state.labels.nodes.every((label) => typeof label?.name === "string") && state.labels.pageInfo?.hasPreviousPage === false && state.labels.pageInfo?.hasNextPage === false && Array.isArray(state.reviews?.nodes) && state.reviews.nodes.every((review) => /^\d+$/.test(review?.fullDatabaseId) && ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state) && Number.isFinite(Date.parse(review.submittedAt)) && typeof review.body === "string" && /^[0-9a-f]{40}$/.test(review.commit?.oid) && review.author?.login === REVIEWER_LOGIN) && state.reviews.pageInfo?.hasPreviousPage === false && state.reviews.pageInfo?.hasNextPage === false, "unexpected final merge-group PR state");
-    const reviews = state.reviews.nodes.map((review) => ({ id: Number(review.fullDatabaseId), state: review.state, submitted_at: review.submittedAt, body: review.body, commit_id: review.commit.oid, user: review.author }));
+    invariant(Number.isSafeInteger(state?.number) && typeof state.state === "string" && typeof state.isDraft === "boolean" && typeof state.body === "string" && /^[0-9a-f]{40}$/.test(state.headRefOid) && /^[0-9a-f]{40}$/.test(state.baseRefOid) && Array.isArray(state.labels?.nodes) && state.labels.nodes.every((label) => typeof label?.name === "string") && state.labels.pageInfo?.hasPreviousPage === false && state.labels.pageInfo?.hasNextPage === false && Array.isArray(state.reviews?.nodes) && state.reviews.nodes.every((review) => /^\d+$/.test(review?.fullDatabaseId) && ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state) && Number.isFinite(Date.parse(review.submittedAt)) && typeof review.body === "string" && /^[0-9a-f]{40}$/.test(review.commit?.oid) && review.author?.login?.toLowerCase() === reviewers[index].login.toLowerCase() && review.author.id === reviewers[index].nodeId) && state.reviews.pageInfo?.hasPreviousPage === false && state.reviews.pageInfo?.hasNextPage === false, "unexpected final merge-group PR state");
+    const reviews = state.reviews.nodes.map((review) => ({ id: Number(review.fullDatabaseId), state: review.state, submitted_at: review.submittedAt, body: review.body, commit_id: review.commit.oid, user: { login: review.author.login, node_id: review.author.id } }));
     invariant(reviews.every((review) => Number.isSafeInteger(review.id)), "unexpected final merge-group PR state");
-    return { ...state, snapshot: computeSnapshot({ number: state.number, state: state.state.toLowerCase(), draft: state.isDraft, body: state.body, head: { sha: state.headRefOid }, base: { sha: state.baseRefOid }, labels: state.labels.nodes, auto_merge: null }), reviewerReview: reviewIdentity(selectLatestReviewerReview(reviews)) };
+    const author = authorIdentity({ login: state.author?.login, node_id: state.author?.id });
+    const reviewer = reviewerForAuthor({ login: author.login, node_id: author.nodeId });
+    invariant(sameAccount(reviewer, reviewers[index]), "merge-group reviewer selection drifted before success");
+    const reviewerReview = selectLatestReviewerReview(reviews, reviewer);
+    invariant(!reviewerReview || !isSelfReview(author, authorIdentity(reviewerReview.user)), "PR author cannot approve their own PR");
+    return { ...state, snapshot: snapshotWithReviewer({ user: { login: author.login, node_id: author.nodeId }, number: state.number, state: state.state.toLowerCase(), draft: state.isDraft, body: state.body, head: { sha: state.headRefOid }, base: { sha: state.baseRefOid }, labels: state.labels.nodes, auto_merge: null }, eligibility[index]), reviewerReview: reviewIdentity(reviewerReview) };
   });
 }
 async function main() {
