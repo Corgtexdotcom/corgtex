@@ -13,15 +13,24 @@ import { captureArtifactInputProof, captureImmutableArtifactInputProof, captureA
 import { capturePermissionEpochs, isArtifactPermissionEpochProofCurrent, parsePermissionEpochProof, type PermissionEpochProof } from "./source-permission-epochs";
 import { withCompanyLegacyRecoveryCapture } from "./legacy-recovery-context";
 import { inspectSourceLineageBackfill } from "./source-lineage-backfill";
+import { meetingAgendaInputProjection, meetingTranscriptInputProjection } from "./meeting-intelligence-context";
+import { readBrainArticleDerivation } from "./brain-source-impact";
 
 export const LEGACY_RECOVERY_OPERATION = "LEGACY_RECOVERY_PUBLICATION";
 // Request deduplication only. An alias is never an input receipt or content authority.
 const LEGACY_RECOVERY_REUSE = "LEGACY_RECOVERY_REQUEST_REUSE";
-export const LEGACY_RECOVERY_KINDS = ["Action", "Tension", "Proposal", "Goal", "GoalUpdate", "KeyResult", "ConversationSession", "ConversationTurn", "Document", "BrainSource", "Role", "Circle"] as const;
+export const LEGACY_RECOVERY_KINDS = ["Action", "Tension", "Proposal", "MeetingTranscript", "Meeting", "MeetingAgenda", "MeetingInsight", "BrainArticle", "Goal", "GoalUpdate", "KeyResult", "ConversationSession", "ConversationTurn", "Document", "BrainSource", "Role", "Circle"] as const;
 export type LegacyRecoveryKind = typeof LEGACY_RECOVERY_KINDS[number];
 const COMPANY_RECOVERY_KINDS: readonly LegacyRecoveryKind[] = [
-  "Action", "Tension", "Proposal", "Goal", "GoalUpdate", "KeyResult", "Document", "BrainSource", "Role", "Circle",
+  "Action", "Tension", "Proposal", "MeetingTranscript", "Meeting", "MeetingAgenda", "MeetingInsight", "BrainArticle", "Goal", "GoalUpdate", "KeyResult", "Document", "BrainSource", "Role", "Circle",
 ];
+const MEETING_COMPONENTS: readonly LegacyRecoveryKind[] = ["MeetingTranscript", "Meeting", "MeetingAgenda"];
+const DISCOVERY_KINDS: readonly LegacyRecoveryKind[] = [
+  "Action", "Tension", "Proposal", "MeetingTranscript", "Meeting", "MeetingAgenda", "MeetingInsight", "BrainArticle",
+];
+function recoveryTable(kind: LegacyRecoveryKind) {
+  return kind === "MeetingTranscript" || kind === "MeetingAgenda" ? "Meeting" : kind;
+}
 type Row = Record<string, unknown> & { id: string };
 type Db = Prisma.TransactionClient;
 type Selection = { workspaceId: string; kind: LegacyRecoveryKind; id: string };
@@ -43,6 +52,16 @@ async function load(db: Db, selection: Selection): Promise<Row | null> {
     case "Action": return db.action.findFirst({ where });
     case "Tension": return db.tension.findFirst({ where });
     case "Proposal": return db.proposal.findFirst({ where });
+    case "Meeting": return db.meeting.findFirst({ where });
+    case "MeetingTranscript":
+    case "MeetingAgenda": {
+      const meeting = await db.meeting.findFirst({ where });
+      if (!meeting) return null;
+      const project = selection.kind === "MeetingTranscript" ? meetingTranscriptInputProjection : meetingAgendaInputProjection;
+      return { ...project(meeting), id: meeting.id, informationCategory: meeting.informationCategory };
+    }
+    case "MeetingInsight": return db.meetingInsight.findFirst({ where });
+    case "BrainArticle": return db.brainArticle.findFirst({ where });
     case "Goal": return db.goal.findFirst({ where });
     case "GoalUpdate": return db.goalUpdate.findFirst({ where: { id: selection.id, goal: { workspaceId: selection.workspaceId } } });
     case "KeyResult": return db.keyResult.findFirst({ where: { id: selection.id, goal: { workspaceId: selection.workspaceId } } });
@@ -60,6 +79,16 @@ async function load(db: Db, selection: Selection): Promise<Row | null> {
 async function targetAudience(actor: AppActor, selection: Selection, row: Row, db: Db): Promise<boolean> {
   if (row.archivedAt != null || row.accessDomain === "FINANCE") return false;
   const governanceItem = selection.kind === "Tension" || selection.kind === "Proposal";
+  const meetingComponent = MEETING_COMPONENTS.includes(selection.kind);
+  const companyArticle = selection.kind === "BrainArticle" && row.isPrivate === false && row.variantOfArticleId == null;
+  if (selection.kind === "BrainArticle" && !companyArticle) return false;
+  if (meetingComponent && (typeof row.informationCategory !== "string"
+    || !await canReadInformationCategory(actor, selection.workspaceId, row.informationCategory, db))) return false;
+  if (selection.kind === "MeetingInsight") {
+    const meeting = await db.meeting.findFirst({ where: { id: String(row.meetingId), workspaceId: selection.workspaceId, archivedAt: null },
+      select: { informationCategory: true } });
+    if (!meeting || !await canReadInformationCategory(actor, selection.workspaceId, meeting.informationCategory, db)) return false;
+  }
   if (governanceItem && row.isPrivate === true) return false;
   if (selection.kind === "GoalUpdate" || selection.kind === "KeyResult") {
     const parent = await db.goal.findFirst({ where: { id: String(row.goalId), workspaceId: selection.workspaceId } });
@@ -73,11 +102,12 @@ async function targetAudience(actor: AppActor, selection: Selection, row: Row, d
       : selection.kind === "Action" ? ["actions:read", "brain:read"]
         : selection.kind === "Goal" ? ["goals:read", "brain:read"]
           : selection.kind === "Tension" ? ["tensions:read", "brain:read"]
-            : selection.kind === "Proposal" ? ["proposals:read", "brain:read"] : ["brain:read"];
+            : selection.kind === "Proposal" ? ["proposals:read", "brain:read"]
+              : meetingComponent || selection.kind === "MeetingInsight" ? ["meetings:read", "brain:read"] : ["brain:read"];
     if (!credential || mcpCredentialVersion(credential.tokenHash) !== actor.credentialVersion
       || mcpScopesHash(credential.scopes) !== mcpScopesHash(actor.scopes ?? []) || !scopes.some(scope=>credential.scopes.includes(scope))) return false;
     if (selection.kind === "Role") return Boolean(await db.circle.findFirst({ where: { id: String(row.circleId), workspaceId: selection.workspaceId, archivedAt: null } }));
-    return governanceItem || selection.kind === "Circle" || selection.kind === "Action" || selection.kind === "Goal" || row.accessDomain === "WORKSPACE" && typeof row.informationCategory === "string"
+    return governanceItem || companyArticle || meetingComponent || selection.kind === "MeetingInsight" || selection.kind === "Circle" || selection.kind === "Action" || selection.kind === "Goal" || row.accessDomain === "WORKSPACE" && typeof row.informationCategory === "string"
       && await canReadInformationCategory(actor,selection.workspaceId,row.informationCategory,db);
   }
   const member = await db.member.findFirst({ where: { workspaceId: selection.workspaceId, userId: actor.user.id, isActive: true } });
@@ -87,7 +117,7 @@ async function targetAudience(actor: AppActor, selection: Selection, row: Row, d
   if (selection.kind === "ConversationSession") return row.userId === actor.user.id;
   if (selection.kind === "ConversationTurn") return Boolean(await db.conversationSession.findFirst({ where: {
     id: String(row.conversationId), workspaceId: selection.workspaceId, userId: actor.user.id } }));
-  if (governanceItem) return true;
+  if (governanceItem || companyArticle || meetingComponent || selection.kind === "MeetingInsight") return true;
   if (selection.kind === "Action" || selection.kind === "Goal") return row.isPrivate !== true || row.authorUserId === actor.user.id && row.status === "DRAFT";
   return row.accessDomain === "WORKSPACE" && typeof row.informationCategory === "string"
     && await canReadInformationCategory(actor, selection.workspaceId, row.informationCategory, db);
@@ -174,6 +204,44 @@ async function knownRoots(actor: AppActor, selection: Selection, row: Row, db: D
   if (selection.kind === "Tension" && typeof row.proposalId === "string") {
     parents.push({ kind: "Proposal", id: row.proposalId });
   }
+  if (selection.kind === "MeetingTranscript") {
+    const meeting = await db.meeting.findFirst({ where: { id: row.id, workspaceId: selection.workspaceId },
+      select: { source: true, transcript: true, _count: { select: { transcriptSourceRecords: true, recordings: true } } } });
+    const upload = await db.auditLog.findFirst({ where: { workspaceId: selection.workspaceId, entityType: "Meeting",
+      entityId: row.id, action: "meeting.created", actorUserId: { not: null } }, select: { id: true } });
+    invariant(meeting?.source === "transcript-upload" && meeting.transcript && upload
+      && !meeting._count.transcriptSourceRecords && !meeting._count.recordings, 409, "RECOVERY_SOURCE_RESTRICTED",
+      "The original transcript must be a recorded workspace upload with no external recording or import binding.");
+  }
+  if (selection.kind === "Meeting" && typeof row.transcript === "string" && row.transcript) {
+    parents.push({ kind: "MeetingTranscript", id: row.id });
+  }
+  if (selection.kind === "MeetingAgenda") {
+    invariant(row.agendaJson != null, 404, "NOT_FOUND", "This meeting has no agenda to recover.");
+    parents.push({ kind: "Meeting", id: row.id });
+  }
+  if (selection.kind === "MeetingInsight") {
+    invariant(row.sourceRecordId == null, 409, "RECOVERY_SOURCE_RESTRICTED",
+      "Restore the original provider source before recovering this insight.");
+    invariant(row.operation === "CREATE" || row.targetEntityId == null, 409, "RECOVERY_SOURCE_RESTRICTED",
+      "This insight includes an update to another record and needs its original input proof.");
+  }
+  if (selection.kind === "BrainArticle") {
+    invariant(Array.isArray(row.sourceIds) && row.sourceIds.length <= 1000
+      && row.sourceIds.every(id => typeof id === "string" && id.length > 0),
+    409, "RECOVERY_EVIDENCE_INVALID", "The article source references are unavailable.");
+    const derivation = row.derivationJson == null ? null : readBrainArticleDerivation(row.derivationJson as Prisma.JsonValue);
+    invariant(row.derivationJson == null || derivation, 409, "RECOVERY_EVIDENCE_INVALID", "The article derivation is unavailable.");
+    const references = new Map<string, string | undefined>((row.sourceIds as string[]).map(id => [id, undefined]));
+    for (const source of derivation?.sources ?? []) references.set(source.sourceId, source.fingerprint);
+    invariant(references.size <= 1000, 413, "RECOVERY_EVIDENCE_LIMIT", "The article has too many original source references.");
+    for (const [id, fingerprint] of references) {
+      const source = await db.brainSource.findFirst({ where: { workspaceId: selection.workspaceId, id } });
+      invariant(source && (!fingerprint || lineageContentFingerprint("BrainSource", source) === fingerprint),
+        409, "RECOVERY_SOURCE_RESTRICTED", "An original article source is unavailable or changed.");
+      parents.push({ kind: "BrainSource", id });
+    }
+  }
   for (const parent of parents) {
     for (const root of await captureArtifactInputProof(actor, selection.workspaceId, [parent], db)) retain(root);
   }
@@ -209,8 +277,45 @@ async function selectionForRecovery(actor: AppActor, selection: Selection, db: D
   invariant(!getSupportAuthorizationContext()?.origin,403,"RECOVERY_HUMAN_REQUIRED","Use a direct workspace membership to recover history.");
   const row = await load(db, selection);
   invariant(row && await targetAudience(actor, selection, row, db), 404, "NOT_FOUND", "Selected history is unavailable.");
-  invariant(selection.kind.startsWith("Conversation") || member?.role === "ADMIN", 403, "RECOVERY_ADMIN_REQUIRED", "A workspace administrator must recover company history.");
+  invariant(selection.kind.startsWith("Conversation") || (member?.role === "ADMIN" && member.id !== "global-operator"), 403, "RECOVERY_ADMIN_REQUIRED", "A workspace administrator must recover company history.");
   return row;
+}
+
+/** Discovery lists identifiers only. Original content still requires a published receipt. */
+export async function listLegacyRecoveryCandidates(actor: AppActor, workspaceId: string, kind: LegacyRecoveryKind, cursor?: string) {
+  invariant(DISCOVERY_KINDS.includes(kind) && (!cursor || /^[a-zA-Z0-9_-]{1,191}$/.test(cursor)),
+    400, "INVALID_INPUT", "Select a supported historical record type and cursor.");
+  return prisma.$transaction(async tx => {
+    invariant(actor.kind === "user" && !getMcpOrigin() && !getSupportAuthorizationContext()?.origin,
+      403, "RECOVERY_HUMAN_REQUIRED", "Use a direct workspace membership to recover history.");
+    const member = await requireWorkspaceMembership({ actor, workspaceId, tx });
+    invariant(member?.role === "ADMIN" && member.id !== "global-operator" && !getSupportAuthorizationContext()?.origin,
+      403, "RECOVERY_ADMIN_REQUIRED", "A workspace administrator must recover company history.");
+    const table = recoveryTable(kind);
+    const privateFilter = ["Action", "Proposal", "Tension", "BrainArticle"].includes(kind)
+      ? Prisma.sql`AND candidate."isPrivate" = false` : Prisma.empty;
+    const archivedFilter = kind === "MeetingInsight" ? Prisma.empty : Prisma.sql`AND candidate."archivedAt" IS NULL`;
+    const componentFilter = kind === "MeetingAgenda" ? Prisma.sql`AND candidate."agendaJson" IS NOT NULL AND candidate."agendaJson" <> 'null'::jsonb`
+      : kind === "MeetingTranscript" ? Prisma.sql`AND candidate."transcript" IS NOT NULL AND candidate."transcript" <> ''` : Prisma.empty;
+    const audienceFields = MEETING_COMPONENTS.includes(kind) ? Prisma.sql`, candidate."informationCategory"`
+      : kind === "MeetingInsight" ? Prisma.sql`, candidate."meetingId"`
+        : kind === "BrainArticle" ? Prisma.sql`, candidate."isPrivate", candidate."variantOfArticleId"` : Prisma.empty;
+    const candidates = await tx.$queryRaw<Array<Row & { createdAt: Date }>>(Prisma.sql`
+      SELECT candidate.id, candidate."createdAt" ${audienceFields} FROM ${Prisma.raw(`"${table}"`)} candidate
+      LEFT JOIN LATERAL (
+        SELECT origin FROM "ArtifactInputLineage" WHERE "workspaceId" = ${workspaceId}
+          AND "artifactType" = ${kind} AND "artifactId" = candidate.id ORDER BY revision DESC LIMIT 1
+      ) AS head ON true
+      WHERE candidate."workspaceId" = ${workspaceId} AND (head.origin IS NULL OR head.origin = 'UNKNOWN')
+        ${cursor ? Prisma.sql`AND candidate.id > ${cursor}` : Prisma.empty} ${privateFilter} ${archivedFilter} ${componentFilter}
+      ORDER BY candidate.id LIMIT 51`);
+    const items = [];
+    for (const candidate of candidates.slice(0, 50)) {
+      const { id, createdAt } = candidate;
+      if (await targetAudience(actor, { workspaceId, kind, id }, candidate, tx)) items.push({ id, createdAt });
+    }
+    return { items, nextCursor: candidates.length > 50 ? candidates[49].id : null };
+  }, { isolationLevel: "RepeatableRead", timeout: 30_000 });
 }
 
 export async function inspectLegacyRecovery(actor: AppActor, selection: Selection) {
@@ -397,7 +502,7 @@ export async function recoverLegacyArtifact(actor: AppActor, submission: Selecti
         [{kind:request.kind,id:request.id,fingerprint:request.expectedFingerprint}],tx),409,"RECOVERY_CONFLICT","The original recovery is no longer valid.");
       return {id:request.id,kind:request.kind,method:"CURRENT_RECOVERY" as const,basis:capsule.basis,receiptId:receipt.id};
     }
-    const table = request.kind;
+    const table = recoveryTable(request.kind);
     await tx.$queryRaw(Prisma.sql`SELECT id FROM ${Prisma.raw(`"${table}"`)} WHERE id=${request.id} FOR UPDATE`);
     await tx.$queryRaw`SELECT id FROM "Member" WHERE "workspaceId"=${request.workspaceId} AND "userId"=${userId} FOR SHARE`;
     const current = await selectionForRecovery(actor, request, tx);

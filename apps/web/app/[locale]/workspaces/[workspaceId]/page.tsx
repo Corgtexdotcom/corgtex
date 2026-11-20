@@ -572,7 +572,12 @@ export default async function WorkspaceDashboard({
         </Link>
       </div>
 
-      {limitedSnapshot && <p role="status">{t("limitedSnapshot")}</p>}
+      {limitedSnapshot && (
+        <p role="status">
+          {t("limitedSnapshot")}
+          {actionWindow.count + proposalWindow.count + tensionWindow.count === 0 && <> {tHistory("homeNotice")}</>}
+        </p>
+      )}
       {actor.kind === "user" && membership?.role === "ADMIN" && membership.id !== "global-operator" && (
         <Link href={`/workspaces/${workspaceId}/settings/history-recovery`}>{tHistory("title")}</Link>
       )}

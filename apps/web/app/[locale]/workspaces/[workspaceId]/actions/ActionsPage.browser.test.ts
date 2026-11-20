@@ -322,12 +322,13 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("Actions card
         expect(await opener.getAttribute("aria-haspopup")).toBe("dialog");
         if (surface === "roles") expect(await panel.locator("summary").first().evaluate(node => document.activeElement === node)).toBe(true);
         const summary = panel.locator("summary").filter({ hasText: /^Edit/ }).last();
+        const titleName = surface === "roles" ? "name" : "title";
+        const title = panel.locator(`details[open] input[name="${titleName}"]`);
         await summary.focus(); await page.keyboard.press("Enter");
+        await title.waitFor();
         await page.keyboard.press("Tab"); await settled();
         expect(await panel.count()).toBe(1);
         expect(await panel.getAttribute("role")).toBe("dialog");
-        const titleName = surface === "roles" ? "name" : "title";
-        const title = panel.locator(`details[open] input[name="${titleName}"]`);
         expect(await title.evaluate(node => document.activeElement === node)).toBe(true);
         await title.fill("Unsaved synthetic edit");
         await page.keyboard.press("Tab"); await settled();
@@ -341,7 +342,7 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("Actions card
         expect(await panel.count()).toBe(0);
         expect(await opener.evaluate(node => document.activeElement === node)).toBe(true);
         await opener.press("Enter"); await settled();
-        await summary.focus(); await page.keyboard.press("Enter"); await page.keyboard.press("Tab");
+        await summary.focus(); await page.keyboard.press("Enter"); await title.waitFor(); await page.keyboard.press("Tab");
         const form = title.locator("xpath=ancestor::form[1]");
         await title.fill(""); await form.locator('button[type="submit"]').click();
         expect(await title.evaluate(node => document.activeElement === node)).toBe(true);
@@ -371,7 +372,7 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("Actions card
       await route.fulfill({ json: request.method() === "GET" ? { fingerprint: "a".repeat(64) } : {} });
     });
     await page.goto(`${origin}/?surface=recovery`);
-    await page.getByLabel("Record link").fill("/en/workspaces/synthetic-workspace/tensions/example");
+    await page.getByLabel("Record link", { exact: true }).fill("/en/workspaces/synthetic-workspace/tensions/example");
     await page.getByRole("button", { name: "Check record" }).click();
     const restore = page.getByRole("button", { name: "Restore record" });
     await restore.waitFor();
@@ -381,6 +382,39 @@ describe.runIf(process.env.SHARED_INTERACTIONS_BROWSER_QA === "1")("Actions card
     await page.getByRole("status").filter({ hasText: "The selected record was recovered" }).waitFor();
     expect(requests[1].body).toMatchObject({ kind: "Tension", id: "example",
       expectedFingerprint: "a".repeat(64), consent: "RESTORE_SELECTED_HISTORY" });
+  });
+
+  it("reviews exact batch candidates before publishing and reports partial outcomes", async () => {
+    const requests: string[] = [];
+    await page.route("**/api/workspaces/synthetic-workspace/history-recovery**", async route => {
+      const request = route.request();
+      const query = new URL(request.url()).searchParams;
+      if (request.method() === "POST") {
+        const { id, expectedFingerprint, consent } = request.postDataJSON();
+        expect(expectedFingerprint).toBe("a".repeat(64));
+        expect(consent).toBe("RESTORE_SELECTED_HISTORY");
+        requests.push(`POST ${id}`);
+        return route.fulfill({ status: id === "restricted" ? 409 : 200, json: {} });
+      }
+      if (query.get("mode") === "candidates") {
+        return route.fulfill({ json: { items: ["recoverable", "restricted"].map(id => ({ id, createdAt: "2026-10-16T12:00:00.000Z" })), nextCursor: null } });
+      }
+      requests.push(`GET ${query.get("id")}`);
+      return route.fulfill({ json: { fingerprint: "a".repeat(64) } });
+    });
+    await page.goto(`${origin}/?surface=recovery`);
+    await page.getByLabel("Record type").selectOption("MeetingInsight");
+    await page.getByRole("button", { name: "Find records" }).click();
+    await page.getByRole("checkbox", { name: /recoverable/ }).check();
+    await page.getByRole("checkbox", { name: /restricted/ }).check();
+    await page.getByRole("button", { name: "Review selection" }).click();
+    const publish = page.getByRole("button", { name: "Restore selected records" });
+    await publish.waitFor();
+    expect(requests).toEqual(["GET recoverable", "GET restricted"]);
+    await publish.click();
+    await page.getByRole("status").filter({ hasText: "could not be recovered" }).waitFor();
+    expect(requests).toEqual(["GET recoverable", "GET restricted", "POST recoverable", "POST restricted"]);
+    expect(await page.getByText("Recovered", { exact: true }).count()).toBe(1);
   });
 
   it.each(["goals", "roles"])("%s secondary form retains native field navigation and submits once", async surface => {

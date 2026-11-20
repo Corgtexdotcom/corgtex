@@ -1,11 +1,21 @@
 # Selected legacy history recovery
 
-An authenticated workspace admin can recover selected company Actions, Tensions, and
-Proposals from known record links in Settings → Recover workspace history. The
-same API at `/api/workspaces/{workspaceId}/history-recovery` supports Goals, Goal
-Updates, Key Results, Documents, BrainSources, Roles, and Circles.
-Recovery of a linked Tension or Proposal requires readable source lineage for its
-recorded meeting or proposal contributor.
+A directly signed-in workspace admin can open Recover workspace history from
+Home. Paste a known record link or choose a record type to find older candidates
+by ID and date. Review a selection of up to ten candidates, then confirm recovery.
+The browser checks each current fingerprint before confirmation and reports each
+result independently.
+
+Recover uploaded meeting transcripts first, followed by meeting summaries,
+agendas, and selected insights. Recover linked proposals, tensions, and actions
+after their sources. A provider import or recording without a verifiable source
+must be repaired through its original intake. Existing insights are preserved and
+never reapplied. Company Brain articles retain their recorded source references
+and exact derivation evidence. Private articles and member-specific variants are
+excluded.
+
+The same API at `/api/workspaces/{workspaceId}/history-recovery` also supports
+Goals, Goal Updates, Key Results, Documents, BrainSources, Roles, and Circles.
 Conversation sessions and turns are recoverable only by their actual owner and
 remain private. Finance records are excluded.
 

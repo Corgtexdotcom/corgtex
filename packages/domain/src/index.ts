@@ -216,7 +216,7 @@ export { withMeetingTranscriptWorker, getMeetingTranscriptWorkerPurpose, isMeeti
 export * from "./workspace-initial-knowledge";
 export { captureManualTranscriptSourceArtifact } from "./manual-transcript-source-input";
 
-export { inspectLegacyRecovery, recoverLegacyArtifact, legacyRecoveryFileBinding, LEGACY_RECOVERY_KINDS, type LegacyRecoveryKind } from "./legacy-recovery";
+export { listLegacyRecoveryCandidates, inspectLegacyRecovery, recoverLegacyArtifact, legacyRecoveryFileBinding, LEGACY_RECOVERY_KINDS, type LegacyRecoveryKind } from "./legacy-recovery";
 
 export { isLegacyRecoveryProofWorkspaceShareable } from "./source-lineage";
 
