@@ -14,7 +14,8 @@ const ACTIVE_RECORDING_STATUSES = new Set(["PENDING", "SCHEDULED", "JOINING", "R
 type MeetingListRow = {
   id: string;
   recordedAt: Date | string;
-  transcript: string | null;
+  transcript?: string | null;
+  hasTranscript?: boolean;
 };
 
 export type MeetingListView<TMeeting extends MeetingListRow> = {
@@ -56,11 +57,11 @@ export function filterMeetingRecordingForEvidenceState<TRecording extends { stat
 }
 
 function hasTranscript(meeting: MeetingListRow) {
-  return Boolean(meeting.transcript?.trim());
+  return meeting.hasTranscript ?? Boolean(meeting.transcript?.trim());
 }
 
 function newestFirst<TMeeting extends MeetingListRow>(meetings: TMeeting[]) {
-  return meetings.sort((left, right) => new Date(right.recordedAt).getTime() - new Date(left.recordedAt).getTime());
+  return meetings.sort((left, right) => new Date(right.recordedAt).getTime() - new Date(left.recordedAt).getTime() || left.id.localeCompare(right.id));
 }
 
 export function buildMeetingListView<TMeeting extends MeetingListRow>(params: {

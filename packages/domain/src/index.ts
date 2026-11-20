@@ -222,4 +222,6 @@ export { isLegacyRecoveryProofWorkspaceShareable } from "./source-lineage";
 
 export { WorkItemReadRelease } from "./work-item-readable-page";
 
+export { listDocumentDirectory } from "./documents";
+export { listMeetingDirectory } from "./meetings";
 export * from "./manual-agent-triggers";

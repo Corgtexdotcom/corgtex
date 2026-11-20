@@ -466,6 +466,11 @@
     "workEmailLabel": "Work Email"
   },
   "brain": {
+    "directoryPreviousPage": "Previous documents",
+    "directoryNextPage": "Next documents",
+    "directoryFirstWindow": "First source window",
+    "directoryNextWindow": "Next source window",
+    "directoryWindowLimited": "Source directory counts cover a limited window. + means at least this many; … means unknown. Narrow the date range; meeting history is also available in Meetings.",
     "countWindowLimited": "Counts cover a limited window. + means at least this many; … means the total is not yet known.",
     "typeCountWindowLimited": "Article type counts cover a limited window. All type filters remain available.",
     "meetingUploadGuidance": "Upload meeting transcripts in Meetings to get a summary and reviewable follow-ups. Use Brain for articles, search, and other documents.",
@@ -1638,6 +1643,14 @@
     "viewSuggestions": "View suggestions"
   },
   "meetings": {
+    "directoryFirstWindow": "First source window",
+    "directoryNextWindow": "Next source window",
+    "directoryWindowLimited": "Directory counts cover a limited source window. + means at least this many; … means unknown. Narrow the date filters to see other meetings.",
+    "directoryWindowEmpty": "No matching meetings in this window. Narrow the date filters to search other dates.",
+    "paginationLabel": "Meeting pages",
+    "paginationPrevious": "Previous",
+    "paginationNext": "Next",
+    "paginationSummary": "Page {page} of {pageCount} · showing {count} of {total}",
     "actionDraftLabel": "Action draft",
     "followUpDraftLabel": "Follow-up draft",
     "meetingGuideTitle": "When should I use Meetings or Brain?",

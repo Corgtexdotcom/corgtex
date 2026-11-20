@@ -2,7 +2,7 @@ import React from "react";
 import { boundedCountLabel } from "@/lib/bounded-count-label";
 import { BrainTypeCountFilters } from "./BrainTypeCountFilters";
 import { brainArticleVisibility, listBrainArticleTypeCounts, listBrainPendingSourceCount } from "./article-type-counts";
-import { listArticles, readableArtifactIds, requireWorkspaceMembership, listMeetings, listDocuments, resolveKnowledgeAccessDomains } from "@corgtex/domain";
+import { listArticles, readableArtifactIds, requireWorkspaceMembership, listMeetingDirectory, listDocumentDirectory, resolveKnowledgeAccessDomains } from "@corgtex/domain";
 import { answerKnowledgeQuestion, searchIndexedKnowledge } from "@corgtex/knowledge";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -14,9 +14,11 @@ import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import Link from "next/link";
 import { KnowledgeFileUploader } from "../KnowledgeFileUploader";
 import { BrainSearchResults } from "./BrainSearchResults";
+import { listLinkableBrainSearchDocumentRefs } from "./search-document-refs";
 import { listLinkableBrainSearchMeetingRefs } from "./search-meeting-refs";
 import {
   BRAIN_ARTICLE_TYPES,
+  getBrainRangeCutoff,
   buildBrainIndexHref,
   buildBrainIndexState,
   canManageBrainArticle,
@@ -43,13 +45,16 @@ export default async function BrainPage({
   const t = await getTranslations("brain");
   const resolvedSearch = searchParams ? await searchParams : {};
   const normalizedSearch = normalizeBrainIndexSearch(resolvedSearch);
+  const now = new Date();
+  const documentCursor = Array.isArray(resolvedSearch.documentCursor) ? resolvedSearch.documentCursor[0] : resolvedSearch.documentCursor;
+  const createdFrom = getBrainRangeCutoff(normalizedSearch.range, now) ?? undefined;
   const provisionalQuery = normalizedSearch.query;
   const provisionalQuestion = normalizedSearch.question;
   const accessDomains = provisionalQuery.trim() || provisionalQuestion.trim()
     ? await resolveKnowledgeAccessDomains(actor, workspaceId)
     : [];
 
-  const [{ items: articles }, articleTypeCounts, pendingSources, searchResults, answer, allMeetings, allDocuments] = await Promise.all([
+  const [{ items: articles }, articleTypeCounts, pendingSources, searchResults, answer, meetingDirectory, documentDirectory] = await Promise.all([
     listArticles(actor, {
       workspaceId,
       take: 500,
@@ -63,9 +68,14 @@ export default async function BrainPage({
     provisionalQuestion.trim()
       ? answerKnowledgeQuestion({ actor, workspaceId, question: provisionalQuestion, limit: 4, accessDomains, sourceTypes: ["BRAIN_ARTICLE", "DOCUMENT", "MEETING"] })
       : Promise.resolve(null),
-    listMeetings(actor, workspaceId, { status: "COMPLETED" }),
-    listDocuments(actor, workspaceId),
+    listMeetingDirectory(actor, workspaceId, { status: "COMPLETED" }, meeting => ({ id: meeting.id, title: meeting.title, source: meeting.source, recordedAt: meeting.recordedAt }))
+      .then(result => ({ ...result, items: result.items.sort((a, b) => b.recordedAt.getTime() - a.recordedAt.getTime() || a.id.localeCompare(b.id)) })),
+    listDocumentDirectory(actor, workspaceId, { createdFrom, cursor: documentCursor }),
   ]);
+
+  const allMeetings = meetingDirectory.items;
+  const allDocuments = documentDirectory.items;
+  const directoryCount = (count: number, complete: boolean) => boundedCountLabel({ count, complete });
 
   const {
     query,
@@ -79,12 +89,13 @@ export default async function BrainPage({
     documents,
   } = buildBrainIndexState({
     articles,
+    now,
     meetings: allMeetings,
     documents: allDocuments,
     searchParams: resolvedSearch,
     typeCounts: articleTypeCounts.counts,
   });
-  const [resolvedSearchArticleRefs, resolvedSearchMeetingRefs] = await Promise.all([
+  const [resolvedSearchArticleRefs, resolvedSearchMeetingRefs, resolvedSearchDocumentRefs] = await Promise.all([
     listSearchResultArticleRefs({
       workspaceId,
       actor,
@@ -93,6 +104,7 @@ export default async function BrainPage({
       visibleArticleRefs: articles,
     }),
     listLinkableBrainSearchMeetingRefs({ actor, workspaceId, results: searchResults }),
+    listLinkableBrainSearchDocumentRefs({ actor, workspaceId, results: searchResults }),
   ]);
   const resolvedSearchResults = resolveBrainSearchResults(
     searchResults,
@@ -101,11 +113,22 @@ export default async function BrainPage({
   );
   const groupedSearchResults = groupBrainSearchResults(
     resolvedSearchResults,
-    new Set(allDocuments.map((document) => document.id)),
+    new Set(resolvedSearchDocumentRefs.map((document) => document.id)),
   );
 
   const totalArticleLabel = boundedCountLabel({count:articleTypeCounts.counts.reduce((sum,row)=>sum+row.count,0),complete:articleTypeCounts.complete});
   const filterHref = (type: string | null) => buildBrainIndexHref({ query, question, range, type });
+  const rawDocumentPage = Array.isArray(resolvedSearch.documentPage) ? resolvedSearch.documentPage[0] : resolvedSearch.documentPage;
+  const documentPageCount = Math.max(1, Math.ceil(documents.length / 10));
+  const requestedDocumentPage = rawDocumentPage && /^\d+$/.test(rawDocumentPage) && Number.isSafeInteger(Number(rawDocumentPage)) ? Number(rawDocumentPage) : 1;
+  const documentPage = Math.min(documentPageCount, Math.max(1, requestedDocumentPage));
+  const documentWindowHref = (cursor: string | null, page = 1) => {
+    const href = buildBrainIndexHref({ query, question, range, type: selectedType });
+    const params = new URLSearchParams(href.split("?")[1] ?? "");
+    if (cursor) params.set("documentCursor", cursor);
+    if (page > 1) params.set("documentPage", String(page));
+    return `?${params}`;
+  };
   const rangeHref = (nextRange: "30d" | "90d" | "all") => buildBrainIndexHref({ query, question, range: nextRange, type: selectedType });
 
   return (
@@ -114,7 +137,7 @@ export default async function BrainPage({
         <div className="brain-masthead-row">
           <h1>{t("title")}</h1>
           <span className="brain-masthead-meta">
-            {t("stats", { articles: totalArticleLabel, meetings: allMeetings.length })}
+            {t("stats", { articles: totalArticleLabel, meetings: directoryCount(allMeetings.length, meetingDirectory.complete) })}
           </span>
         </div>
       </div>
@@ -332,8 +355,10 @@ export default async function BrainPage({
               </div>
             </div>
 
+            {(!meetingDirectory.complete || !documentDirectory.complete) && <p className="nr-item-meta" role="status">{t("directoryWindowLimited")}</p>}
+
             <div className="brain-raw-section">
-              <h3>{t("meetings", { count: meetings.length })}</h3>
+              <h3>{t("meetings", { count: directoryCount(meetings.length, meetingDirectory.complete) })}</h3>
               <div className="brain-raw-list">
                 {meetings.slice(0, 20).map((meeting) => (
                   <a key={meeting.id} href={`/workspaces/${workspaceId}/meetings`} className="brain-raw-item">
@@ -346,14 +371,20 @@ export default async function BrainPage({
             </div>
 
             <div className="brain-raw-section">
-              <h3>{t("documents", { count: documents.length })}</h3>
+              <h3>{t("documents", { count: directoryCount(documents.length, documentDirectory.complete) })}</h3>
               <div className="brain-raw-list">
-                {documents.slice(0, 10).map((document) => (
+                {documents.slice((documentPage - 1) * 10, documentPage * 10).map((document) => (
                   <div key={document.id} className="brain-raw-item">
                     <strong>{document.title}</strong>
                     <span>{new Date(document.createdAt).toLocaleDateString()} · {document.source}</span>
                   </div>
                 ))}
+              </div>
+              <div className="actions-inline">
+                {documentPage > 1 && <Link href={documentWindowHref(documentCursor ?? null, documentPage - 1)}>{t("directoryPreviousPage")}</Link>}
+                {documentPage < documentPageCount && <Link href={documentWindowHref(documentCursor ?? null, documentPage + 1)}>{t("directoryNextPage")}</Link>}
+                {documentCursor && <Link href={documentWindowHref(null)}>{t("directoryFirstWindow")}</Link>}
+                {documentDirectory.nextCursor && <Link href={documentWindowHref(documentDirectory.nextCursor)}>{t("directoryNextWindow")}</Link>}
               </div>
             </div>
           </section>
