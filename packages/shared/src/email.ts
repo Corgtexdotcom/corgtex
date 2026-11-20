@@ -6,6 +6,21 @@ export type EmailSendResult =
   | { status: "SENT"; providerMessageId: string | null }
   | { status: "SKIPPED"; reason: string };
 
+/** A provider response is not a delivery receipt. Only explicit rejection codes prove no acceptance. */
+export class EmailSendError extends Error {
+  readonly outcome: "FAILED" | "UNKNOWN";
+
+  constructor(message: string, readonly providerCode: string) {
+    super(message);
+    this.name = "EmailSendError";
+    // Resend 6.1.3 does not retain HTTP status. Unknown, transport/server and
+    // idempotency-conflict errors may follow an accepted request, so stay unknown.
+    this.outcome = ["missing_required_field", "invalid_idempotency_key", "invalid_access", "invalid_parameter",
+      "invalid_region", "rate_limit_exceeded", "missing_api_key", "invalid_api_key", "invalid_from_address",
+      "validation_error", "not_found", "method_not_allowed"].includes(providerCode) ? "FAILED" : "UNKNOWN";
+  }
+}
+
 export type EmailTrackingOptions = {
   emailType: string;
   userId?: string | null;
@@ -82,7 +97,7 @@ export async function sendEmail(params: {
 
   if (error) {
     console.error("[email] Resend API error:", error);
-    throw new Error(`Email send failed: ${error.message}`);
+    throw new EmailSendError(`Email send failed: ${error.message}`, error.name);
   }
 
   if (data?.id && params.tracking) {

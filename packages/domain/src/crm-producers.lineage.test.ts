@@ -4,6 +4,7 @@ import type { AppActor } from "@corgtex/shared";
 
 const fixture = vi.hoisted(() => {
   const tables: Record<string, any[]> = {};
+  const hooks = { afterRollback: null as ((error: unknown) => void) | null };
   const time = new Date("2026-10-12T09:00:00Z");
   const match = (row: any, where: any): boolean => Object.entries(where ?? {}).every(([key, value]: [string, any]) => {
     if (key === "AND" || key === "conversation" || key === "member" || key === "account" || key === "contact" || key === "deal") return true;
@@ -63,13 +64,15 @@ const fixture = vi.hoisted(() => {
   }
   prisma.$transaction = vi.fn(async (run: (tx: any) => Promise<any>) => {
     const before = Object.fromEntries(names.map((name) => [name, tables[name].map((row) => ({ ...row }))]));
-    try { return await run(prisma); } catch (error) { for (const name of names) tables[name] = before[name]; throw error; }
+    try { return await run(prisma); } catch (error) { for (const name of names) tables[name] = before[name]; hooks.afterRollback?.(error); throw error; }
   });
-  return { beforeEmail: null as (() => void) | null, prisma, tables, time, revoked: new Set<string>(), departed: new Set<string>() };
+  return { hooks, emailConfigured: true, beforeEmail: null as (() => void) | null, prisma, tables, time, revoked: new Set<string>(), departed: new Set<string>() };
 });
-vi.mock("@corgtex/shared", () => ({ prisma: fixture.prisma, env: { APP_URL: "https://synthetic.test" }, toInputJson: (value: unknown) => value }));
+vi.mock("@corgtex/shared", async () => ({ prisma: fixture.prisma, env: { APP_URL: "https://synthetic.test" },
+  EmailSendError: (await import("../../shared/src/email")).EmailSendError,
+  toInputJson: (value: unknown) => value }));
 vi.mock("../../shared/src/env", () => ({ env: {
-  get RESEND_API_KEY() { fixture.beforeEmail?.(); return "synthetic-resend-key"; },
+  get RESEND_API_KEY() { fixture.beforeEmail?.(); return fixture.emailConfigured ? "synthetic-resend-key" : undefined; },
   EMAIL_FROM: "Synthetic <sender@example.test>", EMAIL_REPLY_TO: "reply@example.test",
 } }));
 vi.mock("../../shared/src/db", () => ({ prisma: fixture.prisma }));
@@ -116,7 +119,7 @@ async function dripRoots() {
 describe("CRM writers with real source receipts", () => {
   beforeEach(() => {
     for (const name of Object.keys(fixture.tables)) fixture.tables[name] = [];
-    fixture.revoked.clear(); fixture.departed.clear(); fixture.beforeEmail = null; vi.clearAllMocks();
+    fixture.hooks.afterRollback = null; fixture.revoked.clear(); fixture.departed.clear(); fixture.beforeEmail = null; fixture.emailConfigured = true; vi.clearAllMocks();
     wire.mockResolvedValue(new Response(JSON.stringify({ id: "synthetic-message" }), {status: 200, headers: {"Content-Type": "application/json"}}));
     vi.stubGlobal("fetch", wire);
     fixture.prisma.$queryRaw.mockReset().mockResolvedValue([]);
@@ -176,7 +179,7 @@ describe("CRM writers with real source receipts", () => {
     const opts = { actor: agent, lineageRoots: roots, operationId: "job", expectedFollowUpNumber: 1, send };
     await recordDripFollowUp(ws, "lead", "Proven body", opts);
     expect(send).toHaveBeenCalledWith("lead@synthetic.test", "job", expect.objectContaining({signal: expect.any(AbortSignal), authorizeAttempt: expect.any(Function)})); expect(fixture.tables.demoLead[0].followUpCount).toBe(1);
-    expect(JSON.parse(fixture.tables.crmActivity[0].bodyMd)).toEqual({ operationId: "job", status: "SENT", providerMessageId: "message", emailContent: "Proven body" });
+    expect(JSON.parse(fixture.tables.crmActivity[0].bodyMd)).toEqual({ operationId: "job", status: "PROVIDER_ACCEPTED", providerMessageId: "message", followUpRecorded: true, emailContent: "Proven body" });
     expect(await readableArtifactIds(agent, ws, "DemoLead", fixture.tables.demoLead)).toEqual(new Set(["lead"]));
     expect(await readableArtifactIds(agent, ws, "CrmActivity", fixture.tables.crmActivity)).toEqual(new Set([fixture.tables.crmActivity[0].id]));
     await expect(recordDripFollowUp(ws, "lead", "Proven body", opts)).rejects.toMatchObject({ code: "DELIVERY_ALREADY_RESERVED" });
@@ -191,7 +194,7 @@ describe("CRM writers with real source receipts", () => {
     const send = vi.fn((_recipient, _operationId, controls) => sendEmail({to: "lead@synthetic.test", subject: "Original", html: "<p>Original</p>"}, controls));
     const work = recordDripFollowUp(ws, "lead", "Proven body", {actor: agent, lineageRoots: roots, operationId: "job", expectedFollowUpNumber: 1, send});
     if (change === "unchanged") {
-      await expect(work).resolves.toMatchObject({delivery: {status: "SENT"}});
+      await expect(work).resolves.toMatchObject({delivery: {status: "PROVIDER_ACCEPTED"}});
       expect(wire).toHaveBeenCalledTimes(1);
       expect(wire.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
       expect(fixture.tables.demoLead[0].followUpCount).toBe(1);
@@ -236,11 +239,11 @@ describe("CRM writers with real source receipts", () => {
     await expect(recordDripFollowUp(ws, "lead", "Body", { actor: agent, lineageRoots: [...roots, ...wrongRoots], operationId: wrong.id, expectedFollowUpNumber: 1, send })).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
     expect(send).not.toHaveBeenCalled(); expect(fixture.tables.crmActivity).toHaveLength(0);
   });
-  it("keeps durable reservation on provider uncertainty and never automatically repeats an attempted email", async () => {
+  it("records provider uncertainty and never automatically repeats an attempted email", async () => {
     const roots = await dripRoots(); const send = vi.fn(async () => { throw new Error("Synthetic uncertain provider response"); });
     const opts = { actor: agent, lineageRoots: roots, operationId: "job", expectedFollowUpNumber: 1, send };
     await expect(recordDripFollowUp(ws, "lead", "Proven body", opts)).rejects.toThrow("Synthetic uncertain");
-    expect(fixture.tables.demoLead[0].followUpCount).toBe(0); expect(JSON.parse(fixture.tables.crmActivity[0].bodyMd).status).toBe("RESERVED");
+    expect(fixture.tables.demoLead[0].followUpCount).toBe(0); expect(JSON.parse(fixture.tables.crmActivity[0].bodyMd).status).toBe("UNKNOWN");
     await expect(recordDripFollowUp(ws, "lead", "Proven body", opts)).rejects.toMatchObject({ code: "DELIVERY_ALREADY_RESERVED" });
     expect(send).toHaveBeenCalledTimes(1);
   });
@@ -258,14 +261,80 @@ describe("CRM writers with real source receipts", () => {
     const opts = { actor: agent, lineageRoots: roots, operationId: "job", expectedFollowUpNumber: 1, send };
     fixture.prisma.crmActivity.update.mockRejectedValueOnce(new Error("Synthetic commit-path failure"));
     await expect(recordDripFollowUp(ws, "lead", "Body", opts)).rejects.toThrow("Synthetic commit-path failure");
-    expect(fixture.tables.demoLead[0].followUpCount).toBe(0); expect(JSON.parse(fixture.tables.crmActivity[0].bodyMd).status).toBe("RESERVED");
+    expect(fixture.tables.demoLead[0].followUpCount).toBe(0);
+    expect(JSON.parse(fixture.tables.crmActivity[0].bodyMd)).toMatchObject({ status: "PROVIDER_ACCEPTED", providerMessageId: "message", followUpRecorded: false });
     await expect(recordDripFollowUp(ws, "lead", "Body", opts)).rejects.toMatchObject({ code: "DELIVERY_ALREADY_RESERVED" });
     expect(send).toHaveBeenCalledTimes(1);
   });
-  it("does not treat a skipped or missing-provider-id send as successful", async () => {
+  it("records a skipped send without consuming the follow-up allowance", async () => {
     const roots = await dripRoots(); const send = vi.fn(async () => ({ status: "SKIPPED" as const, reason: "Synthetic missing credentials" }));
-    await expect(recordDripFollowUp(ws, "lead", "Body", { actor: agent, lineageRoots: roots, operationId: "job", expectedFollowUpNumber: 1, send })).rejects.toMatchObject({ code: "DELIVERY_UNCERTAIN" });
+    await expect(recordDripFollowUp(ws, "lead", "Body", { actor: agent, lineageRoots: roots, operationId: "job", expectedFollowUpNumber: 1, send })).rejects.toMatchObject({ code: "DELIVERY_SKIPPED" });
     expect(fixture.tables.demoLead[0].followUpCount).toBe(0); expect(fixture.tables.crmActivity).toHaveLength(1);
+    expect(JSON.parse(fixture.tables.crmActivity[0].bodyMd)).toMatchObject({ status: "SKIPPED", reason: "Synthetic missing credentials" });
+    expect(await readableArtifactIds(agent, ws, "CrmActivity", fixture.tables.crmActivity)).toEqual(new Set([fixture.tables.crmActivity[0].id]));
+  });
+  it("records the real sender's missing configuration without a provider request or allowance change", async () => {
+    const roots = await dripRoots();
+    fixture.emailConfigured = false;
+    const send = vi.fn((_recipient, _operationId, controls) => sendEmail({ to: "lead@synthetic.test", subject: "Original", html: "Body" }, controls));
+    const opts = { actor: agent, lineageRoots: roots, operationId: "job", expectedFollowUpNumber: 1, send };
+    await expect(recordDripFollowUp(ws, "lead", "Body", opts)).rejects.toMatchObject({ code: "DELIVERY_SKIPPED" });
+    expect(JSON.parse(fixture.tables.crmActivity[0].bodyMd)).toMatchObject({ status: "SKIPPED", reason: "RESEND_API_KEY missing" });
+    expect(fixture.tables.demoLead[0]).toMatchObject({ followUpCount: 0, lastFollowUpAt: null });
+    await expect(recordDripFollowUp(ws, "lead", "Body", opts)).rejects.toMatchObject({ code: "DELIVERY_ALREADY_RESERVED" });
+    expect(wire).not.toHaveBeenCalled();
+  });
+  it.each(["member", "source", "lease", "reservation", "storage"])("retains the durable reservation when receipt recovery is blocked by %s", async change => {
+    const roots = await dripRoots();
+    let leaseActive = true;
+    const failure = new Error("Synthetic accounting write failure");
+    const send = vi.fn(async () => ({ status: "SENT" as const, providerMessageId: "message" }));
+    const opts = { actor: agent, lineageRoots: roots, operationId: "job", expectedFollowUpNumber: 1, send };
+    fixture.hooks.afterRollback = error => {
+      if (error !== failure) return;
+      if (change === "member") fixture.departed.add("agent");
+      if (change === "source") fixture.tables.workflowJob[0].payload = { demoLeadId: "lead", followUpNumber: 1, changed: true };
+      if (change === "lease") leaseActive = false;
+      if (change === "reservation") fixture.tables.crmActivity[0].title = "Operator inspection pending";
+    };
+    fixture.prisma.crmActivity.update.mockRejectedValueOnce(failure);
+    if (change === "storage") fixture.prisma.crmActivity.update.mockRejectedValueOnce(new Error("Synthetic recovery storage failure"));
+    await expect(withArtifactInputWriteFence(async () => {
+      if (!leaseActive) throw new Error("Synthetic lease lost");
+    }, () => recordDripFollowUp(ws, "lead", "Body", opts))).rejects.toBe(failure);
+    expect(JSON.parse(fixture.tables.crmActivity[0].bodyMd).status).toBe("RESERVED");
+    if (change === "reservation") expect(fixture.tables.crmActivity[0].title).toBe("Operator inspection pending");
+    expect(fixture.tables.demoLead[0]).toMatchObject({ followUpCount: 0, lastFollowUpAt: null });
+    await expect(recordDripFollowUp(ws, "lead", "Body", { ...opts, actor: user })).rejects.toMatchObject({ code: "DELIVERY_ALREADY_RESERVED" });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+  it("records an accepted response without a provider id as unknown, not delivered", async () => {
+    const roots = await dripRoots();
+    const send = vi.fn(async () => ({ status: "SENT" as const, providerMessageId: null }));
+    const opts = { actor: agent, lineageRoots: roots, operationId: "job", expectedFollowUpNumber: 1, send };
+    await expect(recordDripFollowUp(ws, "lead", "Body", opts)).rejects.toMatchObject({ code: "DELIVERY_UNCERTAIN" });
+    expect(JSON.parse(fixture.tables.crmActivity[0].bodyMd)).toMatchObject({ status: "UNKNOWN", reason: "MISSING_PROVIDER_MESSAGE_ID" });
+    expect(fixture.tables.demoLead[0].followUpCount).toBe(0);
+    await expect(recordDripFollowUp(ws, "lead", "Body", opts)).rejects.toMatchObject({ code: "DELIVERY_ALREADY_RESERVED" });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    [403, "validation_error", "FAILED"],
+    [429, "rate_limit_exceeded", "FAILED"],
+    [409, "concurrent_idempotent_requests", "UNKNOWN"],
+    [500, "application_error", "UNKNOWN"],
+  ])("records the real sender's provider response %s (%s) as %s without claiming delivery", async (status, name, outcome) => {
+    const roots = await dripRoots();
+    wire.mockResolvedValueOnce(new Response(JSON.stringify({ name, message: "Synthetic provider denial" }), {
+      status: Number(status), headers: { "Content-Type": "application/json" },
+    }));
+    const send = vi.fn((_recipient, _operationId, controls) => sendEmail({ to: "lead@synthetic.test", subject: "Original", html: "Body", idempotencyKey: "crm-drip/job" }, controls));
+    const opts = { actor: agent, lineageRoots: roots, operationId: "job", expectedFollowUpNumber: 1, send };
+    await expect(recordDripFollowUp(ws, "lead", "Body", opts)).rejects.toThrow("Synthetic provider denial");
+    expect(JSON.parse(fixture.tables.crmActivity[0].bodyMd).status).toBe(outcome);
+    expect(fixture.tables.demoLead[0].followUpCount).toBe(0);
+    await expect(recordDripFollowUp(ws, "lead", "Body", opts)).rejects.toMatchObject({ code: "DELIVERY_ALREADY_RESERVED" });
+    expect(wire).toHaveBeenCalledTimes(1);
   });
   it("rejects changed recipient, unknown operation and worker lease loss before outbound", async () => {
     const roots = await dripRoots(); const send = vi.fn(async () => ({ status: "SENT" as const, providerMessageId: "message" }));
