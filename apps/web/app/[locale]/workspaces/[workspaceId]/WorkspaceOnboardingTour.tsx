@@ -11,6 +11,7 @@ import type { AiWorkspaceLaunchState } from "@/lib/ai-workspace-launch";
 import { OnboardingAiWorkspaceSetup } from "./OnboardingAiWorkspaceSetup";
 import { SourceIntakePanel } from "./SourceIntakePanel";
 import { workspaceRouteMatches, workspaceStepUrl } from "./onboarding-tour-routing";
+import { onTourHighlightStarted } from "./tour-accessibility";
 
 const RESTART_EVENT = "corgtex:restart-self-serve-tour";
 
@@ -262,6 +263,7 @@ export function WorkspaceOnboardingTour({
       showProgress: true,
       animate: true,
       allowClose: false,
+      onHighlightStarted: onTourHighlightStarted,
       steps: tourSteps.map((step, index) => ({
         element: step.element,
         popover: {
