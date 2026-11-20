@@ -3,6 +3,7 @@ import { getKnowledgeSearchInputRoots, searchIndexedKnowledge } from "@corgtex/k
 import { assertCatalogModelBudget, CatalogBudgetError, defaultModelGateway, IncrementalJsonStringDecoder, WorkspaceModelBudgetError } from "@corgtex/models";
 import { AppError, captureArtifactInputProof, captureImmutableArtifactInputProof, sealArtifactInputActor, withArtifactInputReadCapture, withArtifactInputWriteFence, type ArtifactInputWriteFence, checkBudget, loadRelevantMemories, requireWorkspaceMembership, storeAgentMemory, supportCapabilityVersion } from "@corgtex/domain";
 import { prepareConversationInputs, loadConversationHistory, loadConversationOnboarding, type ConversationInputCollector } from "./conversation-inputs";
+import { ConversationInterruptionJournal } from "./conversation-interruption";
 import { createConversationLineageCollector } from "./conversation-lineage";
 import { executeTrustedConversationReadTool } from "./conversation-tool-lineage";
 import { type LineageRoot } from "@corgtex/domain";
@@ -200,6 +201,7 @@ type ConversationContext = {
   lineageRoots?: LineageRoot[];
   requestLineageRoots?: LineageRoot[];
   terminalOperation?: { collector?: ConversationInputCollector; message?: string };
+  interruptionJournal?: ConversationInterruptionJournal;
 };
 
 type ConversationContextUsed = {
@@ -991,7 +993,7 @@ async function executeConversationToolCall({
     };
   }
 
-  const result = await handler(actor, ctx, args);
+  const result = await observeConversationHandler(ctx, toolName, () => handler(actor, ctx, args));
   return {
     result,
     pendingOperation: null,
@@ -1009,7 +1011,7 @@ async function executeVersionedFollowupTools(response: import("@corgtex/models")
     const toolName = call.function.name;
     const args = effectiveToolArgs(toolName, ctx, call.function.arguments);
     try {
-      const result = await TOOL_HANDLERS[toolName]!(actor, ctx, args);
+      const result = await observeConversationHandler(ctx, toolName, () => TOOL_HANDLERS[toolName]!(actor, ctx, args));
       executed.push({ toolName, args, result });
       messages.push({ role: "tool", content: JSON.stringify(result), name: toolName, tool_call_id: call.id });
     } catch (err) {
@@ -1191,21 +1193,22 @@ async function closeAsyncIterator<T, TReturn>(iterator: AsyncIterator<T, TReturn
   }
 }
 
+function observeConversationHandler<T>(ctx: ConversationContext, toolName: string, handler: () => Promise<T>) {
+  return ctx.interruptionJournal ? ctx.interruptionJournal.observe(toolName, handler) : handler();
+}
+
 function throwIfConversationCanceled(ctx: ConversationContext, error?: unknown) {
   if (!ctx.signal?.aborted) return;
-  const reason = ctx.signal.reason;
-  if (reason instanceof Error) {
-    throw reason;
-  }
-  if (error instanceof Error) {
-    throw error;
-  }
+  // Abort reasons may be strings or other values. A handler's unrelated failure
+  // must never replace the user's original cancellation reason.
+  if (ctx.signal.reason !== undefined) throw ctx.signal.reason;
+  if (error instanceof Error) throw error;
   throw new Error("Conversation stream canceled.");
 }
 
 function immutableConversationSubmission(ctx: ConversationContext): ConversationContext {
   sealArtifactInputActor(requireConversationToolActor(ctx));
-  return { ...ctx,
+  return { ...ctx, interruptionJournal: undefined,
     ...(ctx.operationScopes ? { operationScopes: Object.freeze([...ctx.operationScopes]) } : {}),
     ...(ctx.pageContext ? { pageContext: structuredClone(ctx.pageContext) } : {}),
     ...(ctx.lineageRoots ? { lineageRoots: structuredClone(ctx.lineageRoots) } : {}),
@@ -1222,11 +1225,19 @@ export async function processConversationTurn(ctx: ConversationContext) {
   const origin = getSupportAuthorizationContext()?.origin;
   const prepared = await withArtifactInputWriteFence(ctx.persistenceFence, () => prepareConversationInputs({ ...ctx, actor: requireConversationToolActor(ctx) }));
   const terminalOperation: NonNullable<ConversationContext["terminalOperation"]> = {};
-  const checkedContext = { ...ctx, ...prepared, terminalOperation };
-  const result = await processConversationTurnContent(checkedContext);
-  const lineageRoots = await (terminalOperation.collector ?? prepared.collector).roots();
-  if (origin) await supportCapabilityVersion(origin.userId, origin.workspaceId, origin.version);
-  return { ...result, lineageRoots, promptInputId: prepared.promptInputId };
+  const interruptionJournal = new ConversationInterruptionJournal();
+  const checkedContext = { ...ctx, ...prepared, terminalOperation, interruptionJournal };
+  try {
+    const result = await processConversationTurnContent(checkedContext);
+    const lineageRoots = await (terminalOperation.collector ?? prepared.collector).roots();
+    if (origin) await supportCapabilityVersion(origin.userId, origin.workspaceId, origin.version);
+    throwIfConversationCanceled(ctx);
+    return { ...result, lineageRoots, promptInputId: prepared.promptInputId };
+  } catch (error) {
+    if (ctx.signal?.aborted) await interruptionJournal.persist(checkedContext, actor);
+    throwIfConversationCanceled(ctx);
+    throw error;
+  }
 }
 
 async function processConversationTurnContent(ctx: ConversationContext): Promise<{
@@ -1529,7 +1540,9 @@ export async function* processConversationTurnStream(ctx: ConversationContext) {
   const origin = getSupportAuthorizationContext()?.origin;
   const prepared = await withArtifactInputWriteFence(ctx.persistenceFence, () => prepareConversationInputs({ ...ctx, actor: requireConversationToolActor(ctx) }));
   const terminalOperation: NonNullable<ConversationContext["terminalOperation"]> = {};
-  const iterator = processConversationTurnStreamContent({ ...ctx, ...prepared, terminalOperation });
+  const interruptionJournal = new ConversationInterruptionJournal();
+  const checkedContext = { ...ctx, ...prepared, terminalOperation, interruptionJournal };
+  const iterator = processConversationTurnStreamContent(checkedContext);
   const buffered: string[] = [];
   try {
     while (true) {
@@ -1551,8 +1564,18 @@ export async function* processConversationTurnStream(ctx: ConversationContext) {
       if (origin) await supportCapabilityVersion(origin.userId, origin.workspaceId, origin.version);
       return { ...result.value, lineageRoots, promptInputId: prepared.promptInputId };
     }
+  } catch (error) {
+    throwIfConversationCanceled(ctx);
+    throw error;
   } finally {
-    await iterator.return({ assistantMessage: "", contextUsed: {} });
+    try {
+      await iterator.return({ assistantMessage: "", contextUsed: {} });
+    } finally {
+      if (ctx.signal?.aborted) {
+        await interruptionJournal.persist(checkedContext, actor);
+        throwIfConversationCanceled(ctx);
+      }
+    }
   }
 }
 

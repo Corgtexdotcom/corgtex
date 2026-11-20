@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { AppActor } from "@corgtex/shared";
 
 const {
+  interruptionAuditMock,
   assertCatalogModelBudgetMock,
   applyContextGraphProposedDiffMock,
   buildSelectedRegionContextMock,
@@ -36,6 +37,7 @@ const {
   storeAgentMemoryMock,
   workspaceFeatureFlagFindManyMock,
 } = vi.hoisted(() => ({
+  interruptionAuditMock: vi.fn(),
   assertCatalogModelBudgetMock: vi.fn(),
   applyContextGraphProposedDiffMock: vi.fn(),
   buildSelectedRegionContextMock: vi.fn(),
@@ -86,7 +88,7 @@ vi.mock("@corgtex/shared", () => ({
     conversationTurn: {
       findMany: conversationTurnFindManyMock,
     },
-    auditLog: { findFirst: vi.fn().mockResolvedValue(null), update: vi.fn() },
+    auditLog: { create: interruptionAuditMock, findFirst: vi.fn().mockResolvedValue(null), update: vi.fn() },
     tension: { findMany: vi.fn().mockResolvedValue([]), count: vi.fn().mockResolvedValue(0) },
     action: { findMany: vi.fn().mockResolvedValue([]), count: vi.fn().mockResolvedValue(0) },
     proposal: { findMany: vi.fn().mockResolvedValue([]), count: vi.fn().mockResolvedValue(0) },
@@ -280,6 +282,7 @@ function pendingOperationFixture(overrides: Record<string, any> = {}) {
 
 describe("processConversationTurn", () => {
   beforeEach(() => {
+    interruptionAuditMock.mockReset().mockResolvedValue({ id: "audit-interruption" });
     vi.clearAllMocks(); (env as any).MODEL_PROVIDER = "openai_compatible"; chatMock.mockReset(); chatStreamMock.mockReset(); chatEventStreamMock.mockReset();
     chatEventStreamMock.mockImplementation((request: any) => (async function* () { const stream = chatStreamMock(request)[Symbol.asyncIterator](); let message = ""; let terminal: any; while (true) { const next = await stream.next(); if (next.done) { terminal = next.value; break; } message += next.value; } const calls = terminal?.tool_calls ?? []; const name = calls.length ? "route_conversation_tools" : "respond_conversation"; const args = calls.length ? { calls: calls.map((call: any) => { try { return { name: call.function.name, arguments: JSON.parse(call.function.arguments) }; } catch { return { name: call.function.name, arguments: null }; } }) } : { answer: message || terminal?.content || "" }; const wrapper = { id: "route-test", type: "function", function: { name, arguments: JSON.stringify(args) } }; yield { type: "tool_call_delta", index: 0, idDelta: wrapper.id, nameDelta: name, argumentsDelta: wrapper.function.arguments }; return { ...terminal, content: "", tool_calls: [wrapper] }; })());
     vi.mocked(searchIndexedKnowledge).mockReset().mockResolvedValue([]);
@@ -473,11 +476,14 @@ describe("processConversationTurn", () => {
   }
 
   describe.each([false, true])("generic mutation cancellation (stream=%s)", (streaming) => {
-    it.each([false, true])("stops after a held first mutation when aborted=%s", async (aborted) => {
+    it.each(["before-first", "held-resolves", "held-rejects", "receipt-fails", "string-reason", "control"])("records interrupted dispatch observations: %s", async (scenario) => {
+      const aborted = scenario !== "control";
+      const beforeFirst = scenario === "before-first";
+      if (scenario === "receipt-fails") interruptionAuditMock.mockRejectedValueOnce(new Error("synthetic audit unavailable"));
       const { createAction, createGoal } = await import("@corgtex/domain");
       const { processConversationTurn, processConversationTurnStream } = await import("./conversation");
       const controller = new AbortController();
-      const cancellation = new Error("synthetic conversation canceled");
+      const cancellation = scenario === "string-reason" ? "synthetic cancellation reason" : new Error("synthetic conversation canceled");
       let started!: () => void;
       let release!: () => void;
       const firstStarted = new Promise<void>((resolve) => { started = resolve; });
@@ -485,7 +491,8 @@ describe("processConversationTurn", () => {
       vi.mocked(createAction).mockReset().mockImplementationOnce(async () => {
         started();
         await firstReleased;
-        return { id: "action-committed" } as any;
+        if (scenario === "held-rejects") throw new Error("synthetic post-effect failure with private details");
+        return { id: "action-committed", privateOutput: "never copy this" } as any;
       });
       vi.mocked(createGoal).mockReset().mockResolvedValue({ id: "goal-committed" } as any);
       conversationTurnFindManyMock.mockResolvedValueOnce([{
@@ -497,10 +504,16 @@ describe("processConversationTurn", () => {
       ];
       const summary = "Both synthetic mutations succeeded.";
       if (streaming) {
-        chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: calls }))
+        chatStreamMock.mockReturnValueOnce((async function* () {
+          if (beforeFirst) controller.abort(cancellation);
+          return { content: "", tool_calls: calls };
+        })())
           .mockReturnValueOnce(streamResponse([summary], { content: summary }));
       } else {
-        chatMock.mockResolvedValueOnce({ content: "", tool_calls: calls })
+        chatMock.mockImplementationOnce(async () => {
+          if (beforeFirst) controller.abort(cancellation);
+          return { content: "", tool_calls: calls };
+        })
           .mockResolvedValueOnce({ content: summary });
       }
       const emitted: string[] = [];
@@ -515,13 +528,23 @@ describe("processConversationTurn", () => {
       })() : processConversationTurn(ctx);
       // Observe rejection immediately so cancellation cannot become unhandled.
       const outcome = turn.then((result) => ({ result, error: null }), (error: unknown) => ({ result: null, error }));
-      await firstStarted;
-      expect(createGoal).not.toHaveBeenCalled();
-      if (aborted) controller.abort(cancellation);
+      if (!beforeFirst) {
+        await firstStarted;
+        expect(createGoal).not.toHaveBeenCalled();
+        if (aborted) controller.abort(cancellation);
+      }
       release();
       const settled = await outcome;
-      expect(createAction).toHaveBeenCalledOnce();
+      expect(createAction).toHaveBeenCalledTimes(beforeFirst ? 0 : 1);
       if (aborted) {
+        expect.soft(interruptionAuditMock).toHaveBeenCalledOnce();
+        expect.soft(interruptionAuditMock).toHaveBeenCalledWith({ data: expect.objectContaining({
+          workspaceId: "ws-1", actorUserId: "user-1", action: "conversation.interrupted",
+          entityType: "ConversationPromptInput", entityId: "prompt-fixture",
+          meta: { version: 1, status: "CANCELED", observationScope: "model_tool_handlers",
+            calls: beforeFirst ? [] : [{ toolName: "create_action", handlerState: scenario === "held-rejects" ? "rejected" : "returned", effectState: "unknown" }] },
+        }) });
+        expect.soft(JSON.stringify(interruptionAuditMock.mock.calls)).not.toMatch(/privateOutput|never copy|First synthetic action|post-effect failure/);
         expect.soft(createGoal).not.toHaveBeenCalled();
         expect.soft(settled.error).toBe(cancellation);
         expect.soft(settled.result).toBeNull();
@@ -529,6 +552,7 @@ describe("processConversationTurn", () => {
         expect.soft(streaming ? chatStreamMock : chatMock).toHaveBeenCalledOnce();
         expect.soft(storeAgentMemoryMock).not.toHaveBeenCalled();
       } else {
+        expect(interruptionAuditMock).not.toHaveBeenCalled();
         expect(settled.error).toBeNull();
         expect(settled.result?.assistantMessage).toBe(summary);
         expect(createGoal).toHaveBeenCalledOnce();
@@ -624,6 +648,14 @@ describe("processConversationTurn", () => {
         }
         const settled = await outcome;
         if (aborted) {
+          expect.soft(interruptionAuditMock).toHaveBeenCalledOnce();
+          const receipt = interruptionAuditMock.mock.calls[0]?.[0]?.data.meta;
+          expect.soft(receipt?.status).toBe("CANCELED");
+          expect.soft(receipt?.calls).toEqual([
+            { toolName: "query_actions", handlerState: "returned", effectState: "unknown" },
+            { toolName: "query_tensions", handlerState: "returned", effectState: "unknown" },
+            ...(beforeFirst ? [] : [{ toolName: "update_action", handlerState: scenario === "held-rejects" ? "rejected" : "returned", effectState: "unknown" }]),
+          ]);
           expect.soft(settled.error).toBe(cancellation);
           expect.soft(settled.result).toBeNull();
           expect.soft(emitted).toEqual([]);
