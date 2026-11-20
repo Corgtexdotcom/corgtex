@@ -117,6 +117,40 @@ describe("selected current legacy recovery",()=>{
     expect(await listLegacyRecoveryCandidates(f.owner, f.workspace.id, "Tension")).toEqual({ items: [], nextCursor: null });
   });
 
+  it.each([
+    { source: "granola", transcript: null, binding: "provider" },
+    { source: "manual", transcript: null, binding: "recording" },
+    { source: "manual", transcript: null, binding: "none" },
+    { source: "transcript-upload", transcript: " \n\t ", binding: "none" },
+  ])("withholds transcript-less Meeting recovery for $source ($binding)", async ({ source, transcript, binding }) => {
+    const f = await fixture();
+    const workspaceId = f.workspace.id;
+    const recordedAt = new Date();
+    const meeting = await db.meeting.create({ data: { workspaceId, source, title: "Unverified legacy meeting",
+      recordedAt, transcript, summaryMd: "Unverified historical summary", participantIds: [], participantEmails: [] } });
+    await db.auditLog.create({ data: { workspaceId, action: "meeting.created", entityType: "Meeting", entityId: meeting.id,
+      actorUserId: f.users[0].id, meta: { source } } });
+    if (binding === "provider") {
+      await db.meetingTranscriptSourceRecord.create({ data: { workspaceId, meetingId: meeting.id,
+        provider: "GRANOLA", externalId: randomUUID(), recordedAt, contentHash: "fixture",
+        transcriptText: "Provider transcript not authorized for this recovery" } });
+    }
+    if (binding === "recording") {
+      await db.meetingRecording.create({ data: { workspaceId, meetingId: meeting.id,
+        provider: "RECALL_AI", meetingUrl: "https://example.test/synthetic-recording" } });
+    }
+    const selection = f.select("Meeting", meeting);
+    const restricted = { status: 409, code: "RECOVERY_SOURCE_RESTRICTED" };
+    await expect(inspectLegacyRecovery(f.owner, selection)).rejects.toMatchObject(restricted);
+    // Submit independently of preview so the confirmation path must enforce the same guard.
+    await expect(recoverLegacyArtifact(f.owner, { ...selection,
+      expectedFingerprint: lineageContentFingerprint("Meeting", meeting), requestId: randomUUID(),
+      consent: "RESTORE_SELECTED_HISTORY" })).rejects.toMatchObject(restricted);
+    expect(await db.conversationOperationOutcome.count({ where: { workspaceId } })).toBe(0);
+    expect(await db.artifactInputLineage.count({ where: { workspaceId } })).toBe(0);
+    expect(await db.meeting.findUniqueOrThrow({ where: { id: meeting.id } })).toEqual(meeting);
+  });
+
   it("recovers a meeting upload and its applied Action without reapplying the insight", async () => {
     const f = await fixture();
     const workspaceId = f.workspace.id;

@@ -211,7 +211,11 @@ async function knownRoots(actor: AppActor, selection: Selection, row: Row, db: D
       && !meeting._count.transcriptSourceRecords && !meeting._count.recordings, 409, "RECOVERY_SOURCE_RESTRICTED",
       "The original transcript must be a recorded workspace upload with no external recording or import binding.");
   }
-  if (selection.kind === "Meeting" && typeof row.transcript === "string" && row.transcript) {
+  if (selection.kind === "Meeting") {
+    // A source label or a creation audit does not prove the origin of a
+    // transcript-less summary. Require the separately authorized transcript.
+    invariant(typeof row.transcript === "string" && row.transcript.trim().length > 0, 409,
+      "RECOVERY_SOURCE_RESTRICTED", "A meeting requires a verifiable transcript before it can be recovered.");
     parents.push({ kind: "MeetingTranscript", id: row.id });
   }
   if (selection.kind === "MeetingAgenda") {
