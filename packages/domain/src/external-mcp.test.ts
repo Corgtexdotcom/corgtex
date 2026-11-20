@@ -71,6 +71,16 @@ vi.mock("./external-mcp-response-input", () => ({
   registerExternalMcpResponseOutput: (_actor: unknown, _workspaceId: string, value: object) => value,
 }));
 
+// Exercise the real agent adapter against this domain and synthetic transport.
+vi.mock("@corgtex/domain", async () => ({
+  executeExternalMcpTool: (...args: Parameters<typeof import("./external-mcp").executeExternalMcpTool>) =>
+    import("./external-mcp").then(module => module.executeExternalMcpTool(...args)),
+}));
+vi.mock("@corgtex/knowledge", () => ({ searchIndexedKnowledge: vi.fn() }));
+vi.mock("../../agents/src/tools/knowledge", () => ({
+  INTERACTIVE_KNOWLEDGE_SOURCE_TYPES: [], resolveInteractiveKnowledgeAccessDomains: vi.fn(),
+}));
+
 const actor = {
   kind: "user" as const,
   user: {
@@ -442,6 +452,84 @@ describe("external MCP gateway", () => {
       providerAccountId: "box-user-1", mode: "SEARCH", toolName: "search_files_keyword",
       arguments: externalMcpNativeReadRequest("box", "SEARCH", { query: "budget", limit: 1 }).arguments }))
       .rejects.toMatchObject({ code: "EXTERNAL_MCP_ERROR" });
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ["notion-create-page", { operation: "read", confidence: 0.2 }],
+    ["notion-unknown-search", { operation: "read", confidence: 0.2 }],
+    ["notion-create-page", { confidence: 0.2, explicitUserIntent: true }],
+    ...[undefined, null, NaN, Infinity, -Infinity, "0.99", {}, -0.1, 1.1].map(confidence =>
+      ["notion-create-page", { confidence }] as [string, Record<string, unknown>]),
+  ])("withholds untrusted write authority for %s %j", async (toolName, claims) => {
+    externalMcpConnectionMock.findFirst.mockResolvedValue(activeNotionConnection());
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ result: { structuredContent: { ok: true } } })));
+    const { executeExternalMcpTool } = await import("./external-mcp");
+    const result = await executeExternalMcpTool(actor, {
+      workspaceId: "ws-1", providerKey: "notion", toolName, arguments: { title: "Synthetic" }, ...claims,
+    } as Parameters<typeof executeExternalMcpTool>[1]);
+    expect(result).toMatchObject({ skipped: true, policy: { policyClass: "draft_or_clarify", autoRunAllowed: false } });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["notion-create-page", 0.2, true],
+    ["notion-unknown-search", 0.2, true],
+    ...[undefined, null, NaN, Infinity, "0.99", 1.1].map(confidence => ["notion-create-page", confidence, true]),
+  ])("the real agent adapter cannot forge authority for %s %j", async (toolName, confidence, explicitUserIntent) => {
+    externalMcpConnectionMock.findFirst.mockResolvedValue(activeNotionConnection());
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ result: { structuredContent: { ok: true } } })));
+    const { executeExternalToolAction } = await import("../../agents/src/tools/external-mcp");
+    await expect(executeExternalToolAction(actor, { workspaceId: "ws-1" }, {
+      providerKey: "notion", toolName, argumentsJson: '{"title":"Synthetic"}', operation: "read", confidence, explicitUserIntent,
+    })).resolves.toMatchObject({ skipped: true });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["notion-search", "notion-fetch"])("preserves the trusted read classification for %s", async toolName => {
+    externalMcpConnectionMock.findFirst.mockResolvedValue(activeNotionConnection());
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ result: { structuredContent: { ok: true } } })));
+    const { executeExternalToolAction } = await import("../../agents/src/tools/external-mcp");
+    await expect(executeExternalToolAction(actor, { workspaceId: "ws-1" }, {
+      providerKey: "notion", toolName, argumentsJson: '{"query":"Synthetic"}', operation: "write", confidence: null,
+    })).resolves.toMatchObject({ skipped: false, policy: { policyClass: "read" } });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(externalMcpConnectionMock.findFirst).toHaveBeenCalledWith({ where: {
+      workspaceId: "ws-1", userId: actor.user.id, providerKey: "notion", status: "ACTIVE",
+    } });
+  });
+
+  it("preserves valid high-confidence delegated writes through the real agent adapter", async () => {
+    externalMcpConnectionMock.findFirst.mockResolvedValue(activeNotionConnection());
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ result: { structuredContent: { ok: true } } })));
+    const { executeExternalToolAction } = await import("../../agents/src/tools/external-mcp");
+    await expect(executeExternalToolAction(actor, { workspaceId: "ws-1" }, {
+      providerKey: "notion", toolName: "notion-create-page", argumentsJson: '{"title":"Synthetic"}', confidence: 0.95,
+    })).resolves.toMatchObject({ skipped: false, policy: { policyClass: "normal_write" } });
+    expect(JSON.parse(vi.mocked(fetch).mock.calls[0]![1]!.body as string).params).toEqual({
+      name: "notion-create-page", arguments: { title: "Synthetic" },
+    });
+  });
+
+  it.each(["box", "atlassian", "miro"] as const)("preserves the %s provider execution hold through the agent adapter", async providerKey => {
+    vi.stubGlobal("fetch", vi.fn());
+    const { executeExternalToolAction } = await import("../../agents/src/tools/external-mcp");
+    await expect(executeExternalToolAction(actor, { workspaceId: "ws-1" }, {
+      providerKey, toolName: "get_file_details", arguments: {}, confidence: 1, explicitUserIntent: true, operation: "read",
+    })).rejects.toMatchObject({ code: "EXTERNAL_TOOL_EXECUTION_DISABLED" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps workspace, user-actor and sensitive-tool restrictions ahead of transport", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    const { executeExternalMcpTool } = await import("./external-mcp");
+    const request = { workspaceId: "ws-1", providerKey: "notion" as const,
+      toolName: "notion-create-page", arguments: {}, confidence: 1, explicitUserIntent: true };
+    requireWorkspaceMembershipMock.mockRejectedValueOnce(new Error("FORBIDDEN"));
+    await expect(executeExternalMcpTool(actor, request)).rejects.toThrow("FORBIDDEN");
+    await expect(executeExternalMcpTool({ kind: "agent", authProvider: "credential", label: "Synthetic agent" }, request)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(executeExternalMcpTool(actor, { ...request, toolName: "reveal_tool_link_credential", operation: "read" }))
+      .resolves.toMatchObject({ skipped: true, policy: { policyClass: "sensitive" } });
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("executes high-confidence external writes and audits the policy class", async () => {
