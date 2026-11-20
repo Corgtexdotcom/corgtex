@@ -620,9 +620,17 @@ async function failEvent(event: ClaimedEvent, error: unknown) {
   });
 }
 
-async function completeJob(jobId: string) {
-  await prisma.workflowJob.update({
-    where: { id: jobId },
+// Compare the claim atomically with settlement. An unrenewed generic handler
+// may outlive the reclaim window; only an actual takeover invalidates its claim.
+function genericClaimWhere(job: ClaimedJob, workerId: string): Prisma.WorkflowJobWhereInput {
+  return { id: job.id, workspaceId: job.workspaceId, type: job.type, status: "RUNNING",
+    lockedBy: workerId, attempts: job.attempts, startedAt: job.startedAt,
+    lockedAt: job.lockedAt };
+}
+
+async function completeJob(job: ClaimedJob, workerId: string) {
+  return prisma.workflowJob.updateMany({
+    where: genericClaimWhere(job, workerId),
     data: {
       status: "COMPLETED",
       completedAt: new Date(),
@@ -633,12 +641,12 @@ async function completeJob(jobId: string) {
   });
 }
 
-async function failJob(job: ClaimedJob, error: unknown) {
+async function failJob(job: ClaimedJob, workerId: string, error: unknown) {
   const message = error instanceof Error ? error.message : "Unknown worker error.";
-  const status: WorkflowJobStatus = job.attempts >= MAX_ATTEMPTS || executionAuthorizationRevoked(error) ? "FAILED" : "PENDING";
+  const status: WorkflowJobStatus = job.attempts >= MAX_ATTEMPTS || executionAuthorizationRevoked(error) || (error instanceof Error && (error as Error & {code?: string}).code === "AGENT_RUN_RECOVERY_REQUIRED") ? "FAILED" : "PENDING";
 
-  await prisma.workflowJob.update({
-    where: { id: job.id },
+  return prisma.workflowJob.updateMany({
+    where: genericClaimWhere(job, workerId),
     data: {
       status,
       error: message,
@@ -1341,7 +1349,11 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
           data: { status: "COMPLETED", completedAt: new Date(), error: null, lockedAt: null, lockedBy: null },
         });
       } else if (!superseded) {
-        await completeJob(job.id);
+        const settled = await completeJob(job, workerId);
+        if (settled.count !== 1) {
+          logger.warn("workflow_job_claim_lost", {jobId: job.id, workerId, attempts: job.attempts});
+          return;
+        }
       }
     }
   } catch (error) {
@@ -1384,7 +1396,11 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
           lockedAt: null, lockedBy: null },
       });
     } else {
-      await failJob(job, error);
+      const settled = await failJob(job, workerId, error);
+      if (settled.count !== 1) {
+        logger.warn("workflow_job_claim_lost", {jobId: job.id, workerId, attempts: job.attempts});
+        return;
+      }
     }
   } finally {
     await sqlLease?.stop();

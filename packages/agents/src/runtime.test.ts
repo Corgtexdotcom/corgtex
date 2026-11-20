@@ -576,6 +576,19 @@ describe("agent runtime", () => {
     };
   }
 
+  it.each(["PENDING", "RUNNING"])("requires reconciliation for an interrupted %s run without replaying effects", async status => {
+    const { executeAgentRun } = await import("./runtime");
+    prismaMock.agentRun.findFirst.mockResolvedValue({ id: "interrupted-run", status });
+    const execute = vi.fn();
+    await expect(executeAgentRun({ ...provenRunParams(), execute })).rejects.toMatchObject({
+      code: "AGENT_RUN_RECOVERY_REQUIRED",
+    });
+    expect(execute).not.toHaveBeenCalled();
+    expect(prismaMock.agentRun.create).not.toHaveBeenCalled();
+    expect(prismaMock.agentRun.update).not.toHaveBeenCalled();
+    expect(lineage.readableIds).not.toHaveBeenCalled();
+  });
+
   it("captures immutable inputs before work and writes exact child IDs plus DERIVED receipts atomically", async () => {
     const { executeAgentRun } = await import("./runtime");
     await executeAgentRun(provenRunParams());
