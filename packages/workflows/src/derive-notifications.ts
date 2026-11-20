@@ -1,3 +1,4 @@
+import { isReplayEvent, readPayloadString } from "@corgtex/shared/work-item-events";
 import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { meetingTranscriptInputProjection, type LineageInput, type LineageRoot } from "@corgtex/domain";
@@ -10,32 +11,6 @@ type NotificationDraft = {
   title: string;
   bodyMd: string | null;
 };
-
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readPayloadString(payload: unknown, key: string) {
-  if (!isObjectRecord(payload)) {
-    return null;
-  }
-
-  const value = payload[key];
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}
-
-function isReplayEvent(payload: unknown) {
-  if (!isObjectRecord(payload)) {
-    return false;
-  }
-
-  const runtimeMeta = payload.runtimeMeta;
-  if (!isObjectRecord(runtimeMeta)) {
-    return false;
-  }
-
-  return typeof runtimeMeta.replayOfEventId === "string" && runtimeMeta.replayOfEventId.trim().length > 0;
-}
 
 export function deriveNotificationsForEvent(event: {
   type: string;

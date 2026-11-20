@@ -10,6 +10,7 @@ import { Prisma, type EventStatus, type NewspaperCadence, type WorkflowJobStatus
 import { logger, prisma, type AppActor } from "@corgtex/shared";
 import { withWorkspaceSupportExecution, withMcpConnectionExecution, withMeetingTranscriptWorker, isMeetingTranscriptWorkerJob } from "@corgtex/domain";
 import { deriveJobsForEvent } from "./derive-jobs";
+import { decodeActionEvent } from "@corgtex/shared/work-item-events";
 import { handleReleaseDiagnostic } from "./release-diagnostic-handler";
 import { deriveDispatchNotifications } from "./derive-notifications";
 import { createActionAssignmentNotification } from "./action-assignment-notifications";
@@ -1218,6 +1219,14 @@ export async function dispatchPendingEvents(workerId: string, batchSize = DEFAUL
   for (const event of events) {
     try {
       await withWorkspaceSupportExecution(event, () => withMcpConnectionExecution(event, () => prisma.$transaction(async (tx) => {
+        const actionEvent = decodeActionEvent(event);
+        if (actionEvent.status === "invalid" || actionEvent.status === "unsupported-version") {
+          logger.warn("action_event_sync_rejected", {
+            eventId: event.id, eventType: event.type, workspaceId: event.workspaceId,
+            decodeStatus: actionEvent.status,
+            ...(actionEvent.status === "invalid" ? { reason: actionEvent.reason } : { version: actionEvent.version }),
+          });
+        }
         const derivedJobs = deriveJobsForEvent(event);
         for (const job of derivedJobs) {
           let dependsOnJobId: string | null = null;

@@ -401,6 +401,10 @@ describe("action domain lifecycle", () => {
     expect(recordAudit).not.toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
       action: "action.published",
     }));
+    expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [{
+      workspaceId: "workspace-1", type: "action.created", aggregateType: "Action", aggregateId: "action-private",
+      payload: { actionId: "action-private", title: "Follow up", eventVersion: 1 },
+    }]);
   });
 
   it("reuses a supplied transaction for atomic composed Action writes", async () => {
@@ -1259,6 +1263,9 @@ describe("action domain lifecycle", () => {
 
     expect(appendEvents.mock.calls.flatMap(([, events]) => events).map((event) => event.type))
       .toEqual(["action.updated"]);
+    expect(appendEvents.mock.calls.flatMap(([, events]) => events)[0]).toMatchObject({
+      aggregateId: "draft-1", payload: { actionId: "draft-1", fields: ["assigneeMemberId", "version"], eventVersion: 1 },
+    });
   });
 
   it("allows an assigned member to edit an open action and snapshots the previous version", async () => {

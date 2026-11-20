@@ -75,6 +75,7 @@ const {
   },
   txMock: {
     $queryRaw: vi.fn(),
+    event: { update: vi.fn() },
     mcpOAuthAccessToken: { findUnique: vi.fn() },
     workflowJob: {
       updateMany: vi.fn(),
@@ -221,7 +222,8 @@ vi.mock("@corgtex/domain", async () => ({
   getNewspaperDueOccurrence: getNewspaperDueOccurrenceMock,
 }));
 
-import { runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs } from "./outbox";
+import { dispatchPendingEvents, runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs } from "./outbox";
+import { createWebhookDeliveries } from "@corgtex/domain";
 import { resetWorkflowJobMetricsForTest, snapshotWorkflowJobMetrics } from "./job-metrics";
 
 function deferred<T = void>() {
@@ -247,6 +249,37 @@ function createdWorkflowJobs() {
 afterEach(() => {
   vi.useRealTimers();
   delete process.env.WORKER_DAILY_JOB_START_HOUR_UTC;
+});
+
+describe("rejected action sync dispatch", () => {
+  it.each([
+    [{}, { decodeStatus: "invalid", reason: "actionId must be a nonempty string" }],
+    [{ eventVersion: 2 }, { decodeStatus: "unsupported-version", version: 2 }],
+  ])("warns without dropping generic triage or leaking payload text %j", async (version, rejection) => {
+    const event = { id: "event-inbound", workspaceId: "ws-1", type: "action.created", aggregateType: null, aggregateId: null,
+      payload: { message: "Synthetic private payload text", inboundWebhookId: "inbound-1", source: "generic", ...version },
+      attempts: 1, createdAt: new Date("2026-11-05T06:02:00Z") };
+    prismaMock.$transaction.mockReset().mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
+    txMock.$queryRaw.mockReset().mockResolvedValueOnce([event]);
+    txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "triage-job" });
+    txMock.event.update.mockReset().mockResolvedValue({ id: event.id });
+    vi.mocked(createWebhookDeliveries).mockReset().mockResolvedValue([]);
+    loggerMock.warn.mockReset();
+
+    await expect(dispatchPendingEvents("worker-1", 1)).resolves.toBe(1);
+    expect(loggerMock.warn).toHaveBeenCalledExactlyOnceWith("action_event_sync_rejected", {
+      eventId: event.id, eventType: event.type, workspaceId: event.workspaceId, ...rejection,
+    });
+    expect(JSON.stringify(loggerMock.warn.mock.calls)).not.toContain("Synthetic private payload text");
+    expect(txMock.workflowJob.upsert).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      where: { dedupeKey: "ws-1:triage:2026-11-05T06:00:00.000Z" },
+      create: expect.objectContaining({ type: "agent.inbox-triage", eventId: event.id }),
+    }));
+    expect(createWebhookDeliveries).toHaveBeenCalledWith(txMock, expect.objectContaining({
+      payload: expect.objectContaining({ payload: event.payload }),
+    }));
+    expect(txMock.event.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "DISPATCHED" }) }));
+  });
 });
 
 describe("runPendingJobs", () => {

@@ -18,6 +18,7 @@
     "paths": {
       "@/*": ["apps/web/*"],
       "@corgtex/shared": ["packages/shared/src/index.ts"],
+      "@corgtex/shared/work-item-events": ["packages/shared/src/work-item-events.ts"],
       "@corgtex/shared/telemetry": ["packages/shared/src/telemetry.ts"],
       "@corgtex/shared/telemetry-node": ["packages/shared/src/telemetry-node.ts"],
       "@corgtex/shared/release-metadata-node": ["packages/shared/src/release-metadata-node.ts"],
