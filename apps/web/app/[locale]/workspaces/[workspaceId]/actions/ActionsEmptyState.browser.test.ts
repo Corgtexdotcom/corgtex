@@ -218,4 +218,35 @@ describe.runIf(process.env.ACTIONS_EMPTY_BROWSER_QA === "1")("Actions empty-view
     }
   });
 
+  it.each([
+    ["status", "ALL", "DRAFT", "DRAFT"],
+    ["due", "DRAFT", "OPEN", "DRAFT"],
+    ["priority", "DRAFT", "OPEN", "DRAFT"],
+  ])("recovers mobile hidden or filtered %s board using sequential keyboard navigation", async (group, status, columns, label) => {
+    await page.setViewportSize({width:390,height:844});
+    await page.evaluate(() => {localStorage.clear(); sessionStorage.setItem("emptyRecovery", "filtered");});
+    try {
+      await page.goto(origin + `/en/workspaces/synthetic-workspace/actions?view=kanban&scope=workspace&status=${status}&group=${group}&columns=${columns}`);
+      const recovery=page.getByRole("link",{name:"Show all workspace actions",exact:true});
+      await recovery.waitFor();
+      expect(await page.getByRole("status").innerText()).toContain(`Status: ${label} · Scope: All workspace actions`);
+      const b=await recovery.boundingBox();
+      expect(b).not.toBeNull();
+      expect(b!.width).toBeGreaterThan(40);
+      expect(b!.x).toBeGreaterThanOrEqual(0);
+      expect(b!.x+b!.width).toBeLessThanOrEqual(391);
+      await page.locator("#before").focus();
+      let reached=false;
+      for(let i=0;i<50;i++) {await page.keyboard.press("Tab"); if(await recovery.evaluate(el=>el===document.activeElement)){ reached=true; break; }}
+      expect(reached).toBe(true);
+      await page.screenshot({path:fileURLToPath(new URL(`qa-mobile-${group}.png`,artifactRoot))});
+      await page.keyboard.press("Enter");
+      await page.getByRole("link", {name:"Open Older workspace action", exact:true}).waitFor();
+      expect(new URL(page.url()).search).toBe("?status=ALL&scope=workspace");
+      expect(await page.evaluate(() => (window as unknown as { fixture: { submissions: unknown[] } }).fixture.submissions)).toEqual([]);
+    } finally {
+      await page.evaluate(() => { localStorage.clear(); sessionStorage.removeItem("emptyRecovery"); });
+      await page.setViewportSize({ width: 1280, height: 800 });
+    }
+  });
 });
