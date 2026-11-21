@@ -86,7 +86,7 @@ export default async function TensionDetailPage({
   const { statusFilters, dateFilters } = resolveTensionSearch(listSearch, listView === "kanban" ? null : "OPEN");
   const { circleIds, memberIds, sort } = resolveWorkItemFilters(listSearch);
   const { items: contextItems } = hasReviewContext && listView !== "kanban" ? await listTensions(actor, workspaceId, {
-    take: 200, circleIds, memberIds, sort,
+    take: 200, circleIds, memberIds, sort, statuses: statusFilters,
     openedFrom: dateFilters.openedFrom ? startOfUtcDate(dateFilters.openedFrom) : undefined,
     openedTo: dateFilters.openedTo ? endOfUtcDate(dateFilters.openedTo) : undefined,
     closedFrom: dateFilters.closedFrom ? startOfUtcDate(dateFilters.closedFrom) : undefined,

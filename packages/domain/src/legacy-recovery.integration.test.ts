@@ -2,12 +2,16 @@ import { createHash, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma as db, mcpCredentialVersion, type AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
-import { inspectLegacyRecovery, recoverLegacyArtifact, legacyRecoveryFileBinding } from "./legacy-recovery";
+import { listLegacyRecoveryCandidates, inspectLegacyRecovery, recoverLegacyArtifact, legacyRecoveryFileBinding } from "./legacy-recovery";
 import { captureArtifactInputProof, isArtifactInputProofReadable, lineageContentFingerprint, recordArtifactInputLineage } from "./source-lineage";
 import { defaultModelGateway } from "@corgtex/models";
 import { readableArtifactIds, isArtifactInputProofPubliclyShareable, isLegacyRecoveryProofWorkspaceShareable } from "./source-lineage";
 import { NextRequest } from "next/server";
 import { getAction } from "./actions";
+import { listTensions } from "./tensions";
+import { listProposals } from "./proposals";
+import { listMeetings } from "./meetings";
+import type { LegacyRecoveryKind } from "./legacy-recovery";
 import { getConversation } from "./conversations";
 const store = vi.hoisted(()=>({stream:vi.fn(), actor:vi.fn()}));
 vi.mock("@/lib/auth",()=>({resolveRequestActor:store.actor}));
@@ -19,7 +23,7 @@ async function fixture(){
   const users=await Promise.all(["owner","peer"].map(name=>db.user.create({data:{email:`${name}-${randomUUID()}@recovery.test`,passwordHash:"synthetic"}})));
   await db.member.createMany({data:users.map((user,index)=>({workspaceId:workspace.id,userId:user.id,role:index === 0 ? "ADMIN" : "CONTRIBUTOR"}))});
   const owner:AppActor={kind:"user",user:users[0]},peer:AppActor={kind:"user",user:users[1]};
-  const select=(kind:"Action"|"ConversationSession"|"ConversationTurn"|"Document"|"BrainSource",row:{id:string})=>({workspaceId:workspace.id,kind,id:row.id});
+  const select=(kind:LegacyRecoveryKind,row:{id:string})=>({workspaceId:workspace.id,kind,id:row.id});
   const restore=async(kind:Parameters<typeof select>[0],row:{id:string},actor=owner)=>{
     const choice=await inspectLegacyRecovery(actor,select(kind,row));
     return recoverLegacyArtifact(actor,{...select(kind,row),expectedFingerprint:choice.fingerprint,requestId:randomUUID(),consent:"RESTORE_SELECTED_HISTORY"});
@@ -73,6 +77,125 @@ describe("selected current legacy recovery",()=>{
     await expect(recoverLegacyArtifact(f.owner,{...request,expectedFingerprint:"0".repeat(64)})).rejects.toThrow();
     await expect(db.conversationOperationOutcome.update({where:{id:result.receiptId!},data:{operation:"FORGED"}})).rejects.toThrow("Immutable legacy recovery");
   });
+  it.each(["Tension", "Proposal"] as const)("restores selected company %s history without changing the original row", async kind => {
+    const f = await fixture();
+    const data = { workspaceId: f.workspace.id, authorUserId: f.users[0].id, title: "Historical record",
+      bodyMd: "Original body", status: "OPEN" as const, isPrivate: false };
+    const item = kind === "Tension" ? await db.tension.create({ data }) : await db.proposal.create({ data });
+    const list = kind === "Tension" ? listTensions : listProposals;
+    expect((await list(f.peer, f.workspace.id)).items).toEqual([]);
+    await expect(f.restore(kind, item, f.peer)).rejects.toMatchObject({ code: "RECOVERY_ADMIN_REQUIRED" });
+
+    await expect(f.restore(kind, item)).resolves.toMatchObject({ basis: "CURRENT_ATTESTATION" });
+    expect((await list(f.peer, f.workspace.id)).items).toEqual([expect.objectContaining({ id: item.id, bodyMd: data.bodyMd })]);
+    const original = kind === "Tension" ? await db.tension.findUnique({ where: { id: item.id } })
+      : await db.proposal.findUnique({ where: { id: item.id } });
+    expect(original).toEqual(item);
+  });
+
+  it("withholds a legacy Tension when its linked Proposal is restricted", async () => {
+    const f = await fixture();
+    const data = { workspaceId: f.workspace.id, authorUserId: f.users[0].id, title: "Historical record", bodyMd: "Original body" };
+    const proposal = await db.proposal.create({ data: { ...data, isPrivate: true } });
+    const tension = await db.tension.create({ data: { ...data, status: "OPEN", proposalId: proposal.id } });
+    await expect(f.restore("Tension", tension)).rejects.toThrow();
+    await expect(f.restore("Proposal", proposal)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await db.conversationOperationOutcome.count()).toBe(0);
+  });
+
+  it("lists only bounded metadata for a direct admin and removes recovered candidates", async () => {
+    const f = await fixture();
+    const data = { workspaceId: f.workspace.id, authorUserId: f.users[0].id, title: "Historical record" };
+    const visible = await db.tension.create({ data });
+    await db.tension.create({ data: { ...data, isPrivate: true } });
+    await db.tension.create({ data: { ...data, archivedAt: new Date() } });
+    await expect(listLegacyRecoveryCandidates(f.peer, f.workspace.id, "Tension")).rejects.toMatchObject({ code: "RECOVERY_ADMIN_REQUIRED" });
+    expect(await listLegacyRecoveryCandidates(f.owner, f.workspace.id, "Tension")).toEqual({
+      items: [{ id: visible.id, createdAt: visible.createdAt }], nextCursor: null,
+    });
+    await f.restore("Tension", visible);
+    expect(await listLegacyRecoveryCandidates(f.owner, f.workspace.id, "Tension")).toEqual({ items: [], nextCursor: null });
+  });
+
+  it.each([
+    { source: "granola", transcript: null, binding: "provider" },
+    { source: "manual", transcript: null, binding: "recording" },
+    { source: "manual", transcript: null, binding: "none" },
+    { source: "transcript-upload", transcript: " \n\t ", binding: "none" },
+  ])("withholds transcript-less Meeting recovery for $source ($binding)", async ({ source, transcript, binding }) => {
+    const f = await fixture();
+    const workspaceId = f.workspace.id;
+    const recordedAt = new Date();
+    const meeting = await db.meeting.create({ data: { workspaceId, source, title: "Unverified legacy meeting",
+      recordedAt, transcript, summaryMd: "Unverified historical summary", participantIds: [], participantEmails: [] } });
+    await db.auditLog.create({ data: { workspaceId, action: "meeting.created", entityType: "Meeting", entityId: meeting.id,
+      actorUserId: f.users[0].id, meta: { source } } });
+    if (binding === "provider") {
+      await db.meetingTranscriptSourceRecord.create({ data: { workspaceId, meetingId: meeting.id,
+        provider: "GRANOLA", externalId: randomUUID(), recordedAt, contentHash: "fixture",
+        transcriptText: "Provider transcript not authorized for this recovery" } });
+    }
+    if (binding === "recording") {
+      await db.meetingRecording.create({ data: { workspaceId, meetingId: meeting.id,
+        provider: "RECALL_AI", meetingUrl: "https://example.test/synthetic-recording" } });
+    }
+    const selection = f.select("Meeting", meeting);
+    const restricted = { status: 409, code: "RECOVERY_SOURCE_RESTRICTED" };
+    await expect(inspectLegacyRecovery(f.owner, selection)).rejects.toMatchObject(restricted);
+    // Submit independently of preview so the confirmation path must enforce the same guard.
+    await expect(recoverLegacyArtifact(f.owner, { ...selection,
+      expectedFingerprint: lineageContentFingerprint("Meeting", meeting), requestId: randomUUID(),
+      consent: "RESTORE_SELECTED_HISTORY" })).rejects.toMatchObject(restricted);
+    expect(await db.conversationOperationOutcome.count({ where: { workspaceId } })).toBe(0);
+    expect(await db.artifactInputLineage.count({ where: { workspaceId } })).toBe(0);
+    expect(await db.meeting.findUniqueOrThrow({ where: { id: meeting.id } })).toEqual(meeting);
+  });
+
+  it("recovers a meeting upload and its applied Action without reapplying the insight", async () => {
+    const f = await fixture();
+    const workspaceId = f.workspace.id;
+    const meeting = await db.meeting.create({ data: { workspaceId, source: "transcript-upload", title: "Historical meeting",
+      recordedAt: new Date(), transcript: "Original transcript", summaryMd: "Original summary", agendaJson: { title: "Original agenda" },
+      participantIds: [], participantEmails: [] } });
+    await db.auditLog.create({ data: { workspaceId, action: "meeting.created", entityType: "Meeting", entityId: meeting.id, actorUserId: f.users[0].id } });
+    const action = await db.action.create({ data: { workspaceId, title: "Original Action", authorUserId: f.users[0].id, isPrivate: false, status: "OPEN" } });
+    const insight = await db.meetingInsight.create({ data: { workspaceId, meetingId: meeting.id, title: "Original insight",
+      type: "ACTION_ITEM", status: "APPLIED", bodyMd: "Original action insight", appliedEntityType: "Action", appliedEntityId: action.id } });
+    await db.actionCreationSource.create({ data: { workspaceId, actionId: action.id, sourceType: "MEETING_INSIGHT", sourceId: insight.id } });
+
+    expect(await listMeetings(f.peer, workspaceId)).toEqual([]);
+    await expect(f.restore("Meeting", meeting)).rejects.toThrow();
+    await expect(f.restore("Action", action)).rejects.toThrow();
+    await f.restore("MeetingTranscript", meeting);
+    expect(await listMeetings(f.peer, workspaceId)).toEqual([expect.objectContaining({
+      id: meeting.id, transcript: meeting.transcript, summaryMd: null, agendaJson: null,
+    })]);
+    await f.restore("Meeting", meeting);
+    await f.restore("MeetingAgenda", meeting);
+    await f.restore("MeetingInsight", insight);
+    await f.restore("Action", action);
+
+    expect(await listMeetings(f.peer, workspaceId)).toEqual([expect.objectContaining({
+      id: meeting.id, summaryMd: meeting.summaryMd, agendaJson: meeting.agendaJson,
+    })]);
+    expect(await getAction(f.peer, { workspaceId, actionId: action.id })).toMatchObject({ id: action.id });
+    expect(await db.meetingInsight.findUnique({ where: { id: insight.id } })).toEqual(insight);
+    expect(await db.action.count({ where: { workspaceId } })).toBe(1);
+  });
+
+  it("preserves a company Brain article only after its referenced source is readable", async () => {
+    const f = await fixture();
+    const workspaceId = f.workspace.id;
+    const article = await db.brainArticle.create({ data: { workspaceId, slug: "historical", title: "Historical",
+      bodyMd: "Existing article", type: "PROJECT", sourceIds: ["source-without-proof"] } });
+    await expect(f.restore("BrainArticle", article)).rejects.toThrow();
+    await expect(db.artifactInputLineage.count({ where: { workspaceId, artifactId: article.id } })).resolves.toBe(0);
+    const independent = await db.brainArticle.create({ data: { workspaceId, slug: "independent", title: "Independent",
+      bodyMd: "Existing article", type: "PROJECT", sourceIds: [] } });
+    await f.restore("BrainArticle", independent);
+    expect(await readableArtifactIds(f.peer, workspaceId, "BrainArticle", [independent])).toEqual(new Set([independent.id]));
+  });
+
   it("restores a legacy mixed user message and answer only to its owner, without creating prompt inputs",async()=>{
     const f=await fixture();
     const session=await db.conversationSession.create({data:{workspaceId:f.workspace.id,userId:f.users[0].id,topic:"Historical conversation"}});

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, inspectLegacyRecovery, recoverLegacyArtifact, LEGACY_RECOVERY_KINDS, type LegacyRecoveryKind } from "@corgtex/domain";
+import { AppError, listLegacyRecoveryCandidates, inspectLegacyRecovery, recoverLegacyArtifact, LEGACY_RECOVERY_KINDS, type LegacyRecoveryKind } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 
@@ -14,8 +14,12 @@ function selection(workspaceId: string, kind: unknown, id: unknown) {
 export async function GET(request: NextRequest, context: Context) {
   try {
     const actor = await resolveRequestActor(request), {workspaceId} = await context.params;
-    return NextResponse.json(await inspectLegacyRecovery(actor,selection(workspaceId,request.nextUrl.searchParams.get("kind"),request.nextUrl.searchParams.get("id"))),
-      {headers:{"Cache-Control":"private, no-store"}});
+    const query = request.nextUrl.searchParams;
+    const kind = query.get("kind");
+    const result = query.get("mode") === "candidates"
+      ? await listLegacyRecoveryCandidates(actor, workspaceId, kind as LegacyRecoveryKind, query.get("cursor") ?? undefined)
+      : await inspectLegacyRecovery(actor, selection(workspaceId, kind, query.get("id")));
+    return NextResponse.json(result, { headers: { "Cache-Control": "private, no-store" } });
   } catch(error) {return handleRouteError(error);}
 }
 export async function POST(request: NextRequest, context: Context) {

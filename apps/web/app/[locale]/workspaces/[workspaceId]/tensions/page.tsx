@@ -75,8 +75,11 @@ export default async function TensionsPage({
     closedFrom: dateFilters.closedFrom ? startOfUtcDate(dateFilters.closedFrom) : undefined,
     closedTo: dateFilters.closedTo ? endOfUtcDate(dateFilters.closedTo) : undefined,
   };
-  const [{ items: tensions }, circles, members, adviceWindow] = await Promise.all([
-    listTensions(actor, workspaceId, { take: 200, circleIds, memberIds, sort, ...listDateFilters }),
+  const [{ items: tensions, total }, circles, members, adviceWindow] = await Promise.all([
+    listTensions(actor, workspaceId, {
+      take: 200, circleIds, memberIds, sort, ...listDateFilters,
+      statuses: view === "kanban" ? undefined : statusFilters,
+    }),
     listCircles(actor, workspaceId),
     listHumanMembers(workspaceId),
     listAdviceRequestWindow(actor, { workspaceId, subjectType: "TENSION", status: "ACTIVE", take: 100, cursor: typeof resolvedSearch.adviceCursor === "string" ? resolvedSearch.adviceCursor : undefined }),
@@ -91,6 +94,12 @@ export default async function TensionsPage({
 
   const groupedTensions = groupTensionsByStatus(tensions);
   const displayTensions = tensions.filter((tension) => tensionMatchesStatusFilters(tension, statusFilters));
+  function statusFilterLabel(status: TensionStatusFilter) {
+    const label = statusLabel(status);
+    if (view === "kanban") return t("filterWithCount", { label, count: groupedTensions[status].length });
+    const selected = statusFilters.length === 0 ? status === "ALL" : statusFilters.length === 1 && status === statusFilters[0];
+    return selected ? t("filterWithCount", { label, count: total }) : label;
+  }
   const activeInputRequestCounts = activeInputRequests.reduce((counts, request) => {
     const tensionId = request.process.subjectId;
     counts.set(tensionId, (counts.get(tensionId) ?? 0) + 1);
@@ -576,7 +585,7 @@ export default async function TensionsPage({
                 href={tensionFilterHref(status)}
                 className={`nr-filter-item ${tensionFilterActive(status) ? "nr-filter-active" : ""}`}
               >
-                {t("filterWithCount", { label: statusLabel(status), count: groupedTensions[status].length })}
+                {statusFilterLabel(status)}
               </a>
             ))}
           </div>

@@ -59,6 +59,7 @@ export type ListTensionsOptions = {
   skip?: number;
   archiveFilter?: ArchiveFilter;
   status?: TensionStatus;
+  statuses?: readonly TensionStatus[];
   circleId?: string | null;
   circleIds?: string[] | null;
   memberId?: string | null;
@@ -224,6 +225,16 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
     const openedAt = dateRangeWhere(opts?.openedFrom, opts?.openedTo);
     const closedAt = dateRangeWhere(opts?.closedFrom, opts?.closedTo);
     if (opts?.status) where.status = opts.status;
+    const statuses = opts?.statuses;
+    if (statuses?.length) {
+      const publishedStatuses = statuses.filter(status => status !== "DRAFT");
+      appendTensionWhereAnd(where, {
+        OR: [
+          ...(statuses.includes("DRAFT") ? [{ status: "DRAFT" as const }] : []),
+          ...(publishedStatuses.length ? [{ status: { in: publishedStatuses }, isPrivate: false }] : []),
+        ],
+      });
+    }
     const circleIds = listFilterValues(opts?.circleIds);
     if (circleIds.length > 0) where.circleId = { in: circleIds };
     else if (opts?.circleId) where.circleId = opts.circleId;

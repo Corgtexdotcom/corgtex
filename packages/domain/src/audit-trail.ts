@@ -5,6 +5,7 @@ import { WorkItemReadRelease } from "./work-item-readable-page";
 import { redactAgentRunContent } from "./agent-runs";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
+import { isLegacyRecoveryKind } from "./legacy-recovery-context";
 import { captureArtifactReadHeadObservation, mergeLineageInputRoot, withArtifactCountReleaseSnapshot, captureArtifactInputProof, isArtifactInputProofReadable, isLineageKind, readableArtifactIds, sealArtifactInputActor, type LineageKind, type LineageRoot } from "./source-lineage";
 
 export async function recordAudit(
@@ -33,19 +34,15 @@ export async function recordAudit(
 // Only server-defined operation vocabulary is an operational fact. Historical
 // free text is never certified by the current target's content receipt.
 const AUDIT_OPERATIONS: Partial<Record<LineageKind, readonly string[]>> = {
-  ConversationTurn: ["legacy-history.recovered"],
-  ConversationSession: ["legacy-history.recovered"],
-  KeyResult: ["legacy-history.recovered"],
-  GoalUpdate: ["legacy-history.recovered"],
-  Action: ["legacy-history.recovered", "action.checklist_item.created", "action.checklist_item.deleted", "action.checklist_item.updated", "action.completed", "action.created", "action.duplicate_resolved", "action.published", "action.returned_to_draft", "action.updated", "create_action"],
+  Action: ["action.checklist_item.created", "action.checklist_item.deleted", "action.checklist_item.updated", "action.completed", "action.created", "action.duplicate_resolved", "action.published", "action.returned_to_draft", "action.updated", "create_action"],
   AdviceRequest: ["advice.request.completed", "advice.request.withdrawn", "advice.requested"],
   AgentRun: ["agentRun.feedbackSubmitted"],
   ApprovalFlow: ["approval.decision_recorded", "approval.finalized", "approval.objection_created", "approval.objection_resolved", "approval.withdrawn"],
   BrainArticle: ["brain-article.created", "brain-article.published", "brain-article.regenerated", "brain-article.returned_to_draft", "brain-article.updated", "brain-article.variant.created"],
-  BrainSource: ["legacy-history.recovered", "brain-source.created", "brain-source.reconciled", "brain-source.updated"],
+  BrainSource: ["brain-source.created", "brain-source.reconciled", "brain-source.updated"],
   BuildArtifact: ["build_artifact.created", "build_artifact.updated", "build_artifact.public_revoked"],
   BuildArtifactAsset: ["build_artifact_asset.created", "managed_release.inventory_frozen"],
-  Circle: ["legacy-history.recovered", "circle.created", "circle.updated"],
+  Circle: ["circle.created", "circle.updated"],
   ContextGraphObject: ["context-graph.object.upserted"],
   ContextGraphProposedDiff: ["context-graph.diff.applied", "context-graph.diff.approved", "context-graph.diff.edited", "context-graph.diff.proposed"],
   ContextGraphRelationship: ["context-graph.relationship.upserted"],
@@ -56,23 +53,28 @@ const AUDIT_OPERATIONS: Partial<Record<LineageKind, readonly string[]>> = {
   CrmContact: ["crm.contact.created", "crm.contact.updated"],
   CrmDeal: ["crm.deal.created", "crm.deal.updated"],
   DeliberationEntry: ["deliberation.entry_posted", "deliberation.entry_resolved", "deliberation.entry_updated"],
-  Document: ["legacy-history.recovered", "document.created", "document.updated"],
+  Document: ["document.created", "document.updated"],
   ExecutionRequest: ["execution_request.created", "execution_result.submitted"],
   ExternalContentSource: ["external-content-source.selected", "external-content-source.sync_requested"],
   FinanceImportBatch: ["finance-report-import.applied", "finance-report-import.extracted", "finance-report-import.extraction-failed", "finance-report-import.proposed", "finance-report-import.reconciled", "finance-report-import.uploaded"],
   FinanceImportCandidate: ["finance-report-import.candidate-edited"],
-  Goal: ["legacy-history.recovered", "goal.created", "goal.updated", "workspace-artifact.archived"],
+  Goal: ["goal.created", "goal.updated", "workspace-artifact.archived"],
   Meeting: ["meeting.agenda.edited", "meeting.created", "meeting.intelligence-regeneration-requested", "meeting.processed_content_updated", "meeting.scheduled", "meeting.transcript-uploaded", "meeting.updated", "meeting_follow_up_review_posted"],
   MeetingAudioAsset: ["meeting-audio.ingested", "meeting-audio.uploaded"],
   MeetingSeries: ["meeting-invite.imported", "meeting-series.created", "meeting-series.recorder-url-updated"],
   Member: ["member.access_link.created", "member.created", "member.deactivated", "member.merged", "member.reactivated", "member.updated", "procurement_trial.admin_created"],
   Proposal: ["proposal.created", "proposal.created_from_tension", "proposal.opened", "proposal.published", "proposal.reopened", "proposal.resolved", "proposal.returned_to_draft", "proposal.support_reopened_resolved", "proposal.updated", "workspace-artifact.archived"],
-  Role: ["legacy-history.recovered", "role.created", "role.updated", "workspace-artifact.archived"],
+  Role: ["role.created", "role.updated", "workspace-artifact.archived"],
   RoleAssignment: ["role.assigned", "role.unassigned"],
   Tension: ["tension.created", "tension.published", "tension.returned_to_draft", "tension.updated"],
   WorkspaceToolLink: ["tool_link.created", "tool_link.credential_revealed", "tool_link.updated"],
 };
 const ARCHIVE_OPERATIONS = new Set(["workspace-artifact.archived", "workspace-artifact.restored", "workspace-artifact.purged"]);
+function isAuditOperation(kind: LineageKind, action: string) {
+  return AUDIT_OPERATIONS[kind]?.includes(action) || ARCHIVE_OPERATIONS.has(action)
+    || (action === "legacy-history.recovered" && isLegacyRecoveryKind(kind));
+}
+
 const EVENT_OPERATIONS: Partial<Record<LineageKind, readonly string[]>> = {
   Action: ["action.assigned", "action.checklist_item.created", "action.checklist_item.deleted", "action.checklist_item.updated", "action.created", "action.published", "action.returned_to_draft", "action.updated"],
   AdviceRequest: ["advice.reminder_due", "advice.request.completed", "advice.request.withdrawn", "advice.requested"],
@@ -186,7 +188,7 @@ export async function listAuditLogsPage(actor: AppActor, workspaceId: string, op
       after = row;
       examined += 1;
       mayHaveMore = index < rows.length - 1 || rows.length === 100;
-      if (!isLineageKind(row.entityType) || !(AUDIT_OPERATIONS[row.entityType]?.includes(row.action) || ARCHIVE_OPERATIONS.has(row.action))) continue;
+      if (!isLineageKind(row.entityType) || !isAuditOperation(row.entityType, row.action)) continue;
       const key = JSON.stringify([row.entityType, row.entityId]);
       if (!proofs.has(key)) proofs.set(key, await release.observeRead(() => captureAuditTarget(actor, workspaceId, row.entityType, row.entityId)));
       const roots = proofs.get(key);
@@ -237,7 +239,7 @@ export async function getEntityTimeline(actor: AppActor, workspaceId: string, en
   const currentJobs: typeof jobs = [];
   for (const job of admittedJobs) if (await isArtifactInputProofReadable(actor, workspaceId, job.roots)) currentJobs.push(job.row);
   if (!await isArtifactInputProofReadable(actor, workspaceId, roots)) return empty;
-  return { auditLogs: auditLogs.filter(row => AUDIT_OPERATIONS[entityType]?.includes(row.action) || ARCHIVE_OPERATIONS.has(row.action)).map(auditOperationalFields),
+  return { auditLogs: auditLogs.filter(row => isAuditOperation(entityType, row.action)).map(auditOperationalFields),
     relatedEvents: visibleEvents.map(event => ({ id: event.id, type: event.type, status: event.status, createdAt: event.createdAt,
       jobs: currentJobs.filter(job => job.eventId === event.id).map(job => ({ id: job.id, type: job.type, status: job.status, completedAt: job.completedAt })), payload: null })) };
 

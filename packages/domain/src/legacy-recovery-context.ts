@@ -2,6 +2,16 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 
+export const LEGACY_RECOVERY_KINDS = [
+  "Action", "Tension", "Proposal", "MeetingTranscript", "Meeting", "MeetingAgenda", "MeetingInsight", "BrainArticle",
+  "Goal", "GoalUpdate", "KeyResult", "ConversationSession", "ConversationTurn", "Document", "BrainSource", "Role", "Circle",
+] as const;
+export type LegacyRecoveryKind = (typeof LEGACY_RECOVERY_KINDS)[number];
+
+export function isLegacyRecoveryKind(kind: unknown): kind is LegacyRecoveryKind {
+  return LEGACY_RECOVERY_KINDS.includes(kind as LegacyRecoveryKind);
+}
+
 // Only omission of newly captured observer identity, never a read grant. Target
 // governors and every original saved vector remain checked by the real evaluator.
 type Scope = {actor:AppActor;workspaceId:string;targetKind:string;targetId:string;receiptId?:string;tx?:Prisma.TransactionClient;assertCurrent?:(tx:Prisma.TransactionClient)=>Promise<void>;active:boolean};
