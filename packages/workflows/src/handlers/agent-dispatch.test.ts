@@ -12,6 +12,11 @@ const { runCompanyUnderstandingAgentMock, runActionExtractionAgentMock, runBrain
   recoveryGuard: vi.fn(), execute: vi.fn(), absorb: vi.fn(), captureProof: vi.fn(), maintenance: vi.fn(),
 }));
 
+const sourceReader = vi.hoisted(() => ({ findFirst: vi.fn() }));
+vi.mock("@corgtex/shared", async original => ({
+  ...await original<typeof import("@corgtex/shared")>(), prisma: { brainSource: sourceReader },
+}));
+
 vi.mock("../brain-maintenance-jobs", () => ({prepareMaintenanceClaim: maintenanceClaim, MaintenanceDeferred: class extends Error {}}));
 vi.mock("@corgtex/domain", async () => ({...await import("../../../domain/src/errors"), assertBrainSourceRecoveryJob: recoveryGuard, captureArtifactInputProof: captureProof, withMeetingTranscriptWorker: meetingWorker }));
 
@@ -36,6 +41,7 @@ vi.mock("@corgtex/agents", () => ({
 describe("runAgentWorkflowJob", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    sourceReader.findFirst.mockResolvedValue({ channel: "manual" });
     meetingWorker.mockImplementation(async (_claim, work) => work(meetingActor));
     runCompanyUnderstandingAgentMock.mockResolvedValue({ id: "run-1" });
     absorb.mockResolvedValue({ absorbed: true, sourceId: "source" });

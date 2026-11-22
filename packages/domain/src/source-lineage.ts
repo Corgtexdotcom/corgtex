@@ -85,7 +85,7 @@ export type LineageKind =
   | "McpToolInput" | "ConversationIngressInput" | "DemoLeadIntakeInput" | "CrmQualificationEmailInput" | "DemoLead" | "CrmQualification" | "WorkflowJobInput"
   | "AgentRequestInput" | "AgentFeedbackInput" | "ConversationPendingOperation" | "BrainDiscussionThread" | "BrainDiscussionComment"
   | "AgentRun" | "AgentStep" | "AgentToolCall"
-  | "Workspace" | "Member" | "User" | "AgentIdentity" | "CircleAgentAssignment" | "Role" | "Circle" | "RoleAssignment" | "RoleVersion" | "RoleHolderHistory"
+  | "WorkspaceAgentGovernance" | "Workspace" | "Member" | "User" | "AgentIdentity" | "CircleAgentAssignment" | "Role" | "Circle" | "RoleAssignment" | "RoleVersion" | "RoleHolderHistory"
   | "BrainSource" | "BrainArticle" | "BrainArticleVersion" | "Document" | "Meeting" | "MeetingTranscript"
   | "MeetingInsight" | "MeetingSeries" | "MeetingAgenda" | "DeliberationEntry" | "KnowledgeChunk"
   | "MeetingFollowUpReview"
@@ -160,6 +160,7 @@ const CONTENT_FIELDS: Record<LineageKind, string[]> = {
   Workspace: ["name", "slug", "description", "plan"],
   User: ["email", "displayName", "bio", "avatarUrl", "linkedinUrl", "websiteUrl"],
   Member: ["userId", "role", "kind", "memberType", "isActive", "joinedAt", "user"],
+  WorkspaceAgentGovernance: ["workspaceId", "agentKey", "governancePolicy", "archivedAt"],
   AgentIdentity: ["agentKey", "memberType", "displayName", "purposeMd", "behaviorMd", "isActive", "archivedAt"],
   CircleAgentAssignment: ["circleId", "agentIdentityId", "roleId", "assignedAt"],
   Role: ["name", "purposeMd", "accountabilities", "artifacts", "metricsMd", "coreRoleType", "circleId", "archivedAt"],
@@ -250,7 +251,7 @@ function snapshotContentFields(kind: LineageKind, row?: Record<string, unknown>)
 
 function fingerprintFields(kind: LineageKind) {
   return [...new Set([...CONTENT_FIELDS[kind], "createdAt",
-    ...(["FinanceReportFactRevision", "NativeTranscriptInput", "CommunicationMessageNativeInput", "OAuthProviderFetchInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationOperationOutcome", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "WorkflowJobInput", "McpToolInput", "ConversationIngressInput", "NewspaperTrackedLink", "Meeting", "ModelUsageBudget", "ConversationSession", "ConversationPendingOperation", "AgentRun", "AgentStep", "AgentToolCall"].includes(kind) ? [] : ["updatedAt"])])];
+    ...(["WorkspaceAgentGovernance", "FinanceReportFactRevision", "NativeTranscriptInput", "CommunicationMessageNativeInput", "OAuthProviderFetchInput", "ExternalProviderFetchInput", "ExternalMcpResponseInput", "ExternalMcpConnectionSet", "FinanceReportUploadInput", "CrmQualificationFormInput", "ConversationOperationOutcome", "DemoLeadIntakeInput", "CrmQualificationEmailInput", "WorkflowJobInput", "McpToolInput", "ConversationIngressInput", "NewspaperTrackedLink", "Meeting", "ModelUsageBudget", "ConversationSession", "ConversationPendingOperation", "AgentRun", "AgentStep", "AgentToolCall"].includes(kind) ? [] : ["updatedAt"])])];
 }
 
 export function lineageContentFingerprint(kind: LineageKind, row: unknown): string {
@@ -795,6 +796,7 @@ async function loadArtifact(db: LineageClient, workspaceId: string, input: Linea
     case "Workspace": return db.workspace.findFirst({ where: { id: input.id === workspaceId ? input.id : "" }, select: { id: true, name: true, slug: true, description: true, plan: true, createdAt: true, updatedAt: true } });
     case "User": return db.user.findFirst({ where: { id: input.id, memberships: { some: { workspaceId, isActive: true } } }, select: { id: true, email: true, displayName: true, bio: true, avatarUrl: true, linkedinUrl: true, websiteUrl: true, createdAt: true, updatedAt: true } });
     case "Member": return db.member.findFirst({ where, include: { user: { select: { id: true, email: true, displayName: true } } } });
+    case "WorkspaceAgentGovernance": return db.workspaceAgentConfig.findFirst({ where, select: { id: true, workspaceId: true, agentKey: true, governancePolicy: true, archivedAt: true, createdAt: true, updatedAt: true } });
     case "AgentIdentity": return db.agentIdentity.findFirst({ where, select: { id: true, workspaceId: true, agentKey: true,
       memberType: true, displayName: true, purposeMd: true, behaviorMd: true, isActive: true, archivedAt: true, createdAt: true, updatedAt: true } });
     case "CircleAgentAssignment": return db.circleAgentAssignment.findFirst({ where: { id: input.id,
@@ -987,6 +989,7 @@ function credentialReadScopes(kind: LineageKind): readonly string[] {
   if (kind === "ExternalMcpResponseInput" || kind === "ExternalMcpConnectionSet") return ["external-tools:read"];
   if (kind === "ArtifactInputSnapshot" || ["McpToolInput", "ConversationIngressInput", "ConversationOperationOutcome"].includes(kind)) return [];
   if (kind === "Workspace") return ["workspace:read"];
+  if (kind === "WorkspaceAgentGovernance") return ["agents:read"];
   if (["Member", "User"].includes(kind)) return ["members:read"];
   if (["Role", "Circle", "RoleAssignment", "RoleVersion", "RoleHolderHistory", "AgentIdentity", "CircleAgentAssignment"].includes(kind)) return ["circles:read"];
   if (["BrainSource", "BrainArticle", "BrainArticleVersion", "Document", "KnowledgeChunk", "PolicyCorpus", "Constitution", "ConstitutionSourceReference", "BrainDiscussionThread", "BrainDiscussionComment"].includes(kind)) return ["brain:read"];
@@ -2724,7 +2727,7 @@ type HumanAdvanceAdmission = {
 const humanAdvanceAdmissions = new WeakMap<object, HumanAdvanceAdmission>();
 const manifestAdvanceStamp = (manifest: NonNullable<Awaited<ReturnType<typeof latestManifest>>>) =>
   createHash("sha256").update(sourceCommitCanonical(manifest)).digest("hex");
-const artifactOwnEpochKind = (kind: LineageKind) => ["MeetingTranscript", "MeetingAgenda"].includes(kind) ? "Meeting" : kind;
+const artifactOwnEpochKind = (kind: LineageKind) => kind === "WorkspaceAgentGovernance" ? "WorkspaceAgentConfig" : ["MeetingTranscript", "MeetingAgenda"].includes(kind) ? "Meeting" : kind;
 
 /** Admit the original derived body BEFORE its governed edit. The opaque, single-use
  * receipt never refreshes upstream permissions or accepts an already stale body. */

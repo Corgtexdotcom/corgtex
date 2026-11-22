@@ -3,7 +3,7 @@ import type { AgentRunStatus, AgentTriggerType } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { env, prisma, toInputJson, type AppActor } from "@corgtex/shared";
 import { resolveModel, type ModelAttemptGuard, type ModelRequestControls } from "@corgtex/models";
-import { isAgentEnabled, getAgentModelOverride, AGENT_REGISTRY, type RegisteredAgentKey } from "@corgtex/domain";
+import { isAgentEnabled, getAgentModelOverride, supportsAgentGovernancePrompt, AGENT_REGISTRY, type RegisteredAgentKey } from "@corgtex/domain";
 import {
   resolveAgentIdentityLimits, captureArtifactInputProof, captureImmutableArtifactInputProof,
   isArtifactInputProofReadable, readableArtifactIds, recordArtifactInputLineage, invalidateArtifactInputLineage,
@@ -218,6 +218,24 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
   const accumulatedToolCalls: LoggedOperation[] = [];
   let behaviorContext: string | null = null;
   let behaviorLineageRoots: LineageRoot[] = [];
+  let liveGovernanceRoots: LineageRoot[] = [];
+  let governanceContext: string | null = null;
+  let governanceSelectionCaptured = false;
+  let governanceRevision: { id: string; updatedAt: Date; governancePolicy: string | null; archivedAt: Date | null } | null = null;
+  const assertGovernanceCurrent = async (db: Prisma.TransactionClient | typeof prisma = prisma) => {
+    if (!governanceSelectionCaptured) return;
+    const current = await db.workspaceAgentConfig.findUnique({ where: {
+      workspaceId_agentKey: { workspaceId: params.workspaceId, agentKey: params.agentKey },
+    }, select: { id: true, updatedAt: true, governancePolicy: true, archivedAt: true } });
+    const sameRevision = governanceRevision
+      ? current?.id === governanceRevision.id && current.updatedAt.getTime() === governanceRevision.updatedAt.getTime()
+        && current.governancePolicy === governanceRevision.governancePolicy
+        && current.archivedAt?.getTime() === governanceRevision.archivedAt?.getTime()
+      : current === null;
+    invariant(sameRevision && (!liveGovernanceRoots.length
+      || await isArtifactInputProofReadable(actor, params.workspaceId, liveGovernanceRoots, db)),
+      409, "SOURCE_CHANGED", "Saved governance changed during execution.");
+  };
   let contextRoots: LineageRoot[] | null = null;
   const operation = async <T>(kind: "AgentStep" | "AgentToolCall", name: string, input: unknown,
     work: (operation: AgentOperationContext) => Promise<T>, proof?: AgentOperationReceipt): Promise<T> => {
@@ -228,7 +246,8 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
     // A forged token or revoked input must be rejected before executing a model/tool.
     if (proof?.receipt) invariant(roots && await isArtifactInputProofReadable(actor, params.workspaceId, roots),
       409, "UNKNOWN_LINEAGE", "Agent operation has no valid captured input receipt.");
-    const attemptRoots = proof?.receipt ? attemptReceipts.get(proof.receipt) : undefined;
+    const capturedAttemptRoots = proof?.receipt ? attemptReceipts.get(proof.receipt) : undefined;
+    const attemptRoots = capturedAttemptRoots ? mergeArtifactInputProofs(capturedAttemptRoots, liveGovernanceRoots) : undefined;
     const controller = new AbortController();
     const requestSignals: AbortSignal[] = [];
     const operationContext: AgentOperationContext = {
@@ -242,6 +261,7 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
             signal.throwIfAborted();
             context.signal.throwIfAborted();
             await priorGuard?.(context);
+            await assertGovernanceCurrent();
             signal.throwIfAborted();
             context.signal.throwIfAborted();
             invariant(await isArtifactInputProofReadable(actor, params.workspaceId, attemptRoots),
@@ -253,10 +273,30 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
             throw error;
           }
         };
-        return { ...request, signal, authorizeAttempt };
+        // Centralize the saved policy at the request boundary as well as exposing
+        // the composed behavior to existing consumers. Avoid repeating it when a
+        // consumer already used behaviorContext.
+        const prompt = request as unknown as T & { instruction?: string; systemInstruction?: string; messages?: Array<{ role: string; content: string }> };
+        let governed = request;
+        if (governanceContext) {
+          if (typeof prompt.instruction === "string") {
+            governed = { ...request,
+              systemInstruction: [behaviorContext, prompt.systemInstruction].filter(Boolean).join("\n\n"),
+              instruction: behaviorContext && prompt.instruction.startsWith(behaviorContext)
+                ? prompt.instruction.slice(behaviorContext.length).trimStart() : prompt.instruction };
+          } else if (Array.isArray(prompt.messages)) {
+            const messages = [...prompt.messages];
+            const index = messages.findIndex(message => message.role === "system");
+            if (index < 0) messages.unshift({ role: "system", content: behaviorContext! });
+            else if (!messages[index].content.startsWith(governanceContext)) messages[index] = {
+              ...messages[index], content: `${behaviorContext}\n\n${messages[index].content}` };
+            governed = { ...request, messages };
+          }
+        }
+        return { ...governed, signal, authorizeAttempt };
       },
     };
-    const invoke = () => work(operationContext);
+    const invoke = async () => { await assertGovernanceCurrent(); return work(operationContext); };
     try {
       let output: T;
       if (proof?.auditedRead && roots) {
@@ -265,6 +305,7 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
         roots = mergeArtifactInputProofs(roots, (observed.roots.length ? await freezeRoots(observed.roots) : []));
       } else output = await invoke();
       controller.signal.throwIfAborted();
+      await assertGovernanceCurrent();
       for (const signal of requestSignals) signal.throwIfAborted();
       list.push({ data: { id, agentRunId: run.id, name, status: "COMPLETED", inputJson: toJson(input),
         outputJson: toJson(output), startedAt, completedAt: new Date(), createdAt: startedAt, error: null }, roots });
@@ -279,7 +320,7 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
   const helpers: AgentHelpers = {
     async captureInputs(roots) {
       const originalJobRoots = liveJobRoots(roots);
-      const frozen = await freezeRoots(roots);
+      const frozen = await freezeRoots(mergeArtifactInputProofs(roots, behaviorLineageRoots));
       const receipt: AgentInputReceipt = Object.freeze({ kind: "agent-input-receipt" });
       receipts.set(receipt, frozen);
       attemptReceipts.set(receipt, mergeArtifactInputProofs(frozen, originalJobRoots, initialLiveJobRoots));
@@ -315,8 +356,22 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
     const tier = AGENT_REGISTRY[params.agentKey as RegisteredAgentKey]?.defaultModelTier ?? "none";
     const model = resolveModel(tier, override);
 
-    // Only proven current identity behavior may enter execution or copied logs.
+    // Config governance precedes the existing workspace and agent identity text.
+    // Unknown legacy policy fails closed until a full authenticated replacement.
     const behaviorParts: string[] = [];
+    const governance = supportsAgentGovernancePrompt(params.agentKey) ? await prisma.workspaceAgentConfig.findUnique({ where: {
+      workspaceId_agentKey: { workspaceId: params.workspaceId, agentKey: params.agentKey },
+    } }) : null;
+    governanceSelectionCaptured = supportsAgentGovernancePrompt(params.agentKey);
+    governanceRevision = governance ? { id: governance.id, updatedAt: governance.updatedAt,
+      governancePolicy: governance.governancePolicy, archivedAt: governance.archivedAt } : null;
+    if (governance && !governance.archivedAt && governance.governancePolicy?.trim()) {
+      liveGovernanceRoots = await captureArtifactInputProof(actor, params.workspaceId,
+        [{ kind: "WorkspaceAgentGovernance", id: governance.id, snapshot: governance }]);
+      behaviorLineageRoots = await freezeRoots(liveGovernanceRoots);
+      governanceContext = `## Saved Agent Governance\n\n${governance.governancePolicy}`;
+      behaviorParts.push(governanceContext);
+    }
     for (const agentKey of ["__workspace__", params.agentKey]) {
       const identity = await prisma.agentIdentity.findUnique({ where: { workspaceId_agentKey: { workspaceId: params.workspaceId, agentKey } } });
       if (!identity || identity.archivedAt || (agentKey !== "__workspace__" && !identity.isActive) || !identity.behaviorMd) continue;
@@ -339,6 +394,7 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
     }
 
     const outcome = await params.execute(context, helpers, run.id, model);
+    await assertGovernanceCurrent();
     const nextStatus: AgentRunStatus = outcome.approvalCheckpoint ? "WAITING_APPROVAL" : "COMPLETED";
     if (outcome.approvalCheckpoint) {
       const createdAt = new Date();
@@ -350,6 +406,16 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
     }
 
     const finalRun = await prisma.$transaction(async (tx) => {
+      if (governanceSelectionCaptured) {
+        if (governanceRevision) {
+          await tx.$queryRaw`SELECT "id" FROM "WorkspaceAgentConfig" WHERE "id" = ${governanceRevision.id} AND "workspaceId" = ${params.workspaceId} FOR SHARE`;
+        } else {
+          // A missing child row cannot be locked. The parent UPDATE lock conflicts
+          // with the FK's KEY SHARE lock, serializing insertion with this commit.
+          await tx.$queryRaw`SELECT "id" FROM "Workspace" WHERE "id" = ${params.workspaceId} FOR UPDATE`;
+        }
+        await assertGovernanceCurrent(tx);
+      }
       if (nextStatus === "COMPLETED" && params.beforeComplete) await params.beforeComplete(tx, run.id);
       await persistOperations(tx);
 
