@@ -10,6 +10,7 @@
   },
   "exports": {
     ".": "./src/index.ts",
+    "./work-item-events": "./src/work-item-events.ts",
     "./release-metadata": "./src/release-metadata.ts",
     "./release-metadata-node": "./src/release-metadata-node.ts",
     "./telemetry-node": "./src/telemetry-node.ts",

@@ -1,3 +1,4 @@
+import { createActionEvent } from "@corgtex/shared/work-item-events";
 import { createHash } from "node:crypto";
 import { Prisma, type ConversationOperationOutcome } from "@prisma/client";
 import { assertMcpOriginActive, getMcpOrigin, mcpScopesHash, mcpCredentialVersion, decryptSecret, prisma, type AppActor } from "@corgtex/shared";
@@ -260,8 +261,9 @@ export async function completeActionWithNativeRequest(actor: AppActor, input: Ac
     await finishActionCompletionLineage(actor, params, receipt, updated, tx, publicNoteRoot);
     await recordAudit(tx, actor, {workspaceId: params.workspaceId, action: "action.completed", entityType: "Action", entityId: updated.id,
       meta: {fields: ["status", "completedVia"]}});
-    await appendEvents(tx, [{workspaceId: params.workspaceId, type: "action.updated", aggregateType: "Action", aggregateId: updated.id,
-      payload: {actionId: updated.id, fields: ["status", "completedVia"]}}]);
+    await appendEvents(tx, [createActionEvent("action.updated", {
+      actionId: updated.id, fields: ["status", "completedVia"],
+    }, params.workspaceId)]);
     await assertActionCompletionNativeRequest(actor, params, tx);
     await assertArtifactInputWriteFence(tx);
     return recordOutcome(actor, params, updated, root, tx);
