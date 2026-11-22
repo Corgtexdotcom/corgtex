@@ -317,6 +317,11 @@ describe("terminal archive facts using actual domain receipts and conversation c
         expect((await turn).assistantMessage).toBe(acknowledgment.message);
         expect(chunks).toEqual(streaming ? [acknowledgment.message] : []);
       }
+      const interrupted = [...(fixture.tables.get("auditLog")?.values() ?? [])].filter(row => row.action === "conversation.interrupted");
+      expect(interrupted).toHaveLength(aborted ? 1 : 0);
+      if (aborted) expect(interrupted[0].meta.calls).toEqual([
+        { toolName: "archive_tool_link", handlerState: "returned", effectState: "unknown" },
+      ]);
       expect(fixture.tables.get("conversationOperationOutcome")?.size).toBe(1);
       expect(fixture.tables.get("workspaceToolLink")!.get("private-tool").archivedAt).toBeInstanceOf(Date);
       expect(streaming ? fixture.eventStream : fixture.chat).toHaveBeenCalledOnce();
