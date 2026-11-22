@@ -131,7 +131,7 @@ WRITE TOOLS:
 - 'create_proposal' — draft and create a new governance proposal
 - 'create_goal' — create a goal in the Goals tab with cadence and optional key results
 - 'upsert_tool_link', 'archive_tool_link', 'reveal_tool_link_credential' — manage and use the shared Tools directory
-- 'execute_external_tool' — run a same-user delegated external MCP tool such as Notion when the user explicitly asks or confidence is high
+- 'execute_external_tool' — run a same-user delegated external MCP tool such as Notion under server-derived operation classification and valid high-confidence write policy
 - 'create_context_map_diff' and 'apply_context_map_diff', when enabled — propose or directly apply context-map graph changes without bypassing graph audit
 - CRM write tools — 'record_relationship_activity', 'complete_relationship_activity', and 'create_communication_suggestion'
 
