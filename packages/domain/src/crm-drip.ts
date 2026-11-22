@@ -1,12 +1,18 @@
 import type { Prisma } from "@prisma/client";
-import { prisma, type AppActor, type EmailSendResult, type EmailAttemptControls } from "@corgtex/shared";
+import { prisma, EmailSendError, type AppActor, type EmailSendResult, type EmailAttemptControls } from "@corgtex/shared";
 import { activeCrmParentWhere, lockCrmLinkClosure } from "./crm-archive-guards";
 import { mergeArtifactInputProofs } from "./digest-lineage";
 import { requireWorkspaceMembership } from "./auth";
-import { invariant } from "./errors";
+import { AppError, invariant } from "./errors";
 import { finishProducerLineage, prepareProducerLineage, type ProducerLineageParams } from "./producer-lineage";
 import { assertArtifactInputWriteFence, captureArtifactInputProof, captureImmutableArtifactInputProof, currentArtifactInputRoots, preserveUnknownArtifactInputSnapshot,
   isArtifactInputProofReadable, isArtifactInputProofPubliclyShareable } from "./source-lineage";
+
+export type DripDeliveryOutcome =
+  | { status: "PROVIDER_ACCEPTED"; providerMessageId: string; followUpRecorded: boolean }
+  | { status: "SKIPPED"; reason: string }
+  | { status: "FAILED"; reason: "PROVIDER_REJECTED"; providerCode: string }
+  | { status: "UNKNOWN"; reason: "PROVIDER_RESPONSE_UNCERTAIN" | "MISSING_PROVIDER_MESSAGE_ID" };
 
 export async function recordDripFollowUp(
   workspaceId: string,
@@ -23,6 +29,7 @@ export async function recordDripFollowUp(
   const actor: AppActor = options.actor ?? { kind: "agent", authProvider: "bootstrap", label: "crm-drip-followup", workspaceIds: [workspaceId] };
   await requireWorkspaceMembership({ actor, workspaceId });
   const load = async (tx: Prisma.TransactionClient) => {
+    await requireWorkspaceMembership({ actor, workspaceId, tx });
     await assertArtifactInputWriteFence(tx);
     await tx.$queryRaw`SELECT id FROM "DemoLead" WHERE id = ${demoLeadId} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
     const lead = await tx.demoLead.findFirst({ where: { id: demoLeadId, workspaceId } });
@@ -77,7 +84,7 @@ export async function recordDripFollowUp(
     return created;
   }) : null;
 
-  return prisma.$transaction(async tx => {
+  const checkReservation = async (tx: Prisma.TransactionClient) => {
     if (reservation) await tx.$queryRaw`SELECT id FROM "CrmActivity" WHERE id = ${reservation.id} AND "workspaceId" = ${workspaceId} FOR UPDATE`;
     if (reservation) {
       const current = await tx.crmActivity.findFirst({ where: { id: reservation.id, workspaceId, archivedAt: null, source: "crm-drip-effect", sourceExternalId: options.operationId } });
@@ -85,44 +92,113 @@ export async function recordDripFollowUp(
         409, "DELIVERY_ALREADY_RESERVED", "Delivery reservation changed or was cancelled; inspect it before retrying.");
       await captureArtifactInputProof(actor, workspaceId, [{ kind: "CrmActivity", id: current.id, snapshot: current }], tx);
     }
-    const { lead, contact, roots, leadReceipt, activityReceipt } = await load(tx);
-    let delivery: EmailSendResult | undefined;
-    if (options.send) {
-      // Fence the active worker lease immediately before the irreversible operation.
-      await assertArtifactInputWriteFence(tx);
-      invariant(await isArtifactInputProofPubliclyShareable(actor, workspaceId, roots, tx), 403, "SOURCE_RESTRICTED", "Recipient inputs are no longer public.");
-      const originalRoots = structuredClone(roots);
-      const controller = new AbortController();
-      const controls: EmailAttemptControls = {
-        signal: controller.signal,
-        authorizeAttempt: async ({ signal }) => {
-          try {
-            controller.signal.throwIfAborted(); signal.throwIfAborted();
-            await requireWorkspaceMembership({ actor, workspaceId, tx });
-            await assertArtifactInputWriteFence(tx);
-            invariant(await isArtifactInputProofPubliclyShareable(actor, workspaceId, originalRoots, tx),
-              403, "SOURCE_RESTRICTED", "Original follow-up inputs are no longer public.");
-            controller.signal.throwIfAborted(); signal.throwIfAborted();
-          } catch (error) { controller.abort(error); throw error; }
-        },
-      };
-      delivery = await options.send(lead.email, options.operationId!, controls);
-      // A transport wrapper cannot turn a swallowed authority failure into SENT.
-      controller.signal.throwIfAborted();
-      invariant(delivery.status === "SENT" && delivery.providerMessageId, 409, "DELIVERY_UNCERTAIN", "Delivery is skipped or uncertain; its reservation requires inspection.");
-    }
-    if (!await currentArtifactInputRoots(tx, workspaceId, { kind: "DemoLead", id: demoLeadId }, lead)) {
-      await preserveUnknownArtifactInputSnapshot(tx, workspaceId, { kind: "DemoLead", id: demoLeadId }, lead);
-    }
-    const updatedLead = await tx.demoLead.update({ where: { id: demoLeadId }, data: {
-      followUpCount: { increment: 1 }, lastFollowUpAt: new Date(),
+  };
+  const writeOutcome = async (tx: Prisma.TransactionClient, delivery: DripDeliveryOutcome, receipt: Awaited<ReturnType<typeof load>>["activityReceipt"]) => {
+    invariant(reservation, 409, "DELIVERY_ALREADY_RESERVED", "A delivery reservation is required.");
+    const titles = {
+      PROVIDER_ACCEPTED: delivery.status === "PROVIDER_ACCEPTED" && delivery.followUpRecorded
+        ? `Follow-up #${options.expectedFollowUpNumber} accepted by email provider`
+        : "Follow-up accepted by email provider; recording requires recovery",
+      SKIPPED: "Follow-up email skipped",
+      FAILED: "Follow-up email rejected by provider",
+      UNKNOWN: "Follow-up email outcome unknown; inspection required",
+    };
+    const activity = await tx.crmActivity.update({ where: { id: reservation.id }, data: {
+      title: titles[delivery.status], bodyMd: JSON.stringify({ operationId: options.operationId, ...delivery, emailContent }),
     } });
-    await finishProducerLineage({ tx, actor, workspaceId, artifact: { kind: "DemoLead", id: demoLeadId }, content: updatedLead, receipt: leadReceipt });
-    const data = { title: `Sent follow-up #${lead.followUpCount + 1}`, bodyMd: delivery
-      ? JSON.stringify({ operationId: options.operationId, ...delivery, emailContent }) : emailContent };
-    const activity = reservation ? await tx.crmActivity.update({ where: { id: reservation.id }, data })
-      : await tx.crmActivity.create({ data: { workspaceId, accountId: contact?.accountId ?? null, type: "EMAIL", contactId: contact?.id ?? null, ...data } });
-    await finishProducerLineage({ tx, actor, workspaceId, artifact: { kind: "CrmActivity", id: activity.id }, content: activity, receipt: activityReceipt });
-    return { operationId: options.operationId ?? null, delivery: delivery ?? null };
-  });
+    await finishProducerLineage({ tx, actor, workspaceId, artifact: { kind: "CrmActivity", id: activity.id }, content: activity, receipt });
+  };
+
+  let observedOutcome: DripDeliveryOutcome | undefined;
+  let sendFailure: { error: unknown } | undefined;
+  let result;
+  try {
+    result = await prisma.$transaction(async tx => {
+      await checkReservation(tx);
+      const { lead, contact, roots, leadReceipt, activityReceipt } = await load(tx);
+      if (options.send) {
+        // Fence the active worker lease immediately before the irreversible operation.
+        await assertArtifactInputWriteFence(tx);
+        invariant(await isArtifactInputProofPubliclyShareable(actor, workspaceId, roots, tx), 403, "SOURCE_RESTRICTED", "Recipient inputs are no longer public.");
+        const originalRoots = structuredClone(roots);
+        const controller = new AbortController();
+        const controls: EmailAttemptControls = {
+          signal: controller.signal,
+          authorizeAttempt: async ({ signal }) => {
+            try {
+              controller.signal.throwIfAborted(); signal.throwIfAborted();
+              await requireWorkspaceMembership({ actor, workspaceId, tx });
+              await assertArtifactInputWriteFence(tx);
+              invariant(await isArtifactInputProofPubliclyShareable(actor, workspaceId, originalRoots, tx),
+                403, "SOURCE_RESTRICTED", "Original follow-up inputs are no longer public.");
+              controller.signal.throwIfAborted(); signal.throwIfAborted();
+            } catch (error) { controller.abort(error); throw error; }
+          },
+        };
+        let delivery: EmailSendResult | undefined;
+        try {
+          delivery = await options.send(lead.email, options.operationId!, controls);
+        } catch (error) {
+          // Authorization/lease loss must still roll back. Never certify an outcome
+          // from a wrapper that swallowed a failed dispatch guard.
+          controller.signal.throwIfAborted();
+          observedOutcome = error instanceof EmailSendError && error.outcome === "FAILED"
+            ? { status: "FAILED", reason: "PROVIDER_REJECTED", providerCode: error.providerCode }
+            : { status: "UNKNOWN", reason: "PROVIDER_RESPONSE_UNCERTAIN" };
+          sendFailure = { error };
+        }
+        controller.signal.throwIfAborted();
+        if (delivery?.status === "SKIPPED") {
+          observedOutcome = delivery;
+          sendFailure = { error: new AppError(409, "DELIVERY_SKIPPED", "Email was skipped; inspect its receipt before retrying.") };
+        } else if (delivery?.status === "SENT" && delivery.providerMessageId) {
+          observedOutcome = { status: "PROVIDER_ACCEPTED", providerMessageId: delivery.providerMessageId, followUpRecorded: false };
+        } else if (!sendFailure) {
+          observedOutcome = { status: "UNKNOWN", reason: "MISSING_PROVIDER_MESSAGE_ID" };
+          sendFailure = { error: new AppError(409, "DELIVERY_UNCERTAIN", "Email acceptance is uncertain; inspect its receipt before retrying.") };
+        }
+        if (observedOutcome && observedOutcome.status !== "PROVIDER_ACCEPTED") {
+          await writeOutcome(tx, observedOutcome, activityReceipt);
+          return { operationId: options.operationId ?? null, delivery: observedOutcome };
+        }
+      }
+      if (!await currentArtifactInputRoots(tx, workspaceId, { kind: "DemoLead", id: demoLeadId }, lead)) {
+        await preserveUnknownArtifactInputSnapshot(tx, workspaceId, { kind: "DemoLead", id: demoLeadId }, lead);
+      }
+      const updatedLead = await tx.demoLead.update({ where: { id: demoLeadId }, data: {
+        followUpCount: { increment: 1 }, lastFollowUpAt: new Date(),
+      } });
+      await finishProducerLineage({ tx, actor, workspaceId, artifact: { kind: "DemoLead", id: demoLeadId }, content: updatedLead, receipt: leadReceipt });
+      const recordedOutcome = observedOutcome?.status === "PROVIDER_ACCEPTED"
+        ? { ...observedOutcome, followUpRecorded: true } : null;
+      if (recordedOutcome) {
+        await writeOutcome(tx, recordedOutcome, activityReceipt);
+      } else {
+        const activity = await tx.crmActivity.create({ data: { workspaceId, accountId: contact?.accountId ?? null, type: "EMAIL",
+          contactId: contact?.id ?? null, title: `Sent follow-up #${lead.followUpCount + 1}`, bodyMd: emailContent } });
+        await finishProducerLineage({ tx, actor, workspaceId, artifact: { kind: "CrmActivity", id: activity.id }, content: activity, receipt: activityReceipt });
+      }
+      return { operationId: options.operationId ?? null, delivery: recordedOutcome };
+    });
+  } catch (error) {
+    if (reservation && observedOutcome) {
+      // A failed accounting transaction must not discard an observed provider
+      // receipt. Recover only an unchanged reservation under the same current
+      // membership, source and worker fences; this never sends or advances count.
+      try {
+        await prisma.$transaction(async tx => {
+          await checkReservation(tx);
+          const { activityReceipt } = await load(tx);
+          await writeOutcome(tx, observedOutcome!, activityReceipt);
+        });
+      } catch {
+        // If storage or authority is still unavailable, the original durable
+        // RESERVED row remains the fail-closed recovery marker. Preserve error.
+      }
+    }
+    throw error;
+  }
+  // Non-success receipts must commit before reporting the original failure.
+  if (sendFailure) throw sendFailure.error;
+  return result;
 }
