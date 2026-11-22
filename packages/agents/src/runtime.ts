@@ -114,6 +114,11 @@ export async function executeAgentRun<TPayload extends Record<string, unknown>, 
   "Feedback continuation needs the immutable prior run and authored feedback receipt.");
   const actor: AppActor = params.lineageActor ?? { kind: "agent", authProvider: "bootstrap", label: "agent-runtime", workspaceIds: [params.workspaceId] };
   const existing = await findExistingRun(params.agentKey, params.workspaceId, params.triggerType, params.triggerRef);
+  // An unfinished execution may already have committed external effects before
+  // its buffered receipts were persisted. Require reconciliation; never report
+  // it as completed or replay it solely because the workflow was reclaimed.
+  invariant(!existing || !["PENDING", "RUNNING"].includes(existing.status), 409,
+    "AGENT_RUN_RECOVERY_REQUIRED", "An unfinished agent execution requires reconciliation before retry.");
   if (existing && existing.status !== "FAILED" && existing.status !== "CANCELLED") {
     const readable = (await readableArtifactIds(actor, params.workspaceId, "AgentRun", [existing])).has(existing.id);
     return readable ? existing : { ...existing, goal: "Content unavailable", triggerRef: null, planJson: null,

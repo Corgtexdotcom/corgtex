@@ -250,6 +250,48 @@ afterEach(() => {
 });
 
 describe("runPendingJobs", () => {
+  describe("generic attempt settlement", () => {
+    it.each(["current-success", "current-error", "other-worker-success", "other-worker-error", "same-worker-success", "same-worker-error", "long-running-success", "long-running-error", "recovery-required"])("fences %s", async mode => {
+      const now = new Date(Date.now() - (mode.startsWith("long-running") ? 6 * 60_000 : 0));
+      const row = { id: "generic-job", workspaceId: "ws-1", type: "agent.inbox-triage",
+        payload: {}, attempts: 1, status: "RUNNING", lockedBy: "worker-1", lockedAt: now, startedAt: now };
+      const claim = structuredClone(row);
+      txMock.$queryRaw.mockResolvedValue([claim]);
+      const held = deferred();
+      const entered = deferred();
+      runAgentWorkflowJobMock.mockImplementation(async () => {
+        entered.resolve();
+        await held.promise;
+        if (mode === "recovery-required") throw Object.assign(new Error("Reconcile interrupted execution."), {code: "AGENT_RUN_RECOVERY_REQUIRED"});
+        if (mode.endsWith("error")) throw new Error("Old attempt failed");
+      });
+      const apply = async ({where, data}: any) => {
+        const matches = Object.entries(where).every(([key, value]) => {
+          if (key === "lockedAt") return row.lockedAt.getTime() === (value as Date).getTime();
+          if (key === "startedAt") return row.startedAt.getTime() === (value as Date).getTime();
+          return row[key as keyof typeof row] === value;
+        });
+        if (matches) Object.assign(row, data);
+        return {count: matches ? 1 : 0};
+      };
+      prismaMock.workflowJob.updateMany.mockImplementation(apply);
+      prismaMock.workflowJob.update.mockImplementation(async ({data}) => { Object.assign(row, data); return row; });
+      const pending = runPendingJobs("worker-1", 1);
+      await entered.promise;
+      expect(row.status).toBe("RUNNING");
+      if (mode.startsWith("other-worker") || mode.startsWith("same-worker")) {
+        row.attempts++;
+        if (mode.startsWith("other-worker")) row.lockedBy = "worker-2";
+      }
+      const replacement = structuredClone(row);
+      held.resolve();
+      await pending;
+      if (mode === "recovery-required") expect(row.status).toBe("FAILED");
+      else if (mode.startsWith("current") || mode.startsWith("long-running")) expect(row.status).toBe(mode.endsWith("error") ? "PENDING" : "COMPLETED");
+      else expect(row).toEqual(replacement);
+      expect(prismaMock.workflowJob.update).not.toHaveBeenCalled();
+    });
+  });
   describe.each(["oauth.documents.sync", "oauth.email.sync", "knowledge.sync.event"])("%s original claim settlement", type => {
     it.each(["current", "takeover-success", "takeover-error", "renewed-success", "renewed-error"])("retains the original recipe and fences %s", async mode => {
       if (mode.startsWith("renewed")) vi.useFakeTimers();
@@ -313,8 +355,8 @@ describe("runPendingJobs", () => {
     runAgentWorkflowJobMock.mockResolvedValue({ skipped: true, reason: "kill_switch" });
 
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "feedback-job" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "feedback-job" }),
       data: expect.objectContaining({ status: "PENDING", error: "Agent feedback continuation did not reach a review checkpoint." }),
     });
   });
@@ -509,8 +551,8 @@ describe("runPendingJobs", () => {
       payload: { meetingId: "meeting-1" },
       attempts: 1,
     });
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "PENDING",
         error: "Agent concurrency limit reached.",
@@ -543,7 +585,7 @@ describe("runPendingJobs", () => {
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
     expect(runFinanceReportImportExtractionJobMock).toHaveBeenCalledWith({ workspaceId: "ws-1",
       batchId: "batch-1", workflowJobId: "job-1", attempts: 5, isFinalAttempt: true, expectedLease: { lockedBy: "worker-1", lockedAt } });
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({ status: "COMPLETED" }) }));
     vi.clearAllMocks();
     prismaMock.workflowJob.update.mockResolvedValue({ id: "job-2" });
@@ -551,7 +593,7 @@ describe("runPendingJobs", () => {
       type: "finance-report-import.extract", payload: null, attempts: 1 }]);
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
     expect(runFinanceReportImportExtractionJobMock).not.toHaveBeenCalled();
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "job-2" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "job-2" }),
       data: expect.objectContaining({ status: "PENDING" }) }));
   });
 
@@ -616,8 +658,8 @@ describe("runPendingJobs", () => {
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
 
     expect(processSlackInboundEventMock).toHaveBeenCalledWith("inbound-1");
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -638,8 +680,8 @@ describe("runPendingJobs", () => {
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
 
     expect(captureReferencesForSourceMock).toHaveBeenCalledWith("SLACK_MESSAGE", "message-1");
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -712,8 +754,8 @@ describe("runPendingJobs", () => {
     await vi.waitFor(() => {
       expect(processSlackInboundEventMock).toHaveBeenCalledTimes(2);
     });
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-2" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-2" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -721,8 +763,8 @@ describe("runPendingJobs", () => {
 
     firstJob.resolve();
     await expect(pendingRun).resolves.toBe(2);
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -868,8 +910,8 @@ describe("runPendingJobs", () => {
         payload: { sourceId: "source-1", reason: "recurring" },
       }),
     }));
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -896,8 +938,8 @@ describe("runPendingJobs", () => {
       workflowJobId: "job-1",
     });
     expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -925,8 +967,8 @@ describe("runPendingJobs", () => {
         payload: { sourceId: "source-flaky", reason: "recurring" },
       }),
     }));
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "FAILED",
         error: "Microsoft Graph unavailable",
@@ -958,8 +1000,8 @@ describe("runPendingJobs", () => {
       limit: null,
       concurrency: null,
     });
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -1006,8 +1048,8 @@ describe("runPendingJobs", () => {
         healthStatus: null,
       },
     });
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -1040,8 +1082,8 @@ describe("runPendingJobs", () => {
       idMaps: [{ entityType: "Member", sourceId: "member-1", destinationId: "member-a" }],
       reason: "Queued worker verification.",
     });
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -1064,8 +1106,8 @@ describe("runPendingJobs", () => {
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
 
     expect(runControlPlaneClientMigrationWorkerVerificationJobMock).not.toHaveBeenCalled();
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "FAILED",
         error: "Control Plane client migration verification job is missing migrationRunId.",
@@ -1091,8 +1133,8 @@ describe("runPendingJobs", () => {
       demoLeadId: "lead-1",
       workflowJobId: "job-1",
     });
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -1113,8 +1155,8 @@ describe("runPendingJobs", () => {
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
 
     expect(deliverNotificationDeliveryMock).toHaveBeenCalledWith("delivery-1");
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -1136,8 +1178,8 @@ describe("runPendingJobs", () => {
       workspaceId: "ws-1",
       conversationId: "conversation-1",
     });
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -1163,8 +1205,8 @@ describe("runPendingJobs", () => {
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
 
     expect(syncSlackPublicArchiveForWorkspaceMock).toHaveBeenCalledWith("ws-1");
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -1191,8 +1233,8 @@ describe("runPendingJobs", () => {
       runtimeId: "runtime-1",
       reason: "Scheduled enterprise app health sweep.",
     });
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -1229,8 +1271,8 @@ describe("runPendingJobs", () => {
       prompt: "Create an action",
       workflowJobId: "job-1",
     }));
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -1270,8 +1312,8 @@ describe("runPendingJobs", () => {
       messageTs: "1710000001.000100",
       messageText: "Add Bob's detail",
     });
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -1295,8 +1337,8 @@ describe("runPendingJobs", () => {
       workspaceId: "ws-1",
       reason: "daily-recurring-series-repair",
     });
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -1329,8 +1371,8 @@ describe("runPendingJobs", () => {
       threadTs: "1710000000.000100",
       dayISO: "2026-04-29",
     });
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -1357,8 +1399,8 @@ describe("runPendingJobs", () => {
       workflowJobId: "job-1",
       installationId: "install-1",
     });
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
@@ -1394,8 +1436,8 @@ describe("runPendingJobs", () => {
         lastError: "invalid_auth",
       }),
     });
-    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
-      where: { id: "job-1" },
+    expect(prismaMock.workflowJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: "job-1" }),
       data: expect.objectContaining({
         status: "COMPLETED",
       }),
