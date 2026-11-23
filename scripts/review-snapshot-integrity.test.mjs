@@ -102,6 +102,27 @@ describe("merge-group delivery policy", () => {
     const unrelated = { position: 3, baseCommit: { oid: "e".repeat(40) }, headCommit: { oid: "f".repeat(40) }, pullRequest: { number: 3, state: "OPEN", headRefOid: "0".repeat(40), baseRefOid: "9".repeat(40) } };
     expect(resolveMergeGroupPrNumbers(group, { ...good, nodes: [...good.nodes, unrelated] }, steps)).toEqual([1, 2]);
   });
+  it("resolves built members beside pending queue entries with nullable commits", () => {
+    const group = { head_sha: "a".repeat(40), base_sha: "b".repeat(40), base_ref: "refs/heads/main" };
+    const step = { baseSha: group.base_sha, headSha: group.head_sha, prHeadSha: "c".repeat(40) };
+    const selected = { position: 1, baseCommit: { oid: step.baseSha }, headCommit: { oid: step.headSha }, pullRequest: { number: 1, state: "OPEN", headRefOid: step.prHeadSha, baseRefOid: group.base_sha } };
+    const pending = { position: 2, baseCommit: null, headCommit: null, pullRequest: { number: 2, state: "OPEN", headRefOid: "d".repeat(40), baseRefOid: group.base_sha } };
+    const connection = (nodes) => ({ nodes, pageInfo: { hasPreviousPage: false, hasNextPage: false } });
+    for (const sibling of [pending, { ...pending, baseCommit: { oid: group.head_sha } }, { ...pending, headCommit: { oid: "e".repeat(40) } }]) {
+      expect(resolveMergeGroupMembers(group, connection([selected, sibling]), [step])).toEqual([{ number: 1, headSha: step.prHeadSha, baseSha: group.base_sha }]);
+    }
+    const anotherPending = { ...pending, position: 3, pullRequest: { ...pending.pullRequest, number: 3 } };
+    expect(resolveMergeGroupPrNumbers(group, connection([selected, pending, anotherPending]), [step])).toEqual([1]);
+    for (const bad of [
+      { ...pending, baseCommit: undefined }, { ...pending, headCommit: undefined },
+      { ...pending, baseCommit: {} }, { ...pending, headCommit: { oid: "bad" } },
+      { ...pending, position: selected.position },
+      { ...pending, pullRequest: { ...pending.pullRequest, number: selected.pullRequest.number } },
+    ]) expect(() => resolveMergeGroupMembers(group, connection([selected, bad]), [step])).toThrow("authoritative merge-group membership");
+    for (const missing of [{ ...selected, baseCommit: null }, { ...selected, headCommit: null }, { ...selected, baseCommit: null, headCommit: null }]) {
+      expect(() => resolveMergeGroupMembers(group, connection([missing, pending]), [step])).toThrow("authoritative merge-group membership");
+    }
+  });
   it("allows an unrelated queue PR to share a selected member's PR head commit", () => {
     const group = { head_sha: "a".repeat(40), base_sha: "b".repeat(40), base_ref: "refs/heads/main" };
     const step = { baseSha: group.base_sha, headSha: group.head_sha, prHeadSha: "c".repeat(40) };
@@ -209,6 +230,19 @@ describe("merge-group live validation", () => {
     expect(seen.every((r) => r.method === "GET" || (r.u.endsWith("/graphql") && r.method === "POST" && JSON.parse(r.body).query.startsWith("query(")))).toBe(true);
     expect(seen.some((r) => /statuses|dismissals/.test(r.u) || /mutation/i.test(r.body ?? ""))).toBe(false);
     vi.unstubAllGlobals();
+  });
+  it("revalidates exact built members without evaluating unrelated pending queue PRs", async () => {
+    const entries = queueEntries([1, 2, 3]);
+    entries[1].baseCommit = null; entries[1].headCommit = null;
+    entries[2].baseCommit = null; entries[2].headCommit = null;
+    const seen = stub(entries, { memberCount: 1 });
+    try {
+      await expect(evaluateMergeGroup(repo, event, group.head_sha)).resolves.toMatchObject({ failed: false, prNumbers: [1] });
+      expect(seen.filter((request) => request.body && JSON.parse(request.body).query.includes("mergeQueue"))).toHaveLength(2);
+      expect(seen.filter((request) => request.u.includes("/pulls/"))).toHaveLength(6);
+      expect(seen.filter((request) => request.u.includes("/pulls/")).every((request) => request.u.includes("/pulls/1"))).toBe(true);
+      expect(seen.every((request) => request.method === "GET" || (request.u.endsWith("/graphql") && JSON.parse(request.body).query.startsWith("query(")))).toBe(true);
+    } finally { vi.unstubAllGlobals(); }
   });
   it("accepts an older PR base snapshot after main advances while preserving target identity", async () => {
     stub(queueEntries([1146]), { prBaseSha: "d".repeat(40) });
