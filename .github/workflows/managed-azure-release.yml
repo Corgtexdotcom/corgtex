@@ -8,12 +8,12 @@ on:
         required: false
         type: string
       inventory_ref:
-        description: Immutable private Ops inventory asset ID
-        required: true
+        description: Optional Ops inventory asset ID; leave both inventory fields blank to freeze automatically
+        required: false
         type: string
       inventory_sha256:
-        description: SHA-256 of the exact inventory bytes
-        required: true
+        description: Optional SHA-256 of the exact inventory bytes
+        required: false
         type: string
       deployment_id:
         description: Exact managed Azure deployment UUID
@@ -100,6 +100,31 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Select explicit inventory or freeze fresh exact inventory
+        id: inventory
+        shell: bash
+        env:
+          CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL }}
+          CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
+          RELEASE_INPUT_DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+          RELEASE_INPUT_WORKLOAD_CLASS: ${{ inputs.workload_class }}
+          PROVIDED_INVENTORY_REF: ${{ inputs.inventory_ref }}
+          PROVIDED_INVENTORY_SHA: ${{ inputs.inventory_sha256 }}
+          ACR_NAME: ${{ inputs.acr_name }}
+          RELEASE_REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$PROVIDED_INVENTORY_REF" || -n "$PROVIDED_INVENTORY_SHA" ]]; then
+            [[ "$PROVIDED_INVENTORY_REF" =~ ^[0-9a-f-]{36}$ && "$PROVIDED_INVENTORY_SHA" =~ ^[0-9a-f]{64}$ ]]
+            printf 'ref=%s\nsha256=%s\n' "$PROVIDED_INVENTORY_REF" "$PROVIDED_INVENTORY_SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ "$RELEASE_INPUT_WORKLOAD_CLASS" == ACTIVE_CLIENT_PRIMARY && "$ACR_NAME" =~ ^[a-z0-9]{5,50}$ ]]
+          scratch="$(mktemp)"
+          trap 'rm -f "$scratch"' EXIT
+          payload="$(jq -cn --arg id "$RELEASE_INPUT_DEPLOYMENT_ID" --arg class "$RELEASE_INPUT_WORKLOAD_CLASS" --arg acr "$ACR_NAME" --arg reason "$RELEASE_REASON" '{deploymentId:$id,workloadClass:$class,acrName:$acr,acrServer:($acr+".azurecr.io"),reason:$reason}')"
+          node scripts/control-plane.mjs call freeze_managed_release_inventory "$payload" > "$scratch"
+          node scripts/release/managed-azure-single-run-preflight.mjs inventory "$scratch"
       - name: Verify exact target without effects
         env:
           CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL }}
@@ -108,8 +133,8 @@ jobs:
           GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN || github.token }}
           MANAGED_AZURE_ACR_NAME: ${{ inputs.acr_name }}
           MANAGED_AZURE_ACR_RESOURCE_GROUP: ${{ inputs.acr_resource_group }}
-          RELEASE_INPUT_INVENTORY_REF: ${{ inputs.inventory_ref }}
-          RELEASE_INPUT_INVENTORY_SHA256: ${{ inputs.inventory_sha256 }}
+          RELEASE_INPUT_INVENTORY_REF: ${{ steps.inventory.outputs.ref }}
+          RELEASE_INPUT_INVENTORY_SHA256: ${{ steps.inventory.outputs.sha256 }}
           RELEASE_INPUT_DEPLOYMENT_ID: ${{ inputs.deployment_id }}
           RELEASE_INPUT_WORKLOAD_CLASS: ${{ inputs.workload_class }}
           RELEASE_INPUT_RELEASE_SHA: ${{ inputs.release_sha }}
@@ -166,6 +191,31 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Select explicit inventory or freeze fresh exact inventory
+        id: inventory
+        shell: bash
+        env:
+          CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL }}
+          CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
+          RELEASE_INPUT_DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+          RELEASE_INPUT_WORKLOAD_CLASS: ${{ inputs.workload_class }}
+          PROVIDED_INVENTORY_REF: ${{ inputs.inventory_ref }}
+          PROVIDED_INVENTORY_SHA: ${{ inputs.inventory_sha256 }}
+          ACR_NAME: ${{ inputs.acr_name }}
+          RELEASE_REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$PROVIDED_INVENTORY_REF" || -n "$PROVIDED_INVENTORY_SHA" ]]; then
+            [[ "$PROVIDED_INVENTORY_REF" =~ ^[0-9a-f-]{36}$ && "$PROVIDED_INVENTORY_SHA" =~ ^[0-9a-f]{64}$ ]]
+            printf 'ref=%s\nsha256=%s\n' "$PROVIDED_INVENTORY_REF" "$PROVIDED_INVENTORY_SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ "$RELEASE_INPUT_WORKLOAD_CLASS" == ACTIVE_CLIENT_PRIMARY && "$ACR_NAME" =~ ^[a-z0-9]{5,50}$ ]]
+          scratch="$(mktemp)"
+          trap 'rm -f "$scratch"' EXIT
+          payload="$(jq -cn --arg id "$RELEASE_INPUT_DEPLOYMENT_ID" --arg class "$RELEASE_INPUT_WORKLOAD_CLASS" --arg acr "$ACR_NAME" --arg reason "$RELEASE_REASON" '{deploymentId:$id,workloadClass:$class,acrName:$acr,acrServer:($acr+".azurecr.io"),reason:$reason}')"
+          node scripts/control-plane.mjs call freeze_managed_release_inventory "$payload" > "$scratch"
+          node scripts/release/managed-azure-single-run-preflight.mjs inventory "$scratch"
       - name: Execute approved exact-target release
         env:
           CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL }}
@@ -174,20 +224,29 @@ jobs:
           GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN || github.token }}
           MANAGED_AZURE_ACR_NAME: ${{ inputs.acr_name }}
           MANAGED_AZURE_ACR_RESOURCE_GROUP: ${{ inputs.acr_resource_group }}
-          RELEASE_INPUT_INVENTORY_REF: ${{ inputs.inventory_ref }}
-          RELEASE_INPUT_INVENTORY_SHA256: ${{ inputs.inventory_sha256 }}
+          PROVIDED_INVENTORY_REF: ${{ inputs.inventory_ref }}
+          RELEASE_INPUT_INVENTORY_REF: ${{ steps.inventory.outputs.ref }}
+          RELEASE_INPUT_INVENTORY_SHA256: ${{ steps.inventory.outputs.sha256 }}
           RELEASE_INPUT_DEPLOYMENT_ID: ${{ inputs.deployment_id }}
           RELEASE_INPUT_WORKLOAD_CLASS: ${{ inputs.workload_class }}
           RELEASE_INPUT_RELEASE_SHA: ${{ inputs.release_sha }}
           RELEASE_INPUT_RELEASE_VERSION: ${{ inputs.release_version }}
           RELEASE_INPUT_REASON: ${{ inputs.reason }}
-        run: >-
-          node scripts/release/managed-azure-release-transaction.mjs
-          --inventory-ref "$RELEASE_INPUT_INVENTORY_REF"
-          --inventory-sha256 "$RELEASE_INPUT_INVENTORY_SHA256"
-          --deployment-id "$RELEASE_INPUT_DEPLOYMENT_ID"
-          --workload-class "$RELEASE_INPUT_WORKLOAD_CLASS"
-          --release-sha "$RELEASE_INPUT_RELEASE_SHA"
-          --release-version "$RELEASE_INPUT_RELEASE_VERSION"
-          --reason "$RELEASE_INPUT_REASON"
-          --execute true
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$(mktemp)"
+          trap 'rm -f "$scratch"' EXIT
+          args=(--inventory-ref "$RELEASE_INPUT_INVENTORY_REF"
+            --inventory-sha256 "$RELEASE_INPUT_INVENTORY_SHA256"
+            --deployment-id "$RELEASE_INPUT_DEPLOYMENT_ID"
+            --workload-class "$RELEASE_INPUT_WORKLOAD_CLASS"
+            --release-sha "$RELEASE_INPUT_RELEASE_SHA"
+            --release-version "$RELEASE_INPUT_RELEASE_VERSION"
+            --reason "$RELEASE_INPUT_REASON")
+          if [[ -z "$PROVIDED_INVENTORY_REF" ]]; then
+            node scripts/release/managed-azure-release-transaction.mjs "${args[@]}" --execute false > "$scratch"
+            node scripts/release/managed-azure-single-run-preflight.mjs preflight "$scratch"
+            cat "$scratch"
+          fi
+          node scripts/release/managed-azure-release-transaction.mjs "${args[@]}" --execute true
