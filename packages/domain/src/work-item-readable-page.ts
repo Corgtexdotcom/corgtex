@@ -113,6 +113,8 @@ export async function readableWorkItemPage<T extends WorkItemPosition>(params: {
   take: number; skip: number; release: WorkItemReadRelease;
   load: (after: T | undefined) => Promise<T[]>;
   admit?: (row: T) => Promise<boolean>;
+  /** Apply a presentation filter after admission, without dropping its observed proof. */
+  includeInResult?: (row: T) => boolean;
 }) {
   invariant(Number.isSafeInteger(params.take) && params.take >= 0 && params.take <= 5000
     && Number.isSafeInteger(params.skip) && params.skip >= 0,400,"INVALID_INPUT","Work item pagination is invalid.");
@@ -132,6 +134,7 @@ export async function readableWorkItemPage<T extends WorkItemPosition>(params: {
     for(const row of rows) {
       if(!readable.has(row.id) || params.admit && !await params.admit(row)) continue;
       admitted.push(row);
+      if (params.includeInResult && !params.includeInResult(row)) continue;
       if(total >= params.skip && items.length < params.take) items.push(row);
       total++;
     }

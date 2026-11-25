@@ -84,6 +84,10 @@ vi.mock("./events", () => ({
 }));
 
 vi.mock("./source-lineage", () => ({
+  mergeLineageInputRoot: (previous: unknown, root: unknown) => {
+    if (previous) expect(previous).toEqual(root);
+    return root;
+  },
   collectWorkItemReadSnapshot: vi.fn(async (_workspaceId: string, read: (tx: typeof prismaMock) => Promise<unknown>) => read(prismaMock)),
   captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
   captureReadableWorkItemInputs: vi.fn(async (reader: import("@corgtex/shared").AppActor, workspaceId: string,
@@ -685,6 +689,55 @@ describe("action domain lifecycle", () => {
     expect(prismaMock.action.findMany.mock.calls[0][0]).not.toHaveProperty("skip");
     expect(result.items.map((item) => item.id)).toEqual(permitted.slice(50, 75).map((item) => item.id));
     expect(prismaMock.action.count).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { statuses: [], total: 100, ids: [1, 2] },
+    { statuses: ["OPEN"] as const, total: 26, ids: [1, 5] },
+    { statuses: ["COMPLETED", "IN_PROGRESS"] as const, total: 50, ids: [2, 3] },
+  ])("counts all statuses in one sorted scan while selecting $statuses", async ({ statuses, total, ids }) => {
+    const rows = Array.from({ length: 102 }, (_, index) => ({
+      id: `row-${String(index).padStart(3, "0")}`,
+      title: `Title ${String(index).padStart(3, "0")}`,
+      status: ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"][index % 4],
+      lineageDenied: index === 0 || index === 100,
+    }));
+    prismaMock.action.findMany
+      .mockResolvedValueOnce(rows.slice(0, 100))
+      .mockResolvedValueOnce(rows.slice(100))
+      .mockResolvedValueOnce(ids.map(index => rows[index]).reverse());
+    const { listActionsWithStatusCounts } = await import("./actions");
+    const result = await listActionsWithStatusCounts(actor, "workspace-1", {
+      page: 1, statuses: [...statuses], sort: "alpha", take: 2,
+    });
+    expect(result).toMatchObject({ total, page: 1, pageCount: Math.ceil(total / 2), skip: 0,
+      statusCounts: { DRAFT: 24, OPEN: 26, IN_PROGRESS: 25, COMPLETED: 25, ALL: 100 } });
+    expect(result.items.map(row => row.id)).toEqual(ids.map(index => rows[index].id));
+    const inventory = prismaMock.action.findMany.mock.calls.filter(([query]) => !query.include);
+    expect(inventory).toHaveLength(2);
+    expect(inventory[0][0].where.status).toBeUndefined();
+    for (const [query] of inventory) {
+      expect(query.orderBy).toEqual([{ title: "asc" }, { createdAt: "desc" }, { id: "desc" }]);
+    }
+    expect(inventory[1][0].where.AND[1].OR[0]).toEqual({ title: { gt: rows[99].title } });
+    const admissions = vi.mocked(readableArtifactIds).mock.calls.filter(call => call[2] === "Action");
+    expect(admissions.map(call => call[3].length)).toEqual([100, 2]);
+  });
+
+  it("passes other-status Action proofs to final release and propagates withdrawal", async () => {
+    const { withArtifactCountReleaseSnapshot } = await import("./source-lineage");
+    const { listActionsWithStatusCounts } = await import("./actions");
+    const rows = [{ id: "first", status: "OPEN" }, { id: "second", status: "COMPLETED" }];
+    const roots = rows.map(row => ({ kind: "Action" as const, id: row.id, fingerprint: row.id }));
+    prismaMock.action.findMany.mockResolvedValueOnce(rows).mockResolvedValueOnce([rows[0]]);
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor, _workspaceId, inputs) =>
+      roots.filter(root => inputs.some(input => input.kind === root.kind && input.id === root.id)));
+    vi.mocked(withArtifactCountReleaseSnapshot).mockImplementationOnce(async (_actor, _workspaceId, observed) => {
+      expect(observed).toEqual(roots);
+      throw new AppError(409, "SOURCE_CHANGED", "Synthetic withdrawal.");
+    });
+    await expect(listActionsWithStatusCounts(actor, "workspace-1", { take: 1, status: "OPEN" }))
+      .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
   });
 
   it("applies the selected lifecycle status before due sorting and pagination", async () => {

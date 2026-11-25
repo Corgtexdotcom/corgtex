@@ -319,10 +319,18 @@ function actionListWhere(actor: AppActor, membership: MembershipSummary | null, 
   return where;
 }
 
+function actionStatusFilters(opts?: ListActionsOptions) {
+  return opts?.statuses?.length ? [...new Set(opts.statuses)] : opts?.status ? [opts.status] : [];
+}
+
+function emptyActionStatusCounts() {
+  return { DRAFT: 0, OPEN: 0, IN_PROGRESS: 0, COMPLETED: 0, ALL: 0 };
+}
+
 async function collectActionStatusCounts(actor: AppActor, workspaceId: string, opts: ListActionsOptions | undefined, release: WorkItemReadRelease) {
   const membership = await requireWorkspaceOperation({ operation: "list_actions", actor, workspaceId, tx: release.db });
   const where = actionListWhere(actor, membership, workspaceId, { ...opts, status: undefined, statuses: undefined });
-  const counts = { DRAFT: 0, OPEN: 0, IN_PROGRESS: 0, COMPLETED: 0, ALL: 0 };
+  const counts = emptyActionStatusCounts();
   let afterId: string | undefined;
   let examined = 0;
   for (;;) {
@@ -378,15 +386,27 @@ function actionPageAfter(row: import("@prisma/client").Action, sort: ListActions
   return {OR:[{dueAt:null},{dueAt:sort==="due_asc"?{gt:row.dueAt}:{lt:row.dueAt}},{dueAt:row.dueAt,...tied}]};
 }
 
-async function collectActions(actor: AppActor, workspaceId: string, opts: ListActionsOptions | undefined, release: WorkItemReadRelease) {
+async function collectActions(actor: AppActor, workspaceId: string, opts: ListActionsOptions | undefined,
+  release: WorkItemReadRelease, statusCounts?: ReturnType<typeof emptyActionStatusCounts>) {
     const db = release.db;
     const take = opts?.take ?? 20;
     const skip = opts?.skip ?? 0;
     const membership = await requireWorkspaceOperation({ operation: "list_actions", actor, workspaceId, tx: db });
     const where = actionListWhere(actor, membership, workspaceId, opts);
 
+    // First-page status buckets require admission of all statuses. Apply the
+    // requested status to selection only, after its original proof was observed.
+    const inventoryWhere = statusCounts
+      ? actionListWhere(actor, membership, workspaceId, { ...opts, status: undefined, statuses: undefined })
+      : where;
+    const statuses = actionStatusFilters(opts);
     const page=await readableWorkItemPage<import("@prisma/client").Action>({actor,workspaceId,release,kind:"Action",take,skip,
-      load: after => db.action.findMany({where:after?{AND:[where,actionPageAfter(after,opts?.sort)]}:where,
+      includeInResult: statusCounts ? row => {
+        statusCounts[row.status]++;
+        statusCounts.ALL++;
+        return statuses.length === 0 || statuses.includes(row.status);
+      } : undefined,
+      load: after => db.action.findMany({where:after?{AND:[inventoryWhere,actionPageAfter(after,opts?.sort)]}:inventoryWhere,
         orderBy:workItemOrderBy(opts?.sort),take:100})});
     const selected = page.items;
     const hydrated = selected.length ? await db.action.findMany({where:{AND:[where,{id:{in:selected.map(row=>row.id)}}]},
@@ -457,8 +477,15 @@ export async function listActionsWithStatusCounts(actor: AppActor, workspaceId: 
     && Number.isSafeInteger(requestedPage) && requestedPage > 0,
   400, "INVALID_INPUT", "Action page is invalid.");
   return readWorkItemListSnapshot(actor, workspaceId, async release => {
+    // Page one never needs clamping. Count statuses and select its rows in
+    // one sorted scan, using the same snapshot and final release for both.
+    if (requestedPage === 1) {
+      const statusCounts = emptyActionStatusCounts();
+      const result = await collectActions(actor, workspaceId, { ...opts, take, skip: 0 }, release, statusCounts);
+      return { ...result, statusCounts, page: 1, pageCount: Math.max(1, Math.ceil(result.total / take)) };
+    }
+    const statuses = actionStatusFilters(opts);
     const statusCounts = await collectActionStatusCounts(actor, workspaceId, opts, release);
-    const statuses = opts.statuses?.length ? [...new Set(opts.statuses)] : opts.status ? [opts.status] : [];
     const total = statuses.length ? statuses.reduce((sum, status) => sum + statusCounts[status], 0) : statusCounts.ALL;
     const pageCount = Math.max(1, Math.ceil(total / take));
     const page = Math.min(requestedPage, pageCount);
