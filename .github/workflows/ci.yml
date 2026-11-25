@@ -498,6 +498,19 @@ jobs:
         if: github.event_name == 'merge_group'
         run: echo "Client Data Scan passed on pull_request before merge queue entry."
 
+  required:
+    name: CI Required
+    needs: [check, db-sync, build, docs, gitleaks, client-data-scan]
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require all six CI results
+        env:
+          CHECK_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          jq -e 'length == 6 and all(.[]; .result == "success")' <<< "$CHECK_RESULTS"
+
   smoke-target:
     name: Pin Production Validation Target
     needs: [check, db-sync, build]
