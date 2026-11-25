@@ -417,6 +417,7 @@
     "findAccountError": "Account lookup is temporarily unavailable. Try again.",
     "findAccountMultiple": "Choose the account you want to open.",
     "findAccountNoMatch": "No enterprise account was found for that email. Try another email or start a trial.",
+    "findAccountOpeningWorkspace": "Opening {workspace}…",
     "findAccountPasswordLogin": "Log in with password",
     "findAccountSearching": "Finding account...",
     "findAccountSignedIn": "You are already signed in. Open one of your workspaces.",

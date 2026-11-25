@@ -417,6 +417,7 @@
     "findAccountError": "La búsqueda de cuenta no está disponible temporalmente. Inténtalo de nuevo.",
     "findAccountMultiple": "Elige la cuenta que quieres abrir.",
     "findAccountNoMatch": "No encontramos una cuenta enterprise para ese correo. Prueba otro correo o inicia una prueba.",
+    "findAccountOpeningWorkspace": "Abriendo {workspace}…",
     "findAccountPasswordLogin": "Iniciar sesión con contraseña",
     "findAccountSearching": "Buscando cuenta...",
     "findAccountSignedIn": "Ya iniciaste sesión. Abre uno de tus espacios de trabajo.",

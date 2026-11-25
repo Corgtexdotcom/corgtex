@@ -5,6 +5,7 @@ import { hasActiveWorkspaceSupport, listActorWorkspaces, resolveSessionActor } f
 import { sessionCookieName } from "@corgtex/shared";
 import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
 import { FindAccountForm } from "./FindAccountForm";
+import { WorkspaceLinkStatus } from "./WorkspaceLinkStatus";
 
 export const dynamic = "force-dynamic";
 
@@ -59,9 +60,10 @@ export default async function FindAccountPage({
                 style={{ display: "block", textAlign: "left", textDecoration: "none" }}
               >
                 <strong>{workspace.name}</strong>
-                <span className="muted" style={{ display: "block", fontSize: 12, marginTop: 2 }}>
-                  {workspace.slug}
-                </span>
+                <WorkspaceLinkStatus
+                  slug={workspace.slug}
+                  openingLabel={t("findAccountOpeningWorkspace", { workspace: workspace.name })}
+                />
               </Link>
             ))}
           </div>
