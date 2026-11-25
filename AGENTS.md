@@ -22,20 +22,17 @@ accept manageable, reversible risk and ordinary follow-up fixes.
   without new evidence, change approach or seek focused help. Report a concrete
   blocker when an external dependency or user decision prevents further progress.
   Do not repeat unchanged checks, status polls, handoffs, or speculative hardening.
-- Once acceptance, QA, and required CI pass, deliver through the normal merge queue.
+- Once acceptance and required CI pass, merge the PR with an authorized account.
   Do not ask again for routine edits, commits, pushes, PR updates, fixes, or merge.
   Ask only for new scope or authority: access changes, paid spend, external messages,
   unapproved irreversible production/data operations, or protection bypass.
 
-## Build, then independent QA
+## Validate the work
 
-- After the integrated outcome is ready, a separate GPT-6 agent reviews the complete
-  diff and acceptance evidence, exercises relevant behavior, and reports concrete
-  blockers together. The owner fixes them in the same PR.
-- QA focuses on correctness, usability, integration, and realistic security/data
-  risks. Accept minor imperfections; do not block on taste, speculative edge cases,
-  diff size, or paperwork wording. Recheck affected behavior after fixes and reuse
-  unchanged evidence. QA may also perform protected review using the reviewer identity.
+- The delivery owner validates the integrated outcome and fixes concrete issues in
+  the same PR. A second agent or reviewer is optional, not a delivery gate.
+- Focus validation on correctness, usability, integration, and realistic security
+  and data risks. Recheck affected behavior after fixes and reuse unchanged evidence.
 - Run focused tests during development. Add tests for meaningful uncovered behavior
   or regressions; existing coverage can be sufficient. A source edit does not require
   a matching test-file edit. Do not test trivial changes just to satisfy a checklist.
@@ -44,7 +41,7 @@ accept manageable, reversible risk and ordinary follow-up fixes.
   GitHub checks still apply. Expand checks only for new code, failures, or a specific
   unresolved concern. For incidents, reproduce the observed failing boundary early.
 - Visible UI changes need evidence from the running application. API-only changes,
-  tests, and nonvisual refactors do not need screenshots. QA judges proof adequacy.
+  tests, and nonvisual refactors do not need screenshots. The delivery owner checks that the proof covers the change.
   Keep captures in ignored `.artifacts/`; use `scripts/upload-build-artifacts.mjs` or
   CI artifacts, with private links for private content. Never commit generated proof.
 
@@ -83,19 +80,19 @@ accept manageable, reversible risk and ordinary follow-up fixes.
 
 ## GitHub delivery
 
-- Builder: `Corgtex-builder` via `$HOME/.config/gh-corgtex-builder`.
-  Independent reviewer: `beepto-codex` via `$HOME/.config/gh-codex-reviewer`.
-  Verify `api user --jq .login` immediately before each GitHub write.
-- The owner never self-approves. The reviewer does not edit, push, or merge.
-  Native approval, required checks, conversation resolution, and merge queue govern
-  delivery. Never push directly to `main`, skip hooks, or bypass protection without
-  an explicit instruction for that operation.
+- Only `beepto-codex`, `puncar-dev`, and `Corgtex-builder` may merge to
+  `main`. Verify the selected identity before GitHub writes. Public contributions
+  through pull requests are welcome.
+- Merge after required CI passes and conversations are resolved. No separate
+  approval, handoff, or merge queue is required. Use normal protected merges.
+- Production deployments still need Puncar's explicit authorization. Use the exact
+  approved candidate, the existing preflight and recovery workflow, and verify
+  the serving build and affected behavior before reporting success.
 - Risk tiers (`low`, `standard`, `high`, `critical`) guide QA depth, not PR size.
   Auth, migrations, deploy, and agent/CI policy are `critical`; state the reason in
   Scope. The executable protected-path list lives in `scripts/check-plan.mjs`.
-- Mutable PR metadata is validated automatically. Review approvals need no custom
-  attestation; valid metadata edits alone do not require another full code review.
-  New code requires review of the changes and integration; reuse unaffected findings.
+- Keep PR metadata accurate. Recheck affected behavior when the head changes;
+  do not repeat unrelated validation or require a separate approval.
 
 See `.codex/review.md` for QA/review and `.github/pull_request_template.md` for the
 short PR form. GitHub setup details live in `.codex/ops/github-setup.md`.

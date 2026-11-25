@@ -16,7 +16,7 @@
 
 ## Test plan
 
-[Relevant checks and results, including existing coverage and separate-agent QA.
+[Relevant checks and results, including existing coverage and acceptance evidence.
 Link running proof for visible UI changes. Reuse CI evidence where sufficient.]
 
 ## Risk and rollback
