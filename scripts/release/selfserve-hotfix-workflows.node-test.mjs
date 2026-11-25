@@ -14,6 +14,11 @@ test("required CI includes exact candidate checks with no production environment
   assert.deepEqual(candidate.permissions, { contents: "read" });
   const text = JSON.stringify(candidate);
   assert.doesNotMatch(text, /secrets\.|id-token|packages.*write/);
+  const admissions = candidate.jobs.admissions;
+  const selector = admissions.steps.find((step) => step.id === "scope");
+  assert.match(selector.run, /GITHUB_EVENT_NAME.*!= pull_request/);
+  assert.match(selector.run, /git diff --quiet "\$BASE_SHA" HEAD -- \.github scripts package\.json package-lock\.json \.npmrc/);
+  assert.equal(candidate.jobs.candidate.if, "needs.admissions.outputs.run_matrix == 'true'");
   const steps = candidate.jobs.candidate.steps;
   assert.ok(steps.findIndex((s) => s.run?.includes("hotfix-candidate-ci.mjs verify")) < steps.findIndex((s) => s.run === "npm ci"));
   assert.ok(steps.some((s) => s.run?.includes("WorkspaceSwitcher.browser.test.ts")));
