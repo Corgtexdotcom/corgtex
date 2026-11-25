@@ -6,7 +6,7 @@ export type WorkItemScope = "company" | "circle" | "member";
 
 export type WorkItemSort = "priority" | "date" | "alpha";
 
-export type WorkItemDateValues = Record<string, string | undefined>;
+type WorkItemDateValues = Record<string, string | undefined>;
 
 export type WorkItemSortable = {
   priority: number;

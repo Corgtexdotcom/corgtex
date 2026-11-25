@@ -21,7 +21,7 @@ export type NavGroup = {
 
 // Any workspace feature flag may gate a nav item. Aliased to the registry's
 // single-source-of-truth union so the nav vocabulary cannot drift.
-export type WorkspaceNavFeatureFlag = WorkspaceFeatureFlagKey;
+type WorkspaceNavFeatureFlag = WorkspaceFeatureFlagKey;
 
 export type WorkspaceNavCapability =
   | "canManageAgentGovernance"
