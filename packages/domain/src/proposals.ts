@@ -577,7 +577,7 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
     const items=await Promise.all(selected.map(proposal=>readableProposalRelations(actor,workspaceId,proposal,membership,release,window)));
     invariant(items.length === page.items.length,409,"SOURCE_CHANGED","Selected proposals changed within collection.");
     return {items,total:page.total,take,skip};
-  });
+  }, "Proposal");
 }
 
 export async function getProposal(actor: AppActor, params: {

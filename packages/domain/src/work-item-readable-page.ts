@@ -72,25 +72,44 @@ export class WorkItemReadRelease {
     }
   }
 
-  finish<T>(value: T) {
+  finish<T>(value: T, onFinalTransactionStart?: () => void) {
     return withArtifactCountReleaseSnapshot(this.actor, this.workspaceId, [...this.roots.values()],
       async () => {}, async tx => {
         await requireWorkspaceMembership({actor: this.actor, workspaceId: this.workspaceId, tx});
         return value;
-      }, this.heads);
+      }, this.heads, { onFinalTransactionStart });
   }
 }
 
 /** Keep inventory, rank, relationships and selected hydration in one local DB
  * snapshot, then replay provider authority and release the original union. */
 export async function readWorkItemListSnapshot<T>(actor: AppActor, workspaceId: string,
-  collect: (release: WorkItemReadRelease) => Promise<T>) {
-  let release!: WorkItemReadRelease;
-  const value = await collectWorkItemReadSnapshot(workspaceId, async tx => {
-    release = new WorkItemReadRelease(actor, workspaceId, tx);
-    return collect(release);
-  });
-  return release.finish(value);
+  collect: (release: WorkItemReadRelease) => Promise<T>, kind: "Action" | "Proposal" | "Tension" | "BrainSource") {
+  const startedAt = performance.now();
+  let phaseStartedAt = startedAt;
+  let phase: "collection" | "preflight" | "finalTransaction" = "collection";
+  try {
+    let release!: WorkItemReadRelease;
+    const value = await collectWorkItemReadSnapshot(workspaceId, async tx => {
+      release = new WorkItemReadRelease(actor, workspaceId, tx);
+      return collect(release);
+    });
+    phase = "preflight";
+    phaseStartedAt = performance.now();
+    return await release.finish(value, () => {
+      phase = "finalTransaction";
+      phaseStartedAt = performance.now();
+    });
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "P2028") {
+      const now = performance.now();
+      console.error(JSON.stringify({
+        event: "work_item_list_transaction_error", code: "P2028", kind, phase,
+        elapsedMs: Math.round(now - startedAt), phaseElapsedMs: Math.round(now - phaseStartedAt),
+      }));
+    }
+    throw error;
+  }
 }
 
 export type WorkItemPosition = { id: string; title: string; priority: number; createdAt: Date };
@@ -113,6 +132,8 @@ export async function readableWorkItemPage<T extends WorkItemPosition>(params: {
   take: number; skip: number; release: WorkItemReadRelease;
   load: (after: T | undefined) => Promise<T[]>;
   admit?: (row: T) => Promise<boolean>;
+  /** Apply a presentation filter after admission, without dropping its observed proof. */
+  includeInResult?: (row: T) => boolean;
 }) {
   invariant(Number.isSafeInteger(params.take) && params.take >= 0 && params.take <= 5000
     && Number.isSafeInteger(params.skip) && params.skip >= 0,400,"INVALID_INPUT","Work item pagination is invalid.");
@@ -132,6 +153,7 @@ export async function readableWorkItemPage<T extends WorkItemPosition>(params: {
     for(const row of rows) {
       if(!readable.has(row.id) || params.admit && !await params.admit(row)) continue;
       admitted.push(row);
+      if (params.includeInResult && !params.includeInResult(row)) continue;
       if(total >= params.skip && items.length < params.take) items.push(row);
       total++;
     }

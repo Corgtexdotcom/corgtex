@@ -186,9 +186,15 @@ async function redactTensionJoins<T extends {
   raisedByMember?: { id: string } | null;
   circleId?: string | null;
   circle?: { id: string } | null;
-}>(actor: AppActor, workspaceId: string, rows: T[], release?: WorkItemReadRelease) {
-  function capture<R extends {id: string}>(kind: import("./source-lineage").LineageKind, records: R[]) {
-    return release ? release.capture(kind,records) : captureReadableDigestInputs({actor,workspaceId,kind,records});
+}>(actor: AppActor, workspaceId: string, rows: T[], release?: WorkItemReadRelease, options?: { deduplicateSnapshotJoins: boolean }) {
+  function capture<R extends { id: string }>(kind: import("./source-lineage").LineageKind, records: R[]) {
+    // The list hydrates each kind with the same projection inside its read snapshot.
+    const inputs = options?.deduplicateSnapshotJoins
+      ? [...new Map(records.map(record => [record.id, record])).values()]
+      : records;
+    return release
+      ? release.capture(kind, inputs)
+      : captureReadableDigestInputs({ actor, workspaceId, kind, records: inputs });
   }
   const [authors, members, circles] = await Promise.all([
     capture("User", rows.flatMap(row => row.author ? [row.author] : [])),
@@ -327,7 +333,7 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
     invariant(items.length === page.items.length,409,"SOURCE_CHANGED","Selected tensions changed within collection.");
     const total=page.total;
     const requestCountSummaries = await loadAdviceRequestCountSummaries(actor, workspaceId, "TENSION", items.map((item) => item.id), rows => release.observe("AdviceRequest", rows), db);
-    const redactedItems = await redactTensionJoins(actor, workspaceId, items, release);
+    const redactedItems = await redactTensionJoins(actor, workspaceId, items, release, { deduplicateSnapshotJoins: true });
     const linkedProposals = items.flatMap((item) => item.proposal ? [item.proposal] : []);
     const visibleProposalIds = linkedProposals.length
       ? await release.readable("Proposal", linkedProposals) : new Set<string>();
@@ -344,7 +350,7 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
       take,
       skip,
     };
-  });
+  }, "Tension");
 }
 
 async function applyTensionDuplicateUpdate(actor: AppActor, params: CreateTensionParams, tensionId: string) {

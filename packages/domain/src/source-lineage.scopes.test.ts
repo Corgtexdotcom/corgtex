@@ -53,6 +53,7 @@ vi.mock("./external-mcp", async original => ({
 import { captureMcpOAuthGrantEpoch, mcpCredentialVersion, mcpScopesHash, runWithMcpOrigin } from "../../shared/src/mcp-context";
 import { captureArtifactInputProof, captureArtifactInputSnapshotProof, isArtifactInputProofReadable,
   recordArtifactInputLineage, readableArtifactIds, lineageContentFingerprint, withArtifactInputReadCapture, withArtifactCountReleaseSnapshot, type LineageKind, type LineageRoot } from "./source-lineage";
+import { readWorkItemListSnapshot } from "./work-item-readable-page";
 import { externalMcpNativeReadRequest, externalMcpConnectionGrantHash } from "./external-mcp";
 import { externalMcpResponseHash } from "./external-mcp-response-input";
 import { capturePermissionEpochs } from "./source-permission-epochs";
@@ -413,6 +414,46 @@ describe("complete local admission before native query replay", () => {
         .rejects.toMatchObject({ code: "UNKNOWN_LINEAGE" });
     });
     expect(replay.sdk.mock.calls.length).toBeGreaterThan(successfulReplays);
+  });
+});
+
+describe("work item list transaction diagnostics", () => {
+  it.each(["collection", "preflight", "finalTransaction"] as const)("reports only safe metadata for a %s P2028", async phase => {
+    const error = Object.assign(new Error("private database detail"), { code: "P2028", meta: { target: "private target" } });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = readWorkItemListSnapshot(owner, "ws-a", async release => {
+        if (phase === "collection") throw error;
+        if (phase === "preflight") {
+          release.add([{ kind: "User", id: "private-source", fingerprint: "fixture" }]);
+          f.authorize.mockRejectedValueOnce(error);
+        } else {
+          // Fail on transaction acquisition, before its callback starts.
+          f.base.$transaction.mockRejectedValueOnce(error);
+        }
+        return 1;
+      }, "Tension");
+      await expect(result).rejects.toBe(error);
+      expect(log.mock.calls).toHaveLength(1);
+      expect(log.mock.calls[0]).toHaveLength(1);
+      expect(JSON.parse(log.mock.calls[0][0])).toEqual({
+        event: "work_item_list_transaction_error", code: "P2028", kind: "Tension", phase, elapsedMs: expect.any(Number), phaseElapsedMs: expect.any(Number),
+      });
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("leaves successful reads and unrelated failures silent", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(readWorkItemListSnapshot(owner, "ws-a", async () => 1, "Tension")).resolves.toBe(1);
+      const error = Object.assign(new Error("private detail"), { code: "SOURCE_CHANGED" });
+      await expect(readWorkItemListSnapshot(owner, "ws-a", async () => { throw error; }, "Tension")).rejects.toBe(error);
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+    }
   });
 });
 

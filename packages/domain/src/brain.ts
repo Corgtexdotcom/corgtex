@@ -1069,7 +1069,7 @@ export async function listSources(actor: AppActor, params: {
       cursor = candidates[candidates.length - 1].id;
     }
     return { items, total, take, skip };
-  });
+  }, "BrainSource");
 }
 
 export async function markSourceAbsorbed(_actor: AppActor, params: {

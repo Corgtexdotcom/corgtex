@@ -105,6 +105,19 @@ it.each(["off-page-head", "caller-aba", "source-aba"] as const)("rejects the ori
   expect(changed()).toBe(1);
 },60_000);
 
+it.each([undefined, "COMPLETED"] as const)("rejects the first page filtered to %s if an off-page contributing head is replaced", async status => {
+  const f = await fixture(3);
+  const changed = afterRead(f, args => args.take === 100 && args.orderBy?.[0]?.title === "asc",
+    () => f.transaction(async tx => {
+      const row = await tx.action.findUniqueOrThrow({ where: { id: "row-002" } });
+      await recordArtifactInputLineage({ tx, actor: f.actor, workspaceId: f.workspace.id,
+        artifact: { kind: "Action", id: row.id }, content: row, origin: "HUMAN_ORIGINAL", inputs: [] });
+    }));
+  await expect(listActionsWithStatusCounts(f.actor, f.workspace.id, { status, sort: "alpha", take: 1 }))
+    .rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+  expect(changed()).toBe(1);
+}, 60_000);
+
 it("keeps zero-count, status-filter, tenant and own-draft behavior with exact clamping",async()=>{
   const f=await fixture(0);
   expect(await listActionsWithStatusCounts(f.actor,f.workspace.id,{statuses:["OPEN"],take:2,page:9})).toMatchObject({items:[],total:0,page:1,pageCount:1,statusCounts:{ALL:0}});
