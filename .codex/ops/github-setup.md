@@ -1,33 +1,21 @@
 # GitHub protection
 
-Use native protection for `main`: one independent approval, stale-approval dismissal,
-latest-push approval, resolved conversations, required checks, and merge queue.
-Agents cannot push directly to main, force-push, or bypass these controls.
+Keep the repository public for contributions. Restrict updates and merges to
+`main` to `beepto-codex`, `puncar-dev`, and `Corgtex-builder`, including for
+administrators. Verify the selected identity before GitHub writes.
 
-Required checks:
+Require an up-to-date branch, resolved conversations, and passing CI:
 
 - `Lint, Typecheck & Test`
 - `Database Sync`
 - `Build`
 - `Docs Validation`
-- `PR Policy`
-- `PR Metadata Policy`
 - `Secret Scan`
 - `Client Data Scan`
 
-The metadata workflow executes trusted base code, validates live PR metadata, and
-removes invalid PRs from the queue. Its merge-group evaluator validates actual queue
-membership, current heads/bases, approvals, and metadata drift. The evaluator retains
-its historical filename `scripts/review-snapshot-integrity.mjs`; there is no custom
-attestation or separate snapshot publisher. Valid metadata changes do not dismiss
-code approvals. The independent reviewer still assesses substantive scope changes.
+Do not require a separate PR reviewer or a merge queue. Verify current GitHub
+settings after any change; they are authoritative. Do not relax the required checks
+or expand merge access to fix a failing check.
 
-When updating required contexts, verify the replacement already succeeds on PR and
-merge-group SHAs, save current settings, update only the intended contexts, and read
-back the result. Preserve existing review and queue controls. Compatibility aliases
-may remain during rollout; they are inexpensive wrappers, not extra review stages.
-Restore saved settings if activation fails. Never bypass protection to repair it.
-
-Builder: `Corgtex-builder`; reviewer: `beepto-codex`. Verify the selected identity
-immediately before each GitHub write. The owner queues the approved PR; the reviewer
-never edits or merges. Live GitHub configuration is authoritative.
+Production deployment is separate. Get Puncar's explicit authorization, then use
+the approved Azure target and exact build, run preflight, and verify the rollout.
