@@ -19,38 +19,18 @@ describe("one pinned target through the entire automatic validation chain", () =
     expect(validation.jobs["selfserve-live"]["runs-on"]).toBe("ubuntu-24.04");
     expect(validation.jobs["selfserve-live"].steps.some((step) => step.run === "npx playwright install --with-deps chromium")).toBe(true);
   });
-  it("passes the pinned selection into the reusable context and checks its returned target", () => {
-    expect(ci.jobs["smoke-selfserve"].with.validation_target).toBe("${{ needs.smoke-target.outputs.target }}");
-    expect(validation.on.workflow_call.inputs.validation_target.required).toBe(true);
-    expect(validation.on.workflow_call.outputs.target.value).toBe("${{ jobs.validation-context.outputs.target }}");
-    expect(ci.jobs["smoke-mode-gate"].steps[0].env.TARGET).toBe("${{ needs.smoke-target.outputs.target }}");
-    expect(ci.jobs["observe-prod"].env.PRODUCTION_VALIDATION_TARGET).toBe("${{ needs.smoke-mode-gate.outputs.selected_target }}");
-    expect(ci.jobs["smoke-mode-gate"].outputs.selected_target).toBe("${{ steps.mode.outputs.selected_target }}");
-    expect(validationRunTarget({ eventName: "push", pinnedTarget: target.name, configuredTarget: "core" })).toBe(target.name);
-    expect(() => validationRunTarget({ eventName: "push", configuredTarget: target.name })).toThrow("PINNED_TARGET_REQUIRED");
+  it("observes only a completed Selfserve proof from a trusted production validation run", () => {
+    const observe = validation.jobs["observe-prod"];
+    expect(ci.jobs["observe-prod"]).toBeUndefined();
+    expect(observe.needs).toEqual(["validation-context", "selfserve-outcome"]);
+    expect(observe.if).toContain("github.ref == 'refs/heads/main'");
+    expect(observe.if).toContain("github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'");
+    expect(observe.if).toContain("needs.validation-context.outputs.target == 'selfserve-validation'");
+    expect(observe.if).toContain("needs.selfserve-outcome.outputs.available == 'true'");
+    expect(observe.env.PRODUCTION_VALIDATION_TARGET).toBe("${{ needs.validation-context.outputs.target }}");
+    expect(observe.env.SELFSERVE_VALIDATION_EXPECTED_SHA).toBe("${{ needs.validation-context.outputs.expected_git_sha }}");
     expect(() => validationRunTarget({ eventName: "workflow_dispatch", configuredTarget: "core" })).toThrow("UNKNOWN");
     expect(validationRunTarget({ eventName: "schedule" })).toBe(target.name);
-  });
-  it.each([
-    ["core", "skipped", "", "", 1],
-    [target.name, "success", "true", target.name, 0],
-    [target.name, "failure", "true", target.name, 1],
-    [target.name, "success", "false", target.name, 1],
-    [target.name, "success", "true", "core", 1],
-    [target.name, "success", "true", "", 1],
-    ["", "skipped", "", "", 1],
-    ["core", "success", "true", target.name, 1],
-  ])("executes the gate for %s/%s (bound result %s/%s)", (mode, selfserve, proof, returned, status) => {
-    const directory = mkdtempSync(join(tmpdir(), "validation-mode-"));
-    try {
-      const output = join(directory, "output");
-      const result = spawnSync("bash", ["-c", ci.jobs["smoke-mode-gate"].steps[0].run], { encoding: "utf8", env: {
-        PATH: process.env.PATH, TARGET: mode, SELFSERVE_RESULT: selfserve,
-        SELFSERVE_PROOF: proof, SELFSERVE_TARGET: returned, GITHUB_OUTPUT: output,
-      } });
-      expect(result.status).toBe(status);
-      if (status === 0) expect(readFileSync(output, "utf8")).toBe(`selected_target=${mode}\n`);
-    } finally { rmSync(directory, { recursive: true, force: true }); }
   });
   it("preserves the non-cancelling internal parity lock", () => {
     expect(validation.jobs["selfserve-parity"].concurrency).toEqual({
@@ -60,7 +40,7 @@ describe("one pinned target through the entire automatic validation chain", () =
 });
 
 describe("executed observation shell requires fresh baked health before manifest", () => {
-  const script = ci.jobs["observe-prod"].steps.find((step) => step.name === "Run post-deploy observation gate").run;
+  const script = validation.jobs["observe-prod"].steps.find((step) => step.name === "Run post-deploy observation gate").run;
   function observe(payload, mode = target.name, httpFailure = false) {
     // Only network/provider boundaries are stubbed. Run the actual shell, Node
     // health validator and manifest; never invoke curl or an observation provider.
