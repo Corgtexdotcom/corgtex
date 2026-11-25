@@ -1,3 +1,4 @@
+import { Suspense, type ComponentProps } from "react";
 import { notificationUnreadCountLabel } from "@/lib/notification-count";
 import { isGlobalOperator, listActorWorkspaces, getUnreadNotificationSummary, listRecentConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState, resolveWorkspaceModuleAccess, getWorkspaceInitialKnowledgeSummary, SELF_SERVE_WORKSPACE_TOUR_KEY, SELF_SERVE_WORKSPACE_TOUR_VERSION } from "@corgtex/domain";
 import { workspaceBranding, prisma } from "@corgtex/shared";
@@ -50,6 +51,12 @@ async function hasWorkspaceInitialKnowledge(actor: AppActor, workspaceId: string
   return summary.count > 0 || !summary.complete;
 }
 
+async function OnboardingTourAfterKnowledge({
+  knowledge, ...tourProps
+}: Omit<ComponentProps<typeof WorkspaceOnboardingTour>, "hasInitialKnowledge"> & { knowledge: Promise<boolean> }) {
+  return <WorkspaceOnboardingTour {...tourProps} hasInitialKnowledge={await knowledge} />;
+}
+
 function syncSettingsRecord(value: unknown) {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -86,7 +93,7 @@ export default async function WorkspaceLayout({
     redirect(localizedPath(workspaces[0] ? `/workspaces/${workspaces[0].id}` : "/find-account", locale));
   }
 
-  const [unreadSummary, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge, googleConnection, productFeedbackTarget, hasSupportAccess] = await Promise.all([
+  const [unreadSummary, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, googleConnection, productFeedbackTarget, hasSupportAccess] = await Promise.all([
     userId ? getUnreadNotificationSummary(actor, workspaceId) : Promise.resolve({ count: 0, complete: true, available: true }),
     listRecentConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], complete: false })),
     userId ? listDailyCompanyUnderstandingQuestions(actor, { workspaceId, take: 3 }).catch(() => []) : Promise.resolve([]),
@@ -99,7 +106,6 @@ export default async function WorkspaceLayout({
       tourKey: SELF_SERVE_WORKSPACE_TOUR_KEY,
       tourVersion: SELF_SERVE_WORKSPACE_TOUR_VERSION,
     }).catch(() => null) : Promise.resolve(null),
-    hasWorkspaceInitialKnowledge(actor, workspaceId).catch(() => false),
     userId ? prisma.oAuthConnection.findFirst({
       where: {
         userId,
@@ -314,19 +320,21 @@ export default async function WorkspaceLayout({
         <DemoTour workspaceId={workspaceId} />
       )}
       {showSelfServeOnboarding && (
-        <WorkspaceOnboardingTour
-          workspaceId={workspaceId}
-          tourKey={SELF_SERVE_WORKSPACE_TOUR_KEY}
-          tourVersion={SELF_SERVE_WORKSPACE_TOUR_VERSION}
-          initialCompletedAt={onboardingState?.completedAt?.toISOString() ?? null}
-          hasInitialKnowledge={hasInitialKnowledge}
-          featureFlags={featureFlags}
-          capabilities={capabilities}
-          googleDrivePicker={googleDrivePicker}
-          aiWorkspaceState={aiWorkspaceState}
-          connectorUrl={connectorUrl}
-          origin={origin}
-        />
+        <Suspense fallback={null}>
+          <OnboardingTourAfterKnowledge
+            workspaceId={workspaceId}
+            tourKey={SELF_SERVE_WORKSPACE_TOUR_KEY}
+            tourVersion={SELF_SERVE_WORKSPACE_TOUR_VERSION}
+            initialCompletedAt={onboardingState?.completedAt?.toISOString() ?? null}
+            knowledge={hasWorkspaceInitialKnowledge(actor, workspaceId).catch(() => false)}
+            featureFlags={featureFlags}
+            capabilities={capabilities}
+            googleDrivePicker={googleDrivePicker}
+            aiWorkspaceState={aiWorkspaceState}
+            connectorUrl={connectorUrl}
+            origin={origin}
+          />
+        </Suspense>
       )}
       {!isDemo && productFeedbackTarget && (
         <ProductFeedbackWidget locale={locale} workspaceId={workspaceId} />

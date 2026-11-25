@@ -70,7 +70,7 @@ export async function findLatestReadableArtifact<T extends { id: string; generat
     }
     examined += rows.length;
     const captured = await release.observeRead(() => captureReadableDigestInputs({
-      actor: options.actor, workspaceId: options.workspaceId, kind: options.kind, records: rows,
+      actor: options.actor, workspaceId: options.workspaceId, kind: options.kind, records: rows, firstReadableOnly: true,
     }));
     selected = captured.records[0] ?? null;
     if (selected) {

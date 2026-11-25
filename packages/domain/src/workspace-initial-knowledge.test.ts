@@ -2,7 +2,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 const f = vi.hoisted(() => ({
   rows: new Map<string, Array<Record<string, any>>>(), allowed: new Set<string>(), versions: new Map<string, number>(), active: true,
-  document: vi.fn(), brainSource: vi.fn(), meeting: vi.fn(), membership: vi.fn(), beforeRelease: vi.fn(), release: vi.fn(),
+  capture: vi.fn(), document: vi.fn(), brainSource: vi.fn(), meeting: vi.fn(), membership: vi.fn(), beforeRelease: vi.fn(), release: vi.fn(),
 }));
 vi.mock("@corgtex/shared", () => ({ prisma: { document: { findMany: f.document }, brainSource: { findMany: f.brainSource }, meeting: { findMany: f.meeting } } }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership: f.membership }));
@@ -10,6 +10,7 @@ vi.mock("./brain-access", () => ({ resolveKnowledgeAccessDomains: async () => ["
 vi.mock("./source-lineage", async () => ({
   sealArtifactInputActor: (await import("./artifact-input-actor")).sealArtifactInputActor,
   captureArtifactInputProof: async (_actor: unknown, _ws: string, inputs: Array<{ kind: string; id: string }>) => {
+    f.capture(inputs.map(row => row.id));
     if (inputs.some(row => !f.allowed.has(row.id))) throw new (await import("./errors")).AppError(409, "UNKNOWN_LINEAGE", "Synthetic denied input");
     return inputs.map(row => ({ kind: row.kind, id: row.id, fingerprint: String(f.versions.get(row.id) ?? 1) }));
   },
@@ -62,6 +63,13 @@ it.each(["Document", "BrainSource", "Meeting"])("returns a proved %s positive th
   expect(await getWorkspaceInitialKnowledgeSummary(actor, "ws-1")).toEqual({ found: true, complete: true });
   expect(f.release).toHaveBeenCalledWith([{ kind, id: row.id, fingerprint: "1" }]);
   expect(f.membership).toHaveBeenCalledTimes(2);
+});
+it("stops proving documents at the first readable row in a full candidate page", async () => {
+  const rows = add("Document", 100);
+  f.allowed.add(rows[1].id);
+  expect(await getWorkspaceInitialKnowledgeSummary(actor, "ws-1")).toEqual({ found: true, complete: true });
+  expect(f.capture.mock.calls).toEqual([[[rows[0].id]], [[rows[1].id]]]);
+  expect(f.release).toHaveBeenCalledWith([{ kind: "Document", id: rows[1].id, fingerprint: "1" }]);
 });
 it("reports complete empty only after exhausting eligible workspace/domain/content families", async () => {
   const docs = add("Document", 2); docs[0].workspaceId = "ws-2"; docs[1].accessDomain = "FINANCE";

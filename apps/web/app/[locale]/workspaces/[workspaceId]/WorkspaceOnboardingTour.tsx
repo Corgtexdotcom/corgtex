@@ -11,8 +11,7 @@ import type { AiWorkspaceLaunchState } from "@/lib/ai-workspace-launch";
 import { OnboardingAiWorkspaceSetup } from "./OnboardingAiWorkspaceSetup";
 import { SourceIntakePanel } from "./SourceIntakePanel";
 import { workspaceRouteMatches, workspaceStepUrl } from "./onboarding-tour-routing";
-
-const RESTART_EVENT = "corgtex:restart-self-serve-tour";
+import { listenForTourRestart } from "./onboarding-tour-restart";
 
 interface TourStep {
   href: string;
@@ -372,7 +371,8 @@ export function WorkspaceOnboardingTour({
   useEffect(() => {
     driverRef.current = initDriver();
 
-    if (!completedRef.current && !isMapRoute && targetStepIndexRef.current === null) {
+    const restart = listenForTourRestart(workspaceId, restartTour);
+    if (!restart.replayed && !completedRef.current && !isMapRoute && targetStepIndexRef.current === null) {
       if (onboardingRequested || !hasContextRef.current) {
         setSetupMode((current) => current ?? "setup");
       } else {
@@ -385,10 +385,8 @@ export function WorkspaceOnboardingTour({
       }
     }
 
-    window.addEventListener(RESTART_EVENT, restartTour);
-
     return () => {
-      window.removeEventListener(RESTART_EVENT, restartTour);
+      restart.unsubscribe();
       if (autoStartTimerRef.current !== null) {
         clearTimeout(autoStartTimerRef.current);
         autoStartTimerRef.current = null;
@@ -397,19 +395,24 @@ export function WorkspaceOnboardingTour({
         driverRef.current?.destroy();
       }
     };
-  }, [initDriver, isMapRoute, onboardingRequested, restartTour]);
+  }, [initDriver, isMapRoute, onboardingRequested, restartTour, workspaceId]);
 
   useEffect(() => {
-    if (targetStepIndexRef.current !== null) {
-      const targetIndex = targetStepIndexRef.current;
-      targetStepIndexRef.current = null;
+    const targetIndex = targetStepIndexRef.current;
+    if (targetIndex === null) return;
+    const target = tourSteps[targetIndex];
+    if (!target) return;
+    const expectedUrl = workspaceStepUrl(workspaceId, target.href);
+    if (!workspaceRouteMatches(currentUrl(), expectedUrl)) return;
 
-      setTimeout(() => {
-        driverRef.current = initDriver();
-        driverRef.current.drive(targetIndex);
-      }, 500);
-    }
-  }, [routeKey, initDriver]);
+    const timer = setTimeout(() => {
+      if (targetStepIndexRef.current !== targetIndex || !workspaceRouteMatches(currentUrl(), expectedUrl)) return;
+      targetStepIndexRef.current = null;
+      driverRef.current = initDriver();
+      driverRef.current.drive(targetIndex);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [routeKey, initDriver, tourSteps, workspaceId]);
 
   return (
     <Dialog

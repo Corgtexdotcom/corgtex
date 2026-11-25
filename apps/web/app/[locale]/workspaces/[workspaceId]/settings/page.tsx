@@ -354,7 +354,7 @@ export default async function SettingsPage({
                         Billing portal
                       </a>
                     )}
-                    <OnboardingRestartButton />
+                    <OnboardingRestartButton workspaceId={workspaceId} />
                   </div>
                 </div>
               </section>

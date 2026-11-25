@@ -53,7 +53,7 @@ export async function getWorkspaceInitialKnowledgeSummary(actor: AppActor, works
         const rows = await family.load(afterId, take);
         invariant(rows.length <= take && rows.every(row => !afterId || row.id > afterId),
           503, "SOURCE_READ_SCAN_CHANGED", "Initial knowledge page changed; retry.");
-        const admitted = await captureReadableDigestInputs({ actor, workspaceId, kind: family.kind, records: rows });
+        const admitted = await captureReadableDigestInputs({ actor, workspaceId, kind: family.kind, records: rows, firstReadableOnly: true });
         return { rows, admitted };
       });
       examined += page.rows.length;

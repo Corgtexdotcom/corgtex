@@ -8,12 +8,26 @@ vi.mock("./source-lineage", async importOriginal => ({
   captureReadableNewspaperDeliveryInputs: async () => null,
   captureArtifactReadHeadObservation: async (read: () => Promise<unknown>) => ({value: await read(), heads: new Map()}),
   withArtifactCountReleaseSnapshot: async (_actor: unknown, _ws: string, _roots: unknown, remote: () => Promise<void>, finish: (tx: unknown) => Promise<unknown>) => {releasedRoots(_roots);await remote();return finish({});}, captureArtifactInputProof: capture, isArtifactInputProofReadable: readable }));
-import { DigestReadRelease, isDigestInputProofShared, loadReadableArtifactSample, loadReadableDigestQuery, mergeArtifactInputProofs } from "./digest-lineage";
+import { captureReadableDigestInputs, DigestReadRelease, isDigestInputProofShared, loadReadableArtifactSample, loadReadableDigestQuery, mergeArtifactInputProofs } from "./digest-lineage";
 vi.mock("./auth", () => ({requireWorkspaceMembership: async () => ({id: "member"})}));
 import { SOURCE_PERMISSION_POLICY_VERSION, type PermissionEpochProof } from "./source-permission-epochs";
 
 describe("digest permission selection", () => {
   beforeEach(() => { vi.resetAllMocks(); });
+
+  it.each(["WorkspaceBriefing", "NewspaperEdition"] as const)(
+    "proves only the newest readable %s when the caller needs a single slot", async kind => {
+      const rows = Array.from({ length: 100 }, (_, index) => ({ id: String(index) }));
+      const root = { kind, id: rows[0].id, fingerprint: "a".repeat(64) };
+      capture.mockResolvedValue([root]);
+      const result = await captureReadableDigestInputs({
+        actor: {} as never, workspaceId: "ws", kind, records: rows, firstReadableOnly: true,
+      });
+      expect(capture).toHaveBeenCalledTimes(1);
+      expect(result.records).toEqual([rows[0]]);
+      expect(result.proofs.get(rows[0].id)).toEqual([root]);
+    },
+  );
 
   it("captures an admitted source page once using its original snapshots", async () => {
     const actor = {} as any, rows = [{id: "hidden", content: "Unknown"}, {id: "visible", content: "Original"}];
