@@ -1,11 +1,11 @@
-import test from "node:test";
+import { test } from "vitest";
 import assert from "node:assert/strict";
 import { selectInventory, verifyPreflight } from "./managed-azure-single-run-preflight.mjs";
 
-const deploymentId = "e0d34b24-bd86-4cb2-8ccb-f2f84309ca16";
-const inventoryRef = "3b1b6784-30a4-4600-8ee9-34912c0b38e0";
+const deploymentId = "123e4567-e89b-42d3-a456-426614174001";
+const inventoryRef = "123e4567-e89b-42d3-a456-426614174002";
 const inventorySha256 = "a".repeat(64);
-const releaseSha = "e120e157e3cc79752b3336d691e7b7acc33e29bc";
+const releaseSha = "c".repeat(39) + "d";
 const binding = { deploymentId, workloadClass: "ACTIVE_CLIENT_PRIMARY", inventoryRef, inventorySha256, releaseSha };
 const freeze = { ...binding, validUntil: "2027-01-01T00:00:00Z" };
 const dry = { ...binding, status: "DRY_RUN_READY", effects: 0, executionAllowed: true };
