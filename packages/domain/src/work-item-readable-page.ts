@@ -74,10 +74,10 @@ export class WorkItemReadRelease {
 
   finish<T>(value: T, onFinalTransactionStart?: () => void) {
     return withArtifactCountReleaseSnapshot(this.actor, this.workspaceId, [...this.roots.values()],
-      async () => {}, async tx => {
+      async () => { onFinalTransactionStart?.(); }, async tx => {
         await requireWorkspaceMembership({actor: this.actor, workspaceId: this.workspaceId, tx});
         return value;
-      }, this.heads, { onFinalTransactionStart });
+      }, this.heads);
   }
 }
 

@@ -2107,7 +2107,7 @@ export async function collectWorkItemReadSnapshot<T>(workspaceId: string, read: 
  * This creates no reusable read, native, model or publication capability. */
 export async function withArtifactCountReleaseSnapshot<T>(actor: AppActor, workspaceId: string,
   roots: readonly LineageRoot[], remote: () => Promise<void>, finish: (tx: Prisma.TransactionClient) => Promise<T>,
-  observedHeads?: ReadonlyMap<string,string>, options?: {directory?: boolean; onFinalTransactionStart?: () => void}): Promise<T> {
+  observedHeads?: ReadonlyMap<string,string>, options?: {directory?: boolean}): Promise<T> {
   // Keep only compact original receipts across the aggregate. Bound each proof
   // traversal's hydration/memos, not the workspace's total number of inputs.
   const assertPages = async (db: LineageClient, message: string) => {
@@ -2134,7 +2134,6 @@ export async function withArtifactCountReleaseSnapshot<T>(actor: AppActor, works
     await assertPages(prisma, "Knowledge count inputs changed before native replay.");
     const sealed: ReadHeadBinding = {heads: new Map(binding.heads), sealed: true};
     await remote();
-    options?.onFinalTransactionStart?.();
     return prisma.$transaction(tx => expectedReadHeads.run(sealed, () => localCommitAdmission.run(true, async () => {
       await assertPages(tx, "Knowledge count inputs changed before aggregate release.");
       return finish(tx);
