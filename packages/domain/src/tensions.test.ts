@@ -1582,6 +1582,30 @@ describe("tensions domain", () => {
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
   });
 
+  it("captures each shared tension join once while redacting every occurrence of a denied circle", async () => {
+    const author = { id: "user-shared", displayName: "Shared author", email: "shared@example.test" };
+    const member = { id: "member-shared", user: author };
+    const circle = { id: "circle-denied", name: "Restricted circle" };
+    const rows = ["t-1", "t-2"].map(id => ({
+      id, workspaceId: "ws-1", authorUserId: author.id, author,
+      raisedByMemberId: member.id, raisedByMember: member,
+      assigneeMemberId: member.id, assigneeMember: member, circleId: circle.id, circle,
+    }));
+    prismaMock.tension.findMany.mockResolvedValue(rows);
+    vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor, _workspace, inputs) => {
+      if (inputs.some(input => input.kind === "Circle")) throw new AppError(403, "SOURCE_RESTRICTED", "Source unavailable.");
+      return [];
+    });
+    const { listTensions } = await import("./tensions");
+    const result = await listTensions(actor, "ws-1", { sort: "date" });
+    expect(result.total).toBe(2);
+    expect(result.items).toMatchObject(rows.map(row => ({ ...row, circleId: null, circle: null })));
+    const joinedInputs = vi.mocked(captureArtifactInputProof).mock.calls
+      .flatMap(([, , inputs]) => inputs)
+      .filter(input => ["User", "Member", "Circle"].includes(input.kind));
+    expect(joinedInputs.map(input => input.id).sort()).toEqual([circle.id, member.id, author.id]);
+  });
+
   it.each(["list", "detail"] as const)("withholds revoked tension %s labels without hiding the independently public body", async (surface) => {
     const tension = { id: "public-tension", workspaceId: "ws-1", title: "Public tension", bodyMd: "Independent body",
       authorUserId: "departed", author: { id: "departed", displayName: "Private profile", email: "private@example.test" },
@@ -1595,6 +1619,11 @@ describe("tensions domain", () => {
     const { getTension, listTensions } = await import("./tensions");
     const read = async () => surface === "list" ? (await listTensions(actor, "ws-1")).items[0] : getTension(actor, { workspaceId: "ws-1", tensionId: tension.id });
     expect(await read()).toMatchObject({ author: tension.author, raisedByMember: tension.raisedByMember });
+    if (surface === "detail") {
+      const memberInputs = vi.mocked(captureArtifactInputProof).mock.calls
+        .flatMap(([, , inputs]) => inputs).filter(input => input.kind === "Member");
+      expect(memberInputs.map(input => input.id)).toEqual([tension.assigneeMemberId, tension.raisedByMemberId]);
+    }
     vi.mocked(captureArtifactInputProof).mockImplementation(async (_actor,_workspace,inputs)=>{
       if(inputs.some(input=>["User","Member","Circle"].includes(input.kind))) throw new AppError(403,"SOURCE_RESTRICTED","Source unavailable.");
       return [];
