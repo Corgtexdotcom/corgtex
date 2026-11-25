@@ -68,6 +68,7 @@ describe("permission-filtered artifact pages", () => {
     captureInputs.mockImplementation(async ({ records }) => ({ records: records.filter((row: typeof rows[number]) => row.id === "00900"), proofs: new Map([["00900", ["original-proof"]]]) }));
     const loadPage = vi.fn().mockResolvedValueOnce(rows.slice(0, 100)).mockResolvedValueOnce(rows.slice(100));
     expect(await findLatestReadableArtifact({ actor, workspaceId: "ws", kind: "WorkspaceBriefing", loadPage })).toEqual({ item: rows[100], complete: true });
+    expect(captureInputs.mock.calls.every(([input]) => input.firstReadableOnly === true)).toBe(true);
     expect(add).toHaveBeenCalledExactlyOnceWith(["original-proof"]);
     expect(finish).toHaveBeenCalledExactlyOnceWith({ item: rows[100], complete: true });
   });

@@ -105,10 +105,12 @@ export async function captureReadableDigestInputs<T extends { id: string }>(para
   workspaceId: string;
   kind: LineageKind;
   records: T[];
+  /** For ordered lookups that consume only the first permitted record. */
+  firstReadableOnly?: boolean;
   audience?: AppActor[];
   additionalInputs?: (record: T) => Array<LineageInput & { snapshot?: Record<string, unknown> }>;
 }) {
-  if (!params.db && params.kind === "NewspaperDelivery" && !params.audience && !params.additionalInputs && params.records.length <= 100) {
+  if (!params.firstReadableOnly && !params.db && params.kind === "NewspaperDelivery" && !params.audience && !params.additionalInputs && params.records.length <= 100) {
     try {
       const batched = await captureReadableNewspaperDeliveryInputs(params.actor,params.workspaceId,params.records);
       if (batched) return batched;
@@ -127,6 +129,7 @@ export async function captureReadableDigestInputs<T extends { id: string }>(para
       if (params.audience && !await isDigestInputProofShared(params.audience, params.workspaceId, roots)) continue;
       records.push(record);
       proofs.set(record.id, roots);
+      if (params.firstReadableOnly) break;
     } catch (error) {
       if (!(error instanceof AppError) || !["UNKNOWN_LINEAGE", "SOURCE_CHANGED", "SOURCE_RESTRICTED"].includes(error.code)) throw error;
     }
