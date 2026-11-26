@@ -108,8 +108,8 @@ describe("main Ops public health observation", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("opts in only main CI, removes Railway credentials, and propagates initial health failures", () => {
-    const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+  it("opts in after trusted production validation and propagates initial health failures", () => {
+    const workflow = readFileSync(new URL("../.github/workflows/production-validation.yml", import.meta.url), "utf8");
     const observation = workflow.slice(workflow.indexOf("  observe-prod:"));
     expect(observation).toContain('OPS_OBSERVATION_PUBLIC_HEALTH: "true"');
     expect(observation).not.toMatch(/RAILWAY_API_TOKEN|FLEET_RELEASE_OPS_TARGET_JSON|FLEET_RELEASE_TARGETS_JSON/);
@@ -221,7 +221,7 @@ describe("bounded transient Ops health retries", () => {
   it.each([true, false])("workflow metadata CLI propagates recovered=%s without manufacturing identity", (recover) => {
     const preloader = `let calls = 0; globalThis.fetch = async () => { calls++; if (${recover} && calls === 1) throw new TypeError("reset"); return new Response(JSON.stringify(${JSON.stringify(recover ? health : { ...health, database: "down" })}), {headers:{"content-type":"application/json"}}); }; process.on("exit", () => console.error("fetch calls="+calls));`;
     const preloadUrl = `data:text/javascript,${encodeURIComponent(preloader)}`;
-    const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+    const workflow = readFileSync(new URL("../.github/workflows/production-validation.yml", import.meta.url), "utf8");
     const assignment = workflow.match(/^\s*(ops_release="\$\(node scripts\/ops-public-health\.mjs\)")$/m)?.[1];
     expect(assignment).toBeTruthy();
     const result = spawnSync("bash", ["-e", "-c", `${assignment}\nprintf '%s' "$ops_release"`], {

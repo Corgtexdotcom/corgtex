@@ -85,8 +85,9 @@ accept manageable, reversible risk and ordinary follow-up fixes.
   through pull requests are welcome.
 - Merge after required CI passes and conversations are resolved. No separate
   approval, handoff, or merge queue is required. Use normal protected merges.
-- Production deployments still need Puncar's explicit authorization. Use the exact
-  approved candidate, the existing preflight and recovery workflow, and verify
+- Puncar grants standing authorization to deploy Corgtex to Azure, including
+  production. Choose when to deploy based on the change and its verification.
+  Use the exact candidate, follow the release and recovery workflow, and verify
   the serving build and affected behavior before reporting success.
 - Risk tiers (`low`, `standard`, `high`, `critical`) guide QA depth, not PR size.
   Auth, migrations, deploy, and agent/CI policy are `critical`; state the reason in

@@ -214,7 +214,22 @@ jobs:
           scratch="$(mktemp)"
           trap 'rm -f "$scratch"' EXIT
           payload="$(jq -cn --arg id "$RELEASE_INPUT_DEPLOYMENT_ID" --arg class "$RELEASE_INPUT_WORKLOAD_CLASS" --arg acr "$ACR_NAME" --arg reason "$RELEASE_REASON" '{deploymentId:$id,workloadClass:$class,acrName:$acr,acrServer:($acr+".azurecr.io"),reason:$reason}')"
-          node scripts/control-plane.mjs call freeze_managed_release_inventory "$payload" > "$scratch"
+          if ! node scripts/control-plane.mjs call freeze_managed_release_inventory "$payload" > "$scratch"; then
+            echo '### Managed Azure inventory freeze failed' >> "$GITHUB_STEP_SUMMARY"
+            echo 'The release did not execute. Inspect the current Ops lease before retrying.' >> "$GITHUB_STEP_SUMMARY"
+            status_payload="$(jq -cn --arg id "$RELEASE_INPUT_DEPLOYMENT_ID" --arg acr "$ACR_NAME" '{operation:"get_recovery",deploymentId:$id,acrName:$acr,acrServer:($acr+".azurecr.io")}')"
+            if timeout 20s node scripts/control-plane.mjs call managed_release_lease "$status_payload" > "$scratch" 2>/dev/null; then
+              jq -er '
+                select(.phase == "MUTATING" or .phase == "RECOVERY_REQUIRED")
+                | select((.fence | type) == "number" and (.expiresAt | type) == "string")
+                | select(.expiresAt | test("^[0-9TZ:.+-]+$"))
+                | "- Recovery phase: \(.phase)\n- Fence: \(.fence)\n- Lease expiration (UTC): \(.expiresAt)"
+              ' "$scratch" >> "$GITHUB_STEP_SUMMARY" || echo 'No active recovery status was returned.' >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo 'Recovery status was unavailable.' >> "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 1
+          fi
           node scripts/release/managed-azure-single-run-preflight.mjs inventory "$scratch"
       - name: Execute approved exact-target release
         env:

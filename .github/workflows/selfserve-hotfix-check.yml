@@ -16,23 +16,21 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          # Pull requests compare the actual tested merge tree to its base SHA.
+          # Depth two includes both parents of the synthetic pull request merge.
           fetch-depth: 2
           persist-credentials: false
       - name: Select PRs that can change candidate proof
         id: scope
         shell: bash
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_EVENT_NAME" != pull_request ]]; then
+          if [[ "$GITHUB_EVENT_NAME" != pull_request ]] || ! git rev-parse --verify --quiet HEAD^2 >/dev/null; then
             echo "run_matrix=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          # The event base SHA can lag the merge ref if main advanced.
           result=0
-          git diff --quiet "$BASE_SHA" HEAD -- .github scripts package.json package-lock.json .npmrc || result=$?
+          git diff --quiet HEAD^1 HEAD -- .github scripts package.json package-lock.json .npmrc || result=$?
           case "$result" in
             0) echo "run_matrix=false" >> "$GITHUB_OUTPUT" ;;
             1) echo "run_matrix=true" >> "$GITHUB_OUTPUT" ;;

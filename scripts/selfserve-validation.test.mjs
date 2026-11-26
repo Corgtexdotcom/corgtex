@@ -264,14 +264,16 @@ describe("workflow and fixture secret isolation", () => {
   const ci = workflow("ci"), validation = workflow("production-validation"), recovery = workflow("auto-revert");
   it("retires Core CI and automatic source reverts", () => {
     expect(ci.jobs["smoke-prod"]).toBeUndefined();
-    expect(ci.jobs["smoke-target"].steps[0].env.TARGET).toBe(target.name);
-    expect(ci.jobs["smoke-selfserve"].if).toContain("needs.smoke-target.outputs.target == 'selfserve-validation'");
+    expect(ci.jobs["smoke-target"]).toBeUndefined();
+    expect(ci.jobs["smoke-selfserve"]).toBeUndefined();
     expect(recovery.jobs.revert).toBeUndefined();
-    expect(Object.keys(validation.jobs)).toEqual(["validation-context", "selfserve-live", "selfserve-isolated", "selfserve-parity", "selfserve-outcome"]);
+    expect(Object.keys(validation.jobs)).toEqual(["validation-context", "selfserve-live", "selfserve-isolated", "selfserve-parity", "selfserve-outcome", "observe-prod"]);
   });
-  it("exposes only dedicated credentials to reusable selfserve validation, no broad DB/ADMIN fallback", () => {
-    expect(Object.keys(ci.jobs["smoke-selfserve"].secrets).sort()).toEqual(["SELFSERVE_SCHEMA_AUDITOR_URL", "SELFSERVE_VALIDATION_EMAIL", "SELFSERVE_VALIDATION_PASSWORD"]);
+  it("exposes only dedicated secrets to live Selfserve validation", () => {
     const live = JSON.stringify(validation.jobs["selfserve-live"]);
+    expect([...new Set(live.match(/secrets\.SELFSERVE_[A-Z_]+/g))].sort()).toEqual([
+      "secrets.SELFSERVE_SCHEMA_AUDITOR_URL", "secrets.SELFSERVE_VALIDATION_EMAIL", "secrets.SELFSERVE_VALIDATION_PASSWORD",
+    ]);
     expect(live).not.toMatch(/secrets\.(?:ADMIN_|PRODUCTION_DATABASE_URL|PRODUCTION_VALIDATION_ADMIN_)/);
     expect(live).toContain("selfserve-validation-schema.mjs");
     expect(live).toContain("selfserve-validation-navigation.mjs");
@@ -281,7 +283,6 @@ describe("workflow and fixture secret isolation", () => {
     expect(isolated.environment).toBeUndefined();
     expect(JSON.stringify(isolated).match(/secrets\.[A-Za-z_]+/g)).toEqual(["secrets.GITHUB_TOKEN"]);
     expect(isolated.permissions).toEqual({ actions: "read", contents: "read", packages: "read" });
-    expect(ci.jobs["smoke-selfserve"].permissions.packages).toBe("read");
     expect(isolated.env.SELFSERVE_IMAGE_READ_TOKEN).toBeUndefined();
     const tokenSteps = isolated.steps.filter((step) => step.env?.SELFSERVE_IMAGE_READ_TOKEN);
     expect(tokenSteps).toHaveLength(1);
@@ -330,8 +331,8 @@ describe("workflow and fixture secret isolation", () => {
   it("requires outcome uploads and the selected complete job, while preserving Ops observation", () => {
     expect(validation.jobs["selfserve-outcome"].needs).toEqual(["validation-context", "selfserve-live", "selfserve-isolated", "selfserve-parity"]);
     expect(validation.jobs["selfserve-outcome"].steps.at(-1).with["if-no-files-found"]).toBe("error");
-    expect(ci.jobs["smoke-mode-gate"].steps[0].run).toContain('test "$SELFSERVE_PROOF" = true');
-    const observation = JSON.stringify(ci.jobs["observe-prod"]);
+    const observation = JSON.stringify(validation.jobs["observe-prod"]);
+    expect(observation).toContain("needs.selfserve-outcome.outputs.available == 'true'");
     expect(observation).toContain("observation_targets=azure-selfserve,ops");
     expect(observation).not.toContain("backup-app");
   });

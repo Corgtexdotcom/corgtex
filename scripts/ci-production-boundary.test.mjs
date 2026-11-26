@@ -5,16 +5,17 @@ import { describe, expect, it } from "vitest";
 import { buildObservationSummary, normalizeObservationTargets, runObservationGate } from "./post-deploy-observation-gate.mjs";
 
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+const validation = readFileSync(new URL("../.github/workflows/production-validation.yml", import.meta.url), "utf8");
 const recovery = readFileSync(new URL("../.github/workflows/auto-revert.yml", import.meta.url), "utf8");
 
-function job(name) {
-  const match = workflow.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [a-z][a-z-]*:|$(?![\\s\\S]))`, "m"));
+function job(name, source = workflow) {
+  const match = source.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [a-z][a-z-]*:|$(?![\\s\\S]))`, "m"));
   if (!match) throw new Error(`Missing CI job ${name}`);
   return match[1];
 }
 
 describe("automatic production CI boundary", () => {
-  const observationTargets = job("observe-prod").match(/observation_targets=([^\s]+)/)?.[1];
+  const observationTargets = job("observe-prod", validation).match(/observation_targets=([^\s]+)/)?.[1];
 
   it("serializes QA fixture writes with fleet and direct Azure production releases", () => {
     for (const name of ["qa-workspaces.yml", "fleet-release.yml", "azure-selfserve-production.yml"]) {
@@ -23,8 +24,8 @@ describe("automatic production CI boundary", () => {
     }
   });
 
-  it("observes only selfserve and Ops releases collected by main CI", () => {
-    const observe = job("observe-prod");
+  it("observes only Selfserve and Ops releases after production validation", () => {
+    const observe = job("observe-prod", validation);
     const manifests = [...observe.matchAll(/\{ target: "([^"]+)"/g)].map((match) => match[1]);
     expect(manifests).toEqual(["azure-selfserve", "ops"]);
     expect([...normalizeObservationTargets(observationTargets)]).toEqual(manifests);
@@ -33,7 +34,7 @@ describe("automatic production CI boundary", () => {
   });
 
   function workflowManifest(mode) {
-    const script = job("observe-prod").match(/node -e '\n(\s+const targetManifests = [\s\S]*?)\n\s*'/)?.[1];
+    const script = job("observe-prod", validation).match(/node -e '\n(\s+const targetManifests = [\s\S]*?)\n\s*'/)?.[1];
     expect(script).toBeTruthy();
     return JSON.parse(execFileSync(process.execPath, ["-e", script], { encoding: "utf8", env: {
       PRODUCTION_VALIDATION_TARGET: mode, GITHUB_SHA: "a".repeat(40),
@@ -139,9 +140,9 @@ describe("automatic production CI boundary", () => {
   it("keeps legacy Core writers, baseline consumption and source reverts out of automatic delivery", () => {
     expect(workflow).not.toMatch(/smoke-prod:|accepted-core-baseline|https:\/\/app\.corgtex\.com|secrets\.PRODUCTION_DATABASE_URL/);
     expect(recovery).not.toMatch(/git revert|contents: write|Open revert PR/);
-    expect(job("smoke-selfserve")).toContain("uses: ./.github/workflows/production-validation.yml");
-    expect(job("observe-prod")).toContain("post-deploy-observation-gate.mjs");
-    expect(job("observe-prod")).toContain("SELFSERVE_VALIDATION_EXPECTED_SHA");
+    expect(workflow).not.toMatch(/production-validation\.yml|post-deploy-observation-gate\.mjs|fleet-release-production/);
+    expect(job("observe-prod", validation)).toContain("post-deploy-observation-gate.mjs");
+    expect(job("observe-prod", validation)).toContain("SELFSERVE_VALIDATION_EXPECTED_SHA");
     expect(job("test")).toContain("npx vitest run --project unit --project integration");
   });
 
