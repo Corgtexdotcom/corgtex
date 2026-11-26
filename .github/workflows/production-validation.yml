@@ -343,10 +343,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [validation-context, selfserve-outcome]
     if: >-
-      github.ref == 'refs/heads/main' && github.repository == 'Corgtexdotcom/corgtex'
+      !cancelled() && github.ref == 'refs/heads/main' && github.repository == 'Corgtexdotcom/corgtex'
       && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
       && needs.validation-context.outputs.target == 'selfserve-validation'
-      && needs.selfserve-outcome.outputs.available == 'true'
+      && needs.selfserve-outcome.result == 'success' && needs.selfserve-outcome.outputs.available == 'true'
     environment: fleet-release-production
     permissions:
       contents: read

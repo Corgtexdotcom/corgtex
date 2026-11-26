@@ -26,6 +26,8 @@ describe("one pinned target through the entire automatic validation chain", () =
     expect(observe.if).toContain("github.ref == 'refs/heads/main'");
     expect(observe.if).toContain("github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'");
     expect(observe.if).toContain("needs.validation-context.outputs.target == 'selfserve-validation'");
+    expect(observe.if).toContain("!cancelled()");
+    expect(observe.if).toContain("needs.selfserve-outcome.result == 'success'");
     expect(observe.if).toContain("needs.selfserve-outcome.outputs.available == 'true'");
     expect(observe.env.PRODUCTION_VALIDATION_TARGET).toBe("${{ needs.validation-context.outputs.target }}");
     expect(observe.env.SELFSERVE_VALIDATION_EXPECTED_SHA).toBe("${{ needs.validation-context.outputs.expected_git_sha }}");
