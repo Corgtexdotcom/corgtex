@@ -1,4 +1,5 @@
-import { getContextMapData, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getContextMapData, requireWorkspaceMembership } from "@corgtex/domain";
+import { notFound } from "next/navigation";
 
 import { prisma } from "@corgtex/shared";
 
@@ -30,6 +31,12 @@ export default async function ContextMapsPage({
       workspaceId,
       mapViewId: query.view ?? null,
       includeStale: query.stale === "1",
+    }).catch((error: unknown) => {
+      if (error instanceof AppError && error.status === 404 && error.code === "NOT_FOUND"
+        && error.message === "Context map not found.") {
+        notFound();
+      }
+      throw error;
     }),
     isWorkspaceFeatureEnabled(workspaceId, "CONTEXT_MAP_AI"),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
