@@ -1,7 +1,8 @@
 import type { BrainArticleType, BrainArticleAuthority } from "@prisma/client";
-import { getArticlePageData, updateArticle } from "@corgtex/domain";
+import { AppError, getArticlePageData, updateArticle } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import Link from "next/link";
+import { notFound } from "next/navigation";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
@@ -42,7 +43,12 @@ export default async function BrainArticlePage({
   const t = await getTranslations("brain");
 
   const {article, otherArticles, sources, isArchived, isAdmin, canManage, archiveRecord} =
-    await getArticlePageData(actor, {workspaceId, slug});
+    await getArticlePageData(actor, {workspaceId, slug}).catch((error: unknown) => {
+      if (error instanceof AppError && error.status === 404 && error.code === "NOT_FOUND") {
+        notFound();
+      }
+      throw error;
+    });
 
   const ageText = (date: Date) => {
     const days = Math.floor((Date.now() - new Date(date).getTime()) / (1000 * 60 * 60 * 24));
