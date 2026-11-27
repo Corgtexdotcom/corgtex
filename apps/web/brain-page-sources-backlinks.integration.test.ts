@@ -10,7 +10,7 @@ import * as lineage from "../../packages/domain/src/source-lineage";
 const pageActor = vi.hoisted(() => ({value: null as AppActor | null}));
 vi.mock("@/lib/auth", () => ({requirePageActor: async () => pageActor.value}));
 vi.mock("next-intl/server", () => ({getTranslations: async () => (key: string) => key}));
-vi.mock("@corgtex/domain", async () => ({...await import("../../packages/domain/src/brain"), ...await import("../../packages/domain/src/auth"), ...await import("../../packages/domain/src/archive")}));
+vi.mock("@corgtex/domain", async () => ({...await import("../../packages/domain/src/brain"), ...await import("../../packages/domain/src/auth"), ...await import("../../packages/domain/src/archive"), ...await import("../../packages/domain/src/errors")}));
 vi.mock("@/lib/components/MarkdownEditor", () => ({MarkdownEditor: () => null}));
 vi.mock("@/lib/components/MarkdownRenderer", () => ({MarkdownRenderer: () => null}));
 vi.mock("@/lib/components/ArchivedItemBanner", () => ({ArchivedItemBanner: () => null}));
