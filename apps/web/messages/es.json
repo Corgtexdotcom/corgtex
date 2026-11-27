@@ -481,6 +481,8 @@
     "articleTitle": "Título del artículo",
     "askAgent": "Preguntar al Agente",
     "askPlaceholder": "¿Sintetizar información sobre...?",
+    "articleNotFoundTitle": "Artículo no encontrado",
+    "articleNotFoundDescription": "Este artículo de Brain no está disponible.",
     "backToIndex": "← Volver al Índice",
     "bodyMd": "Cuerpo (Markdown)",
     "core": "Principal",

@@ -481,6 +481,8 @@
     "articleTitle": "Article title",
     "askAgent": "Ask the Agent",
     "askPlaceholder": "Synthesize information about...?",
+    "articleNotFoundTitle": "Article not found",
+    "articleNotFoundDescription": "This Brain article is not available.",
     "backToIndex": "← Back to Index",
     "bodyMd": "Body (Markdown)",
     "core": "Core",
