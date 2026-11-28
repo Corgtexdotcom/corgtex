@@ -7,6 +7,8 @@ import enMessages from "@/messages/en.json";
 import esMessages from "@/messages/es.json";
 
 const mocks = vi.hoisted(() => ({
+  nextCursor: null as string | null,
+  complete: true,
   locale: "en" as "en" | "es",
   completed: [] as Array<Record<string, unknown>>,
   scheduled: [] as Array<Record<string, unknown>>,
@@ -18,7 +20,7 @@ vi.mock("@/lib/auth", () => ({
 }));
 vi.mock("@corgtex/domain", () => ({
   requireWorkspaceMembership: async () => ({ role: "CONTRIBUTOR" }),
-  listMeetings: mocks.listMeetings,
+  listMeetingDirectory: async (actor: unknown, workspaceId: string, opts: unknown, project: (row: any) => unknown) => ({ items: (await mocks.listMeetings(actor, workspaceId, opts)).map(project), complete: mocks.complete, nextCursor: mocks.nextCursor }),
   listMeetingRecordings: async () => [],
   listHumanMembers: async () => [],
   getMeetingRecorderConfig: async () => null,
@@ -97,6 +99,8 @@ describe("Meetings filters", () => {
   beforeEach(() => {
     vi.stubGlobal("React", React);
     mocks.locale = "en";
+    mocks.complete = true;
+    mocks.nextCursor = null;
     mocks.completed = [
       meeting("ready", "COMPLETED", "Transcript content", 5),
       meeting("missing", "COMPLETED", null, 4),
@@ -108,6 +112,46 @@ describe("Meetings filters", () => {
     mocks.listMeetings.mockReset().mockImplementation(async (_actor, _workspaceId, options: { status: string }) => (
       options.status === "COMPLETED" ? mocks.completed : mocks.scheduled
     ));
+  });
+
+  it("renders 20 tied-date rows per page with honest totals and filter-preserving links", async () => {
+    mocks.completed = Array.from({ length: 45 }, (_, i) => meeting(`ready-${String(44 - i).padStart(2, "0")}`, "COMPLETED", "Transcript", 5));
+    mocks.scheduled = [];
+    const first = await render({ memberId: "member-1", recordedFrom: "2026-10-01" });
+    expect(first).toContain("showing 20 of 45");
+    expect(first).toContain('href="/workspaces/synthetic-workspace/meetings/ready-00"');
+    expect(first).not.toContain('href="/workspaces/synthetic-workspace/meetings/ready-20"');
+    expect(first).toContain('href="?memberId=member-1&amp;recordedFrom=2026-10-01&amp;page=2"');
+    const last = await render({ page: "999", status: "COMPLETED" });
+    expect(last).toContain("Page 3 of 3");
+    expect(last).toContain("showing 5 of 45");
+    expect(last).toContain('href="?status=COMPLETED&amp;page=2"');
+    expect(last).toContain('href="?status=TRANSCRIPT_NEEDED"');
+  });
+
+  it("preserves older-window navigation and resets exhausted lists and filter changes", async () => {
+    mocks.complete = false;
+    mocks.nextCursor = "opaque-position";
+    const html = await render({ memberId: "member-1", page: "2", completedCursor: "prior-position" });
+    expect(html).toContain("Next source window");
+    expect(html).toContain("completedCursor=opaque-position");
+    expect(html).toContain("scheduledCursor=opaque-position");
+    expect(html).toContain("First source window");
+    expect(html).toContain('href="?status=TRANSCRIPT_NEEDED&amp;memberId=member-1"');
+  });
+
+  it("marks truncated counts as lower bounds and hidden-only windows as unknown", async () => {
+    mocks.complete = false;
+    let html = await render();
+    expect(html).toContain("All (1+)");
+    expect(html).toContain("limited source window");
+    expect(html).not.toContain("1++");
+    mocks.completed = [];
+    mocks.scheduled = [];
+    html = await render();
+    expect(html).toContain("All (…)");
+    expect(html).toContain("No matching meetings in this window");
+    expect(html).not.toContain("No meetings with transcripts yet");
   });
 
   it("defaults to transcript-ready rows and keeps counts and filter links honest", async () => {
