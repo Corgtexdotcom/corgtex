@@ -20,17 +20,25 @@ type CaptureRecord = {
   excludedDialogChild: boolean;
   includedContent: boolean;
 };
+type SubmitOutcome = "success" | "failure" | "network";
+type CommitChange = "Escape" | "X" | "backdrop" | "pathname" | "search" | "workspace" | "focused route" | "unmount";
 type Fixture = {
   pathname: string;
   search: string;
   workspaceId: string;
   captures: CaptureRecord[];
+  toasts: string[];
   mode: "success" | "fail" | "canvas-pending" | "blob-pending";
   resolveCanvas: () => void;
   resolveBlob: () => void;
   resolvePreviousCapture: () => void;
   navigate: (pathname: string, search?: string, workspaceId?: string) => void;
   unmount: () => void;
+  holdPost: (outcome: SubmitOutcome) => void;
+  postReady: boolean;
+  postCount: number;
+  completePostDuringCommit: (change: CommitChange) => void;
+  postSettledBeforePassive: boolean | null;
   queuedFrames: Array<{ id: number; callback: FrameRequestCallback; canceled: boolean }>;
   holdFrames: () => void;
   runQueuedFrames: () => boolean[];
@@ -94,17 +102,75 @@ describe.runIf(process.env.PRODUCT_FEEDBACK_BROWSER_QA === "1")("ProductFeedback
     const component = fileURLToPath(new URL("./ProductFeedbackWidget.tsx", import.meta.url));
     const bundle = await build({
       stdin: {
-        contents: `import React from 'react'; import {createRoot} from 'react-dom/client';
+        contents: `import React, {startTransition, useEffect, useLayoutEffect} from 'react';
+          import {createRoot} from 'react-dom/client';
+          import {unstable_shouldYield as shouldYield} from 'scheduler';
           import {ProductFeedbackWidget} from ${JSON.stringify(component)};
           const fixture = window.__feedbackFixture = {
-            pathname: '/en/workspaces/demo', search: '', workspaceId: 'demo', captures: [], mode: 'success',
+            pathname: '/en/workspaces/demo', search: '', workspaceId: 'demo', captures: [], toasts: [], mode: 'success',
           };
           const root = createRoot(document.getElementById('root'));
-          const render = () => root.render(<ProductFeedbackWidget locale="en" workspaceId={fixture.workspaceId} />);
+          let version = 0;
+          let widgetMounted = true;
+          function FixtureRoot({version}) {
+            useLayoutEffect(() => {
+              const finishPost = fixture.finishPostOnCommit;
+              if (!finishPost) return;
+              fixture.finishPostOnCommit = null;
+              queueMicrotask(async () => {
+                finishPost();
+                // Drain the fetch/json/await chain before checking the passive marker.
+                for (let i = 0; i < 5; i++) await Promise.resolve();
+                fixture.postSettledBeforePassive = fixture.passiveVersion !== version;
+              });
+              // Make React yield after commit so the microtask runs before passive effects,
+              // rather than relying on network delivery or a fixed-duration timing race.
+              while (!shouldYield()) {}
+            }, [version]);
+            useEffect(() => { fixture.passiveVersion = version; }, [version]);
+            return widgetMounted ? <ProductFeedbackWidget locale="en" workspaceId={fixture.workspaceId} /> : null;
+          }
+          const render = () => root.render(<FixtureRoot version={++version} />);
           fixture.navigate = (pathname, search = '', workspaceId = 'demo') => {
             Object.assign(fixture, {pathname, search, workspaceId}); render();
           };
           fixture.unmount = () => root.unmount();
+          fixture.holdPost = outcome => {
+            const nativeFetch = window.fetch.bind(window);
+            fixture.postReady = false;
+            fixture.postCount = 0;
+            fixture.postSettledBeforePassive = null;
+            window.fetch = (url, options) => {
+              if (!String(url).endsWith('/product-feedback')) return nativeFetch(url, options);
+              fixture.postCount++;
+              if (outcome === 'network') return new Promise((resolve, reject) => {
+                fixture.finishPost = () => reject(new Error('Old network failure'));
+                fixture.postReady = true;
+              });
+              return Promise.resolve({ok: outcome === 'success', json: () => new Promise(resolve => {
+                fixture.finishPost = () => resolve({error: {message: 'Old request failed'}});
+                fixture.postReady = true;
+              })});
+            };
+          };
+          fixture.completePostDuringCommit = change => {
+            fixture.finishPostOnCommit = fixture.finishPost;
+            startTransition(() => {
+              const dialog = document.querySelector('dialog');
+              if (change === 'Escape') dialog.dispatchEvent(new Event('cancel', {bubbles: true, cancelable: true}));
+              else if (change === 'X') document.querySelector('.dialog-close').click();
+              else if (change === 'backdrop') dialog.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+              else if (change === 'unmount') widgetMounted = false;
+              else if (change === 'pathname') fixture.pathname = '/en/workspaces/demo/meetings';
+              else if (change === 'search') fixture.search = 'tab=other';
+              else if (change === 'workspace') fixture.workspaceId = 'other';
+              else {
+                fixture.pathname = '/en/workspaces/demo/add';
+                fixture.search = 'kind=action';
+              }
+              render();
+            });
+          };
           const nativeFrame = window.requestAnimationFrame.bind(window);
           const nativeCancelFrame = window.cancelAnimationFrame.bind(window);
           fixture.queuedFrames = [];
@@ -145,7 +211,7 @@ describe.runIf(process.env.PRODUCT_FEEDBACK_BROWSER_QA === "1")("ProductFeedback
                export const useSearchParams = () => new URLSearchParams(window.__feedbackFixture.search);`
             : args.path === "next-intl"
               ? `const translate = (key, values) => key + (values?.number ? ' ' + values.number : ''); export const useTranslations = () => translate;`
-              : `const addToast = () => {}; export const useToast = () => ({addToast});`,
+              : `const addToast = message => window.__feedbackFixture.toasts.push(message); export const useToast = () => ({addToast});`,
         }));
       } }],
     });
@@ -380,6 +446,178 @@ describe.runIf(process.env.PRODUCT_FEEDBACK_BROWSER_QA === "1")("ProductFeedback
     await page.evaluate((key: CaptureResolver) => window.__feedbackFixture[key](), resolver);
     await expect.poll(() => page.getByRole("img").count()).toBe(1);
     expect(await page.getByRole("button", { name: "capture", exact: true }).isEnabled()).toBe(true);
+  });
+
+  for (const width of [1100, 390]) {
+    for (const dismissal of ["Escape", "X", "backdrop"]) {
+      it.each(["success", "failure", "network"] as const)(`isolates a late %s after ${dismissal} at ${width}px`, async (outcome) => {
+        await page.setViewportSize({ width, height: 800 });
+        await open();
+        await releaseModule();
+        await expect.poll(() => page.getByRole("img").count()).toBe(1);
+        await page.getByRole("textbox").fill("Request A");
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => { release = resolve; });
+        let posts = 0;
+        await page.route("**/api/workspaces/demo/product-feedback", async (route) => {
+          posts++;
+          await held;
+          if (outcome === "network") await route.abort("failed");
+          else await route.fulfill({ status: outcome === "success" ? 200 : 503,
+            contentType: "application/json", body: JSON.stringify({ error: { message: "Old request failed" } }) });
+        });
+        await page.getByRole("button", { name: "submit", exact: true }).click();
+        await expect.poll(() => posts).toBe(1);
+        expect(await page.getByRole("textbox").isDisabled()).toBe(true);
+        for (const name of ["capture", "attach", "removeScreenshot 1"]) {
+          expect(await page.getByRole("button", { name, exact: true }).isDisabled()).toBe(true);
+        }
+        expect(await page.getByRole("button", { name: "cancel", exact: true }).isDisabled()).toBe(true);
+        if (dismissal === "Escape") await page.keyboard.press("Escape");
+        else if (dismissal === "X") await page.getByRole("button", { name: "close", exact: true }).click();
+        else await page.locator("dialog").evaluate((dialog) => dialog.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+        await page.getByRole("button", { name: "open", exact: true }).click();
+        await expect.poll(() => page.getByRole("img").count()).toBe(2);
+        expect(await page.getByRole("button", { name: "submitting", exact: true }).isDisabled()).toBe(true);
+        // Even a programmatic duplicate submit must respect the transport lock.
+        await page.locator("form").evaluate((form) => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+        await settle();
+        expect(posts).toBe(1);
+        release();
+        await expect.poll(() => page.getByRole("button", { name: "submit", exact: true }).isEnabled()).toBe(true);
+        expect(await page.locator("dialog").evaluate((dialog) => (dialog as HTMLDialogElement).open)).toBe(true);
+        expect(await page.getByRole("textbox").inputValue()).toBe("Request A");
+        expect(await page.getByRole("img").count()).toBe(2);
+        expect(await page.getByRole("alert").count()).toBe(0);
+        expect(await page.evaluate(() => window.__feedbackFixture.toasts)).toEqual([]);
+        await page.getByRole("textbox").fill("New session remains editable");
+        await page.getByRole("button", { name: "removeScreenshot 1", exact: true }).click();
+        expect(await page.getByRole("img").count()).toBe(1);
+        await page.unroute("**/api/workspaces/demo/product-feedback");
+        await page.route("**/api/workspaces/demo/product-feedback", (route) => {
+          posts++;
+          return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+        });
+        await page.getByRole("button", { name: "submit", exact: true }).click();
+        await expect.poll(() => page.locator("dialog").evaluate((dialog) => (dialog as HTMLDialogElement).open)).toBe(false);
+        expect(posts).toBe(2);
+        expect(await page.evaluate(() => window.__feedbackFixture.toasts)).toEqual(["submitted"]);
+        expect(await page.locator("textarea").inputValue()).toBe("");
+        expect(await page.locator('[role="img"]').count()).toBe(0);
+      });
+    }
+  }
+
+  for (const change of ["Escape", "X", "backdrop", "pathname", "search", "workspace", "focused route", "unmount"] as const) {
+    it.each(["success", "failure", "network"] as const)(`ignores a %s POST between ${change} commit and passive effects`, async (outcome) => {
+      await open();
+      await releaseModule();
+      await expect.poll(() => page.getByRole("img").count()).toBe(1);
+      await page.getByRole("textbox").fill("Commit-boundary draft");
+      await page.evaluate((value) => window.__feedbackFixture.holdPost(value), outcome);
+      await page.getByRole("button", { name: "submit", exact: true }).click();
+      await expect.poll(() => page.evaluate(() => window.__feedbackFixture.postReady)).toBe(true);
+      await page.evaluate((value) => window.__feedbackFixture.completePostDuringCommit(value), change);
+      await expect.poll(() => page.evaluate(() => window.__feedbackFixture.postSettledBeforePassive)).toBe(true);
+      await settle();
+      expect(await page.evaluate(() => window.__feedbackFixture.postCount)).toBe(1);
+      expect(await page.evaluate(() => window.__feedbackFixture.toasts)).toEqual([]);
+      if (change === "unmount") {
+        expect(await page.locator("#root").textContent()).toBe("");
+        return;
+      }
+      if (["Escape", "X", "backdrop"].includes(change)) {
+        await page.getByRole("button", { name: "open", exact: true }).click();
+      } else if (change === "focused route") {
+        await page.evaluate(() => window.__feedbackFixture.navigate("/en/workspaces/demo"));
+      }
+      expect(await page.getByRole("textbox").inputValue()).toBe("Commit-boundary draft");
+      expect(await page.getByRole("img").count()).toBeGreaterThanOrEqual(1);
+      expect(await page.getByRole("alert").count()).toBe(0);
+      expect(await page.getByRole("button", { name: "submit", exact: true }).isEnabled()).toBe(true);
+    });
+  }
+
+  it.each(["pathname", "search", "workspace", "unmount"])("ignores POST completion after %s changes", async (change) => {
+    await open();
+    await releaseModule();
+    await expect.poll(() => page.getByRole("img").count()).toBe(1);
+    await page.getByRole("textbox").fill("Navigation draft");
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let received = false;
+    await page.route("**/api/workspaces/demo/product-feedback", async (route) => {
+      received = true;
+      await held;
+      await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+    });
+    await page.getByRole("button", { name: "submit", exact: true }).click();
+    await expect.poll(() => received).toBe(true);
+    await page.evaluate((value) => {
+      const fixture = window.__feedbackFixture;
+      if (value === "unmount") fixture.unmount();
+      else fixture.navigate(value === "pathname" ? "/en/workspaces/demo/meetings" : "/en/workspaces/demo",
+        value === "search" ? "tab=other" : "", value === "workspace" ? "other" : "demo");
+    }, change);
+    await settle();
+    release();
+    if (change === "unmount") {
+      await settle();
+      expect(await page.locator("#root").textContent()).toBe("");
+    } else {
+      await expect.poll(() => page.getByRole("button", { name: "submit", exact: true }).isEnabled()).toBe(true);
+      expect(await page.getByRole("textbox").inputValue()).toBe("Navigation draft");
+      expect(await page.getByRole("img").count()).toBe(1);
+    }
+  });
+
+  it.each(["failure", "network"])("shows a current session's %s and permits retry", async (outcome) => {
+    await open();
+    await releaseModule();
+    await expect.poll(() => page.getByRole("img").count()).toBe(1);
+    await page.getByRole("textbox").fill("Retry draft");
+    await page.route("**/api/workspaces/demo/product-feedback", (route) => outcome === "network"
+      ? route.abort("failed")
+      : route.fulfill({ status: 503, contentType: "application/json", body: '{"error":{"message":"Current failure"}}' }));
+    await page.getByRole("button", { name: "submit", exact: true }).click();
+    await expect.poll(() => page.getByRole("alert").count()).toBe(1);
+    expect(await page.getByRole("textbox").inputValue()).toBe("Retry draft");
+    expect(await page.getByRole("img").count()).toBe(1);
+    expect(await page.getByRole("button", { name: "submit", exact: true }).isEnabled()).toBe(true);
+    await page.unroute("**/api/workspaces/demo/product-feedback");
+    await page.route("**/api/workspaces/demo/product-feedback", (route) => route.fulfill({
+      status: 200, contentType: "application/json", body: "{}",
+    }));
+    await page.getByRole("button", { name: "submit", exact: true }).click();
+    await expect.poll(() => page.locator("dialog").evaluate((dialog) => (dialog as HTMLDialogElement).open)).toBe(false);
+  });
+
+  it.each(["canvas-pending", "blob-pending"] as const)("preserves a newer %s capture when the old POST finishes", async (mode) => {
+    await open();
+    await releaseModule();
+    await expect.poll(() => page.getByRole("img").count()).toBe(1);
+    await page.getByRole("textbox").fill("Held capture draft");
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let received = false;
+    await page.route("**/api/workspaces/demo/product-feedback", async (route) => {
+      received = true;
+      await held;
+      await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+    });
+    await page.getByRole("button", { name: "submit", exact: true }).click();
+    await expect.poll(() => received).toBe(true);
+    await page.keyboard.press("Escape");
+    await page.evaluate((value) => { window.__feedbackFixture.mode = value; }, mode);
+    await page.getByRole("button", { name: "open", exact: true }).click();
+    const resolver: CaptureResolver = mode === "canvas-pending" ? "resolveCanvas" : "resolveBlob";
+    await expect.poll(() => page.evaluate((key) => typeof window.__feedbackFixture[key], resolver)).toBe("function");
+    release();
+    await expect.poll(() => page.getByRole("button", { name: "submit", exact: true }).isEnabled()).toBe(true);
+    expect(await page.getByRole("button", { name: "capturing", exact: true }).isDisabled()).toBe(true);
+    await page.evaluate((key) => window.__feedbackFixture[key](), resolver);
+    await expect.poll(() => page.getByRole("img").count()).toBe(2);
+    expect(await page.getByRole("textbox").inputValue()).toBe("Held capture draft");
   });
 
   it("rejects oversized and unsupported manual files while accepting supported images", async () => {
